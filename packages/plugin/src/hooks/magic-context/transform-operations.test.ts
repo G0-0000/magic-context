@@ -64,7 +64,10 @@ describe("tagMessages", () => {
             ],
         };
         const raw: TestMessage[] = [
-            { info: { id: "prompt", role: "user" }, parts: [{ type: "text", text: "inspect tests" }] },
+            {
+                info: { id: "prompt", role: "user" },
+                parts: [{ type: "text", text: "inspect tests" }],
+            },
             target,
             {
                 info: { id: "result-53", role: "tool" },
