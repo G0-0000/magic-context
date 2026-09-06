@@ -25,7 +25,7 @@ export function buildMagicContextHookConfig(pluginConfig: MagicContextPluginConf
     // the user, turning opted-in features off with no warning. The hook only
     // consumes the fields its config type declares, so the extra top-level keys
     // carried by the spread are inert.
-    const hookConfig: Record<string, unknown> = {
+    const hookConfig = {
         ...pluginConfig,
         protected_tokens: pluginConfig.protected_tokens,
         execute_threshold_percentage:
@@ -33,12 +33,8 @@ export function buildMagicContextHookConfig(pluginConfig: MagicContextPluginConf
     };
     // The parser retains the deprecated count only to issue one migration warning.
     // Do not carry that inert key into live per-session plumbing.
-    delete hookConfig[["protected", "tags"].join("_")];
-    return hookConfig as MagicContextPluginConfig & {
-        execute_threshold_percentage: NonNullable<
-            MagicContextPluginConfig["execute_threshold_percentage"]
-        >;
-    };
+    delete hookConfig.protected_tags;
+    return hookConfig;
 }
 
 export function createSessionHooks(args: {

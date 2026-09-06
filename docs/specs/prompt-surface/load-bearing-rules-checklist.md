@@ -79,15 +79,15 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 | `tool-all-active` | **not-present** |
 | `tool-memory-disabled` | **not-present** |
 
-### G-003 — Protected recent tail
+### G-003 — Protected token-mass window
 
 - **Source fragment:** `guidance-reduce-intro`
 - **Scope:** primary sessions with ctx_reduce
 - **Polarity:** mechanism
-- **Operative condition:** A requested tag is within the newest protected window.
-- **Mechanism:** The last protectedTags tags remain protected; marking only queues them until they age out.
+- **Operative condition:** A requested tag is within the newest token-mass window.
+- **Mechanism:** The newest token-mass window stays protected until newer work displaces it.
 - **Consequence:** A recent mark is harmless and cannot immediately release the protected tail.
-- **Source evidence:** `The last ${protectedTags} tags are protected`
+- **Source evidence:** `The newest token-mass window stays protected until displaced.`
 
 | Variant | Applicability status |
 | --- | --- |

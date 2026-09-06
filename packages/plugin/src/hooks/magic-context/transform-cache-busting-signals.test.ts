@@ -693,7 +693,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             const hiddenToolTag = tagsAfterFold.find((tag) => tag.type === "tool");
             expect(hiddenToolTag?.status).toBe("compacted");
             expect(
-                getOldestActiveUnprotectedToolTags(db, sessionId, 0, 10).some(
+                getOldestActiveUnprotectedToolTags(db, sessionId, new Set(), 10).some(
                     (tag) => tag.tagNumber === hiddenToolTag?.tagNumber,
                 ),
             ).toBe(false);
@@ -815,6 +815,27 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             (tag) => tag.type === "tool" && tag.messageId === "drained-tool",
         );
         expect(toolTag).toBeDefined();
+        // The token window always retains the newest three tool tags. Add three
+        // newer persisted arcs so this fixture's queued target is eligible to drain.
+        const newestTagNumber = Math.max(
+            ...getTagsBySession(db, sessionId).map((tag) => tag.tagNumber),
+        );
+        for (let offset = 1; offset <= 3; offset += 1) {
+            insertTag(
+                db,
+                sessionId,
+                `window-displacer-${offset}`,
+                "tool",
+                80_000,
+                newestTagNumber + offset,
+                0,
+                "read",
+                0,
+                `window-displacer-owner-${offset}`,
+                null,
+                { tokenCount: 20_000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+        }
         queuePendingOp(db, sessionId, toolTag!.tagNumber, "drop");
         replaceAllCompartmentState(
             db,

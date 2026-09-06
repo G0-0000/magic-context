@@ -144,7 +144,6 @@ export function registerCtxStatusCommand(
 				const statusText = executeStatus(
 					currentDeps.db,
 					sessionId,
-					currentDeps.protectedTags ?? 20,
 					currentDeps.executeThresholdPercentage,
 					modelKey,
 					currentDeps.historyBudgetPercentage,

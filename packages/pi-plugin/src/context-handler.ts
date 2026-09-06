@@ -280,6 +280,20 @@ import { createPiTranscript } from "./transcript-pi";
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
 
+function newestActiveTagNumbersByCount(
+	tags: readonly { tagNumber: number; status: string }[],
+	count: number,
+): Set<number> {
+	if (count <= 0) return new Set();
+	return new Set(
+		tags
+			.filter((tag) => tag.status === "active")
+			.map((tag) => tag.tagNumber)
+			.sort((left, right) => right - left)
+			.slice(0, count),
+	);
+}
+
 function isPiHardCacheExpired(
 	lastResponseTime: number,
 	ttlMs: number,
@@ -3291,7 +3305,7 @@ export function registerPiContextHandler(
 					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
 						options.db,
 						sessionId,
-						protectedTags,
+						newestActiveTagNumbersByCount(tags, protectedTags),
 					);
 					const channelState = {
 						...baseline,
@@ -5106,7 +5120,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				args.protectedTags,
+				newestActiveTagNumbersByCount(pendingOperationTags, args.protectedTags),
 				pendingOperationTags,
 				pendingOps,
 			);
@@ -5629,7 +5643,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				args.protectedTags,
+				newestActiveTagNumbersByCount(
+					getActiveTagsBySession(args.db, args.sessionId),
+					args.protectedTags,
+				),
 				undefined,
 				[],
 				syntheticPendingOps,

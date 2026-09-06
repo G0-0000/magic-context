@@ -386,7 +386,7 @@ describe("applyPiHeuristicCleanup", () => {
 			];
 			const replayTranscript = createPiTranscript(replayMessages, sessionId);
 			const replay = tagTranscript(sessionId, replayTranscript, tagger, db);
-			applyPendingOperations(sessionId, db, replay.targets, 0);
+			applyPendingOperations(sessionId, db, replay.targets, new Set());
 			applyFlushedStatuses(sessionId, db, replay.targets);
 			replayTranscript.commit();
 
@@ -514,7 +514,7 @@ describe("applyPiHeuristicCleanup emergency floor accounting", () => {
 			queuePendingOp(db, sessionId, 1, "drop", 1);
 			queuePendingOp(db, sessionId, 2, "drop", 2);
 
-			applyPendingOperations(sessionId, db, targets, 0);
+			applyPendingOperations(sessionId, db, targets, new Set());
 			const activeAfterPending = getActiveTagsBySession(db, sessionId);
 			applyPiHeuristicCleanup(
 				sessionId,

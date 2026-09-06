@@ -360,7 +360,7 @@ export function applyPiHeuristicCleanup(
 			tags: droppableTags as readonly EmergencyDropTag[],
 			floorTags: activeTags as readonly EmergencyDropTag[],
 			maxTag,
-			protectedTags: config.protectedTags,
+			protectedCutoff,
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
 			ceilingTokens: emergency.ceilingTokens,
 			usagePercentage: emergency.usagePercentage,
@@ -566,7 +566,7 @@ export function applyPiHeuristicCleanup(
 		const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
 			enabled: true,
 			minChars: config.caveman.minChars,
-			protectedTags: config.protectedTags,
+			protectedCutoff,
 		});
 		compressedTextTags =
 			cavemanResult.compressedToLite +
