@@ -14,9 +14,12 @@ import { getMemoriesByProject, insertMemory } from "./memory/storage-memory";
 import { MIGRATIONS, runMigrations } from "./migrations";
 import { recordSessionProjectIdentity } from "./session-project-storage";
 import { initializeDatabase } from "./storage-db";
+import { getPersistedEpochFloor } from "./storage-meta-persisted";
+import { getOrCreateSessionMeta, updateSessionMeta } from "./storage-meta-session";
 import { addNote, getSmartNotes } from "./storage-notes";
 
 const PROJECT_PATH = "/armed-migration-replay";
+const V84_SESSION_ID = "armed-replay-session-meta-v84";
 const STATE_TABLE_PREDICATE =
     "COALESCE((SELECT enabled FROM context_privilege_state WHERE id = 1), 0) = 0";
 const MEMORY_REFUSAL = "context.db memory writes are managed by the Rust module";
@@ -76,21 +79,47 @@ function applyExactlyOneMigration(db: DatabaseType, migration: (typeof MIGRATION
 // This list is the independent side of that claim: it only changes when a
 // human edits it, so a populate arm going quiet reddens the walk with the
 // table's name instead of silently narrowing coverage.
-// Both arms write the same two tables, so a per-table count would let one arm
-// go quiet behind the other's rows (proved by a survived early-return mutant
-// during construction). The claim is therefore per ARM: each arm's rows carry
-// a distinctive content prefix, and each prefix must be present at walk end.
+// Some arms write the same tables, so a per-table count would let one arm go
+// quiet behind another arm's rows (proved by a survived early-return mutant
+// during construction). The claim is therefore per arm: each arm's rows carry
+// a distinctive column value, and each value must be present at walk end.
 const CLAIMED_ARM_SIGNATURES = [
-    { arm: "populateTsOwnedRows", table: "memories", like: "memory populated after v%" },
-    { arm: "populateTsOwnedRows", table: "notes", like: "note populated after v%" },
-    { arm: "populateModuleOwnedRows", table: "memories", like: "module memory populated after v%" },
-    { arm: "populateModuleOwnedRows", table: "notes", like: "module note populated after v%" },
+    {
+        arm: "populateTsOwnedRows",
+        table: "memories",
+        column: "content",
+        like: "memory populated after v%",
+    },
+    {
+        arm: "populateTsOwnedRows",
+        table: "notes",
+        column: "content",
+        like: "note populated after v%",
+    },
+    {
+        arm: "populateModuleOwnedRows",
+        table: "memories",
+        column: "content",
+        like: "module memory populated after v%",
+    },
+    {
+        arm: "populateModuleOwnedRows",
+        table: "notes",
+        column: "content",
+        like: "module note populated after v%",
+    },
+    {
+        arm: "populateV84SessionMetaAtV83",
+        table: "session_meta",
+        column: "session_id",
+        like: V84_SESSION_ID,
+    },
 ] as const;
 
 function assertClaimedTablesNonEmpty(db: DatabaseType): void {
     for (const claim of CLAIMED_ARM_SIGNATURES) {
         const row = db
-            .prepare(`SELECT COUNT(*) AS n FROM ${claim.table} WHERE content LIKE ?`)
+            .prepare(`SELECT COUNT(*) AS n FROM ${claim.table} WHERE ${claim.column} LIKE ?`)
             .get(claim.like) as { n: number };
         if (row.n === 0) {
             throw new Error(
@@ -198,6 +227,15 @@ function assertUnprivilegedWritesRefused(db: DatabaseType, version: number): voi
             surfaceCondition: "always",
         }),
     ).toThrow(NOTE_REFUSAL);
+}
+
+function populateV84SessionMetaAtV83(db: DatabaseType): void {
+    updateSessionMeta(db, V84_SESSION_ID, { counter: 83 });
+}
+
+function assertV84SessionMetaArm(db: DatabaseType): void {
+    expect(getOrCreateSessionMeta(db, V84_SESSION_ID).counter).toBe(83);
+    expect(getPersistedEpochFloor(db, V84_SESSION_ID)).toBeNull();
 }
 
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
@@ -368,8 +406,17 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
         case 80:
         case 81:
         case 82:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            populateModuleOwnedRows(db, version, state);
+            return;
         case 83:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            populateModuleOwnedRows(db, version, state);
+            populateV84SessionMetaAtV83(db);
+            return;
+        case 84:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV84SessionMetaArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
         default:

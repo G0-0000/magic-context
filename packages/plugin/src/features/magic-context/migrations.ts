@@ -2916,6 +2916,14 @@ export const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 84,
+        description: "persist the effective protected-token floor per session",
+        up(db: Database): void {
+            if (!tableExists(db, "session_meta")) return;
+            ensureColumn(db, "session_meta", "protected_tokens_effective", "INTEGER");
+        },
+    },
 ];
 
 /**

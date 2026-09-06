@@ -5,7 +5,6 @@ import { Database } from "../../shared/sqlite";
 import {
     clearDeferredExecutePendingIfMatches,
     type DeferredExecutePayload,
-    ensureProtectedTokensEffectiveColumn,
     getPersistedEpochFloor,
     peekDeferredExecutePending,
     persistEpochFloorSnapshot,
@@ -40,7 +39,8 @@ function createTestDb(): Database {
             tool_call_tokens INTEGER NOT NULL DEFAULT 0,
             cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
             last_todo_state TEXT NOT NULL DEFAULT '',
-            deferred_execute_state TEXT
+            deferred_execute_state TEXT,
+            protected_tokens_effective INTEGER
         )
     `);
     return db;
@@ -113,13 +113,7 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
         resetEpochFloorRegistryForTest();
     });
 
-    it("ensures session_meta.protected_tokens_effective column exists and round-trips", () => {
-        ensureProtectedTokensEffectiveColumn(db);
-        const columns = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
-            name: string;
-        }>;
-        expect(columns.some((col) => col.name === "protected_tokens_effective")).toBe(true);
-
+    it("round-trips the snapshotted floor on a migrated schema", () => {
         expect(getPersistedEpochFloor(db, SES)).toBeNull();
 
         persistEpochFloorSnapshot(db, SES, 20_000);
@@ -127,6 +121,16 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
 
         persistEpochFloorSnapshot(db, SES, 32_000);
         expect(getPersistedEpochFloor(db, SES)).toBe(32_000);
+    });
+
+    it("does not add protected_tokens_effective from the write path", () => {
+        db.exec("ALTER TABLE session_meta DROP COLUMN protected_tokens_effective");
+
+        expect(() => persistEpochFloorSnapshot(db, SES, 20_000)).toThrow();
+        const columns = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+            name: string;
+        }>;
+        expect(columns.some((column) => column.name === "protected_tokens_effective")).toBe(false);
     });
 
     it("lifecycle (a): resolves and writes on the first cache-busting pass", () => {

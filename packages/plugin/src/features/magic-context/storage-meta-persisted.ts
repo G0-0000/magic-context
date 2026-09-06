@@ -14,7 +14,6 @@ import {
 } from "./merged-reasoning-decisions";
 import { readEpochFloorSnapshot } from "./protection-window";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
-import { ensureColumn } from "./storage-schema-helpers";
 import type { ContextUsage } from "./types";
 
 const emergencyRecoveryArmedSessions = new Set<string>();
@@ -3054,19 +3053,10 @@ export function resetEpochFloorRegistryForTest(): void {
 }
 
 /**
- * Ensure the session_meta.protected_tokens_effective column exists in the schema
- * before reading or writing it.
- */
-export function ensureProtectedTokensEffectiveColumn(db: Database): void {
-    ensureColumn(db, "session_meta", "protected_tokens_effective", "INTEGER");
-}
-
-/**
  * Persist the resolved effective floor to session_meta.protected_tokens_effective.
  * Called exclusively on cache-busting passes (lifecycle a).
  */
 export function persistEpochFloorSnapshot(db: Database, sessionId: string, floor: number): void {
-    ensureProtectedTokensEffectiveColumn(db);
     ensureSessionMetaRow(db, sessionId);
     const rounded = Math.max(0, Math.round(floor));
     db.prepare("UPDATE session_meta SET protected_tokens_effective = ? WHERE session_id = ?").run(
@@ -3100,8 +3090,6 @@ export function resolveEpochFloorForPass(
     sessionId: string,
     inputs: EpochFloorResolutionInputs,
 ): EpochFloorResolutionResult {
-    ensureProtectedTokensEffectiveColumn(db);
-
     // Lifecycle (c) & (d): Read persisted snapshot verbatim if present.
     // Mid-epoch config and geometry changes never take effect.
     const persisted = getPersistedEpochFloor(db, sessionId);
