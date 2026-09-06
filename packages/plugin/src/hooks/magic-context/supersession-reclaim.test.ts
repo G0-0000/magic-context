@@ -327,4 +327,48 @@ describe("buildEditSupersessionReclaim (superseded-edit compression)", () => {
         // newest (call-b) kept; older (call-a) compressed.
         expect([...editMarkerTagIds]).toEqual([olderId!]);
     });
+
+    it("excludes tags in protectedTagNumbers set form from supersession reclaim", () => {
+        const db = freshDb();
+        insertTag(db, SES, "call-1", "tool", 500, 1, 0, "todowrite");
+        insertTag(db, SES, "call-2", "tool", 500, 2, 0, "todowrite");
+        const targets = new Map<number, TagTarget>([
+            [1, target()],
+            [2, target()],
+        ]);
+
+        // Tag 1 is older todowrite, normally superseded. But protectedTagNumbers protects tag 1.
+        const protectedTagNumbers: ReadonlySet<number> = new Set([1]);
+        const ops = buildSupersessionReclaimOps({
+            db,
+            sessionId: SES,
+            targets,
+            protectedTagNumbers,
+        });
+
+        // Tag 1 is protected by the window -> excluded from supersession drop ops
+        expect(ops).toHaveLength(0);
+    });
+
+    it("excludes tags in protectedTagNumbers set form from edit supersession reclaim", () => {
+        const db = freshDb();
+        insertTag(db, SES, "c1", "tool", 900, 1, 0, "edit");
+        insertTag(db, SES, "c2", "tool", 900, 2, 0, "edit");
+        const targets = new Map<number, TagTarget>([
+            [1, target({ filePath: "A.ts" })],
+            [2, target({ filePath: "A.ts" })],
+        ]);
+
+        // Tag 1 is older edit to A.ts, normally compressed. But protectedTagNumbers protects tag 1.
+        const protectedTagNumbers: ReadonlySet<number> = new Set([1]);
+        const { ops, editMarkerTagIds } = buildEditSupersessionReclaim({
+            db,
+            sessionId: SES,
+            targets,
+            protectedTagNumbers,
+        });
+
+        expect(ops).toHaveLength(0);
+        expect(editMarkerTagIds.size).toBe(0);
+    });
 });

@@ -23,7 +23,6 @@ describe("MagicContextConfigSchema", () => {
                 cache_ttl: "5m",
                 prompt_surface: { default: "full" },
                 execute_threshold_percentage: 65,
-                protected_tags: 20,
                 clear_reasoning_age: 50,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
                 historian_timeout_ms: DEFAULT_HISTORIAN_TIMEOUT_MS,
@@ -667,17 +666,27 @@ describe("MagicContextConfigSchema", () => {
             ).toThrow();
         });
 
-        it("rejects protected_tags greater than 100", () => {
-            expect(() => MagicContextConfigSchema.parse({ protected_tags: 101 })).toThrow();
-        });
-
-        it("rejects protected_tags less than 1", () => {
-            expect(() => MagicContextConfigSchema.parse({ protected_tags: 0 })).toThrow();
-        });
-
-        it("accepts protected_tags boundary values", () => {
-            expect(MagicContextConfigSchema.parse({ protected_tags: 1 }).protected_tags).toBe(1);
+        it("accepts protected_tags at any value including 0 and 101 as deprecated inert key", () => {
+            expect(MagicContextConfigSchema.parse({ protected_tags: 101 }).protected_tags).toBe(
+                101,
+            );
+            expect(MagicContextConfigSchema.parse({ protected_tags: 0 }).protected_tags).toBe(0);
             expect(MagicContextConfigSchema.parse({ protected_tags: 20 }).protected_tags).toBe(20);
+        });
+
+        it("enforces protected_tokens override range at both ends", () => {
+            expect(() => MagicContextConfigSchema.parse({ protected_tokens: 3999 })).toThrow();
+            expect(() => MagicContextConfigSchema.parse({ protected_tokens: 1_000_001 })).toThrow();
+            expect(() => MagicContextConfigSchema.parse({ protected_tokens: 30000.5 })).toThrow();
+            expect(
+                MagicContextConfigSchema.parse({ protected_tokens: 4000 }).protected_tokens,
+            ).toBe(4000);
+            expect(
+                MagicContextConfigSchema.parse({ protected_tokens: 1_000_000 }).protected_tokens,
+            ).toBe(1_000_000);
+            expect(
+                MagicContextConfigSchema.parse({ protected_tokens: 30000 }).protected_tokens,
+            ).toBe(30000);
         });
 
         it("rejects clear_reasoning_age below minimum", () => {

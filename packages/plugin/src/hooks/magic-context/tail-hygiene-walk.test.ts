@@ -645,3 +645,67 @@ describe("tail hygiene structural signature", () => {
         ).toBe(true);
     });
 });
+
+describe("tail hygiene protectedTagNumbers set form (token window)", () => {
+    it("consumes protectedTagNumbers set in tag-number coordinate space and excludes protected tool tags from U", () => {
+        const messages = [
+            nativeTool("owner-1", "call-1", { cmd: "test" }, "tool output 1 ".repeat(100)),
+            nativeTool("owner-2", "call-2", { cmd: "test" }, "tool output 2 ".repeat(100)),
+        ];
+        const tags = [
+            tag(10, "call-1", "tool", { toolOwnerMessageId: "owner-1" }),
+            tag(20, "call-2", "tool", { toolOwnerMessageId: "owner-2" }),
+        ];
+
+        // Coordinate space: tag-number space. Tag 20 is in the token protection window
+        const protectedTagNumbers: ReadonlySet<number> = new Set([20]);
+
+        const measured = measureTailHygiene({
+            messages,
+            tags,
+            protectedTagNumbers,
+        });
+
+        // Tag 10 is unprotected -> included in U
+        // Tag 20 is protected -> excluded from U
+        expect(measured.t).toBeGreaterThan(0);
+        expect(measured.u).toBeGreaterThan(0);
+        expect(measured.u).toBeLessThan(measured.t);
+
+        const part10 = measured.parts.find((p) => p.tagNumber === 10);
+        const part20 = measured.parts.find((p) => p.tagNumber === 20);
+        expect(part10?.protected).toBe(false);
+        expect(part10?.uTokens).toBeGreaterThan(0);
+        expect(part20?.protected).toBe(true);
+        expect(part20?.uTokens).toBe(0);
+    });
+
+    it("declares empty-window behavior: empty set protects 0 tool tags, non-tool tags are never reclaim targets", () => {
+        const messages = [
+            textMessage("msg-1", "prose message text ".repeat(50)),
+            nativeTool("owner-1", "call-1", { cmd: "test" }, "tool output 1 ".repeat(50)),
+        ];
+        const tags = [
+            tag(5, "msg-1:p0", "message"),
+            tag(10, "call-1", "tool", { toolOwnerMessageId: "owner-1" }),
+        ];
+
+        // Empty window: protectedTagNumbers = empty set
+        const protectedTagNumbers: ReadonlySet<number> = new Set();
+
+        const measured = measureTailHygiene({
+            messages,
+            tags,
+            protectedTagNumbers,
+        });
+
+        // Tool tag 10 is unprotected
+        const toolPart = measured.parts.find((p) => p.tagNumber === 10);
+        expect(toolPart?.protected).toBe(false);
+        expect(toolPart?.uTokens).toBeGreaterThan(0);
+
+        // Non-tool message tag 5 has its eligibility decided solely by independent protections (prose text)
+        const msgPart = measured.parts.find((p) => p.tagNumber === 5);
+        expect(msgPart?.kind).toBe("text");
+    });
+});

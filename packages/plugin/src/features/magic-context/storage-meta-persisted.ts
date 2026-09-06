@@ -1,3 +1,4 @@
+import { deriveDefaultProtectedTokens } from "../../config/schema/magic-context";
 import {
     type ContextLimitProvenance,
     normalizeContextLimitProvenance,
@@ -11,7 +12,9 @@ import {
     decodeMergedReasoningParts,
     readFrozenMergedReasoningParts,
 } from "./merged-reasoning-decisions";
+import { readEpochFloorSnapshot } from "./protection-window";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
+import { ensureColumn } from "./storage-schema-helpers";
 import type { ContextUsage } from "./types";
 
 const emergencyRecoveryArmedSessions = new Set<string>();
@@ -3017,5 +3020,146 @@ export function getSessionWorkMetrics(
     return {
         newWorkTokens: typeof row?.new_work_tokens === "number" ? row.new_work_tokens : 0,
         totalInputTokens: typeof row?.total_input_tokens === "number" ? row.total_input_tokens : 0,
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Floor Snapshot (protected_tokens_effective) Lifecycle & Persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface EpochFloorResolutionInputs {
+    configuredOverride?: number;
+    usableSoft: number;
+    isCacheBustingPass: boolean;
+}
+
+export interface EpochFloorResolutionResult {
+    floor: number;
+    isSnapshotPersisted: boolean;
+    provenance: "persisted" | "override" | "derived";
+    preSnapshotInputChanged?: boolean;
+    preSnapshotBustReason?: "config-re-read" | "live-geometry";
+}
+
+interface PreSnapshotMemo {
+    configuredOverride?: number;
+    usableSoft: number;
+    floor: number;
+}
+
+const preSnapshotSessions = new Map<string, PreSnapshotMemo>();
+
+export function resetEpochFloorRegistryForTest(): void {
+    preSnapshotSessions.clear();
+}
+
+/**
+ * Ensure the session_meta.protected_tokens_effective column exists in the schema
+ * before reading or writing it.
+ */
+export function ensureProtectedTokensEffectiveColumn(db: Database): void {
+    ensureColumn(db, "session_meta", "protected_tokens_effective", "INTEGER");
+}
+
+/**
+ * Persist the resolved effective floor to session_meta.protected_tokens_effective.
+ * Called exclusively on cache-busting passes (lifecycle a).
+ */
+export function persistEpochFloorSnapshot(db: Database, sessionId: string, floor: number): void {
+    ensureProtectedTokensEffectiveColumn(db);
+    ensureSessionMetaRow(db, sessionId);
+    const rounded = Math.max(0, Math.round(floor));
+    db.prepare("UPDATE session_meta SET protected_tokens_effective = ? WHERE session_id = ?").run(
+        rounded,
+        sessionId,
+    );
+    preSnapshotSessions.delete(sessionId);
+}
+
+/**
+ * Read the snapshotted epoch floor from session_meta.
+ * On defer passes this reads the persisted snapshot and never recomputes.
+ */
+export function getPersistedEpochFloor(db: Database, sessionId: string): number | null {
+    return readEpochFloorSnapshot(db, sessionId);
+}
+
+/**
+ * Resolve the effective floor for a session according to the 4-stage lifecycle:
+ *   (a) resolve-and-write on the first cache-busting pass
+ *   (b) unsnapshotted first-observed defer pass: resolve effective floor (absolute
+ *       override when configured, else derived default from geometry), do NOT
+ *       persist and do NOT bust, using that one value identically for membership,
+ *       the wire scalar and status floor.
+ *   (c) read verbatim on every pass until the next cache-busting pass including
+ *       across restart.
+ *   (d) config/geometry changes never take effect mid-epoch.
+ */
+export function resolveEpochFloorForPass(
+    db: Database,
+    sessionId: string,
+    inputs: EpochFloorResolutionInputs,
+): EpochFloorResolutionResult {
+    ensureProtectedTokensEffectiveColumn(db);
+
+    // Lifecycle (c) & (d): Read persisted snapshot verbatim if present.
+    // Mid-epoch config and geometry changes never take effect.
+    const persisted = getPersistedEpochFloor(db, sessionId);
+    if (persisted !== null) {
+        return {
+            floor: persisted,
+            isSnapshotPersisted: true,
+            provenance: "persisted",
+        };
+    }
+
+    // Resolve the candidate floor: absolute override if valid, else derived default
+    const hasValidOverride =
+        typeof inputs.configuredOverride === "number" &&
+        Number.isInteger(inputs.configuredOverride) &&
+        inputs.configuredOverride >= 4000 &&
+        inputs.configuredOverride <= 1_000_000;
+    const floor =
+        hasValidOverride && typeof inputs.configuredOverride === "number"
+            ? inputs.configuredOverride
+            : deriveDefaultProtectedTokens(inputs.usableSoft);
+    const provenance = hasValidOverride ? "override" : "derived";
+
+    // Lifecycle (a): First cache-busting pass resolves and writes snapshot
+    if (inputs.isCacheBustingPass) {
+        persistEpochFloorSnapshot(db, sessionId, floor);
+        return {
+            floor,
+            isSnapshotPersisted: true,
+            provenance,
+        };
+    }
+
+    // Lifecycle (b): Unsnapshotted defer pass resolves without persisting (no bust)
+    const existing = preSnapshotSessions.get(sessionId);
+    let preSnapshotInputChanged = false;
+    let preSnapshotBustReason: "config-re-read" | "live-geometry" | undefined;
+
+    if (existing !== undefined) {
+        const overrideMoved = existing.configuredOverride !== inputs.configuredOverride;
+        const geometryMoved = existing.usableSoft !== inputs.usableSoft;
+        if (overrideMoved || geometryMoved) {
+            preSnapshotInputChanged = true;
+            preSnapshotBustReason = overrideMoved ? "config-re-read" : "live-geometry";
+        }
+    }
+
+    preSnapshotSessions.set(sessionId, {
+        configuredOverride: inputs.configuredOverride,
+        usableSoft: inputs.usableSoft,
+        floor,
+    });
+
+    return {
+        floor,
+        isSnapshotPersisted: false,
+        provenance,
+        preSnapshotInputChanged,
+        preSnapshotBustReason,
     };
 }

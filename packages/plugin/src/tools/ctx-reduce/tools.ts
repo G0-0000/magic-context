@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import {
+    getProtectionWindowForSession,
+    type ProtectionWindowResult,
+} from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
     getOrCreateSessionMeta,
@@ -20,7 +24,17 @@ export { CTX_REDUCE_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface CtxReduceToolDeps {
     db: Database;
-    protectedTags: number;
+    /** Legacy parameter; replaced by protectedSet / getProtectionWindow. */
+    protectedTags?: number;
+    /**
+     * Union projection form: protectedSet (tag-number set form).
+     * Coordinate space: tag-number space.
+     * Empty-window behavior: empty set means zero tool tags are protected by the window;
+     * requested drops apply immediately, and non-tool tags are never reclaim targets.
+     */
+    protectedSet?: ReadonlySet<number> | ((sessionId: string) => ReadonlySet<number>);
+    getProtectionWindow?: (sessionId: string) => ProtectionWindowResult;
+    floor?: number;
     getSessionTokens?: (sessionId: string) => number;
     rustToolBackends?: RustToolBackends;
 }
@@ -149,12 +163,31 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 return `Error: Unknown tag(s) ${formatIds(unknownIds)}. Check available tags in conversation.`;
             }
 
-            const activeTags = allTags.filter((tag) => tag.status === "active");
-            const protectedTagIds = activeTags
-                .map((tag) => tag.tagNumber)
-                .sort((left, right) => right - left)
-                .slice(0, deps.protectedTags);
-            const protectedSet = new Set(protectedTagIds);
+            // Form: protectedSet (tag-number set form). Coordinate space: tag-number space.
+            // Empty-window behavior: empty set means zero tool tags are protected by the window;
+            // non-tool tags never become reclaim targets.
+            let protectedSet: ReadonlySet<number>;
+            if (deps.protectedSet) {
+                protectedSet =
+                    typeof deps.protectedSet === "function"
+                        ? deps.protectedSet(sessionId)
+                        : deps.protectedSet;
+            } else if (deps.getProtectionWindow) {
+                protectedSet = deps.getProtectionWindow(sessionId).protectedTagNumbers;
+            } else if (deps.protectedTags !== undefined) {
+                const activeTags = allTags.filter((tag) => tag.status === "active");
+                const protectedTagIds = activeTags
+                    .map((tag) => tag.tagNumber)
+                    .sort((left, right) => right - left)
+                    .slice(0, deps.protectedTags);
+                protectedSet = new Set(protectedTagIds);
+            } else {
+                protectedSet = getProtectionWindowForSession(
+                    deps.db,
+                    sessionId,
+                    deps.floor,
+                ).protectedTagNumbers;
+            }
 
             const tagStatusMap = new Map(allTags.map((tag) => [tag.tagNumber, tag.status]));
             const inertWhitespaceTagNumbers = new Set(
@@ -224,11 +257,24 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 skippedCount > 0
                     ? ` ${skippedCount} requested tag${skippedCount === 1 ? " was" : "s were"} already queued and need no action.`
                     : "";
-            const parts: string[] = [];
-            if (immediateDropIds.length > 0) parts.push(`drop ${formatIds(immediateDropIds)}`);
-            if (deferredDropIds.length > 0)
-                parts.push(`deferred drop ${formatIds(deferredDropIds)}`);
-            return `Queued: ${parts.join(", ")}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+
+            let heldSentence = "";
+            if (deferredDropIds.length === 1) {
+                heldSentence = `Held: §${deferredDropIds[0]} is inside the protected working set; it applies once newer work displaces it.`;
+            } else if (deferredDropIds.length > 1) {
+                heldSentence = `Held: ${deferredDropIds.map((id) => `§${id}`).join(", ")} are inside the protected working set; they apply once newer work displaces them.`;
+            }
+
+            if (immediateDropIds.length > 0 && heldSentence.length > 0) {
+                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""} ${heldSentence}`;
+            }
+            if (immediateDropIds.length > 0) {
+                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+            }
+            if (heldSentence.length > 0) {
+                return `${heldSentence}${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+            }
+            return `Queued: drop ${formatIds(dropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
         },
     });
 }

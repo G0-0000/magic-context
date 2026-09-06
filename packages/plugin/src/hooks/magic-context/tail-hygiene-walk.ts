@@ -314,13 +314,30 @@ function messageIdForTag(tag: TagEntry): string | null {
     return tag.messageId.replace(/:(?:p|file)\d+$/, "");
 }
 
-function protectedTagNumbers(tags: readonly TagEntry[], protectedTags: number): Set<number> {
-    const active = Array.from(
-        new Set(tags.filter((tag) => tag.status === "active").map((tag) => tag.tagNumber)),
-    )
-        .sort((left, right) => right - left)
-        .slice(0, Math.max(0, protectedTags));
-    const protectedNumbers = new Set(active);
+/**
+ * Union projection form: protectedTagNumbers (tag-number set form).
+ * Coordinate space: tag-number space (Set<number>).
+ * Empty-window behavior: an empty set means zero tool tags are protected by the window;
+ * non-tool tags are not window members and remain governed solely by independent protections.
+ */
+function resolveProtectedTagNumbers(
+    tags: readonly TagEntry[],
+    protectedTagNumbersInput?: ReadonlySet<number>,
+    protectedTagsFallback?: number,
+): Set<number> {
+    const protectedNumbers = new Set<number>();
+    if (protectedTagNumbersInput) {
+        for (const num of protectedTagNumbersInput) {
+            protectedNumbers.add(num);
+        }
+    } else if (typeof protectedTagsFallback === "number" && protectedTagsFallback > 0) {
+        const active = Array.from(
+            new Set(tags.filter((tag) => tag.status === "active").map((tag) => tag.tagNumber)),
+        )
+            .sort((left, right) => right - left)
+            .slice(0, Math.max(0, protectedTagsFallback));
+        for (const num of active) protectedNumbers.add(num);
+    }
     const protectedCtxReduceTags = newestCtxReduceTagNumbers(
         tags.filter((tag) => tag.status === "active" && tag.type === "tool"),
     );
@@ -353,13 +370,18 @@ function buildTagAttribution(args: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
     toolIdentities: ReadonlyMap<unknown, ToolPartIdentity>;
-    protectedTags: number;
+    protectedTagNumbers?: ReadonlySet<number>;
+    protectedTags?: number;
 }): {
     protectedNumbers: ReadonlySet<number>;
     messageTags: ReadonlyMap<string, TagEntry>;
     toolTagsByPart: ReadonlyMap<unknown, TagEntry>;
 } {
-    const protectedNumbers = protectedTagNumbers(args.tags, args.protectedTags);
+    const protectedNumbers = resolveProtectedTagNumbers(
+        args.tags,
+        args.protectedTagNumbers,
+        args.protectedTags,
+    );
     const messageTags = new Map<string, TagEntry>();
     const exactToolTags = new Map<string, TagEntry>();
     const orphanTagsByCall = new Map<string, TagEntry[]>();
@@ -553,7 +575,13 @@ export function sameTailHygieneStructuralSignature(
 export function measureTailHygiene(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
-    protectedTags: number;
+    /**
+     * Union projection form: protectedTagNumbers (tag-number set).
+     * Coordinate space: tag-number space.
+     * Empty-window behavior: empty set means zero tool tags are protected by the token window.
+     */
+    protectedTagNumbers?: ReadonlySet<number>;
+    protectedTags?: number;
     /** Active tags whose drop is queued but not yet materialized into the rendered tail. */
     pendingDropTagNumbers?: ReadonlySet<number>;
 }): TailHygieneMeasurement {
@@ -563,6 +591,7 @@ export function measureTailHygiene(input: {
         messages: input.messages,
         tags: input.tags,
         toolIdentities,
+        protectedTagNumbers: input.protectedTagNumbers,
         protectedTags: input.protectedTags,
     });
     const droppedToolOwners = new Set<string>();
@@ -749,7 +778,13 @@ function sameMeasuredPrefix(
 export function refreshTailHygieneBaseline(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
-    protectedTags: number;
+    /**
+     * Union projection form: protectedTagNumbers (tag-number set).
+     * Coordinate space: tag-number space.
+     * Empty-window behavior: empty set means zero tool tags protected by window.
+     */
+    protectedTagNumbers?: ReadonlySet<number>;
+    protectedTags?: number;
     pendingDropTagNumbers?: ReadonlySet<number>;
     cacheBusting: boolean;
     previous?: TailHygieneBaseline;

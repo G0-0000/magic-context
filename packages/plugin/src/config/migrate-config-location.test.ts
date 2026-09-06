@@ -186,10 +186,10 @@ describe("migrateConfigFile (location migration)", () => {
         try {
             const target = join(dir, ".cortexkit", "magic-context.jsonc");
             mkdirSync(join(dir, ".cortexkit"), { recursive: true });
-            writeFileSync(target, '{ "protected_tags": 5 }');
+            writeFileSync(target, '{ "cache_ttl": "5m" }');
             const legacy = join(dir, ".opencode", "magic-context.jsonc");
             mkdirSync(join(dir, ".opencode"), { recursive: true });
-            writeFileSync(legacy, '{ "protected_tags": 9 }');
+            writeFileSync(legacy, '{ "cache_ttl": "9m" }');
 
             const r = migrateConfigFile({
                 scope: "project",
@@ -201,8 +201,8 @@ describe("migrateConfigFile (location migration)", () => {
             expect(r.migrated).toBe(false);
             expect(r.warnings.join("\n")).toContain("already exists with different settings");
             // BOTH left as-is for manual reconciliation — never auto-clobbered.
-            expect(readFileSync(target, "utf8")).toContain('"protected_tags": 5');
-            expect(readFileSync(legacy, "utf8")).toContain('"protected_tags": 9');
+            expect(readFileSync(target, "utf8")).toContain('"cache_ttl": "5m"');
+            expect(readFileSync(legacy, "utf8")).toContain('"cache_ttl": "9m"');
             expect(existsSync(`${legacy}.MOVED_READPLEASE`)).toBe(false);
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -216,8 +216,8 @@ describe("migrateConfigFile (location migration)", () => {
             const b = join(dir, ".pi", "magic-context.jsonc");
             mkdirSync(join(dir, ".opencode"), { recursive: true });
             mkdirSync(join(dir, ".pi"), { recursive: true });
-            writeFileSync(a, '{ "protected_tags": 5 }');
-            writeFileSync(b, '{ "protected_tags": 9 }');
+            writeFileSync(a, '{ "cache_ttl": "5m" }');
+            writeFileSync(b, '{ "cache_ttl": "9m" }');
             const target = join(dir, ".cortexkit", "magic-context.jsonc");
 
             const r = migrateConfigFile({
@@ -256,8 +256,41 @@ describe("migrateConfigFile (location migration)", () => {
 
             expect(r.migrated).toBe(true);
             expect(existsSync(target)).toBe(true);
+            expect(readFileSync(target, "utf8")).not.toContain("protected_tags");
             expect(existsSync(`${a}.MOVED_READPLEASE`)).toBe(true);
             expect(existsSync(`${b}.MOVED_READPLEASE`)).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("strips deprecated protected_tags key during migration to target with notice", () => {
+        const dir = tmp();
+        try {
+            const legacy = join(dir, "magic-context.jsonc");
+            writeFileSync(legacy, '{\n  "protected_tags": 20,\n  "cache_ttl": "15m"\n}\n');
+            const target = join(dir, ".cortexkit", "magic-context.jsonc");
+            const infos: string[] = [];
+            const r = migrateConfigFile({
+                scope: "project",
+                targetPath: target,
+                legacySources: [src(legacy)],
+                logger: {
+                    info: (msg) => infos.push(msg),
+                    warn: () => {},
+                },
+            });
+            expect(r.migrated).toBe(true);
+            const targetContent = readFileSync(target, "utf8");
+            expect(targetContent).not.toContain("protected_tags");
+            expect(targetContent).toContain('"cache_ttl": "15m"');
+            expect(
+                infos.some((msg) =>
+                    msg.includes(
+                        'Stripped deprecated "protected_tags" key during config location migration',
+                    ),
+                ),
+            ).toBe(true);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

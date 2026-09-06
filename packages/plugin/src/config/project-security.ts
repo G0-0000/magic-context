@@ -57,6 +57,8 @@ const TOKEN_THRESHOLD_REASON =
     "security: a repository may only raise execute_threshold_tokens above the user's trusted token threshold; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_INTRODUCTION_REASON =
     "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier historian work or cloned-repo cost escalation.";
+const PROTECTED_TOKENS_REASON =
+    "security: a repository may only raise protected_tokens above the user's effective value; it cannot lower protection below the user's configured floor.";
 
 interface PercentageThresholdConfig {
     defaultValue: number;
@@ -70,6 +72,40 @@ interface TokenThresholdConfig {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function resolveProtectedTokensScalar(
+    value: unknown,
+    modelKey?: string,
+): number | undefined {
+    if (
+        typeof value === "number" &&
+        Number.isInteger(value) &&
+        value >= 4000 &&
+        value <= 1_000_000
+    ) {
+        return value;
+    }
+    if (isPlainObject(value)) {
+        if (
+            modelKey &&
+            typeof value[modelKey] === "number" &&
+            Number.isInteger(value[modelKey]) &&
+            (value[modelKey] as number) >= 4000 &&
+            (value[modelKey] as number) <= 1_000_000
+        ) {
+            return value[modelKey] as number;
+        }
+        if (
+            typeof value.default === "number" &&
+            Number.isInteger(value.default) &&
+            value.default >= 4000 &&
+            value.default <= 1_000_000
+        ) {
+            return value.default;
+        }
+    }
+    return undefined;
 }
 
 function stripListedFields(
@@ -557,6 +593,7 @@ export function constrainProjectThresholdOverrides(args: {
     trustedBaseConfig: {
         execute_threshold_percentage?: unknown;
         execute_threshold_tokens?: unknown;
+        protected_tokens?: unknown;
     };
 }): string[] {
     const warnings: string[] = [];
@@ -697,6 +734,36 @@ export function constrainProjectThresholdOverrides(args: {
 
         if (touchedValidEntry) {
             setMergedTokenThreshold(args.mergedRaw, constrained);
+        }
+    }
+
+    if ("protected_tokens" in args.projectRaw) {
+        const rawProject = args.projectRaw.protected_tokens;
+        const projectVal = resolveProtectedTokensScalar(rawProject);
+        const trustedUserVal = resolveProtectedTokensScalar(
+            args.trustedBaseConfig.protected_tokens,
+        );
+
+        if (projectVal !== undefined) {
+            if (trustedUserVal !== undefined) {
+                if (projectVal >= trustedUserVal) {
+                    args.mergedRaw.protected_tokens = projectVal;
+                } else {
+                    args.mergedRaw.protected_tokens = trustedUserVal;
+                    warnings.push(
+                        makeProjectThresholdWarning("protected_tokens", PROTECTED_TOKENS_REASON),
+                    );
+                }
+            } else {
+                args.mergedRaw.protected_tokens = projectVal;
+            }
+        } else {
+            if (trustedUserVal !== undefined) {
+                args.mergedRaw.protected_tokens = trustedUserVal;
+            } else {
+                delete args.mergedRaw.protected_tokens;
+            }
+            warnings.push(makeProjectThresholdWarning("protected_tokens", PROTECTED_TOKENS_REASON));
         }
     }
 
