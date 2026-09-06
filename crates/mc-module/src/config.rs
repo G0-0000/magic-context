@@ -92,6 +92,9 @@ pub struct McModuleConfig {
     pub execute_threshold_user_configured: bool,
     /// Project overrides are a per-model floor, never permission to lower the user threshold.
     pub execute_threshold_project_config: Option<ExecuteThresholdConfig>,
+    /// User and project protected-token overrides remain separate until usable geometry is known.
+    pub protected_tokens_user: Option<u64>,
+    pub protected_tokens_project: Option<u64>,
     /// Whether compaction is enabled, as resolved during host startup. This determines which
     /// component controls context-window compaction for the request.
     pub compaction_enabled: bool,
@@ -136,6 +139,8 @@ impl Default for McModuleConfig {
             execute_threshold_user_config: None,
             execute_threshold_user_configured: false,
             execute_threshold_project_config: None,
+            protected_tokens_user: None,
+            protected_tokens_project: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: AutoSearchConfig::default(),
@@ -174,6 +179,13 @@ pub struct ResolvedExecuteThreshold {
     pub provenance: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProtectedTokens {
+    pub floor: u64,
+    pub provenance: &'static str,
+    pub warning: Option<String>,
+}
+
 fn resolve_threshold_config(
     config: &ExecuteThresholdConfig,
     model_key: Option<&str>,
@@ -204,6 +216,29 @@ fn resolve_threshold_config(
 }
 
 impl McModuleConfig {
+    pub fn resolve_protected_tokens(&self, usable_soft: u64) -> ResolvedProtectedTokens {
+        let derived = crate::protection_window::derive_default_floor(usable_soft);
+        let (mut floor, mut provenance) = self
+            .protected_tokens_user
+            .map_or((derived, "derived"), |value| (value, "user"));
+        let mut warning = None;
+        if let Some(project) = self.protected_tokens_project {
+            if project >= floor {
+                floor = project;
+                provenance = "project";
+            } else {
+                warning = Some(format!(
+                    "ignoring project protected_tokens={project}; it cannot lower resolved user/default floor {floor}"
+                ));
+            }
+        }
+        ResolvedProtectedTokens {
+            floor,
+            provenance,
+            warning,
+        }
+    }
+
     pub fn resolve_execute_threshold(&self, model_key: Option<&str>) -> ResolvedExecuteThreshold {
         let scalar = ExecuteThresholdConfig::Percentage(self.execute_threshold_percentage);
         let mut resolved = resolve_threshold_config(
@@ -511,6 +546,8 @@ fn merge_tiers_with_warnings(
         }
         cfg.execute_threshold_user_config = execute_threshold_at(user);
         cfg.execute_threshold_user_configured = cfg.execute_threshold_user_config.is_some();
+        cfg.protected_tokens_user = protected_tokens_at(user, "user", &mut warnings);
+        warn_deprecated_protected_tags(user, "user", &mut warnings);
         if let Some(enabled) = user.pointer("/compaction/enabled").and_then(Value::as_bool) {
             cfg.compaction_enabled = enabled;
         }
@@ -595,6 +632,8 @@ fn merge_tiers_with_warnings(
 
     if let Some(project) = project {
         cfg.execute_threshold_project_config = execute_threshold_at(project);
+        cfg.protected_tokens_project = protected_tokens_at(project, "project", &mut warnings);
+        warn_deprecated_protected_tags(project, "project", &mut warnings);
         warn_ignored_project_key(project, "/language", &mut warnings);
         warn_ignored_project_key(project, "/compaction/enabled", &mut warnings);
         if let Some(enabled) = project.pointer("/memory/enabled").and_then(Value::as_bool) {
@@ -709,6 +748,27 @@ fn positive_usize_at(value: &Value, pointer: &str) -> Option<usize> {
         .filter(|v| *v > 0)
 }
 
+fn protected_tokens_at(value: &Value, tier: &str, warnings: &mut Vec<String>) -> Option<u64> {
+    let configured = value.get("protected_tokens")?;
+    let valid = configured
+        .as_u64()
+        .filter(|tokens| (4_000..=1_000_000).contains(tokens));
+    if valid.is_none() {
+        warnings.push(format!(
+            "invalid {tier} protected_tokens; expected an integer from 4000 through 1000000; using the derived/default floor"
+        ));
+    }
+    valid
+}
+
+fn warn_deprecated_protected_tags(value: &Value, tier: &str, warnings: &mut Vec<String>) {
+    if value.get("protected_tags").is_some() {
+        warnings.push(format!(
+            "deprecated {tier} protected_tags is ignored; use protected_tokens"
+        ));
+    }
+}
+
 fn execute_threshold_at(value: &Value) -> Option<ExecuteThresholdConfig> {
     let threshold = value.get("execute_threshold_percentage")?;
     if let Some(number) = threshold.as_f64() {
@@ -806,6 +866,43 @@ pub fn strip_jsonc(input: &str) -> String {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod protected_tokens_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn scalar_overrides_resolve_raise_only_after_geometry_derivation() {
+        let (cfg, warnings) = merge_tiers_with_warnings(
+            Some(&json!({ "protected_tokens": 20_000 })),
+            Some(&json!({ "protected_tokens": 16_000 })),
+        );
+        assert!(warnings.is_empty());
+        let resolved = cfg.resolve_protected_tokens(200_000);
+        assert_eq!(resolved.floor, 20_000);
+        assert_eq!(resolved.provenance, "user");
+        assert!(resolved.warning.unwrap().contains("cannot lower"));
+
+        let (cfg, _) = merge_tiers_with_warnings(
+            Some(&json!({ "protected_tokens": 20_000 })),
+            Some(&json!({ "protected_tokens": 30_000 })),
+        );
+        assert_eq!(cfg.resolve_protected_tokens(200_000).floor, 30_000);
+    }
+
+    #[test]
+    fn invalid_override_falls_back_and_deprecated_count_is_parsed_inertly() {
+        let (cfg, warnings) = merge_tiers_with_warnings(
+            Some(&json!({ "protected_tokens": 4_000.5, "protected_tags": 101 })),
+            None,
+        );
+        assert_eq!(cfg.resolve_protected_tokens(372_000).floor, 18_600);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("expected an integer"));
+        assert!(warnings[1].contains("protected_tags is ignored"));
+    }
 }
 
 #[cfg(test)]

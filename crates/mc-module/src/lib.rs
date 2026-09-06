@@ -39,6 +39,7 @@ pub mod memory_render;
 pub mod memory_tool;
 pub mod project_docs;
 pub mod prompt_surface;
+pub mod protection_window;
 mod retained_size;
 pub mod scheduler;
 pub mod selection;
@@ -611,22 +612,24 @@ pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = 2;
 /// `<compartment>` elements with markdown headings in m0 and m1; epoch 2 sanitizes
 /// historian-authored titles before placing them inside the session-history wrapper.
 pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = 2;
-/// Bumps when the rendered m0 prefix format changes for the claude-code-anthropic
-/// profile; epoch 1 includes covered system messages in m0 instead of sending them as
+/// Bumps for provider-visible byte changes local to the claude-code-anthropic profile,
+/// without invalidating other profiles. Epoch 1 includes covered system messages in m0 instead of sending them as
 /// separate system-role messages. Epoch 2 flips the profile to full-array tail reclaim
 /// (the Thalamus peer retired the byte-splice at U0), so tool-absent sessions gain the
 /// age/pressure tail reclaim they never had; the bump forces one self-coordinated HARD
-/// fold on the first pass under the new binary, per the epoch contract above.
-pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 2;
-/// Bumps when any active tag overlay changes provider-visible bytes. Epoch 3 freezes
-/// temporal-marker decisions in durable rows instead of deriving them from each request array.
-/// Every change requires one cache-breaking fold before the new overlay can render. Inactive
-/// requests omit the component and retain their identity.
+/// fold on the first pass under the new binary, per the epoch contract above. Epoch 3 tags
+/// completed assistant text on first sight even when protected from other mutations.
+pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 3;
+/// Bumps for tagger-wide provider-visible byte changes across active tagging surfaces.
+/// Profile-local changes belong in that profile's render epoch instead, so unchanged
+/// profiles do not pay a collateral HARD. Epoch 3 freezes temporal-marker decisions in
+/// durable rows. Every bump requires a cache-breaking fold; inactive requests omit this
+/// component and retain their identity.
 pub const TAGGER_FEATURE_EPOCH: u32 = 3;
 
 /// The module-owned rendered-prefix format epoch for a serializer profile.
 ///
-/// Future profile-specific m0 format epochs slot in here so the module folds them into
+/// Profile-local rendered-byte epochs slot in here so the module folds them into
 /// its effective render_config even when a consumer sends a static base render_config.
 pub const fn profile_render_epoch(profile: SerializerProfile) -> u32 {
     match profile {
@@ -673,7 +676,6 @@ const GUIDANCE_TEXT: &str = prompt_surface::GUIDANCE_FULL_PRIMARY;
 /// Matches the default OpenCode protected tag window. The Claude Code facade has no
 /// request-local transform config, so acknowledgement validation uses the durable tag
 /// ordering with the same default recency window as an omitted transform field.
-const DEFAULT_PROTECTED_TAGS: usize = 20;
 /// Mirrors packages/plugin/src/config/schema/magic-context.ts commit_cluster_trigger.enabled default.
 const DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED: bool = true;
 /// Mirrors packages/plugin/src/config/schema/magic-context.ts commit_cluster_trigger.min_clusters default.
@@ -3876,6 +3878,8 @@ impl McHandler {
                 execute_threshold_user_config: None,
                 execute_threshold_user_configured: false,
                 execute_threshold_project_config: None,
+                protected_tokens_user: None,
+                protected_tokens_project: None,
                 compaction_enabled: true,
                 memory_enabled: true,
                 auto_search: crate::config::AutoSearchConfig::default(),
@@ -8489,8 +8493,23 @@ impl McHandler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
-        // Bind frames have no model identity. Emit the resolved threshold once on the first
-        // transform for this binding, when the host's model and optional override are available.
+        let hostless_usable_soft = parsed
+            .geometry
+            .as_ref()
+            .map(|geometry| geometry.usable_soft)
+            .or_else(|| {
+                parsed
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.context_limit_tokens)
+                    .filter(|limit| *limit >= scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT)
+            })
+            .unwrap_or(200_000);
+        let resolved_protected_tokens = binding
+            .config
+            .resolve_protected_tokens(hostless_usable_soft);
+        // Bind frames have no model identity. Emit resolved policy once on the first transform for
+        // this binding, when the host's model and optional overrides are available.
         if self
             .threshold_logged_routes
             .lock()
@@ -8507,6 +8526,21 @@ impl McHandler {
                 resolved.provenance,
                 parsed.execute_threshold_or(resolved.percentage),
                 if parsed.effective_execute_threshold.is_some() { "host" } else { "config" },
+            );
+            if let Some(warning) = &resolved_protected_tokens.warning {
+                eprintln!("mc-module: config warning: {warning}");
+            }
+            eprintln!(
+                "mc-module: protected_tokens channel={channel} provenance={} effective={} source={}",
+                resolved_protected_tokens.provenance,
+                parsed
+                    .protected_tokens_effective
+                    .unwrap_or(resolved_protected_tokens.floor),
+                if parsed.protected_tokens_effective.is_some() {
+                    "host"
+                } else {
+                    "config"
+                },
             );
         }
         let run_transform = || {
@@ -8548,6 +8582,12 @@ impl McHandler {
                         .resolve_execute_threshold(parsed.model_key.as_deref())
                         .percentage,
                 ),
+                protected_tokens_floor: resolved_protected_tokens.floor,
+                protected_tokens_provenance: if resolved_protected_tokens.provenance == "derived" {
+                    "derived"
+                } else {
+                    "absolute"
+                },
                 // Route-bound configuration selects either the full pipeline or the
                 // additive-only memory/docs transform for every consumer profile.
                 compaction_enabled: binding.config.compaction_enabled,
@@ -10976,22 +11016,28 @@ impl McHandler {
             ));
         }
 
-        let protected_start = tags
-            .len()
-            .checked_sub(DEFAULT_PROTECTED_TAGS)
-            .and_then(|index| tags.get(index))
-            .map(|tag| tag.tag_number as u64)
-            .unwrap_or(0);
-        let (deferred, immediate): (Vec<_>, Vec<_>) = queueable
-            .iter()
-            .copied()
-            .partition(|number| protected_start != 0 && *number >= protected_start);
+        let loaded = match store.load(session_id) {
+            Ok(loaded) => loaded,
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        let floor = loaded
+            .meta
+            .protected_tokens_effective
+            .or_else(|| {
+                protection_window::pre_snapshot_floor(store.tag_cache_namespace(), session_id)
+            })
+            .unwrap_or_else(|| protection_window::derive_default_floor(200_000));
+        let window = protection_window::ProtectionWindow::from_persisted_rows(&tags, floor);
+        let (deferred, immediate): (Vec<_>, Vec<_>) =
+            queueable.iter().copied().partition(|number| {
+                window
+                    .tag_numbers
+                    .tag_numbers
+                    .contains(&protection_window::TagNumber(*number as i64))
+            });
         let mut details = Vec::new();
         if !immediate.is_empty() {
             details.push(format!("drop {}", format_tag_numbers(&immediate)));
-        }
-        if !deferred.is_empty() {
-            details.push(format!("deferred drop {}", format_tag_numbers(&deferred)));
         }
         let validation_detail = ctx_reduce_ack_details(&unknown, &already_queued);
         if !validation_detail.is_empty() {
@@ -10999,7 +11045,18 @@ impl McHandler {
         }
         // This acknowledgement validates the durable tag state but deliberately does not
         // mutate it. The response observer owns asynchronous delivery on this facade.
-        mcp_text_result(format!("Queued: {}.", details.join("; ")), false)
+        let mut reply = if details.is_empty() {
+            String::new()
+        } else {
+            format!("Queued: {}.", details.join("; "))
+        };
+        if !deferred.is_empty() {
+            if !reply.is_empty() {
+                reply.push(' ');
+            }
+            reply.push_str(&ctx_reduce_held_reply(&deferred));
+        }
+        mcp_text_result(reply, false)
     }
 
     async fn handle_ctx_memory_facade(&self, channel: u16, request: &Value) -> HandlerOutcome {
@@ -14230,6 +14287,15 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
     }
 }
 
+fn ctx_reduce_held_reply(held: &[u64]) -> String {
+    let tags = format_tag_numbers(held);
+    if held.len() == 1 {
+        format!("Held: {tags} is inside the protected working set; it applies once newer work displaces it.")
+    } else {
+        format!("Held: {tags} are inside the protected working set; they apply once newer work displaces them.")
+    }
+}
+
 fn ctx_reduce_ack_details(unknown: &[u64], already_queued: &[u64]) -> String {
     let mut details = Vec::new();
     if !unknown.is_empty() {
@@ -15743,23 +15809,23 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
     // #[non_exhaustive], so builder methods are the only construction path that survives additive
     // field landings. Every field below is set to the exact value the pre-builder struct literal
     // produced, so the serialized HELLO is byte-identical to the pre-migration wire shape.
-    ModuleManifest::builder(
-        module_id.to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-        TrustTier::FirstParty,
-        Bindings {
-            storage: StorageBinding {
-                kind: StorageKind::Sqlite,
-                scope: StorageScope::Project,
-                owns_schema: true,
-            },
-            vault_grants: Vec::new(),
-            identity: IdentityBinding {
-                requires: vec![IdentityScope::Project],
-                optional: vec![IdentityScope::Session],
-            },
+    // subc-protocol 0.19 made trust_tier and bindings optional builder setters because the
+    // daemon reads neither on a production path; we keep declaring both so the HELLO stays
+    // byte-identical to the pre-0.19 wire shape.
+    ModuleManifest::builder(module_id.to_string(), env!("CARGO_PKG_VERSION").to_string())
+    .trust_tier(Some(TrustTier::FirstParty))
+    .bindings(Some(Bindings {
+        storage: StorageBinding {
+            kind: StorageKind::Sqlite,
+            scope: StorageScope::Project,
+            owns_schema: true,
         },
-    )
+        vault_grants: Vec::new(),
+        identity: IdentityBinding {
+            requires: vec![IdentityScope::Project],
+            optional: vec![IdentityScope::Session],
+        },
+    }))
     .protocol_ver(PROTOCOL_VERSION)
     // Introduced by subc-protocol 0.12: optional pre-validated capability
     // declarations. MC requests nothing beyond its role grants, so None keeps
@@ -16647,7 +16713,7 @@ mod tests {
         let m = manifest("magic-context");
         assert_eq!(m.module_id, "magic-context");
         assert_eq!(m.module_version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(m.trust_tier, TrustTier::FirstParty);
+        assert_eq!(m.trust_tier, Some(TrustTier::FirstParty));
         assert_eq!(m.protocol_ver, PROTOCOL_VERSION);
         // The builder migration must preserve the deliberate empty self-signal
         // marker ("examined, none to register") byte-identically; actual signal
@@ -17698,6 +17764,8 @@ mod tests {
             execute_threshold_user_config: None,
             execute_threshold_user_configured: false,
             execute_threshold_project_config: None,
+            protected_tokens_user: None,
+            protected_tokens_project: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
@@ -22569,7 +22637,7 @@ mod tests {
         assert_eq!(status["session_id"], "ses");
         assert_eq!(status["row_version"], Value::Null);
         assert_eq!(status["historian"]["last_no_fire"], Value::Null);
-        assert_eq!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
+        assert_eq!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 3);
         assert_eq!(
             status["epochs"]["memory_render_epoch"],
             json!(MEMORY_RENDER_FORMAT_EPOCH)
@@ -22578,7 +22646,7 @@ mod tests {
             status["epochs"]["compartment_render_epoch"],
             json!(COMPARTMENT_RENDER_FORMAT_EPOCH)
         );
-        assert_eq!(status["epochs"]["profile_epoch"], json!(2));
+        assert_eq!(status["epochs"]["profile_epoch"], json!(3));
         assert_eq!(
             status["epochs"]["tagger_epoch"],
             json!(TAGGER_FEATURE_EPOCH)
@@ -24663,6 +24731,12 @@ mod tests {
         assert!(!bounded.text.contains("[11] U (user)"));
     }
 
+    #[test]
+    fn ctx_reduce_held_copy_has_no_totals_or_countdown() {
+        assert_eq!(ctx_reduce_held_reply(&[7]), "Held: §7§ is inside the protected working set; it applies once newer work displaces it.");
+        assert_eq!(ctx_reduce_held_reply(&[7, 8]), "Held: §7§, §8§ are inside the protected working set; they apply once newer work displaces them.");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn facade_ctx_reduce_resolves_the_session_before_validating_tags() {
         let producer = Arc::new(ProducerState::default());
@@ -24697,7 +24771,7 @@ mod tests {
             .map(|number| TagMintInput {
                 block_id: format!("m{number}#0"),
                 kind: "tool_result".to_string(),
-                token_count: 10,
+                token_count: 800,
                 source_bytes: format!("output {number}").into_bytes(),
             })
             .collect::<Vec<_>>();
@@ -24712,7 +24786,7 @@ mod tests {
             .await,
         );
         assert!(mixed_ack.contains("drop §1§"));
-        assert!(mixed_ack.contains("deferred drop §21§"));
+        assert!(mixed_ack.contains("Held: §21§ is inside the protected working set; it applies once newer work displaces it."));
         assert!(mixed_ack.contains("tags 99, 100 not found"));
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
@@ -24749,7 +24823,7 @@ mod tests {
 
         let queued_ack =
             tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 2, 99" })).await);
-        assert!(queued_ack.contains("deferred drop §2§"));
+        assert!(queued_ack.contains("Held: §2§ is inside the protected working set; it applies once newer work displaces it."), "{queued_ack}");
         assert!(queued_ack.contains("tags 1 already queued"));
         assert!(queued_ack.contains("tags 99 not found"));
 
@@ -30418,6 +30492,8 @@ mod tests {
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
+                protected_tokens_floor: 16_000,
+                protected_tokens_provenance: "derived",
                 compaction_enabled: true,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),
@@ -31217,6 +31293,8 @@ mod tests {
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
+                protected_tokens_floor: 16_000,
+                protected_tokens_provenance: "derived",
                 compaction_enabled: true,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),

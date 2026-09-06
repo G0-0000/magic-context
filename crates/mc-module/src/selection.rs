@@ -184,9 +184,6 @@ pub struct SelectionContext {
     pub current_total_input_tokens: f64,
     /// ceiling = contextLimit × executeThreshold%.
     pub ceiling_tokens: f64,
-    /// The protected-recent window: items with `ordinal > protected_cutoff_ordinal`
-    /// are never emergency-evicted (0 = protect nothing).
-    pub protected_cutoff_ordinal: u64,
     /// The frozen two-pass watermark: tool items with `ordinal <= last_execute_ordinal`
     /// may join the next riding/force batch (0 = none). It advances only after that
     /// batch is applied, so execute-band residency cannot age in one new arc per pass.
@@ -212,7 +209,9 @@ pub struct SelectionContext {
     /// True when supersession can ride concrete work already scheduled for this pass.
     /// Unlike `pass_already_busting`, a held emergency latch alone does not set this.
     pub supersession_ride_available: bool,
-    /// Dynamic newest-tag protection expressed as exact block ids.
+    /// At the scheduler's >=95% backstop, the token window and tier reserve yield.
+    pub emergency_window_yields: bool,
+    /// Persisted token-window protection expressed as exact block ids.
     pub tag_window_protected_block_ids: HashSet<String>,
     /// Whole-message protection for mutation-exempt and lineage-anchor messages.
     pub exempt_message_protected_block_ids: HashSet<String>,
@@ -220,7 +219,7 @@ pub struct SelectionContext {
 
 impl SelectionContext {
     fn block_is_protected(&self, block_id: &str) -> bool {
-        self.tag_window_protected_block_ids.contains(block_id)
+        (!self.emergency_window_yields && self.tag_window_protected_block_ids.contains(block_id))
             || self.exempt_message_protected_block_ids.contains(block_id)
     }
 }
@@ -919,7 +918,6 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
                 .iter()
                 .any(|(id, _)| ctx.block_is_protected(id))
             || arc.result_ids.iter().any(|id| ctx.block_is_protected(id))
-            || (ctx.protected_cutoff_ordinal > 0 && arc.ordinal > ctx.protected_cutoff_ordinal)
         {
             continue;
         }
@@ -1136,7 +1134,11 @@ fn select_emergency(
                     .cmp(&a.ordinal)
                     .then_with(|| b.arc_id.cmp(&a.arc_id))
             });
-            let reserve_count = (TIER_RECENCY_RESERVE * nums.len() as f64).ceil() as usize;
+            let reserve_count = if ctx.emergency_window_yields {
+                0
+            } else {
+                (TIER_RECENCY_RESERVE * nums.len() as f64).ceil() as usize
+            };
             for arc in nums.iter().take(reserve_count) {
                 reserved.insert(arc.arc_id.clone());
             }
@@ -1148,11 +1150,16 @@ fn select_emergency(
     // neither the floor nor target (panel-verified emergency interaction).
     let protected_ctx_reduce_arcs = newest_ctx_reduce_arc_ids(arcs);
 
-    // Build candidates per tier (protected tail + reserve excluded).
+    // Build candidates per tier (persisted protected identities + reserve excluded).
     let mut by_tier: HashMap<u8, Vec<&&ToolArc>> = HashMap::new();
     for arc in arcs {
-        if arc.ordinal > ctx.protected_cutoff_ordinal && ctx.protected_cutoff_ordinal > 0 {
-            continue; // global protected tail
+        if arc
+            .call_inputs
+            .iter()
+            .any(|(id, _)| ctx.block_is_protected(id))
+            || arc.result_ids.iter().any(|id| ctx.block_is_protected(id))
+        {
+            continue;
         }
         if protected_ctx_reduce_arcs.contains(&arc.arc_id) {
             continue;
@@ -1367,9 +1374,8 @@ pub(crate) fn select_reductions_with_outcome(
         PassClass::Defer => unreachable!("defer returned early"),
     }
 
-    // Supersession's recency floor follows the newest ACTIVE tag window rather than a second
-    // owner-message K=20 window. If either half has a protected active tag, retain the whole arc;
-    // otherwise filtering only the tagged result would leave a partially superseded pair.
+    // The persisted token window supplements the structural newest-20 owner floor. Protect the
+    // whole arc when either half is a member, avoiding partially superseded call/result pairs.
     let protected_supersession_arcs = |protected_block_ids: &HashSet<String>| {
         eligible_supersession_arc_ids.as_ref().map(|eligible| {
             eligible
@@ -1389,8 +1395,13 @@ pub(crate) fn select_reductions_with_outcome(
                 .collect::<HashSet<_>>()
         })
     };
+    let yielded_window = HashSet::new();
     let supersession_arcs_with_tag_window_protection =
-        protected_supersession_arcs(&ctx.tag_window_protected_block_ids);
+        protected_supersession_arcs(if ctx.emergency_window_yields {
+            &yielded_window
+        } else {
+            &ctx.tag_window_protected_block_ids
+        });
     let supersession_arcs_with_exempt_message_protection =
         protected_supersession_arcs(&ctx.exempt_message_protected_block_ids);
 
@@ -1666,7 +1677,6 @@ mod tests {
             pass_class: pass,
             current_total_input_tokens: 0.0,
             ceiling_tokens: 0.0,
-            protected_cutoff_ordinal: 0,
             last_execute_ordinal: 0,
             scheduler_pressure_execute: pass == PassClass::Execute,
             prior_input_sample: 0.0,
@@ -1676,6 +1686,7 @@ mod tests {
             first_applied_agent_drop_ids: HashSet::new(),
             pass_already_busting: false,
             supersession_ride_available: false,
+            emergency_window_yields: false,
             tag_window_protected_block_ids: HashSet::new(),
             exempt_message_protected_block_ids: HashSet::new(),
         }
@@ -1840,6 +1851,20 @@ mod tests {
         SelKind::Opaque
     }
 
+    fn golden_ordinal_threshold_to_row_identities(
+        items: &[SelItem],
+        ordinal_threshold: u64,
+    ) -> HashSet<String> {
+        if ordinal_threshold == 0 {
+            return HashSet::new();
+        }
+        items
+            .iter()
+            .filter(|item| item.ordinal > ordinal_threshold)
+            .map(|item| item.id.clone())
+            .collect()
+    }
+
     #[test]
     fn selection_golden_matches_ts_selectors() {
         let raw = include_str!("../testdata/selection-golden.json");
@@ -1927,7 +1952,6 @@ mod tests {
                 pass_class: pass,
                 current_total_input_tokens: case.ctx.current_total_input_tokens,
                 ceiling_tokens: case.ctx.ceiling_tokens,
-                protected_cutoff_ordinal: case.ctx.protected_cutoff_ordinal,
                 last_execute_ordinal: case.ctx.last_execute_ordinal,
                 scheduler_pressure_execute: case.ctx.scheduler_pressure_execute,
                 prior_input_sample: case.ctx.prior_input_sample,
@@ -1937,7 +1961,11 @@ mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: case.smart_drops || case.ctx.pass_already_busting,
                 supersession_ride_available: case.smart_drops || case.ctx.pass_already_busting,
-                tag_window_protected_block_ids: HashSet::new(),
+                emergency_window_yields: false,
+                tag_window_protected_block_ids: golden_ordinal_threshold_to_row_identities(
+                    &items,
+                    case.ctx.protected_cutoff_ordinal,
+                ),
                 exempt_message_protected_block_ids: HashSet::new(),
             };
             let cfg = SelectionConfig {
@@ -2671,6 +2699,50 @@ mod tests {
     }
 
     #[test]
+    fn emergency_95_yields_window_and_reserve_but_retains_open_arcs_and_exemplars() {
+        let mut items = Vec::new();
+        for n in 1..=4 {
+            let id = format!("c{n}");
+            items.push(tool_call(&id, n, "read", serde_json::json!({}), 40_000));
+            items.push(tool_result(&id, n, "read", 40_000));
+        }
+        items.push(tool_call("open", 5, "read", serde_json::json!({}), 40_000));
+        for n in 6..=8 {
+            let id = format!("c{n}");
+            items.push(tool_call(
+                &id,
+                n,
+                "ctx_reduce",
+                serde_json::json!({}),
+                40_000,
+            ));
+            items.push(tool_result(&id, n, "ctx_reduce", 40_000));
+        }
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 190_000.0;
+        ctx.ceiling_tokens = 130_000.0;
+        ctx.tag_window_protected_block_ids = items.iter().map(|item| item.id.clone()).collect();
+        let cfg = SelectionConfig { smart_drops: false };
+        assert!(select_reductions(&items, &HashSet::new(), &ctx, &cfg).is_empty());
+        ctx.emergency_window_yields = true;
+        let decisions = select_reductions(&items, &HashSet::new(), &ctx, &cfg);
+        let targets = decisions
+            .iter()
+            .map(|d| d.target_id.clone())
+            .collect::<HashSet<_>>();
+        for n in 1..=4 {
+            assert!(
+                targets.contains(&result_block_id(&format!("c{n}"))),
+                "completed arc {n}, including newest reserve, must yield"
+            );
+        }
+        assert!(!targets.contains(&call_block_id("open")));
+        for n in 6..=8 {
+            assert!(!targets.contains(&result_block_id(&format!("c{n}"))));
+        }
+    }
+
+    #[test]
     fn supersession_preserves_newest_twenty_message_owners_without_tag_window_help() {
         let mut items = Vec::new();
         for n in 1..=30u64 {
@@ -3120,7 +3192,6 @@ mod tests {
             agent_drop_ids: vec![result_block_id("c9")],
             current_total_input_tokens: 123_456.0,
             ceiling_tokens: 200_000.0,
-            protected_cutoff_ordinal: 2,
             prior_input_sample: 99_000.0,
             has_prior_drop: true,
             pass_already_busting: true,
@@ -3375,7 +3446,10 @@ mod tests {
         ];
         let mut ctx = base_ctx(PassClass::Execute);
         ctx.supersession_ride_available = true;
-        ctx.protected_cutoff_ordinal = 1;
+        ctx.tag_window_protected_block_ids = HashSet::from([
+            "protected-owner#1".to_string(),
+            "protected-new-result#0".to_string(),
+        ]);
         assert!(
             select_reductions(
                 &protected_items,
@@ -3405,7 +3479,7 @@ mod tests {
                 50,
             ),
         ];
-        ctx.protected_cutoff_ordinal = 0;
+        ctx.tag_window_protected_block_ids.clear();
         assert!(
             select_reductions(
                 &open_items,

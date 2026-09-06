@@ -1,0 +1,985 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "label": "F1 exhausted history",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 2,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 3,
+          "row_identity": "r3",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "r4",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 5,
+          "row_identity": "r5",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 6,
+          "row_identity": "r6",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r9",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "r11",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 12,
+          "row_identity": "r12",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 13,
+          "row_identity": "r13",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 14,
+          "row_identity": "r14",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 15,
+          "row_identity": "r15",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 16,
+          "row_identity": "r16",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 17,
+          "row_identity": "r17",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 18,
+          "row_identity": "r18",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 19,
+          "row_identity": "r19",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 20,
+          "row_identity": "r20",
+          "kind": "tool",
+          "tokenCount": 250
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 1,
+      "expectedProtectedRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "13:r13",
+        "14:r14",
+        "15:r15",
+        "16:r16",
+        "17:r17",
+        "18:r18",
+        "19:r19",
+        "1:r1",
+        "20:r20",
+        "2:r2",
+        "3:r3",
+        "4:r4",
+        "5:r5",
+        "6:r6",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ],
+      "expectedProtectedCount": 20,
+      "expectedProtectedMass": 5000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "13:r13",
+        "14:r14",
+        "15:r15",
+        "16:r16",
+        "17:r17",
+        "18:r18",
+        "19:r19",
+        "1:r1",
+        "20:r20",
+        "2:r2",
+        "3:r3",
+        "4:r4",
+        "5:r5",
+        "6:r6",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ]
+    },
+    {
+      "label": "F2 single large read",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 2,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 3,
+          "row_identity": "r3",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "r4",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 5,
+          "row_identity": "r5",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 6,
+          "row_identity": "r6",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r9",
+          "kind": "tool",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 40000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 8,
+      "expectedProtectedRows": [
+        "10:r10",
+        "8:r8",
+        "9:r9"
+      ],
+      "expectedProtectedCount": 3,
+      "expectedProtectedMass": 44000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "8:r8",
+        "9:r9"
+      ]
+    },
+    {
+      "label": "F3 exact equality",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 2,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 3,
+          "row_identity": "r3",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "r4",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 5,
+          "row_identity": "r5",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 6,
+          "row_identity": "r6",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r9",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 4000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 7,
+      "expectedProtectedRows": [
+        "10:r10",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ],
+      "expectedProtectedCount": 4,
+      "expectedProtectedMass": 16000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ]
+    },
+    {
+      "label": "F4 opposed tie ascending",
+      "rows": [
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "a",
+          "kind": "tool",
+          "tokenCount": 10000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "b",
+          "kind": "tool",
+          "tokenCount": 10000
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "r11",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 12,
+          "row_identity": "r12",
+          "kind": "tool",
+          "tokenCount": 4000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 9,
+      "expectedProtectedRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "9:a",
+        "9:b"
+      ],
+      "expectedProtectedCount": 5,
+      "expectedProtectedMass": 32000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "9:a",
+        "9:b"
+      ]
+    },
+    {
+      "label": "F4 opposed tie descending",
+      "rows": [
+        {
+          "tag_number": 12,
+          "row_identity": "r12",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "r11",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "b",
+          "kind": "tool",
+          "tokenCount": 10000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "a",
+          "kind": "tool",
+          "tokenCount": 10000
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 4000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 9,
+      "expectedProtectedRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "9:a",
+        "9:b"
+      ],
+      "expectedProtectedCount": 5,
+      "expectedProtectedMass": 32000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "11:r11",
+        "12:r12",
+        "9:a",
+        "9:b"
+      ]
+    },
+    {
+      "label": "F5 invisible mass",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 1000
+        },
+        {
+          "tag_number": 2,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": null
+        },
+        {
+          "tag_number": 3,
+          "row_identity": "r3",
+          "kind": "tool",
+          "tokenCount": 2000,
+          "status": "dropped"
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "r4",
+          "kind": "tool",
+          "tokenCount": 30000,
+          "status": "edit_marker"
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 2,
+      "expectedProtectedRows": [
+        "2:r2",
+        "3:r3",
+        "4:r4"
+      ],
+      "expectedProtectedCount": 3,
+      "expectedProtectedMass": 32000,
+      "cutoffPredicateRows": [
+        "2:r2",
+        "3:r3",
+        "4:r4"
+      ]
+    },
+    {
+      "label": "F6 disjoint coordinate spaces",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 7,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 8,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r9",
+          "kind": "tool",
+          "tokenCount": 4000
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 4000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 7,
+      "expectedProtectedRows": [
+        "10:r10",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ],
+      "expectedProtectedCount": 4,
+      "expectedProtectedMass": 16000,
+      "cutoffPredicateRows": [
+        "10:r10",
+        "7:r7",
+        "8:r8",
+        "9:r9"
+      ]
+    },
+    {
+      "label": "F7 open invocation and boundary tie",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "10a",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "10b",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "m1",
+          "kind": "message",
+          "tokenCount": 2000
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "11_open",
+          "kind": "tool",
+          "tokenCount": null
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "f1",
+          "kind": "file",
+          "tokenCount": 1000
+        },
+        {
+          "tag_number": 12,
+          "row_identity": "12_mass",
+          "kind": "tool",
+          "tokenCount": 20000
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 10,
+      "expectedProtectedRows": [
+        "10:10a",
+        "10:10b",
+        "11:11_open",
+        "12:12_mass"
+      ],
+      "expectedProtectedCount": 4,
+      "expectedProtectedMass": 21000,
+      "cutoffPredicateRows": [
+        "10:10a",
+        "10:10b",
+        "11:11_open",
+        "12:12_mass"
+      ]
+    },
+    {
+      "label": "F8 empty",
+      "rows": [],
+      "floor": 16000,
+      "expectedCutoff": null,
+      "expectedProtectedRows": [],
+      "expectedProtectedCount": 0,
+      "expectedProtectedMass": 0,
+      "cutoffPredicateRows": []
+    },
+    {
+      "label": "F8 non-tool only",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "m1",
+          "kind": "message",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 2,
+          "row_identity": "m2",
+          "kind": "message",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 3,
+          "row_identity": "f1",
+          "kind": "file",
+          "tokenCount": 1000
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "m3",
+          "kind": "message",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 5,
+          "row_identity": "f2",
+          "kind": "file",
+          "tokenCount": 1000
+        },
+        {
+          "tag_number": 6,
+          "row_identity": "m4",
+          "kind": "message",
+          "tokenCount": 500
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": null,
+      "expectedProtectedRows": [],
+      "expectedProtectedCount": 0,
+      "expectedProtectedMass": 0,
+      "cutoffPredicateRows": []
+    },
+    {
+      "label": "F9 two tools",
+      "rows": [
+        {
+          "tag_number": 1,
+          "row_identity": "m1",
+          "kind": "message",
+          "tokenCount": 100
+        },
+        {
+          "tag_number": 4,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 6,
+          "row_identity": "m2",
+          "kind": "message",
+          "tokenCount": 200
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "f1",
+          "kind": "file",
+          "tokenCount": 300
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 4,
+      "expectedProtectedRows": [
+        "4:r1",
+        "9:r2"
+      ],
+      "expectedProtectedCount": 2,
+      "expectedProtectedMass": 1000,
+      "cutoffPredicateRows": [
+        "4:r1",
+        "9:r2"
+      ]
+    },
+    {
+      "label": "F9 one tool",
+      "rows": [
+        {
+          "tag_number": 4,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 4,
+      "expectedProtectedRows": [
+        "4:r1"
+      ],
+      "expectedProtectedCount": 1,
+      "expectedProtectedMass": 500,
+      "cutoffPredicateRows": [
+        "4:r1"
+      ]
+    },
+    {
+      "label": "F9S step 0",
+      "rows": [],
+      "floor": 16000,
+      "expectedCutoff": null,
+      "expectedProtectedRows": [],
+      "expectedProtectedCount": 0,
+      "expectedProtectedMass": 0,
+      "cutoffPredicateRows": []
+    },
+    {
+      "label": "F9S step 1",
+      "rows": [
+        {
+          "tag_number": 4,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 4,
+      "expectedProtectedRows": [
+        "4:r1"
+      ],
+      "expectedProtectedCount": 1,
+      "expectedProtectedMass": 500,
+      "cutoffPredicateRows": [
+        "4:r1"
+      ]
+    },
+    {
+      "label": "F9S step 2",
+      "rows": [
+        {
+          "tag_number": 4,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 500
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 4,
+      "expectedProtectedRows": [
+        "4:r1",
+        "9:r2"
+      ],
+      "expectedProtectedCount": 2,
+      "expectedProtectedMass": 1000,
+      "cutoffPredicateRows": [
+        "4:r1",
+        "9:r2"
+      ]
+    },
+    {
+      "label": "F9S step 3",
+      "rows": [
+        {
+          "tag_number": 4,
+          "row_identity": "r1",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 9,
+          "row_identity": "r2",
+          "kind": "tool",
+          "tokenCount": 500
+        },
+        {
+          "tag_number": 10,
+          "row_identity": "r3",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 11,
+          "row_identity": "r4",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 12,
+          "row_identity": "r5",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 13,
+          "row_identity": "r6",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 14,
+          "row_identity": "r7",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 15,
+          "row_identity": "r8",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 16,
+          "row_identity": "r9",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 17,
+          "row_identity": "r10",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 18,
+          "row_identity": "r11",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 19,
+          "row_identity": "r12",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 20,
+          "row_identity": "r13",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 21,
+          "row_identity": "r14",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 22,
+          "row_identity": "r15",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 23,
+          "row_identity": "r16",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 24,
+          "row_identity": "r17",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 25,
+          "row_identity": "r18",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 26,
+          "row_identity": "r19",
+          "kind": "tool",
+          "tokenCount": 250
+        },
+        {
+          "tag_number": 27,
+          "row_identity": "r20",
+          "kind": "tool",
+          "tokenCount": 250
+        }
+      ],
+      "floor": 16000,
+      "expectedCutoff": 4,
+      "expectedProtectedRows": [
+        "10:r3",
+        "11:r4",
+        "12:r5",
+        "13:r6",
+        "14:r7",
+        "15:r8",
+        "16:r9",
+        "17:r10",
+        "18:r11",
+        "19:r12",
+        "20:r13",
+        "21:r14",
+        "22:r15",
+        "23:r16",
+        "24:r17",
+        "25:r18",
+        "26:r19",
+        "27:r20",
+        "4:r1",
+        "9:r2"
+      ],
+      "expectedProtectedCount": 20,
+      "expectedProtectedMass": 5500,
+      "cutoffPredicateRows": [
+        "10:r3",
+        "11:r4",
+        "12:r5",
+        "13:r6",
+        "14:r7",
+        "15:r8",
+        "16:r9",
+        "17:r10",
+        "18:r11",
+        "19:r12",
+        "20:r13",
+        "21:r14",
+        "22:r15",
+        "23:r16",
+        "24:r17",
+        "25:r18",
+        "26:r19",
+        "27:r20",
+        "4:r1",
+        "9:r2"
+      ]
+    }
+  ]
+}
