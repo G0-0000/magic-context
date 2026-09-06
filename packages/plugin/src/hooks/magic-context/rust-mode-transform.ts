@@ -2206,6 +2206,11 @@ export function createRustModeTransform(
                     sessionId,
                     `protected token floor snapshot: floor=${protectionFloorResolution.floor} provenance=${protectionFloorResolution.provenance === "override" ? "absolute" : "derived"} usableSoft=${transformGeometry?.usable_soft ?? 128_000}`,
                 );
+            } else if (protectionFloorResolution.preSnapshotInputChanged) {
+                sessionLog(
+                    sessionId,
+                    `protected token floor remains frozen until next priced pass: floor=${protectionFloorResolution.floor} reason=${protectionFloorResolution.preSnapshotBustReason}`,
+                );
             }
             const effectiveFloor = protectionFloorResolution.floor;
             const passInputs: Record<string, unknown> = {

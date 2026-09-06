@@ -1575,6 +1575,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       last_usage_context_limit INTEGER NOT NULL DEFAULT 0,
       prior_boundary_ordinal INTEGER NOT NULL DEFAULT 1,
       protected_tokens_effective INTEGER,
+      protected_tokens_pre_snapshot TEXT,
       protected_tail_policy_version INTEGER NOT NULL DEFAULT 0,
       protected_tail_drain_window_started_at INTEGER NOT NULL DEFAULT 0,
       protected_tail_drain_tokens INTEGER NOT NULL DEFAULT 0,
@@ -1989,6 +1990,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "last_usage_context_limit", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "prior_boundary_ordinal", "INTEGER NOT NULL DEFAULT 1");
     ensureColumn(db, "session_meta", "protected_tokens_effective", "INTEGER");
+    ensureColumn(db, "session_meta", "protected_tokens_pre_snapshot", "TEXT");
     ensureColumn(db, "session_meta", "protected_tail_policy_version", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(
         db,
