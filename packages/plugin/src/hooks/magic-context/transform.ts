@@ -2252,6 +2252,11 @@ export function createTransform(deps: TransformDeps) {
                 sessionId,
                 `protected token floor snapshot: floor=${protectionFloor.floor} provenance=${protectionFloor.provenance === "override" ? "absolute" : protectionFloor.provenance} usableSoft=${protectionUsableSoft}`,
             );
+        } else if (protectionFloor.preSnapshotInputChanged) {
+            sessionLog(
+                sessionId,
+                `protected token floor remains frozen until next priced pass: floor=${protectionFloor.floor} reason=${protectionFloor.preSnapshotBustReason}`,
+            );
         }
         const protectionWindow = getProtectionWindowForSession(
             db,

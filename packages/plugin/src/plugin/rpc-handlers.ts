@@ -26,6 +26,7 @@ import {
     getPersistedSchemaVersion,
     LATEST_SUPPORTED_VERSION,
 } from "../features/magic-context/storage-db";
+import { getObservedEpochFloor } from "../features/magic-context/storage-meta-persisted";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import {
     computeOpenCodeWorkMetricsIncremental,
@@ -760,10 +761,14 @@ export function buildStatusDetail(
                 .get(sessionId);
             detail.droppedTags = droppedRow?.count ?? 0;
             detail.totalTags = detail.activeTags + detail.droppedTags;
-            detail.protectedTagCount = getProtectionWindowForSession(
-                db,
-                sessionId,
-            ).status.protectedCount;
+            const observedProtectionFloor = getObservedEpochFloor(db, sessionId);
+            if (observedProtectionFloor !== null) {
+                detail.protectedTagCount = getProtectionWindowForSession(
+                    db,
+                    sessionId,
+                    observedProtectionFloor,
+                ).status.protectedCount;
+            }
         } catch {
             // tags table might have different schema
         }

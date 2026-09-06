@@ -12,6 +12,10 @@ import {
     initializeDatabase,
     LATEST_SUPPORTED_VERSION,
 } from "../features/magic-context/storage-db";
+import {
+    resetEpochFloorRegistryForTest,
+    resolveEpochFloorForPass,
+} from "../features/magic-context/storage-meta-persisted";
 import { createLiveSessionState } from "../hooks/magic-context/live-session-state";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
@@ -131,6 +135,37 @@ describe("buildStatusDetail — active profile", () => {
             ).toBeNull();
         } finally {
             closeQuietly(db);
+        }
+    });
+});
+
+describe("buildStatusDetail — protected-token floor", () => {
+    test("uses the durable first-observed floor for pre-snapshot sessions after restart", () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-status-pre-snapshot-floor";
+            const insertTag = db.prepare(
+                `INSERT INTO tags (
+                    session_id, message_id, type, status, byte_size, tag_number,
+                    token_count, input_token_count, reasoning_token_count
+                ) VALUES (?, ?, 'tool', 'active', 1, ?, 2000, 0, 0)`,
+            );
+            for (let tagNumber = 1; tagNumber <= 10; tagNumber += 1) {
+                insertTag.run(sessionId, `message-${tagNumber}`, tagNumber);
+            }
+
+            const defer = resolveEpochFloorForPass(db, sessionId, {
+                usableSoft: 100_000,
+                isCacheBustingPass: false,
+            });
+            expect(defer.floor).toBe(8_000);
+            resetEpochFloorRegistryForTest();
+
+            const detail = buildStatusDetail(db, sessionId, process.cwd());
+            expect(detail.protectedTagCount).toBe(4);
+        } finally {
+            closeQuietly(db);
+            resetEpochFloorRegistryForTest();
         }
     });
 });

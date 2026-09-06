@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
+import { getProtectionWindowForSession } from "./protection-window";
 import {
     clearDeferredExecutePendingIfMatches,
     type DeferredExecutePayload,
@@ -13,6 +14,7 @@ import {
     setDeferredExecutePendingIfAbsent,
 } from "./storage-meta-persisted";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
+import { getOldestActiveUnprotectedToolTags } from "./storage-tags";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
@@ -40,7 +42,30 @@ function createTestDb(): Database {
             cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
             last_todo_state TEXT NOT NULL DEFAULT '',
             deferred_execute_state TEXT,
-            protected_tokens_effective INTEGER
+            protected_tokens_effective INTEGER,
+            protected_tokens_pre_snapshot TEXT
+        );
+        CREATE TABLE tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            drop_mode TEXT NOT NULL DEFAULT 'full',
+            tool_name TEXT,
+            input_byte_size INTEGER NOT NULL DEFAULT 0,
+            byte_size INTEGER NOT NULL DEFAULT 0,
+            reasoning_byte_size INTEGER NOT NULL DEFAULT 0,
+            tag_number INTEGER NOT NULL,
+            caveman_depth INTEGER NOT NULL DEFAULT 0,
+            tool_owner_message_id TEXT,
+            token_count INTEGER,
+            input_token_count INTEGER
+        );
+        CREATE TABLE pending_ops (
+            session_id TEXT NOT NULL,
+            tag_id INTEGER NOT NULL,
+            operation TEXT NOT NULL
         )
     `);
     return db;
@@ -259,7 +284,84 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
             expect(getPersistedEpochFloor(db, SES)).toBeNull(); // still unsnapshotted
         });
 
-        it("Half 2: pre-snapshot override edit (16,000 -> 32,000) changes resolved floor and is surfaced as config-re-read bust", () => {
+        it("freezes the first pre-snapshot floor, membership, and hints until a priced pass", () => {
+            const insertTag = db.prepare(
+                `INSERT INTO tags (
+                    session_id, message_id, type, status, tool_name, tag_number,
+                    token_count, input_token_count
+                ) VALUES (?, ?, 'tool', 'active', 'read', ?, 2000, 0)`,
+            );
+            for (let tagNumber = 1; tagNumber <= 10; tagNumber += 1) {
+                insertTag.run(SES, `message-${tagNumber}`, tagNumber);
+            }
+
+            const first = resolveEpochFloorForPass(db, SES, {
+                usableSoft: 100_000,
+                isCacheBustingPass: false,
+            });
+            const firstWindow = getProtectionWindowForSession(db, SES, first.floor);
+            const firstMembers = [...firstWindow.protectedTagNumbers];
+            const firstHints = getOldestActiveUnprotectedToolTags(
+                db,
+                SES,
+                firstWindow.protectedTagNumbers,
+                10,
+            );
+
+            expect(first.floor).toBe(8_000);
+            expect(firstMembers).toEqual([7, 8, 9, 10]);
+            expect(firstHints.map(({ tagNumber }) => tagNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+            expect(getPersistedEpochFloor(db, SES)).toBeNull();
+
+            const moved = resolveEpochFloorForPass(db, SES, {
+                usableSoft: 200_000,
+                isCacheBustingPass: false,
+            });
+            const movedWindow = getProtectionWindowForSession(db, SES, moved.floor);
+            const movedHints = getOldestActiveUnprotectedToolTags(
+                db,
+                SES,
+                movedWindow.protectedTagNumbers,
+                10,
+            );
+
+            expect(moved.floor).toBe(8_000);
+            expect(moved.preSnapshotInputChanged).toBe(true);
+            expect(moved.preSnapshotBustReason).toBe("live-geometry");
+            expect([...movedWindow.protectedTagNumbers]).toEqual(firstMembers);
+            expect(movedHints).toEqual(firstHints);
+            expect(getPersistedEpochFloor(db, SES)).toBeNull();
+
+            // OpenCode can restart into a below-threshold defer pass, so the
+            // unpriced floor must survive loss of the process-local registry.
+            resetEpochFloorRegistryForTest();
+            const restarted = resolveEpochFloorForPass(db, SES, {
+                usableSoft: 200_000,
+                isCacheBustingPass: false,
+            });
+            expect(restarted.floor).toBe(8_000);
+            expect(restarted.preSnapshotInputChanged).toBe(true);
+            expect(restarted.preSnapshotBustReason).toBe("live-geometry");
+
+            const priced = resolveEpochFloorForPass(db, SES, {
+                usableSoft: 200_000,
+                isCacheBustingPass: true,
+            });
+            const pricedWindow = getProtectionWindowForSession(db, SES, priced.floor);
+            const pricedHints = getOldestActiveUnprotectedToolTags(
+                db,
+                SES,
+                pricedWindow.protectedTagNumbers,
+                10,
+            );
+
+            expect(priced.floor).toBe(16_000);
+            expect(getPersistedEpochFloor(db, SES)).toBe(16_000);
+            expect([...pricedWindow.protectedTagNumbers]).toEqual([3, 4, 5, 6, 7, 8, 9, 10]);
+            expect(pricedHints.map(({ tagNumber }) => tagNumber)).toEqual([1, 2]);
+        });
+
+        it("Half 2: pre-snapshot override edit keeps the frozen floor and flags the next priced config re-read", () => {
             const pass1 = resolveEpochFloorForPass(db, SES, {
                 configuredOverride: 16_000,
                 usableSoft: 200_000,
@@ -273,13 +375,12 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
                 usableSoft: 200_000,
                 isCacheBustingPass: false,
             });
-            expect(pass2.floor).toBe(32_000);
+            expect(pass2.floor).toBe(16_000);
             expect(pass2.preSnapshotInputChanged).toBe(true);
             expect(pass2.preSnapshotBustReason).toBe("config-re-read");
-            expect(pass2.floor).not.toBe(16_000);
         });
 
-        it("Half 2: pre-snapshot geometry move changes derived floor and is surfaced as live-geometry bust", () => {
+        it("Half 2: pre-snapshot geometry move keeps the frozen floor and flags the next priced derivation", () => {
             const pass1 = resolveEpochFloorForPass(db, SES, {
                 usableSoft: 100_000, // derives 8,000
                 isCacheBustingPass: false,
@@ -291,7 +392,7 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
                 usableSoft: 200_000,
                 isCacheBustingPass: false,
             });
-            expect(pass2.floor).toBe(16_000);
+            expect(pass2.floor).toBe(8_000);
             expect(pass2.preSnapshotInputChanged).toBe(true);
             expect(pass2.preSnapshotBustReason).toBe("live-geometry");
         });

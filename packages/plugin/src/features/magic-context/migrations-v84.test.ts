@@ -40,6 +40,7 @@ describe("migration v84: effective protected-token floor", () => {
             runMigrations(db);
 
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_effective");
+            expect(columnNames(db, "session_meta")).toContain("protected_tokens_pre_snapshot");
             expect(LATEST_SUPPORTED_VERSION).toBe(84);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
@@ -55,21 +56,29 @@ describe("migration v84: effective protected-token floor", () => {
         try {
             initializeDatabase(db);
             db.exec("ALTER TABLE session_meta DROP COLUMN protected_tokens_effective");
+            db.exec("ALTER TABLE session_meta DROP COLUMN protected_tokens_pre_snapshot");
             seedAppliedVersion(db, 83);
             updateSessionMeta(db, "ses-v83", { counter: 7 });
 
             expect(columnNames(db, "session_meta")).not.toContain("protected_tokens_effective");
+            expect(columnNames(db, "session_meta")).not.toContain("protected_tokens_pre_snapshot");
             runMigrations(db);
             runMigrations(db);
 
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_effective");
+            expect(columnNames(db, "session_meta")).toContain("protected_tokens_pre_snapshot");
             expect(
                 db
                     .prepare(
-                        "SELECT counter, protected_tokens_effective FROM session_meta WHERE session_id = ?",
+                        `SELECT counter, protected_tokens_effective, protected_tokens_pre_snapshot
+                         FROM session_meta WHERE session_id = ?`,
                     )
                     .get("ses-v83"),
-            ).toEqual({ counter: 7, protected_tokens_effective: null });
+            ).toEqual({
+                counter: 7,
+                protected_tokens_effective: null,
+                protected_tokens_pre_snapshot: null,
+            });
 
             persistEpochFloorSnapshot(db, "ses-v83", 24_000);
             expect(getPersistedEpochFloor(db, "ses-v83")).toBe(24_000);
