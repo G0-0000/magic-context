@@ -81,7 +81,7 @@ describe("buildMagicContextSection — subagent mode", () => {
         expect(out).toContain("## Magic Context");
         expect(out).toContain("§N§ identifiers");
         expect(out).toContain("ctx_reduce");
-        expect(out).toContain("The last 20 tags are protected");
+        expect(out).toContain("newest token-mass window");
     });
 
     it("OMITS the long-term-partner frame and primary-only guidance", () => {
@@ -95,9 +95,11 @@ describe("buildMagicContextSection — subagent mode", () => {
         expect(out).not.toContain("ctx_expand");
     });
 
-    it("threads protectedTags into the protected-count line", () => {
-        const out = buildMagicContextSection(null, 7, true, false, false, false, true);
-        expect(out).toContain("The last 7 tags are protected");
+    it("describes token-mass protection independently of a legacy count", () => {
+        const withSeven = buildMagicContextSection(null, 7, true, false, false, false, true);
+        const withTwenty = buildMagicContextSection(null, 20, true, false, false, false, true);
+        expect(withSeven).toBe(withTwenty);
+        expect(withSeven).toContain("newest token-mass window");
     });
 
     it("is much shorter than the full primary block", () => {
@@ -174,7 +176,7 @@ describe("buildMagicContextSection — caveman compression warning", () => {
     it("emits the warning when caveman is enabled and ctx_reduce is unavailable", () => {
         const out = buildMagicContextSection(
             null, // agent
-            20, // protectedTags (ignored in no-reduce path)
+            20, // legacy positional value (ignored in no-reduce path)
             false, // ctx_reduce is unavailable in this session.
             false, // dreamerEnabled
             false, // temporalAwarenessEnabled

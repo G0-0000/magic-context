@@ -127,7 +127,6 @@ export function isMagicContextInternalAgent(systemPromptContent: string): boolea
  */
 export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
-    protectedTags: number;
     dreamerEnabled: boolean;
     /** When false (`memory.enabled: false`), the `<project-memory>` block is
      *  never injected, so ctx_memory guidance is dropped from the prompt and the
@@ -354,7 +353,7 @@ export function createSystemPromptHashHandler(deps: {
         ) {
             const guidance = buildMagicContextSection(
                 null,
-                deps.protectedTags,
+                0,
                 effectiveCtxReduceEnabled,
                 deps.dreamerEnabled,
                 deps.experimentalTemporalAwareness,

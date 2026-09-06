@@ -276,7 +276,6 @@ describe("createMagicContextCommandHandler", () => {
         const sendNotification = mock(async () => {});
         const handler = createMagicContextCommandHandler({
             db,
-            protectedTags: 3,
             sendNotification,
         });
 
@@ -296,7 +295,6 @@ describe("createMagicContextCommandHandler", () => {
         const executeWrapup = mock(async () => "should not run");
         const handler = createMagicContextCommandHandler({
             db,
-            protectedTags: 3,
             sendNotification,
             executeWrapup,
         });
@@ -328,7 +326,6 @@ describe("createMagicContextCommandHandler", () => {
             const onFlush = mock(() => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: true,
                 executeWrapup,
                 executeRecomp,
@@ -363,7 +360,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: false,
                 executeWrapup: async () => "wrapup ran",
                 executeRecomp: async () => "recomp ran",
@@ -391,7 +387,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: true,
                 sendNotification,
             });
@@ -418,7 +413,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: true,
                 getEmbedStatusText: () => "embedding is ready",
                 sendNotification,
@@ -450,7 +444,6 @@ describe("createMagicContextCommandHandler", () => {
             }));
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: true,
                 sendNotification,
                 dreamer: { config: {} as never, projectPath: "/repo", runManual },
@@ -487,7 +480,6 @@ describe("createMagicContextCommandHandler", () => {
             };
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 compactionOff: true,
                 sendNotification,
                 sidekick: {
@@ -517,7 +509,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
             });
 
@@ -545,7 +536,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
             });
 
@@ -574,7 +564,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
                 onFlush,
             });
@@ -610,7 +599,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 5,
                 sendNotification,
             });
 
@@ -634,7 +622,7 @@ describe("createMagicContextCommandHandler", () => {
             expect(text).toContain("- Active: 2");
             expect(text).toContain("- Dropped: 1");
             expect(text).toContain("- Drops: 1");
-            expect(text).toContain("**Protected tags:** 5");
+            expect(text).toContain("**Protected tool tags:** 0 (0 tokens)");
             expect(text).not.toContain("Host backends → MODULE");
         });
 
@@ -644,7 +632,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
             });
 
@@ -670,7 +657,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 2,
                 sendNotification,
             });
 
@@ -690,7 +676,7 @@ describe("createMagicContextCommandHandler", () => {
             expect(text).toContain("- Active: 0");
             expect(text).toContain("- Dropped: 0");
             expect(text).toContain("- Total queued: 0");
-            expect(text).toContain("**Protected tags:** 2");
+            expect(text).toContain("**Protected tool tags:** 0 (0 tokens)");
         });
     });
 
@@ -724,7 +710,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 getStatusDetail: statusDetail,
                 sendNotification,
             });
@@ -757,7 +742,6 @@ describe("createMagicContextCommandHandler", () => {
             const getStatusDetail = mock(statusDetail);
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 getStatusDetail,
                 sendNotification,
             });
@@ -784,7 +768,6 @@ describe("createMagicContextCommandHandler", () => {
             const sinklessNotification = mock(async () => {});
             const sinklessHandler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp: async () => "should not run",
                 sendNotification: sinklessNotification,
             });
@@ -813,7 +796,6 @@ describe("createMagicContextCommandHandler", () => {
             const liveNotification = mock(async () => {});
             const liveHandler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp: async () => "should not run",
                 sendNotification: liveNotification,
             });
@@ -842,7 +824,6 @@ describe("createMagicContextCommandHandler", () => {
             const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp,
                 sendNotification,
             });
@@ -898,7 +879,6 @@ describe("createMagicContextCommandHandler", () => {
             const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp,
                 sendNotification,
             });
@@ -930,7 +910,6 @@ describe("createMagicContextCommandHandler", () => {
             const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp,
                 sendNotification,
             });
@@ -967,7 +946,6 @@ describe("createMagicContextCommandHandler", () => {
             });
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: {
                     call: async () => {
@@ -1006,7 +984,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: {
                     call: async (request) => {
@@ -1059,7 +1036,6 @@ describe("createMagicContextCommandHandler", () => {
             );
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
                 sendNotification,
@@ -1106,7 +1082,6 @@ describe("createMagicContextCommandHandler", () => {
             const runUpgrade = mock(async () => "TS upgrade ran");
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
                 runUpgrade,
@@ -1189,7 +1164,6 @@ describe("createMagicContextCommandHandler", () => {
                 }));
                 const handler = createMagicContextCommandHandler({
                     db,
-                    protectedTags: 3,
                     transformMode: "rust",
                     rustModeModuleClient: { call: moduleCall },
                     sendNotification,
@@ -1233,7 +1207,6 @@ describe("createMagicContextCommandHandler", () => {
             }));
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
                 sendNotification,
@@ -1264,7 +1237,6 @@ describe("createMagicContextCommandHandler", () => {
             });
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
                 getEmbedStatusText: () => "embedding is ready",
@@ -1291,7 +1263,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: {
                     call: async () => ({
@@ -1331,7 +1302,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 rustModeModuleClient: {
                     call: async (request) => {
@@ -1386,7 +1356,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 transformMode: "rust",
                 getEmbedStatusText: () => "Embedding is ready.",
                 sendNotification,
@@ -1421,7 +1390,6 @@ describe("createMagicContextCommandHandler", () => {
             );
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 runUpgrade,
                 sendNotification,
             });
@@ -1452,7 +1420,6 @@ describe("createMagicContextCommandHandler", () => {
             const executeRecomp = mock(async () => "rebuilt");
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 executeRecomp,
                 sendNotification,
             });
@@ -1490,7 +1457,6 @@ describe("createMagicContextCommandHandler", () => {
             }));
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
                 dreamer: {
                     // command handler only reads `config` for presence; runManual is the entry.
@@ -1531,7 +1497,6 @@ describe("createMagicContextCommandHandler", () => {
             }));
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
                 dreamer: {
                     config: {} as never,
@@ -1564,7 +1529,6 @@ describe("createMagicContextCommandHandler", () => {
             }));
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
                 dreamer: {
                     config: {} as never,
@@ -1612,7 +1576,6 @@ describe("createMagicContextCommandHandler", () => {
             };
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
                 sidekick: {
                     config: {
@@ -1660,7 +1623,6 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
-                protectedTags: 3,
                 sendNotification,
             });
 
@@ -1688,12 +1650,10 @@ describe("createMagicContextCommandHandler", () => {
         const sendNotificationStatus = mock(async () => {});
         const handlerFlush = createMagicContextCommandHandler({
             db,
-            protectedTags: 4,
             sendNotification: sendNotificationFlush,
         });
         const handlerStatus = createMagicContextCommandHandler({
             db,
-            protectedTags: 4,
             sendNotification: sendNotificationStatus,
         });
 
@@ -1731,7 +1691,6 @@ describe("createMagicContextCommandHandler", () => {
         const sendNotification = mock(async () => {});
         const handler = createMagicContextCommandHandler({
             db,
-            protectedTags: 3,
             sendNotification,
         });
 
@@ -1756,7 +1715,6 @@ describe("createMagicContextCommandHandler", () => {
         const sendNotification = mock(async () => {});
         const handler = createMagicContextCommandHandler({
             db,
-            protectedTags: 3,
             sendNotification,
         });
 

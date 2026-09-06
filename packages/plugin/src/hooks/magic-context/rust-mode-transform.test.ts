@@ -215,7 +215,7 @@ function makeDeps(db: ContextDatabase, moduleClient: RustModeModuleClient): Tran
         scheduler: {} as TransformDeps["scheduler"],
         contextUsageMap: new Map(),
         db,
-        protectedTags: 4,
+        protectedTokens: 4,
         clearReasoningAge: 50,
         historyRefreshSessions: new Set(),
         pendingMaterializationSessions: new Set(),
@@ -5669,7 +5669,7 @@ describe("rust-mode wire transport (protected_tokens_effective)", () => {
             },
         };
         const deps = makeDeps(db, moduleClient);
-        deps.protectedTokensEffective = 24_000;
+        deps.protectedTokens = 24_000;
         const transform = createRustModeTransform(deps, { moduleClient });
         const input = makeMessages(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));

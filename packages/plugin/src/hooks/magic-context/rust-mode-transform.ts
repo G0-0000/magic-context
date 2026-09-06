@@ -2190,18 +2190,24 @@ export function createRustModeTransform(
                       )
                     : undefined;
             const mural = muralInputForWire(resolvedMural);
-            const depsWithTokens = deps as unknown as {
-                protectedTokensEffective?: number;
-                config?: { protected_tokens?: number };
-            };
-            const effectiveFloor =
-                typeof depsWithTokens.protectedTokensEffective === "number"
-                    ? depsWithTokens.protectedTokensEffective
-                    : resolveEpochFloorForPass(deps.db, sessionId, {
-                          configuredOverride: depsWithTokens.config?.protected_tokens,
-                          usableSoft: transformGeometry?.usable_soft ?? 128_000,
-                          isCacheBustingPass: false,
-                      }).floor;
+            const protectionFloorCacheBustingPass =
+                schedulerDecision === "execute" ||
+                deps.historyRefreshSessions.has(sessionId) ||
+                deps.pendingMaterializationSessions.has(sessionId) ||
+                deps.deferredHistoryRefreshSessions?.has(sessionId) === true ||
+                deps.deferredMaterializationSessions?.has(sessionId) === true;
+            const protectionFloorResolution = resolveEpochFloorForPass(deps.db, sessionId, {
+                configuredOverride: deps.protectedTokens,
+                usableSoft: transformGeometry?.usable_soft ?? 128_000,
+                isCacheBustingPass: protectionFloorCacheBustingPass,
+            });
+            if (protectionFloorResolution.snapshotChanged) {
+                sessionLog(
+                    sessionId,
+                    `protected token floor snapshot: floor=${protectionFloorResolution.floor} provenance=${protectionFloorResolution.provenance === "override" ? "absolute" : "derived"} usableSoft=${transformGeometry?.usable_soft ?? 128_000}`,
+                );
+            }
+            const effectiveFloor = protectionFloorResolution.floor;
             const passInputs: Record<string, unknown> = {
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,

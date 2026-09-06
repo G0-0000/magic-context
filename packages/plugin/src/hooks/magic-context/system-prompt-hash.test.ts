@@ -118,14 +118,12 @@ function buildHandler(opts?: {
     experimentalCavemanTextCompression?: boolean;
     experimentalTemporalAwareness?: boolean;
     language?: string;
-    protectedTags?: number;
     promptSurface?: PromptSurfaceConfig;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
     resolveModel?: (sessionId: string) => { providerID: string; modelID: string } | undefined;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
-        protectedTags: opts?.protectedTags ?? 1,
         language: opts?.language,
         dreamerEnabled: opts?.dreamerEnabled ?? false,
         promptSurface: opts?.promptSurface,
@@ -1016,7 +1014,6 @@ describe("OpenCode prompt-surface guidance epochs", () => {
         useTempDataHome("sph-a1-full-");
         const golden = readA1PrimaryGuidance();
         const common = {
-            protectedTags: 20,
             dreamerEnabled: true,
             experimentalTemporalAwareness: true,
         };

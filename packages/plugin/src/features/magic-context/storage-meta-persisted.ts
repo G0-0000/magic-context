@@ -3036,6 +3036,7 @@ export interface EpochFloorResolutionResult {
     floor: number;
     isSnapshotPersisted: boolean;
     provenance: "persisted" | "override" | "derived";
+    snapshotChanged: boolean;
     preSnapshotInputChanged?: boolean;
     preSnapshotBustReason?: "config-re-read" | "live-geometry";
 }
@@ -3076,7 +3077,7 @@ export function getPersistedEpochFloor(db: Database, sessionId: string): number 
 
 /**
  * Resolve the effective floor for a session according to the 4-stage lifecycle:
- *   (a) resolve-and-write on the first cache-busting pass
+ *   (a) resolve-and-write on each cache-busting pass
  *   (b) unsnapshotted first-observed defer pass: resolve effective floor (absolute
  *       override when configured, else derived default from geometry), do NOT
  *       persist and do NOT bust, using that one value identically for membership,
@@ -3090,14 +3091,16 @@ export function resolveEpochFloorForPass(
     sessionId: string,
     inputs: EpochFloorResolutionInputs,
 ): EpochFloorResolutionResult {
-    // Lifecycle (c) & (d): Read persisted snapshot verbatim if present.
-    // Mid-epoch config and geometry changes never take effect.
+    // Lifecycle (c) & (d): defer passes read the persisted snapshot verbatim.
+    // A cache-busting pass starts the next floor epoch, so it resolves the live
+    // override/geometry instead of carrying the prior epoch forward forever.
     const persisted = getPersistedEpochFloor(db, sessionId);
-    if (persisted !== null) {
+    if (!inputs.isCacheBustingPass && persisted !== null) {
         return {
             floor: persisted,
             isSnapshotPersisted: true,
             provenance: "persisted",
+            snapshotChanged: false,
         };
     }
 
@@ -3113,13 +3116,18 @@ export function resolveEpochFloorForPass(
             : deriveDefaultProtectedTokens(inputs.usableSoft);
     const provenance = hasValidOverride ? "override" : "derived";
 
-    // Lifecycle (a): First cache-busting pass resolves and writes snapshot
+    // Lifecycle (a): every cache-busting pass starts an epoch with the current
+    // effective floor. Persist only when the scalar changed, but always clear the
+    // pre-snapshot memo because a durable epoch now exists.
     if (inputs.isCacheBustingPass) {
-        persistEpochFloorSnapshot(db, sessionId, floor);
+        const snapshotChanged = persisted !== floor;
+        if (snapshotChanged) persistEpochFloorSnapshot(db, sessionId, floor);
+        else preSnapshotSessions.delete(sessionId);
         return {
             floor,
             isSnapshotPersisted: true,
             provenance,
+            snapshotChanged,
         };
     }
 
@@ -3147,6 +3155,7 @@ export function resolveEpochFloorForPass(
         floor,
         isSnapshotPersisted: false,
         provenance,
+        snapshotChanged: false,
         preSnapshotInputChanged,
         preSnapshotBustReason,
     };

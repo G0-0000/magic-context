@@ -90,7 +90,7 @@ export function applyCavemanCleanup(
     db: ContextDatabase,
     targets: Map<number, TagTarget>,
     tags: TagEntry[],
-    config: CavemanCleanupConfig & { protectedTags: number },
+    config: CavemanCleanupConfig & { protectedCutoff: number | null },
 ): CavemanCleanupResult {
     const result: CavemanCleanupResult = {
         compressedToLite: 0,
@@ -101,8 +101,10 @@ export function applyCavemanCleanup(
 
     if (!config.enabled) return result;
 
-    const maxTag = tags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
-    const protectedCutoff = maxTag - config.protectedTags;
+    // Build the eligible list: active message tags older than the exact window
+    // cutoff. A null cutoff means there are no protected tool rows, so no
+    // tag-number threshold applies.
+    const protectedCutoff = config.protectedCutoff;
 
     // Build the eligible list: active message tags outside protected tail with
     // a byte_size at least min_chars. byte_size is the current length in
@@ -113,7 +115,7 @@ export function applyCavemanCleanup(
             (tag) =>
                 tag.type === "message" &&
                 tag.status === "active" &&
-                tag.tagNumber <= protectedCutoff &&
+                (protectedCutoff === null || tag.tagNumber < protectedCutoff) &&
                 tag.byteSize >= config.minChars,
         )
         // Sort by tag_number ascending — oldest first. This matches the

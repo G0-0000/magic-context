@@ -210,6 +210,24 @@ describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => 
         expect(postRestartDefer.floor).toBe(16_000);
     });
 
+    it("refreshes the snapshot from current config and geometry on the next cache-busting pass", () => {
+        resolveEpochFloorForPass(db, SES, {
+            usableSoft: 200_000,
+            isCacheBustingPass: true,
+        });
+
+        const refreshed = resolveEpochFloorForPass(db, SES, {
+            configuredOverride: 32_000,
+            usableSoft: 872_000,
+            isCacheBustingPass: true,
+        });
+
+        expect(refreshed.floor).toBe(32_000);
+        expect(refreshed.provenance).toBe("override");
+        expect(refreshed.snapshotChanged).toBe(true);
+        expect(getPersistedEpochFloor(db, SES)).toBe(32_000);
+    });
+
     describe("pre-snapshot scoping in both halves", () => {
         it("Half 1: with inputs unchanged, floor identical across repeated defer passes and across restart", () => {
             // First defer pass

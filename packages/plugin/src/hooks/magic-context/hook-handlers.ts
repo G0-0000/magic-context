@@ -332,7 +332,6 @@ export function createEventHook(args: {
     lastHeuristicsTurnId: LastHeuristicsTurnId;
     commitSeenLastPass?: Map<string, boolean>;
     client: PluginContext["client"];
-    protectedTags: number;
 }) {
     const latestAssistantMessageIdBySession =
         args.latestAssistantMessageIdBySession ?? new Map<string, string>();

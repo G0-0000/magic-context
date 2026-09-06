@@ -72,11 +72,8 @@ function memoryGuidanceBlock(memoryEnabled: boolean): string {
     return memoryEnabled ? `${MEMORY_GUIDANCE}\n` : "";
 }
 
-const BASE_INTRO = (
-    protectedTags: number,
-    memoryEnabled: boolean,
-): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
-Use \`ctx_reduce\` to mark spent tagged content as discardable and reclaim space. Marking is NOT an immediate delete — it queues the content, which stays fully visible until space is actually needed (as soon as the next turn if you're already under pressure, much later if not), so mark a tool output as soon as you're done with it rather than hoarding the call for the end of the turn. The last ${protectedTags} tags are protected (marking one just queues it until it ages out). Syntax: "3-5", "1,2,9", or "1-5,8,12-15".
+const BASE_INTRO = (memoryEnabled: boolean): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
+Use \`ctx_reduce\` to mark spent tagged content as discardable and reclaim space. Marking is NOT an immediate delete — it queues the content, which stays fully visible until space is actually needed (as soon as the next turn if you're already under pressure, much later if not), so mark a tool output as soon as you're done with it rather than hoarding the call for the end of the turn. Tags in the newest token-mass window are protected (marking one just queues it until it ages out). Syntax: "3-5", "1,2,9", or "1-5,8,12-15".
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 ${CTX_NOTE_GUIDANCE}
 ${memoryGuidanceBlock(memoryEnabled)}Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
@@ -114,11 +111,8 @@ ${TOOL_HISTORY_GUIDANCE}`;
 
 const LIGHT_SEARCH_RECOVERY = `Use ctx_search before asking the user about prior project context; it searches memories, commits, and compacted conversation. When a session-history summary lacks exact wording, values, errors, or reasoning, call ctx_expand with its heading range instead of guessing.`;
 
-const BASE_INTRO_LIGHT = (
-    protectedTags: number,
-    memoryEnabled: boolean,
-): string => `In primary sessions with ctx_reduce, the system tags messages and tool outputs as §N§ (for example §1§ and §42§); never imitate these prefixes in replies because only injected tag numbers are valid ctx_reduce handles.
-In primary sessions, NEVER narrate ctx_reduce; call it silently after extracting a spent output because it marks content discardable and QUEUES release rather than deleting immediately. The last ${protectedTags} tags stay protected until they age out. Use drop grammar "3-5", "1,2,9", or "1-5,8,12-15".
+const BASE_INTRO_LIGHT = (memoryEnabled: boolean): string => `In primary sessions with ctx_reduce, the system tags messages and tool outputs as §N§ (for example §1§ and §42§); never imitate these prefixes in replies because only injected tag numbers are valid ctx_reduce handles.
+In primary sessions, NEVER narrate ctx_reduce; call it silently after extracting a spent output because it marks content discardable and QUEUES release rather than deleting immediately. Tags in the newest token-mass window stay protected until they age out. Use drop grammar "3-5", "1,2,9", or "1-5,8,12-15".
 ${CTX_NOTE_GUIDANCE}
 ${memoryGuidanceBlock(memoryEnabled)}${LIGHT_SEARCH_RECOVERY}
 ${TOOL_HISTORY_GUIDANCE}
@@ -159,16 +153,12 @@ const TEMPORAL_AWARENESS_GUIDANCE = `\n**Temporal awareness**: User messages may
  * ctx_reduce mechanics. The `## Magic Context` marker is still present for
  * injection idempotency (system-prompt-hash.ts gates on it).
  */
-const SUBAGENT_REDUCE_INTRO = (
-    protectedTags: number,
-): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
-Use \`ctx_reduce\` to drop tool outputs you have already finished with, keeping your working context lean. Syntax: "3-5", "1,2,9", or "1-5,8,12-15". The last ${protectedTags} tags are protected.
+const SUBAGENT_REDUCE_INTRO = (): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
+Use \`ctx_reduce\` to drop tool outputs you have already finished with, keeping your working context lean. Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Tags in the newest token-mass window are protected.
 Drop silently — do not narrate it. NEVER drop large ranges blindly (e.g., "1-50"); review each tag first. Do not drop user or assistant text messages — only large tool outputs are worth dropping.
 Older tool calls may show \`[dropped §N§]\` sentinels; that is normal context management, not a pattern to copy. ALWAYS make fresh real tool calls when you need data again; never fabricate or inline tool output.`;
 
-const SUBAGENT_REDUCE_INTRO_LIGHT = (
-    protectedTags: number,
-): string => `In bounded subagent sessions, the system tags messages and tool outputs as §N§; use only those IDs in ctx_reduce drop ranges such as "3-5", "1,2,9", or "1-5,8,12-15". The last ${protectedTags} tags stay protected.
+const SUBAGENT_REDUCE_INTRO_LIGHT = (): string => `In bounded subagent sessions, the system tags messages and tool outputs as §N§; use only those IDs in ctx_reduce drop ranges such as "3-5", "1,2,9", or "1-5,8,12-15". Tags in the newest token-mass window stay protected.
 When dropping, do it silently and NEVER choose a large range before reviewing every tag; drop only finished large tool outputs, never user or assistant messages.
 If older calls show [dropped §N§], never copy that system sentinel because it is not reply syntax; make a fresh real tool call and never fabricate or inline output.`;
 
@@ -176,7 +166,7 @@ const CAVEMAN_COMPRESSION_WARNING = `\n**BEWARE**: History compression is on; ol
 
 export function buildMagicContextSection(
     _agent: string | null,
-    protectedTags: number,
+    _legacyProtectionCount: number,
     ctxReduceCallable = true,
     dreamerEnabled = false,
     temporalAwarenessEnabled = false,
@@ -196,8 +186,8 @@ export function buildMagicContextSection(
     if (subagentMode) {
         const intro =
             preset === "light"
-                ? SUBAGENT_REDUCE_INTRO_LIGHT(protectedTags)
-                : SUBAGENT_REDUCE_INTRO(protectedTags);
+                ? SUBAGENT_REDUCE_INTRO_LIGHT()
+                : SUBAGENT_REDUCE_INTRO();
         return `## Magic Context\n\n${intro}`;
     }
     const smartNoteGuidance = dreamerEnabled
@@ -227,7 +217,7 @@ export function buildMagicContextSection(
         return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE(memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
     }
     if (preset === "light") {
-        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE_LIGHT}\n\n${BASE_INTRO_LIGHT(protectedTags, memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
+        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE_LIGHT}\n\n${BASE_INTRO_LIGHT(memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}${languageGuidance}`;
     }
-    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(protectedTags, memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.${languageGuidance}`;
+    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(memoryEnabled)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}\n${GENERIC_SECTION}\n\nPrefer many small targeted operations over one large blanket operation, and keep the working set tidy as routine maintenance.${languageGuidance}`;
 }

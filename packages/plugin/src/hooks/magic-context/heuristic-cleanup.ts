@@ -40,12 +40,13 @@ export function applyHeuristicCleanup(
     targets: Map<number, TagTarget>,
     messageTagNumbers: Map<MessageLike, number>,
     config: {
-        protectedTags: number;
+        /** Exact token-window membership in tag-number space. */
+        protectedTagNumbers: ReadonlySet<number>;
         /**
          * Exact token-window cutoff in tag-number space. A null cutoff means the
-         * persisted tool population is empty; undefined is retained only for legacy callers.
+         * persisted tool population is empty and applies no tag-number threshold.
          */
-        protectedCutoff?: number | null;
+        protectedCutoff: number | null;
         /**
          * Tiered target-headroom emergency drop. Provided only on force-materialization
          * passes at or above the derived force band; undefined on routine execute
@@ -84,14 +85,10 @@ export function applyHeuristicCleanup(
     // preload is provided we now load active-only directly (the partial
     // index makes this O(active rows) instead of O(all rows)).
     const tags = preloadedTags ?? getActiveTagsBySession(db, sessionId);
-    // `maxTag` must reflect the true session max (including dropped/compacted
-    // rows) so the protected-cutoff window stays anchored to the most recent
-    // tag regardless of status. Previous code computed this from `tags`,
-    // which was correct only when `tags` was the full set; we now look up
-    // the authoritative max via an O(log N) backward index seek so the
-    // contract holds whether `tags` is full or active-only.
+    // Emergency floor accounting still needs the true session max, including
+    // dropped and compacted rows. Protection itself comes only from the canonical
+    // window projections supplied by the transform entry.
     const maxTag = getMaxTagNumberBySession(db, sessionId);
-    const protectedCutoff = maxTag - config.protectedTags;
 
     let droppedTools = 0;
     let emergencyDroppedTools = 0;
@@ -186,7 +183,9 @@ export function applyHeuristicCleanup(
             // Strip or drop system injections (todo continuation, skill reminders, etc.)
             for (const tag of tags) {
                 if (tag.status !== "active") continue;
-                if (tag.tagNumber > protectedCutoff) continue;
+                if (config.protectedCutoff !== null && tag.tagNumber >= config.protectedCutoff) {
+                    continue;
+                }
                 if (tag.type !== "message") continue;
 
                 const target = targets.get(tag.tagNumber);
@@ -252,7 +251,7 @@ export function applyHeuristicCleanup(
         const fingerprintGroups = new Map<string, TagEntry[]>();
         for (const [compositeKey, fingerprint] of toolFingerprints) {
             const tag = tagsByCompositeKey.get(compositeKey);
-            if (!tag || tag.tagNumber > protectedCutoff) continue;
+            if (!tag || config.protectedTagNumbers.has(tag.tagNumber)) continue;
             const group = fingerprintGroups.get(fingerprint) ?? [];
             group.push(tag);
             fingerprintGroups.set(fingerprint, group);
@@ -299,7 +298,7 @@ export function applyHeuristicCleanup(
         const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
             enabled: true,
             minChars: config.caveman.minChars,
-            protectedTags: config.protectedTags,
+            protectedCutoff: config.protectedCutoff,
         });
         compressedTextTags =
             cavemanResult.compressedToLite +

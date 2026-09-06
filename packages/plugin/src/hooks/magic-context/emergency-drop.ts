@@ -135,9 +135,7 @@ export function planEmergencyDrop(input: {
      * Coordinate space: tag-number space (number | null).
      * Empty-window behavior: branches on absent cutoff (null), applying no tag-number threshold.
      */
-    protectedCutoff?: number | null;
-    /** Legacy parameter; deleted in favor of protectedCutoff. */
-    protectedTags?: number;
+    protectedCutoff: number | null;
     /** Provider-proven or estimated pressure; at 95% only open arcs and exemplars survive. */
     usagePercentage?: number;
     currentTotalInputTokens: number;
@@ -216,7 +214,7 @@ export function planEmergencyDrop(input: {
     // Coordinate space: tag-number space (number | null).
     // Empty-window behavior: branches on absent cutoff (null), applying no tag-number threshold.
     // At >=95%, the token window and newest-3 minimum yield (parity with #423).
-    const cutoff = input.protectedCutoff !== undefined ? input.protectedCutoff : null;
+    const cutoff = input.protectedCutoff;
     const windowYields = absoluteEmergency;
 
     // Below 95%, reserve the newest ceil(20%) of T1/T2 as continuation context.

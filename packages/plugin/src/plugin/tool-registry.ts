@@ -1,7 +1,6 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { MagicContextPluginConfig } from "../config";
 import { isCompactionEnabled, isDreamerRunnable } from "../config/agent-disable";
-import { DEFAULT_PROTECTED_TAGS } from "../features/magic-context/defaults";
 import { resolveProjectIdentityForSession } from "../features/magic-context/memory/project-identity";
 import {
     getDatabasePersistenceError,
@@ -135,7 +134,7 @@ export function createToolRegistry(args: {
             ? {}
             : createCtxReduceTools({
                   db,
-                  protectedTags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
+                  floor: pluginConfig.protected_tokens,
                   rustToolBackends,
               })),
         ...createCtxExpandTools({ db }),

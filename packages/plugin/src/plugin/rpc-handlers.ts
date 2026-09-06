@@ -15,6 +15,7 @@ import {
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
+import { getProtectionWindowForSession } from "../features/magic-context/protection-window";
 import { parseCacheTtl } from "../features/magic-context/scheduler";
 import {
     type ContextDatabase as Database,
@@ -759,6 +760,10 @@ export function buildStatusDetail(
                 .get(sessionId);
             detail.droppedTags = droppedRow?.count ?? 0;
             detail.totalTags = detail.activeTags + detail.droppedTags;
+            detail.protectedTagCount = getProtectionWindowForSession(
+                db,
+                sessionId,
+            ).status.protectedCount;
         } catch {
             // tags table might have different schema
         }
@@ -840,9 +845,6 @@ export function buildStatusDetail(
                 ? (config.configParseFailures as ConfigParseFailure[])
                 : [];
 
-            if (typeof config.protected_tags === "number") {
-                detail.protectedTagCount = config.protected_tags;
-            }
             if (typeof config.history_budget_percentage === "number") {
                 detail.historyBudgetPercentage = config.history_budget_percentage;
             }

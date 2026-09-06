@@ -82,7 +82,7 @@ describe("whitespace-only assistant tag transition", () => {
             const hygiene = measureTailHygiene({
                 messages: [message],
                 tags: getTailHygieneTags(db, sessionId),
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
             });
             expect(hygiene.u).toBe(0);
             expect(getActiveTagsBySession(db, sessionId)).toEqual([]);

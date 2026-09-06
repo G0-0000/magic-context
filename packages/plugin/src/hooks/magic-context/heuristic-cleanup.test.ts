@@ -165,7 +165,8 @@ describe("applyHeuristicCleanup", () => {
 
                 //#when
                 applyHeuristicCleanup(SESSION, db, targets, buildMessageTagNumbers([[1, msg]]), {
-                    protectedTags: 0,
+                    protectedTagNumbers: new Set(),
+                    protectedCutoff: null,
                 });
 
                 //#then — reasoning preserved because it has real content
@@ -201,7 +202,7 @@ describe("applyHeuristicCleanup", () => {
             //#when 10 tags × 4000 bytes × 0.25 = 10000 tokens of tail; usage 10000,
             // ceiling 6000 → target = 0 + 0.30×6000 = 1800 → reclaim ≈ 8200 tokens.
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set([9, 10]),
                 protectedCutoff: 9,
                 emergency: {
                     currentTotalInputTokens: 10_000,
@@ -248,14 +249,16 @@ describe("applyHeuristicCleanup", () => {
             const emergency = { currentTotalInputTokens: 10_000, ceilingTokens: 10_000 };
 
             const first = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(first.emergencyDroppedTools).toBeGreaterThan(0);
             expect(getEmergencyInputSample(db, SESSION)).toBe(10_000);
 
             const latched = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(latched.emergencyDroppedTools).toBe(0);
@@ -264,7 +267,8 @@ describe("applyHeuristicCleanup", () => {
             // sample the latch normally waits for, so the abort path releases it.
             clearEmergencyDropSample(db, SESSION);
             const retry = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(retry.emergencyDroppedTools).toBeGreaterThan(0);
@@ -283,7 +287,8 @@ describe("applyHeuristicCleanup", () => {
             ]);
             // usage 1000 well under ceiling 100000 → reclaim negative → no-op.
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency: { currentTotalInputTokens: 1_000, ceilingTokens: 100_000 },
             });
             expect(result.droppedTools).toBe(0);
@@ -301,7 +306,8 @@ describe("applyHeuristicCleanup", () => {
                 );
             }
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
             // No routine tool drops anymore — only dedup/injection-strip run.
             expect(result.droppedTools).toBe(0);
@@ -362,7 +368,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msgB, 60);
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             //#then — neither tag is deduplicated (cross-owner pair).
@@ -405,7 +412,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msg, 80); // newest
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             //#then — older tag dropped, newer kept.
@@ -439,7 +447,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msg, 100);
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             expect(result.deduplicatedTools).toBe(0);

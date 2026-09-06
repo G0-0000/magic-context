@@ -14,18 +14,19 @@ registerIssue423Tests("opencode", {
         const tagger = createTagger();
         tagger.initFromDb(sessionId, db);
         const tagged = tagMessages(sessionId, fixture.opencode, tagger, db);
+        const protectionWindow = getProtectionWindowForSession(
+            db,
+            sessionId,
+            ISSUE_423_PROTECTED_TOKENS,
+        );
         const result = applyHeuristicCleanup(
             sessionId,
             db,
             tagged.targets,
             tagged.messageTagNumbers,
             {
-                protectedTags: 0,
-                protectedCutoff: getProtectionWindowForSession(
-                    db,
-                    sessionId,
-                    ISSUE_423_PROTECTED_TOKENS,
-                ).cutoff,
+                protectedTagNumbers: protectionWindow.protectedTagNumbers,
+                protectedCutoff: protectionWindow.cutoff,
                 routine: false,
                 emergency: {
                     currentTotalInputTokens: percentage * 2040,

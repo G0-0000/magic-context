@@ -144,7 +144,6 @@ function createDeps(contextUsageMap: Map<string, ContextUsageCacheEntry>) {
         contextUsageMap,
         compactionHandler: { onCompacted: mock(() => {}) },
         config: {
-            protected_tags: 5,
             cache_ttl: "5m" as string | Record<string, string>,
         },
         tagger: {

@@ -322,22 +322,9 @@ function messageIdForTag(tag: TagEntry): string | null {
  */
 function resolveProtectedTagNumbers(
     tags: readonly TagEntry[],
-    protectedTagNumbersInput?: ReadonlySet<number>,
-    protectedTagsFallback?: number,
+    protectedTagNumbersInput: ReadonlySet<number>,
 ): Set<number> {
-    const protectedNumbers = new Set<number>();
-    if (protectedTagNumbersInput) {
-        for (const num of protectedTagNumbersInput) {
-            protectedNumbers.add(num);
-        }
-    } else if (typeof protectedTagsFallback === "number" && protectedTagsFallback > 0) {
-        const active = Array.from(
-            new Set(tags.filter((tag) => tag.status === "active").map((tag) => tag.tagNumber)),
-        )
-            .sort((left, right) => right - left)
-            .slice(0, Math.max(0, protectedTagsFallback));
-        for (const num of active) protectedNumbers.add(num);
-    }
+    const protectedNumbers = new Set(protectedTagNumbersInput);
     const protectedCtxReduceTags = newestCtxReduceTagNumbers(
         tags.filter((tag) => tag.status === "active" && tag.type === "tool"),
     );
@@ -370,18 +357,13 @@ function buildTagAttribution(args: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
     toolIdentities: ReadonlyMap<unknown, ToolPartIdentity>;
-    protectedTagNumbers?: ReadonlySet<number>;
-    protectedTags?: number;
+    protectedTagNumbers: ReadonlySet<number>;
 }): {
     protectedNumbers: ReadonlySet<number>;
     messageTags: ReadonlyMap<string, TagEntry>;
     toolTagsByPart: ReadonlyMap<unknown, TagEntry>;
 } {
-    const protectedNumbers = resolveProtectedTagNumbers(
-        args.tags,
-        args.protectedTagNumbers,
-        args.protectedTags,
-    );
+    const protectedNumbers = resolveProtectedTagNumbers(args.tags, args.protectedTagNumbers);
     const messageTags = new Map<string, TagEntry>();
     const exactToolTags = new Map<string, TagEntry>();
     const orphanTagsByCall = new Map<string, TagEntry[]>();
@@ -580,8 +562,7 @@ export function measureTailHygiene(input: {
      * Coordinate space: tag-number space.
      * Empty-window behavior: empty set means zero tool tags are protected by the token window.
      */
-    protectedTagNumbers?: ReadonlySet<number>;
-    protectedTags?: number;
+    protectedTagNumbers: ReadonlySet<number>;
     /** Active tags whose drop is queued but not yet materialized into the rendered tail. */
     pendingDropTagNumbers?: ReadonlySet<number>;
 }): TailHygieneMeasurement {
@@ -592,7 +573,6 @@ export function measureTailHygiene(input: {
         tags: input.tags,
         toolIdentities,
         protectedTagNumbers: input.protectedTagNumbers,
-        protectedTags: input.protectedTags,
     });
     const droppedToolOwners = new Set<string>();
     for (const [part, identity] of toolIdentities) {
@@ -783,8 +763,7 @@ export function refreshTailHygieneBaseline(input: {
      * Coordinate space: tag-number space.
      * Empty-window behavior: empty set means zero tool tags protected by window.
      */
-    protectedTagNumbers?: ReadonlySet<number>;
-    protectedTags?: number;
+    protectedTagNumbers: ReadonlySet<number>;
     pendingDropTagNumbers?: ReadonlySet<number>;
     cacheBusting: boolean;
     previous?: TailHygieneBaseline;
@@ -856,7 +835,7 @@ export function effectiveTailHygiene(
 export function assertTailHygieneContentUnchanged(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
-    protectedTags: number;
+    protectedTagNumbers: ReadonlySet<number>;
     expectedSignature: string;
 }): void {
     const actual = measureTailHygiene(input).contentSignature;

@@ -196,7 +196,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -256,7 +256,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -303,7 +303,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -364,7 +364,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -427,7 +427,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -542,7 +542,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -631,7 +631,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 deferredMaterializationSessions,
                 lastHeuristicsTurnId: new Map<string, string>(),
                 clearReasoningAge: 50,
-                protectedTags: 0,
+                protectedTokens: 0,
             });
 
             await transform({}, { messages: sourceMessages() });
@@ -806,7 +806,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         await transform({}, { messages: sourceMessages(true, true) });
@@ -884,7 +884,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const hook = createChatMessageHook({
             db,
@@ -949,7 +949,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         shouldExecute.mockClear();
@@ -1002,7 +1002,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -1048,7 +1048,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
 
         await transform({}, { messages: buildSimpleMessages(sessionId) });
@@ -1081,7 +1081,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 deferredMaterializationSessions,
                 lastHeuristicsTurnId: new Map<string, string>(),
                 clearReasoningAge: 50,
-                protectedTags: 1,
+                protectedTokens: 1,
                 client: testClient,
                 directory: testDirectory,
             });
@@ -1114,7 +1114,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
@@ -1143,7 +1143,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(historyRefreshSessions.has(sessionId)).toBe(false);
@@ -1188,7 +1188,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -1238,7 +1238,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         const first = buildSimpleMessages(sessionId);
         await transform({}, { messages: first });
@@ -1267,7 +1267,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions: mat,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         await transform({}, { messages: buildSimpleMessages("B") });
         expect(set.has("A")).toBe(true);
@@ -1305,7 +1305,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
@@ -1348,7 +1348,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: testClient,
             directory: testDirectory,
         });
@@ -1400,7 +1400,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
         });
         await Promise.all([
             transform({}, { messages: buildSimpleMessages("A") }),

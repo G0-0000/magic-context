@@ -15,6 +15,7 @@ import {
 } from "../../features/magic-context/memory/project-identity";
 import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
+import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
@@ -42,6 +43,7 @@ import {
     loadProtectedTailMeta,
     recordOverflowDetected,
     resetProtectedTailNoEligibleHead,
+    resolveEpochFloorForPass,
     setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
@@ -90,6 +92,7 @@ import {
 } from "./final-wire-token-estimate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
     selectHiddenMessagesAtCompactionSeam,
@@ -532,7 +535,8 @@ export interface TransformDeps {
     channel1StateBySession?: Map<string, import("./ctx-reduce-nudge").Channel1State>;
     /** Module-authored Channel 2 text held until the terminal `message.updated` event, when the host delivers the pending nudge. */
     channel2DirectiveTextBySession?: Map<string, string>;
-    protectedTags: number;
+    /** Absolute protected-token floor override. Omitted uses the pass's usableSoft geometry. */
+    protectedTokens?: number;
     /**
      * ctx_reduce visibility is resolved per session from the session's tool
      * allow-list. Tag DB rows are still maintained when the tool is unavailable,
@@ -2213,6 +2217,52 @@ export function createTransform(deps: TransformDeps) {
             ? compartmentPhase.rebuiltHistoryThisPass
             : rebuiltHistoryFromInitialPrepare || compartmentPhase.rebuiltHistoryThisPass;
 
+        const protectionFoldWillBust =
+            (!!projectIdentity || !!sessionDirectory) &&
+            (fullFeatureMode || compactionOff) &&
+            mustMaterialize({
+                db,
+                sessionId,
+                state: sessionMeta,
+                projectPath: projectIdentity,
+                projectDirectory: sessionDirectory,
+                injectDocs: deps.injectDocs,
+                memoryEnabled: deps.memoryConfig?.enabled,
+                muralEnabled: deps.muralEnabled,
+                memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
+                historyBudgetTokens,
+                hardSignals: m0HardSignals,
+            }).value;
+        const protectionCacheBustingPass =
+            !compactionOff &&
+            (schedulerDecision === "execute" ||
+                isCacheBusting ||
+                contextUsage.percentage >= forceMaterializationPercentage ||
+                deps.pendingMaterializationSessions.has(sessionId) ||
+                (canConsumeDeferredLate && deferredMaterializationSessions.has(sessionId)) ||
+                protectionFoldWillBust);
+        const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
+        const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
+            configuredOverride: deps.protectedTokens,
+            usableSoft: protectionUsableSoft,
+            isCacheBustingPass: protectionCacheBustingPass,
+        });
+        if (protectionFloor.snapshotChanged) {
+            sessionLog(
+                sessionId,
+                `protected token floor snapshot: floor=${protectionFloor.floor} provenance=${protectionFloor.provenance === "override" ? "absolute" : protectionFloor.provenance} usableSoft=${protectionUsableSoft}`,
+            );
+        }
+        const protectionWindow = getProtectionWindowForSession(
+            db,
+            sessionId,
+            protectionFloor.floor,
+        );
+        const protectedTagNumbers = protectionWindow.protectedTagNumbers;
+        // Pending operation IDs use tag-number coordinates despite the older "ID" name.
+        const protectedTagIds = protectedTagNumbers;
+        const protectedCutoff = protectionWindow.cutoff;
+
         const tPostProcess = performance.now();
         const postTransformResult = await runPostTransformPhase({
             sessionId,
@@ -2265,7 +2315,10 @@ export function createTransform(deps: TransformDeps) {
             deferredMaterializationSessions,
             lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
             clearReasoningAge: deps.clearReasoningAge,
-            protectedTags: deps.protectedTags,
+            protectedTagIds,
+            protectedTagNumbers,
+            protectedCutoff,
+            protectedCount: protectionWindow.status.protectedCount,
             emergencyCeilingTokens,
             pendingCompartmentInjection,
             hiddenMessagesAtCompactionSeam,

@@ -91,7 +91,6 @@ describe("ctx_reduce drop queueing", () => {
     it("returns queued ack immediately and stores pending drops", async () => {
         const tools = createCtxReduceTools({
             db,
-            protectedTags: 3,
         });
 
         const result = await tools.ctx_reduce.execute({ drop: "1,2" }, {

@@ -343,7 +343,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 deferredMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 client: undefined as never,
-                protectedTags: 5,
             });
 
             // First assistant response on the small-context model.
@@ -395,7 +394,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 deferredMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 client: undefined as never,
-                protectedTags: 5,
             });
 
             // The newer assistant shell arrives between two updates for the older row.
@@ -446,7 +444,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 deferredMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 client: undefined as never,
-                protectedTags: 5,
             });
 
             await hook(makeAssistantEvent(sessionId, "fable", "fable-5", "msg-000001"));
@@ -485,7 +482,6 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
                 deferredMaterializationSessions: new Set(),
                 lastHeuristicsTurnId: new Map(),
                 client: undefined as never,
-                protectedTags: 5,
             });
 
             await hook(makeAssistantEvent(sessionId, "anthropic", "claude-small", "msg-000001"));

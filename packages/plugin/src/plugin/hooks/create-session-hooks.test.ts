@@ -7,12 +7,13 @@ describe("buildMagicContextHookConfig", () => {
     it("threads toast_duration_ms into the per-session hook config", () => {
         const config = buildMagicContextHookConfig({
             enabled: true,
-            protected_tags: 10,
+            protected_tokens: 10_000,
             cache_ttl: "5m",
             toast_duration_ms: 30_000,
         } as never);
 
         expect(config.toast_duration_ms).toBe(30_000);
+        expect(config.protected_tokens).toBe(10_000);
     });
 
     it("passes toast_duration_ms = 0 through unchanged (disables toasts)", () => {
@@ -53,10 +54,20 @@ describe("buildMagicContextHookConfig", () => {
         expect(config.temporal_awareness).toBe(true);
     });
 
-    it("still applies the two defaulted fields when unset", () => {
+    it("strips the deprecated count before constructing live session plumbing", () => {
+        const config = buildMagicContextHookConfig({
+            enabled: true,
+            protected_tags: 5,
+        } as never) as Record<string, unknown>;
+
+        expect(config.protected_tags).toBeUndefined();
+        expect(config.protected_tokens).toBeUndefined();
+    });
+
+    it("keeps the token-floor override unset while applying the execute threshold default", () => {
         const config = buildMagicContextHookConfig({ enabled: true } as never);
 
-        expect(config.protected_tags).toBeGreaterThan(0);
+        expect(config.protected_tokens).toBeUndefined();
         expect(config.execute_threshold_percentage).toBeDefined();
     });
 });

@@ -174,7 +174,7 @@ function makeOffTransform(args: {
         pendingMaterializationSessions: new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
         clearReasoningAge: 50,
-        protectedTags: 0,
+        protectedTokens: 0,
         directory: "/repo/project",
         memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         compactionOff: args.compactionOff ?? true,

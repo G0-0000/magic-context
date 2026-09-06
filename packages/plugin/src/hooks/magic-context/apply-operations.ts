@@ -63,7 +63,7 @@ export function applyPendingOperations(
      * non-tool (message/file) tags never become reclaim targets through any window form,
      * their eligibility remaining decided solely by the independent protections.
      */
-    protectedTagIds: ReadonlySet<number> | number = new Set(),
+    protectedTagIds: ReadonlySet<number>,
     preloadedTags?: TagEntry[],
     preloadedPendingOps?: ReturnType<typeof getPendingOps>,
     syntheticPendingOps: PendingOp[] = [],
@@ -80,22 +80,6 @@ export function applyPendingOperations(
         const tags = preloadedTags ?? getTagsBySession(db, sessionId);
         const tagStatusById = new Map(tags.map((tag) => [tag.tagNumber, tag.status] as const));
         const tagTypeById = new Map(tags.map((tag) => [tag.tagNumber, tag.type] as const));
-        // Union projection form: protectedTagIds (set form).
-        // Coordinate space: tag-number space.
-        // Empty-window behavior: empty set means zero tool tags are protected by the window.
-        const protectedIds: ReadonlySet<number> =
-            typeof protectedTagIds === "number"
-                ? protectedTagIds > 0
-                    ? new Set(
-                          tags
-                              .filter((tag) => tag.status === "active")
-                              .map((tag) => tag.tagNumber)
-                              .sort((left, right) => right - left)
-                              .slice(0, protectedTagIds),
-                      )
-                    : new Set<number>()
-                : protectedTagIds;
-
         const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
         const opsToApply: Array<{ op: PendingOp; synthetic: boolean }> = [
             ...pendingOps.map((op) => ({ op, synthetic: false })),
@@ -120,7 +104,7 @@ export function applyPendingOperations(
                 continue;
             }
 
-            if (protectedIds.has(pendingOp.tagId)) {
+            if (protectedTagIds.has(pendingOp.tagId)) {
                 continue;
             }
 

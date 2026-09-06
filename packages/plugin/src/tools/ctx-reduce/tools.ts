@@ -24,8 +24,6 @@ export { CTX_REDUCE_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface CtxReduceToolDeps {
     db: Database;
-    /** Legacy parameter; replaced by protectedSet / getProtectionWindow. */
-    protectedTags?: number;
     /**
      * Union projection form: protectedSet (tag-number set form).
      * Coordinate space: tag-number space.
@@ -174,13 +172,6 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                         : deps.protectedSet;
             } else if (deps.getProtectionWindow) {
                 protectedSet = deps.getProtectionWindow(sessionId).protectedTagNumbers;
-            } else if (deps.protectedTags !== undefined) {
-                const activeTags = allTags.filter((tag) => tag.status === "active");
-                const protectedTagIds = activeTags
-                    .map((tag) => tag.tagNumber)
-                    .sort((left, right) => right - left)
-                    .slice(0, deps.protectedTags);
-                protectedSet = new Set(protectedTagIds);
             } else {
                 protectedSet = getProtectionWindowForSession(
                     deps.db,

@@ -71,7 +71,7 @@ describe("resolveToolTier", () => {
 describe("planEmergencyDrop — guards", () => {
     const base = {
         maxTag: 10,
-        protectedTags: 0,
+        protectedCutoff: null,
         hasPriorDrop: false,
         priorInputSample: 0,
     };
@@ -123,7 +123,7 @@ describe("planEmergencyDrop — floorTags/tags split", () => {
             tags: toolTags,
             floorTags: [...toolTags, ...messageTags],
             maxTag: 200,
-            protectedTags: 0,
+            protectedCutoff: null,
             currentTotalInputTokens: 170_000,
             ceilingTokens: 130_000,
             priorInputSample: 0,
@@ -148,7 +148,7 @@ describe("planEmergencyDrop — floorTags/tags split", () => {
             tags: toolTags,
             floorTags: [...toolTags, ...messageTags],
             maxTag: 60,
-            protectedTags: 0,
+            protectedCutoff: null,
             currentTotalInputTokens: 300_000,
             ceilingTokens: 200_000,
             priorInputSample: 0,
@@ -169,7 +169,7 @@ describe("planEmergencyDrop — target math", () => {
         const plan = planWithFloor({
             tags,
             maxTag: 10,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 30_000,
@@ -207,7 +207,7 @@ describe("planEmergencyDrop — target math", () => {
         const first = planWithFloor({
             tags,
             maxTag: 20,
-            protectedTags: 0,
+            protectedCutoff: null,
             currentTotalInputTokens: 100_000,
             ceilingTokens: 60_000,
             hasPriorDrop: false,
@@ -220,7 +220,7 @@ describe("planEmergencyDrop — target math", () => {
         const second = planWithFloor({
             tags,
             maxTag: 20,
-            protectedTags: 0,
+            protectedCutoff: null,
             currentTotalInputTokens: 100_000, // unchanged — provider hasn't re-measured
             ceilingTokens: 60_000,
             hasPriorDrop: true,
@@ -234,7 +234,7 @@ describe("planEmergencyDrop — target math", () => {
         const third = planWithFloor({
             tags,
             maxTag: 20,
-            protectedTags: 0,
+            protectedCutoff: null,
             currentTotalInputTokens: 95_000,
             ceilingTokens: 60_000,
             hasPriorDrop: true,
@@ -254,7 +254,7 @@ describe("planEmergencyDrop — target math", () => {
         const plan = planWithFloor({
             tags: [big, small],
             maxTag: 2,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             // tail = (400+40000+8000 + 800) × 0.25 = 12300; floor = 20000-12300
@@ -281,7 +281,7 @@ describe("planEmergencyDrop — tier ordering", () => {
         const plan = planWithFloor({
             tags,
             maxTag: 5,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 6_000,
@@ -308,7 +308,7 @@ describe("planEmergencyDrop — tier ordering", () => {
         const plan = planWithFloor({
             tags,
             maxTag: 6,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 6_000,
@@ -326,7 +326,7 @@ describe("planEmergencyDrop — tier ordering", () => {
         const plan = planWithFloor({
             tags,
             maxTag: 10,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 20_000, // tail = 10×2000 = 20000
@@ -346,7 +346,7 @@ describe("planEmergencyDrop — tier ordering", () => {
         const plan = planWithFloor({
             tags,
             maxTag: 2,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 4_000,
@@ -374,7 +374,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
         const plan = planWithFloor({
             tags,
             maxTag: 10,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             // The caller reset the episode latch to 0 because another mutation
             // already priced this pass, so newly eligible tags may ride it.
@@ -395,7 +395,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
         const plan = planWithFloor({
             tags,
             maxTag: 5,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: true,
             priorInputSample: 0,
             currentTotalInputTokens: 10_000,
@@ -415,7 +415,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
         const plan = planWithFloor({
             tags,
             maxTag: 3,
-            protectedTags: 0,
+            protectedCutoff: null,
             hasPriorDrop: false,
             priorInputSample: 0,
             currentTotalInputTokens: 3_000,

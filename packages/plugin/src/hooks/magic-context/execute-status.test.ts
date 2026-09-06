@@ -17,7 +17,7 @@ describe("executeStatus", () => {
             "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         ).run(SESSION_ID, 1, 12, 34, "m12", "m34", "Status arc", "status body", Date.now());
 
-        const status = executeStatus(db, SESSION_ID, 20);
+        const status = executeStatus(db, SESSION_ID);
         const expected = estimateTokens("## 12-34 · Status arc\nstatus body\n");
 
         expect(status).toContain(`- History block: ~${expected.toLocaleString()} tokens`);
@@ -35,7 +35,6 @@ describe("executeStatus", () => {
         const status = executeStatus(
             db,
             SESSION_ID,
-            20,
             65,
             "some/model",
             undefined,
@@ -57,7 +56,6 @@ describe("executeStatus", () => {
         const status = executeStatus(
             db,
             SESSION_ID,
-            20,
             65,
             "some/model",
             undefined,
@@ -79,7 +77,6 @@ describe("executeStatus", () => {
         const status = executeStatus(
             db,
             SESSION_ID,
-            20,
             undefined,
             undefined,
             undefined,
@@ -113,7 +110,7 @@ describe("executeStatus", () => {
             SESSION_ID,
         );
 
-        const status = executeStatus(db, SESSION_ID, 20);
+        const status = executeStatus(db, SESSION_ID);
 
         expect(status).toContain("- Cache TTL: never (session)");
         expect(status).toContain(
@@ -142,7 +139,6 @@ describe("executeStatus", () => {
         const status = executeStatus(
             db,
             SESSION_ID,
-            20,
             undefined,
             "anthropic/claude-opus-5",
             undefined,
@@ -174,11 +170,10 @@ describe("executeStatus", () => {
         initializeDatabase(db);
         getOrCreateSessionMeta(db, SESSION_ID);
 
-        const tsStatus = executeStatus(db, SESSION_ID, 20);
+        const tsStatus = executeStatus(db, SESSION_ID);
         const rustStatus = executeStatus(
             db,
             SESSION_ID,
-            20,
             undefined,
             undefined,
             undefined,

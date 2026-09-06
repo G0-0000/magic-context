@@ -60,6 +60,7 @@ import { createTransform } from "./transform";
 type TextPart = { type: "text"; text: string };
 type ToolPart = {
     type: "tool";
+    tool?: string;
     callID: string;
     state: { status?: string; output: string };
 };
@@ -160,7 +161,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -199,7 +200,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             directory: process.cwd(),
             liveModelBySession,
         });
@@ -265,7 +266,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             directory: process.cwd(),
         });
         const shortMessages: TestMessage[] = [
@@ -380,7 +381,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: {} as PluginContext["client"],
         });
 
@@ -419,7 +420,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -467,7 +468,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -533,7 +534,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -589,7 +590,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         await baselineTransform(
             {},
@@ -653,7 +654,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: flushedMaterialization,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -719,7 +720,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -769,7 +770,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -793,7 +794,7 @@ describe("createTransform", () => {
         expect(messages).toHaveLength(2);
     });
 
-    it("fires the tiered emergency drop at 85% on a reclaimable tail", async () => {
+    it("yields the protected token window at absolute emergency pressure", async () => {
         //#given a large tool output in the tail so there is something to reclaim.
         // The tiered drop is target-driven: at 85% it reclaims down toward 30% of
         // working space. A tiny tool output (as the old need-blind drop assumed)
@@ -814,7 +815,7 @@ describe("createTransform", () => {
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
                 [
                     "ses-force-materialize",
-                    { usage: { percentage: 86, inputTokens: 172_000 }, updatedAt: Date.now() },
+                    { usage: { percentage: 96, inputTokens: 192_000 }, updatedAt: Date.now() },
                 ],
             ]),
             db,
@@ -822,7 +823,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -838,13 +839,13 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then — the newest-window emergency arm keeps a structural skeleton.
-        expect(messages).toHaveLength(2);
+        //#then — absolute emergency pressure yields the token window, so the
+        // tool-only assistant shell is removed by the full-drop path.
+        expect(messages).toHaveLength(1);
         expect(messages[0]?.info.id).toBe("m-user");
-        expect(messages[1]?.info.id).toBe("m-assistant");
         const tags = getTagsBySession(db, "ses-force-materialize");
         expect(tags.find((tag) => tag.type === "tool")?.status).toBe("dropped");
-        expect(tags.find((tag) => tag.type === "tool")?.dropMode).toBe("truncated");
+        expect(tags.find((tag) => tag.type === "tool")?.dropMode).toBe("full");
     });
 
     it("strips structural noise even when scheduler defers", async () => {
@@ -865,7 +866,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 10,
+            protectedTokens: 10,
             liveModelBySession: new Map([
                 ["ses-structural", { providerID: "anthropic", modelID: "claude-sonnet" }],
             ]),
@@ -919,7 +920,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 10,
+            protectedTokens: 10,
             liveModelBySession: new Map([
                 [sessionId, { providerID: "github-copilot", modelID: "claude-sonnet" }],
             ]),
@@ -970,7 +971,7 @@ describe("createTransform", () => {
                 pendingMaterializationSessions: new Set<string>(),
                 lastHeuristicsTurnId: new Map<string, string>(),
                 clearReasoningAge: 50,
-                protectedTags: 10,
+                protectedTokens: 10,
                 liveModelBySession: new Map([
                     [sessionId, { providerID, modelID: "claude-sonnet" }],
                 ]),
@@ -1032,7 +1033,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 10,
+            protectedTokens: 10,
             liveModelBySession,
         });
         const buildMessages = (): TestMessage[] => [
@@ -1090,7 +1091,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             liveModelBySession: new Map(),
         });
         const messages: TestMessage[] = [
@@ -1146,7 +1147,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             channel1StateBySession,
         });
 
@@ -1170,7 +1171,11 @@ describe("createTransform", () => {
         // apply-operations.tool-drop.test.ts — upstream updated that file's
         // tests for the new behavior but missed this one.
         for (let i = 1; i <= 20; i += 1) {
-            insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, 2 + i);
+            insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, 2 + i, 0, null, 0, null, null, {
+                tokenCount: 1_000,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
         }
         queuePendingOp(db, "ses-1", 1, "drop");
         queuePendingOp(db, "ses-1", 2, "drop");
@@ -1229,7 +1234,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const firstPass: TestMessage[] = [
@@ -1295,7 +1300,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const db = openDatabase();
@@ -1342,7 +1347,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             internalChildSessions,
         });
 
@@ -1387,7 +1392,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             directory,
         });
         const messages: TestMessage[] = [
@@ -1445,7 +1450,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             directory: "/repo/project",
             memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
@@ -1493,7 +1498,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             directory: "/repo/project",
             memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
@@ -1532,7 +1537,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const firstPass: TestMessage[] = [
@@ -1571,12 +1576,9 @@ describe("createTransform", () => {
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });
 
-    it("fires the tiered emergency floor for subagents at >=85% (Phase 2 CRIT#5)", async () => {
-        // Merge-blocking guarantee: Phase 2 removed routine age-based tool drops,
-        // so the ONLY tool floor a subagent has is the tiered emergency drop. It
-        // must fire for subagents at >=85% (the force-materialize threshold) even
-        // though forceMaterialization/m[0] materialization stays primary-only.
-        // Without this, a subagent's context would grow unchecked to overflow.
+    it("yields the protected token window for subagents at >=95%", async () => {
+        // Subagents retain the same absolute-emergency escape as primary
+        // sessions: at >=95%, the token window yields so recovery can reclaim.
         useTempDataHome("context-transform-subagent-rerun-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
         const db = openDatabase();
@@ -1593,7 +1595,7 @@ describe("createTransform", () => {
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
                 [
                     "ses-sub-rerun",
-                    { usage: { percentage: 86, inputTokens: 172_000 }, updatedAt: Date.now() },
+                    { usage: { percentage: 96, inputTokens: 192_000 }, updatedAt: Date.now() },
                 ],
             ]),
             db,
@@ -1601,7 +1603,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 4_000,
         });
 
         const messages: TestMessage[] = [
@@ -1620,8 +1622,7 @@ describe("createTransform", () => {
         ];
         await transform({}, { messages });
 
-        // The oldest large tool output is dropped by the tiered emergency drop —
-        // proves the floor fires for a subagent at 85%.
+        // The oldest large tool output is dropped after the window yields.
         const subagentTags = getTagsBySession(db, "ses-sub-rerun");
         const firstToolTag = subagentTags.find((t) => t.messageId === "call-1");
         expect(firstToolTag?.status).toBe("dropped");
@@ -1653,7 +1654,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             channel1StateBySession,
         });
         await transform(
@@ -1696,7 +1697,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             channel1StateBySession,
         });
 
@@ -1749,7 +1750,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             channel1StateBySession,
         });
         await transform(
@@ -1792,7 +1793,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             cavemanTextCompression: { enabled: true, minChars: 50 },
         });
         const droppedOriginal =
@@ -1874,7 +1875,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const firstPass: TestMessage[] = [
@@ -1955,7 +1956,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         // Simulate content that context-injector would have prepended before this transform runs
@@ -1997,7 +1998,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const messages: TestMessage[] = [
@@ -2063,7 +2064,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             liveModelBySession: new Map([
                 ["ses-think", { providerID: "anthropic", modelID: "claude-sonnet" }],
             ]),
@@ -2133,7 +2134,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -2174,7 +2175,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -2212,7 +2213,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -2253,7 +2254,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
         const messages: TestMessage[] = [
             {
@@ -2304,7 +2305,7 @@ describe("createTransform", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
         });
 
         const messages: TestMessage[] = [
@@ -2438,7 +2439,7 @@ describe("createTransform protected tail", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client,
             directory: "/tmp",
         });
@@ -2495,7 +2496,7 @@ describe("createTransform protected tail", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client,
             directory: "/tmp",
         });
@@ -2534,7 +2535,7 @@ describe("createTransform protected tail", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 10,
+            protectedTokens: 10,
             client: {
                 session: {
                     get: mock(async () => ({ data: { directory: "/tmp" } })),
@@ -2610,7 +2611,7 @@ describe("createTransform shrinking model-switch overflow pre-arm", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             liveModelBySession,
             // Mirror production: getModelKey derives from the live model map.
             getModelKey: (id: string) => {
@@ -2908,7 +2909,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: { session: { abort, prompt } } as unknown as PluginContext["client"],
             directory: "/tmp",
         });
@@ -2964,7 +2965,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: {
                 session: { abort, prompt: mock(async () => ({})) },
             } as unknown as PluginContext["client"],
@@ -3022,7 +3023,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: { session: { abort, prompt } } as unknown as PluginContext["client"],
             directory: "/tmp",
         });
@@ -3149,7 +3150,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: {
                 session: {
                     get: mock(async () => ({ data: { directory: "/tmp", title: "Episode" } })),
@@ -3253,7 +3254,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client,
             directory: "/tmp",
             liveModelBySession: new Map([
@@ -3332,7 +3333,7 @@ describe("createTransform historian failure handling", () => {
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTokens: 0,
             client: {
                 session: {
                     get: mock(async () => ({ data: { directory: "/tmp/recovery" } })),
@@ -3405,5 +3406,127 @@ describe("createTransform historian failure handling", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(createSession).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("live transform protected-token window", () => {
+    async function runMassWindowFixture(options: {
+        sessionId: string;
+        protectedTokens?: number;
+        deprecatedProtectedTagCount?: number;
+    }): Promise<number[]> {
+        useTempDataHome(`context-transform-protected-window-${options.sessionId}-`);
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "window-provider",
+                                models: { "window-200k": { limit: { input: 200_000 } } },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+
+        const db = openDatabase();
+        const ownerMessageId = `${options.sessionId}-assistant`;
+        for (let tagNumber = 1; tagNumber <= 30; tagNumber += 1) {
+            insertTag(
+                db,
+                options.sessionId,
+                `call-${tagNumber}`,
+                "tool",
+                4_000,
+                tagNumber,
+                0,
+                "read",
+                0,
+                ownerMessageId,
+                null,
+                { tokenCount: 1_000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+            queuePendingOp(db, options.sessionId, tagNumber, "drop");
+        }
+
+        const messages: TestMessage[] = [
+            {
+                info: {
+                    id: `${options.sessionId}-user`,
+                    role: "user",
+                    sessionID: options.sessionId,
+                },
+                parts: [{ type: "text", text: "apply queued cleanup" }],
+            },
+            {
+                info: {
+                    id: ownerMessageId,
+                    role: "assistant",
+                    providerID: "window-provider",
+                    modelID: "window-200k",
+                },
+                parts: Array.from({ length: 30 }, (_, index) => ({
+                    type: "tool" as const,
+                    tool: "read",
+                    callID: `call-${index + 1}`,
+                    state: { status: "completed", output: "x".repeat(1_000) },
+                })),
+            },
+        ];
+        const transformDeps = {
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "execute" as const) },
+            contextUsageMap: new Map([
+                [
+                    options.sessionId,
+                    { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTokens: options.protectedTokens,
+            ...(options.deprecatedProtectedTagCount === undefined
+                ? {}
+                : { protected_tags: options.deprecatedProtectedTagCount }),
+            liveModelBySession: new Map([
+                [options.sessionId, { providerID: "window-provider", modelID: "window-200k" }],
+            ]),
+            getModelKey: () => "window-provider/window-200k",
+        } as unknown as Parameters<typeof createTransform>[0];
+
+        await createTransform(transformDeps)({}, { messages });
+
+        return getTagsBySession(db, options.sessionId)
+            .filter((tag) => tag.type === "tool" && tag.status === "active")
+            .map((tag) => tag.tagNumber);
+    }
+
+    it("protects the newest 16 one-thousand-token tools at the derived 16k floor for 200k usableSoft", async () => {
+        expect(await runMassWindowFixture({ sessionId: "ses-derived-protected-window" })).toEqual(
+            Array.from({ length: 16 }, (_, index) => index + 15),
+        );
+    });
+
+    it("contracts the live window to the newest 8 tools when protected_tokens is 8k", async () => {
+        expect(
+            await runMassWindowFixture({
+                sessionId: "ses-override-protected-window",
+                protectedTokens: 8_000,
+            }),
+        ).toEqual(Array.from({ length: 8 }, (_, index) => index + 23));
+    });
+
+    it("ignores deprecated protected_tags instead of changing the live window", async () => {
+        expect(
+            await runMassWindowFixture({
+                sessionId: "ses-deprecated-count-protected-window",
+                deprecatedProtectedTagCount: 5,
+            }),
+        ).toEqual(Array.from({ length: 16 }, (_, index) => index + 15));
     });
 });

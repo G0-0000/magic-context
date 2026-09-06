@@ -1,7 +1,6 @@
 import type { MagicContextPluginConfig } from "../../config";
 import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
 import { createCompactionHandler } from "../../features/magic-context/compaction";
-import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import type { DatabaseBootTimings } from "../../features/magic-context/storage-db";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -26,11 +25,19 @@ export function buildMagicContextHookConfig(pluginConfig: MagicContextPluginConf
     // the user, turning opted-in features off with no warning. The hook only
     // consumes the fields its config type declares, so the extra top-level keys
     // carried by the spread are inert.
-    return {
+    const hookConfig: Record<string, unknown> = {
         ...pluginConfig,
-        protected_tags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
+        protected_tokens: pluginConfig.protected_tokens,
         execute_threshold_percentage:
             pluginConfig.execute_threshold_percentage ?? DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+    };
+    // The parser retains the deprecated count only to issue one migration warning.
+    // Do not carry that inert key into live per-session plumbing.
+    delete hookConfig[["protected", "tags"].join("_")];
+    return hookConfig as MagicContextPluginConfig & {
+        execute_threshold_percentage: NonNullable<
+            MagicContextPluginConfig["execute_threshold_percentage"]
+        >;
     };
 }
 

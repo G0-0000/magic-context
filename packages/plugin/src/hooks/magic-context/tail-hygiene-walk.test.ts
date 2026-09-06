@@ -66,7 +66,7 @@ describe("tail hygiene single-walk instrument", () => {
         ];
         const tags = [tag(2, "call-live", "tool", { toolOwnerMessageId: "tool-owner" })];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const severity = measured.u / measured.t;
         const oldInputRelativeSeverity = measured.u / 648_000;
         const oldRebasedPressure = 0.2;
@@ -98,8 +98,10 @@ describe("tail hygiene single-walk instrument", () => {
             inputByteSize: entry.inputByteSize + 200_000,
         }));
 
-        expect(measureTailHygiene({ messages, tags: driftedTags, protectedTags: 0 })).toEqual(
-            measureTailHygiene({ messages, tags: normalTags, protectedTags: 0 }),
+        expect(
+            measureTailHygiene({ messages, tags: driftedTags, protectedTagNumbers: new Set() }),
+        ).toEqual(
+            measureTailHygiene({ messages, tags: normalTags, protectedTagNumbers: new Set() }),
         );
     });
 
@@ -122,11 +124,11 @@ describe("tail hygiene single-walk instrument", () => {
             }),
         ];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const compressedOnly = measureTailHygiene({
             messages: [messages[0]],
             tags: [tags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
 
         expect(measured.u).toBe(compressedOnly.u);
@@ -149,8 +151,16 @@ describe("tail hygiene single-walk instrument", () => {
         ];
         const tags = [tag(1, "m:p0", "message")];
 
-        const expected = measureTailHygiene({ messages: base, tags, protectedTags: 0 });
-        const actual = measureTailHygiene({ messages: withReasoning, tags, protectedTags: 0 });
+        const expected = measureTailHygiene({
+            messages: base,
+            tags,
+            protectedTagNumbers: new Set(),
+        });
+        const actual = measureTailHygiene({
+            messages: withReasoning,
+            tags,
+            protectedTagNumbers: new Set(),
+        });
         expect({ u: actual.u, t: actual.t }).toEqual({ u: expected.u, t: expected.t });
     });
 
@@ -181,7 +191,11 @@ describe("tail hygiene single-walk instrument", () => {
         ];
 
         expect(
-            measureTailHygiene({ messages: syntheticMessages, tags: [], protectedTags: 0 }),
+            measureTailHygiene({
+                messages: syntheticMessages,
+                tags: [],
+                protectedTagNumbers: new Set(),
+            }),
         ).toMatchObject({ u: 0, t: 0 });
     });
 
@@ -201,7 +215,7 @@ describe("tail hygiene single-walk instrument", () => {
             }),
         );
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const protectedTagNumbers = new Set(
             measured.parts.filter((part) => part.protected).map((part) => part.tagNumber),
         );
@@ -228,7 +242,7 @@ describe("tail hygiene single-walk instrument", () => {
             tag(1, "file-owner:file0", "file"),
             tag(2, "call-subset", "tool", { toolOwnerMessageId: "tool-owner" }),
         ];
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
 
         expect(measured.u).toBeGreaterThan(0);
         expect(measured.u).toBeLessThan(measured.t);
@@ -252,31 +266,31 @@ describe("tail hygiene single-walk instrument", () => {
             tag(102, "later-after:p0", "message"),
         ];
 
-        const both = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const both = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const legacyOnly = measureTailHygiene({
             messages: messages.slice(0, 3),
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const legacyProseOnly = measureTailHygiene({
             messages: [messages[0], messages[2]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const laterOnly = measureTailHygiene({
             messages: messages.slice(3),
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const laterProseOnly = measureTailHygiene({
             messages: [messages[3], messages[5]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const allProse = measureTailHygiene({
             messages: [messages[0], messages[2], messages[3], messages[5]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const legacyToolU = legacyOnly.u - legacyProseOnly.u;
 
@@ -299,13 +313,13 @@ describe("tail hygiene single-walk instrument", () => {
             tag(11, "after:p0", "message"),
         ];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         // The neighboring tagged prose still contributes U even though both orphan rows are rejected.
         expect(measured.u).toBeGreaterThan(0);
         const textOnly = measureTailHygiene({
             messages: [messages[0], messages[2]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         expect(measured.u).toBe(textOnly.u);
         expect(measured.t).toBeGreaterThan(measured.u);
@@ -319,13 +333,13 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const bust = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: bust,
         });
@@ -342,28 +356,28 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             textMessage("untagged", "mass ".repeat(30_000)),
         ];
         const tags = [tag(1, "queued:p0", "message"), tag(2, "remaining:p0", "message")];
-        const initial = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const initial = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const queuedMass = measureTailHygiene({
             messages: [messages[0]],
             tags: [tags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         }).u;
         const baseline = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const queued = measureTailHygiene({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
         });
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
@@ -407,13 +421,13 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: [served],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const replay = refreshTailHygieneBaseline({
             messages: [served],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
@@ -430,7 +444,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: baseMessages,
             tags: baseTags,
-            protectedTags: 1,
+            protectedTagNumbers: new Set([1]),
             cacheBusting: true,
         });
         const messages = [
@@ -453,7 +467,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 1,
+            protectedTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
         });
@@ -474,19 +488,19 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: before,
             tags: beforeTags,
-            protectedTags: 2,
+            protectedTagNumbers: new Set([1, 2]),
             cacheBusting: true,
         });
         const oldMass = measureTailHygiene({
             messages: [before[0]],
             tags: [beforeTags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         }).t;
         const appended = textMessage("newest", "newest protected ".repeat(100));
         const defer = refreshTailHygieneBaseline({
             messages: [...before, appended],
             tags: [...beforeTags, tag(3, "newest:p0", "message")],
-            protectedTags: 2,
+            protectedTagNumbers: new Set([2, 3]),
             cacheBusting: false,
             previous: baseline,
         });
@@ -503,7 +517,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: [original],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const mutated = structuredClone(original) as MessageLike;
@@ -512,7 +526,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const defer = refreshTailHygieneBaseline({
             messages: [mutated],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: baseline,
         });
@@ -529,21 +543,21 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: original,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const changed = [textMessage("m", "changed content")];
         const defer = refreshTailHygieneBaseline({
             messages: changed,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: baseline,
         });
         const rewalk = refreshTailHygieneBaseline({
             messages: changed,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
             previous: defer,
         });
@@ -559,14 +573,14 @@ describe("tail hygiene baseline and defer-window deltas", () => {
     it("detects a byte mutation after the walk with a content-hash assertion", () => {
         const messages = [textMessage("m", "stable content")];
         const tags = [tag(1, "m:p0", "message")];
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         (messages[0].parts[0] as { text: string }).text = "mutated bytes!";
 
         expect(() =>
             assertTailHygieneContentUnchanged({
                 messages,
                 tags,
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
                 expectedSignature: measured.contentSignature,
             }),
         ).toThrow(/tail hygiene walk was not the last byte-affecting operation/i);
@@ -580,7 +594,7 @@ describe("tail hygiene walk performance", () => {
         const durations: number[] = [];
         for (let iteration = 0; iteration < 25; iteration += 1) {
             const start = performance.now();
-            measureTailHygiene({ messages, tags, protectedTags: 0 });
+            measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
             durations.push(performance.now() - start);
         }
         durations.sort((left, right) => left - right);
