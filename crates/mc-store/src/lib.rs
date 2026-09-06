@@ -3874,6 +3874,11 @@ pub struct ModuleMeta {
     /// render, so a transition pass can coordinate one cache-breaking HARD first.
     #[serde(default)]
     pub tagging_surface_active: bool,
+    /// Effective protected-token floor in the existing durable metadata blob. Hostless sessions
+    /// resolve it on cache-busting passes; hosted sessions mirror the host's epoch snapshot so
+    /// asynchronous reduction acknowledgements use the same floor as transforms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_tokens_effective: Option<u64>,
     /// Reclaimable-token amount at the last Channel-1 append or suppression reset.
     #[serde(default)]
     pub channel1_last_nudge_undropped: i64,
@@ -8071,7 +8076,7 @@ impl McStore {
                 if block_id.is_empty() {
                     continue;
                 }
-                if let Some(row) = tx
+                if let Some(mut row) = tx
                     .query_row(
                         "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
                          FROM mc_tags
@@ -8081,6 +8086,15 @@ impl McStore {
                     )
                     .optional()?
                 {
+                    let candidate = input.token_count.max(0);
+                    tx.execute(
+                        "UPDATE mc_tags
+                            SET token_count = MAX(COALESCE(token_count, 0), ?3)
+                          WHERE session_id = ?1 AND block_id = ?2
+                            AND COALESCE(token_count, 0) < ?3",
+                        params![session_id, block_id, candidate],
+                    )?;
+                    row.token_count = row.token_count.max(candidate);
                     out.push(row);
                     continue;
                 }
@@ -8113,6 +8127,27 @@ impl McStore {
                 });
             }
             Ok(out)
+        })?)
+    }
+
+    /// Raise a persisted tag's output-token mass without permitting a later observation to lower
+    /// it. The SQL guard also backfills a legacy NULL if one is encountered in a migrated store.
+    pub fn update_tag_token_count_max(
+        &self,
+        session_id: &str,
+        block_id: &str,
+        token_count: i64,
+    ) -> Result<bool, McStoreError> {
+        let candidate = token_count.max(0);
+        Ok(self.inner.with_conn_fenced(|conn| {
+            let changed = conn.execute(
+                "UPDATE mc_tags
+                    SET token_count = MAX(COALESCE(token_count, 0), ?3)
+                  WHERE session_id = ?1 AND block_id = ?2
+                    AND COALESCE(token_count, 0) < ?3",
+                params![session_id, block_id, candidate],
+            )?;
+            Ok(changed > 0)
         })?)
     }
 
@@ -16500,7 +16535,7 @@ fn tag_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<McTagRow> {
         tag_number: r.get(0)?,
         block_id: r.get(1)?,
         kind: r.get(2)?,
-        token_count: r.get(3)?,
+        token_count: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
         created_at_ms: r.get(4)?,
         source_bytes: r.get(5)?,
     })
@@ -19035,10 +19070,11 @@ mod tests {
         assert_eq!(
             store.tag_cache_summary("ses").unwrap(),
             TagCacheSummary {
-                generation: 3,
+                generation: 5,
                 count: 3,
                 max_tag_number: 3,
-            }
+            },
+            "the MAX-guarded raise and the new insert both invalidate the tag baseline"
         );
         store
             .execute_tag_sql_for_test(
@@ -19048,15 +19084,15 @@ mod tests {
         assert_eq!(
             store.tag_cache_summary("ses").unwrap(),
             TagCacheSummary {
-                generation: 5,
+                generation: 7,
                 count: 3,
                 max_tag_number: 3,
             },
             "an update fires both OLD and NEW generation writes"
         );
         assert_eq!(
-            all[0].token_count, 11,
-            "token count is computed once at mint"
+            all[0].token_count, 999,
+            "a later larger observation raises the durable token count"
         );
         assert_eq!(
             all[0].source_bytes, b"message source",
@@ -19069,7 +19105,15 @@ mod tests {
             store
                 .sum_tag_token_counts_for_blocks("ses", &token_sum_ids)
                 .unwrap(),
-            44
+            1_032
+        );
+        assert!(
+            !store.update_tag_token_count_max("ses", "m1#0", 10).unwrap(),
+            "a downward write is rejected by the SQL MAX guard"
+        );
+        assert_eq!(
+            store.load_tags_for_session("ses").unwrap()[0].token_count,
+            999
         );
         store
             .execute_tag_sql_for_test(
@@ -19079,7 +19123,7 @@ mod tests {
         assert_eq!(
             store.tag_cache_summary("ses").unwrap(),
             TagCacheSummary {
-                generation: 6,
+                generation: 8,
                 count: 2,
                 max_tag_number: 2,
             },
@@ -19136,6 +19180,52 @@ mod tests {
             .apply_active_overlay_decisions("ses", 4, &[], None, 800)
             .unwrap();
         assert_eq!(store.overlay_watermark("ses").unwrap(), Some(4));
+    }
+
+    #[test]
+    fn legacy_null_tag_mass_decodes_as_zero() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT 7, 'legacy#0', 'tool', NULL, 0, X''",
+                [],
+                tag_row_from_sql,
+            )
+            .unwrap();
+        assert_eq!(row.token_count, 0);
+    }
+
+    #[test]
+    fn hostless_protected_tokens_floor_round_trips_in_module_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        {
+            let store = McStore::open(&descriptor).unwrap();
+            let meta = ModuleMeta {
+                protected_tokens_effective: Some(32_000),
+                ..ModuleMeta::default()
+            };
+            store
+                .commit("protected-floor", None, &CoreState::default(), &meta)
+                .unwrap();
+        }
+
+        let restarted = McStore::open(&descriptor).unwrap();
+        assert_eq!(
+            restarted
+                .load("protected-floor")
+                .unwrap()
+                .meta
+                .protected_tokens_effective,
+            Some(32_000)
+        );
+        let mut legacy = serde_json::to_value(ModuleMeta::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("protected_tokens_effective");
+        let legacy: ModuleMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.protected_tokens_effective, None);
     }
 
     #[test]
