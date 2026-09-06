@@ -558,9 +558,8 @@ export function measureTailHygiene(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
     /**
-     * Union projection form: protectedTagNumbers (tag-number set).
-     * Coordinate space: tag-number space.
-     * Empty-window behavior: empty set means zero tool tags are protected by the token window.
+     * Canonical membership from computeProtectionWindow(persistedRows, snapshottedFloor).
+     * Coordinate space: tag-number. An empty set means the token window has no tool rows.
      */
     protectedTagNumbers: ReadonlySet<number>;
     /** Active tags whose drop is queued but not yet materialized into the rendered tail. */
@@ -758,11 +757,7 @@ function sameMeasuredPrefix(
 export function refreshTailHygieneBaseline(input: {
     messages: readonly MessageLike[];
     tags: readonly TagEntry[];
-    /**
-     * Union projection form: protectedTagNumbers (tag-number set).
-     * Coordinate space: tag-number space.
-     * Empty-window behavior: empty set means zero tool tags protected by window.
-     */
+    /** Canonical tag-number membership from persisted row mass and the floor snapshot. */
     protectedTagNumbers: ReadonlySet<number>;
     pendingDropTagNumbers?: ReadonlySet<number>;
     cacheBusting: boolean;
@@ -810,8 +805,8 @@ export function refreshTailHygieneBaseline(input: {
     ) {
         const part = measured.parts[index];
         turnDeltaT += part.tokens;
-        // The recency reserve always contains the newest completed tool output,
-        // so that output grows total mass T without growing reclaimable mass U.
+        // The canonical window always contains the newest tool-tag groups, so a newly
+        // appended attributed output grows total mass T without growing reclaimable mass U.
         if (part.kind !== "toolOutput") turnDeltaU += part.uTokens;
     }
     return {

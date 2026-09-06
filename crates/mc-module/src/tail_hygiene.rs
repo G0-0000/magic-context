@@ -1185,7 +1185,9 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct HygieneGoldenCase {
         id: String,
+        /// Inert migration sentinel retained by the cross-language fixture contract.
         protected_tags: usize,
+        protected_tokens_effective: u64,
         messages: Vec<HygieneFixtureMessage>,
         tags: Vec<HygieneFixtureTag>,
         #[serde(default)]
@@ -1240,6 +1242,7 @@ mod tests {
         tag_number: i64,
         block_id: String,
         kind: String,
+        token_count: i64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -1253,6 +1256,7 @@ mod tests {
     struct HygieneFixtureInput<'a> {
         id: &'a str,
         protected_tags: usize,
+        protected_tokens_effective: u64,
         messages: &'a [HygieneFixtureMessage],
         tags: &'a [HygieneFixtureTag],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1265,6 +1269,7 @@ mod tests {
             .map(|case| HygieneFixtureInput {
                 id: &case.id,
                 protected_tags: case.protected_tags,
+                protected_tokens_effective: case.protected_tokens_effective,
                 messages: &case.messages,
                 tags: &case.tags,
                 pending_drop_tag_numbers: (!case.pending_drop_tag_numbers.is_empty())
@@ -1349,7 +1354,7 @@ mod tests {
             tag_number: input.tag_number,
             block_id: input.block_id.clone(),
             kind: input.kind.clone(),
-            token_count: 0,
+            token_count: input.token_count,
             created_at_ms: 0,
             source_bytes: Vec::new(),
         }
@@ -1360,14 +1365,14 @@ mod tests {
         let golden: HygieneGolden =
             serde_json::from_str(include_str!("../testdata/nudge-hygiene-golden.json"))
                 .expect("parse nudge hygiene golden");
-        assert_eq!(golden.schema, 1);
-        assert_eq!(golden.provenance.generator_version, "nudge-hygiene-ts-v2");
+        assert_eq!(golden.schema, 2);
+        assert_eq!(golden.provenance.generator_version, "nudge-hygiene-ts-v3");
         assert_eq!(
             hygiene_fixture_hash(&golden.cases),
             golden.provenance.input_sha256,
             "committed fixture inputs must match the TypeScript generator provenance"
         );
-        assert!(golden.cases.len() >= 12);
+        assert!(golden.cases.len() >= 14);
 
         for case in &golden.cases {
             let messages = case
@@ -1376,6 +1381,12 @@ mod tests {
                 .map(fixture_message)
                 .collect::<Vec<_>>();
             let tags = case.tags.iter().map(fixture_tag).collect::<Vec<_>>();
+            // Rust independently walks its persisted rows with the same fixture floor; only
+            // the resulting tag-number projection enters the hygiene instrument.
+            let protection = crate::protection_window::ProtectionWindow::from_persisted_rows(
+                &tags,
+                case.protected_tokens_effective,
+            );
             let projection = project_messages(&messages).expect("project parity fixture");
             let pending_numbers = case
                 .pending_drop_tag_numbers
@@ -1392,7 +1403,7 @@ mod tests {
                 &CoreState::default(),
                 None,
                 &tags,
-                &legacy_tag_number_projection(&tags, case.protected_tags),
+                &protection.tag_numbers,
                 &HashSet::new(),
                 &pending_targets,
             );
@@ -1407,12 +1418,13 @@ mod tests {
                 );
             }
             if case.id == "queued-tool-arc-full-mass" {
-                let unqueued = measure_tail_hygiene(
+                let unqueued = measure_tail_hygiene_with_pending_drops(
                     &projection,
                     &CoreState::default(),
                     None,
                     &tags,
-                    case.protected_tags,
+                    &protection.tag_numbers,
+                    &HashSet::new(),
                     &HashSet::new(),
                 );
                 assert_eq!(
@@ -1424,6 +1436,21 @@ mod tests {
                     measured.u, case.expected.u,
                     "Rust and TS queued U must agree"
                 );
+            }
+            if case.id == "protected-recency-reserve" {
+                assert!(protection.tag_numbers.tag_numbers.contains(&TagNumber(2)));
+            }
+            if case.id == "protected-token-window-spans-more-than-one-tag" {
+                assert_eq!(
+                    protection.tag_numbers.tag_numbers,
+                    [TagNumber(1), TagNumber(2), TagNumber(3), TagNumber(4)]
+                        .into_iter()
+                        .collect()
+                );
+            }
+            if case.id == "empty-protected-token-window" {
+                assert_eq!(case.protected_tags, 99);
+                assert!(protection.tag_numbers.tag_numbers.is_empty());
             }
             if case.id == "reasoning-excluded-both-terms" {
                 let reasoning_tokens = case

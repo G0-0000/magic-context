@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { computeProtectionWindow } from "../../features/magic-context/protection-window";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import type { TagEntry } from "../../features/magic-context/types";
 import { buildChannel1Reminder, decideChannel1 } from "./ctx-reduce-nudge";
@@ -77,6 +78,48 @@ describe("tail hygiene single-walk instrument", () => {
         expect(severity).toBeGreaterThanOrEqual(0.55);
         expect(severity).toBeLessThan(0.7);
         expect(oldWouldFire).toBe(false);
+    });
+
+    it("consumes token-window membership derived from the floor and persisted tag mass", () => {
+        const messages: MessageLike[] = [];
+        const tags: TagEntry[] = [];
+        const persistedRows: Array<{
+            tag_number: number;
+            block_id: string;
+            kind: "tool";
+            token_count: number;
+        }> = [];
+        for (let number = 1; number <= 4; number += 1) {
+            const owner = `owner-${number}`;
+            const callId = `call-${number}`;
+            messages.push(nativeTool(owner, callId, { path: String(number) }, `result ${number}`));
+            tags.push(tag(number, callId, "tool", { toolOwnerMessageId: owner }));
+            persistedRows.push({
+                tag_number: number,
+                block_id: callId,
+                kind: "tool",
+                token_count: 4_000,
+            });
+        }
+        const protectedTagNumbers = computeProtectionWindow(persistedRows, 16_000).tagNumberSet
+            .tagNumbers;
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers });
+
+        expect(protectedTagNumbers).toEqual(new Set([1, 2, 3, 4]));
+        expect(measured.u).toBe(0);
+        expect(measured.t).toBeGreaterThan(0);
+
+        const emptyProtectedTagNumbers = computeProtectionWindow(
+            [{ tag_number: 5, block_id: "message:p0", kind: "message", token_count: 8_000 }],
+            16_000,
+        ).tagNumberSet.tagNumbers;
+        const emptyWindowMeasured = measureTailHygiene({
+            messages: [textMessage("message", "still reclaimable")],
+            tags: [tag(5, "message:p0", "message")],
+            protectedTagNumbers: emptyProtectedTagNumbers,
+        });
+        expect(emptyProtectedTagNumbers).toEqual(new Set());
+        expect(emptyWindowMeasured.u).toBe(emptyWindowMeasured.t);
     });
 
     it("is invariant to raw tag weights and measures only final rendered content", () => {

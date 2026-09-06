@@ -3267,7 +3267,6 @@ export function registerPiContextHandler(
 						sessionId,
 					);
 					const protectedTagNumbers = windowResult.tagNumberSet.tagNumbers;
-					const protectedTags = options.protectedTags ?? 20;
 					// Queued ctx_reduce drops are completed agent decisions. Their bytes
 					// remain in T until a cache-busting materialization, but not in U.
 					const pendingDropTagNumbers = new Set(
@@ -3282,7 +3281,6 @@ export function registerPiContextHandler(
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
 						tags,
-						protectedTags,
 						protectedTagNumbers,
 						pendingDropTagNumbers,
 						stableId,
@@ -3312,7 +3310,7 @@ export function registerPiContextHandler(
 					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
 						options.db,
 						sessionId,
-						newestActiveTagNumbersByCount(tags, protectedTags),
+						protectedTagNumbers,
 					);
 					const channelState = {
 						...baseline,
@@ -3320,7 +3318,7 @@ export function registerPiContextHandler(
 						realUserTurnCount: countRealPiUserMessages({
 							messages: outputMessages,
 							tags,
-							protectedTags,
+							protectedTagNumbers,
 							pendingDropTagNumbers,
 							stableId,
 							syntheticLeadingCount: result.syntheticLeadingCount,
@@ -3356,7 +3354,7 @@ export function registerPiContextHandler(
 						assertPiTailHygieneContentUnchanged({
 							messages: outputMessages,
 							tags,
-							protectedTags,
+							protectedTagNumbers,
 							pendingDropTagNumbers,
 							stableId,
 							syntheticLeadingCount: result.syntheticLeadingCount,
