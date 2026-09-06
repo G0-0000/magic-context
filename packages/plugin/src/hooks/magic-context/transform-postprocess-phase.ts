@@ -856,7 +856,12 @@ interface RunPostTransformPhaseArgs {
     deferredMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
     clearReasoningAge: number;
+    /** Legacy count-window fallback for callers not yet supplying the canonical projections. */
     protectedTags: number;
+    /** Canonical token-window membership in tag-number space. */
+    protectedTagNumbers?: ReadonlySet<number>;
+    /** Canonical token-window cutoff in tag-number space. */
+    protectedCutoff?: number | null;
     /**
      * Ceiling for the tiered emergency drop = contextLimit × executeThreshold%.
      * Undefined when the context limit isn't resolved (cold start) — the
@@ -1501,7 +1506,7 @@ export async function runPostTransformPhase(
                 args.sessionId,
                 args.db,
                 args.targets,
-                args.protectedTags,
+                args.protectedTagNumbers ?? args.protectedTags,
                 undefined,
                 pendingOps,
             );
@@ -1568,6 +1573,7 @@ export async function runPostTransformPhase(
                 args.messageTagNumbers,
                 {
                     protectedTags: args.protectedTags,
+                    protectedCutoff: args.protectedCutoff,
                     // Tiered emergency drop fires only at the derived force band (both primary and
                     // subagent) AND only when the ceiling is known. Undefined
                     // ceiling (cold start) or below-threshold usage → no
@@ -1599,6 +1605,7 @@ export async function runPostTransformPhase(
                     args.messageTagNumbers,
                     {
                         protectedTags: args.protectedTags,
+                        protectedCutoff: args.protectedCutoff,
                         routine: true,
                         caveman: cavemanConfig,
                     },
@@ -1753,6 +1760,7 @@ export async function runPostTransformPhase(
                     targets: args.targets,
                     pendingOps,
                     recentMessageIds,
+                    protectedTagNumbers: args.protectedTagNumbers,
                 });
                 for (const op of supersessionOps) {
                     if (!selectedIds.has(op.tagId)) {
@@ -1766,6 +1774,7 @@ export async function runPostTransformPhase(
                     targets: args.targets,
                     pendingOps,
                     recentMessageIds,
+                    protectedTagNumbers: args.protectedTagNumbers,
                 });
                 for (const op of editReclaim.ops) {
                     // A superseded edit only compresses if no earlier rule already
@@ -1784,7 +1793,7 @@ export async function runPostTransformPhase(
                     args.sessionId,
                     args.db,
                     args.targets,
-                    args.protectedTags,
+                    args.protectedTagNumbers ?? args.protectedTags,
                     undefined,
                     [],
                     syntheticPendingOps,
@@ -2726,6 +2735,7 @@ export async function runPostTransformPhase(
                 const baseline = refreshTailHygieneBaseline({
                     messages: args.messages,
                     tags,
+                    protectedTagNumbers: args.protectedTagNumbers,
                     protectedTags: args.protectedTags,
                     pendingDropTagNumbers,
                     cacheBusting: bustedThisPass,

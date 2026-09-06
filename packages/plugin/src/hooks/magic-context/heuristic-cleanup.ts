@@ -42,6 +42,11 @@ export function applyHeuristicCleanup(
     config: {
         protectedTags: number;
         /**
+         * Exact token-window cutoff in tag-number space. A null cutoff means the
+         * persisted tool population is empty; undefined is retained only for legacy callers.
+         */
+        protectedCutoff?: number | null;
+        /**
          * Tiered target-headroom emergency drop. Provided only on force-materialization
          * passes at or above the derived force band; undefined on routine execute
          * passes, which do not perform age-based tool drops. When
@@ -119,7 +124,7 @@ export function applyHeuristicCleanup(
             tags: droppableTags as readonly EmergencyDropTag[],
             floorTags: activeTags as readonly EmergencyDropTag[],
             maxTag,
-            protectedTags: config.protectedTags,
+            protectedCutoff: config.protectedCutoff,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
             ceilingTokens: emergency.ceilingTokens,
             usagePercentage: emergency.usagePercentage,

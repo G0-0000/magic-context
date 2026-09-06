@@ -2091,11 +2091,14 @@
         "maximum": 2000000
       }
     },
+    "protected_tokens": {
+      "description": "Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000). When omitted, the derived default is clamp(round(0.05 × usableSoft), min(16_000, round(0.08 × usableSoft)), 64_000).",
+      "type": "integer",
+      "minimum": 4000,
+      "maximum": 1000000
+    },
     "protected_tags": {
-      "description": "Number of recent tags to protect from dropping (min: 1, max: 100, default: 20)",
-      "type": "number",
-      "minimum": 1,
-      "maximum": 100
+      "description": "Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead."
     },
     "clear_reasoning_age": {
       "default": 50,

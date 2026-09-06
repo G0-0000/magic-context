@@ -201,24 +201,28 @@ describe("applyHeuristicCleanup", () => {
             //#when 10 tags × 4000 bytes × 0.25 = 10000 tokens of tail; usage 10000,
             // ceiling 6000 → target = 0 + 0.30×6000 = 1800 → reclaim ≈ 8200 tokens.
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 2,
-                emergency: { currentTotalInputTokens: 10_000, ceilingTokens: 6_000 },
+                protectedTags: 0,
+                protectedCutoff: 9,
+                emergency: {
+                    currentTotalInputTokens: 10_000,
+                    ceilingTokens: 6_000,
+                    usagePercentage: 95,
+                },
             });
 
-            //#then the oldest tags drop first, including the bash tool at tag 3, while the newest protected window retains its persisted skeleton.
-            expect(result.droppedTools).toBeGreaterThan(0);
+            //#then the >=95% backstop yields the token window and drops oldest-first until the target is met.
+            expect(result.droppedTools).toBe(9);
             const tags = getTagsBySession(db, SESSION);
             const dropped = tags
                 .filter((t) => t.status === "dropped")
                 .map((t) => t.tagNumber)
                 .sort((a, b) => a - b);
-            // protected tail (tags 9,10) never dropped.
-            expect(dropped).not.toContain(9);
-            expect(dropped).not.toContain(10);
-            // oldest dropped first.
-            expect(dropped[0]).toBe(1);
+            // Nine 1k-token drops are needed to exceed the 8.2k reclaim target;
+            // tag 10 survives because selection stops once that target is met.
+            expect(dropped).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            expect(tags.find((tag) => tag.tagNumber === 10)?.status).toBe("active");
             expect(
-                tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "truncated"),
+                tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "full"),
             ).toBe(true);
         });
 

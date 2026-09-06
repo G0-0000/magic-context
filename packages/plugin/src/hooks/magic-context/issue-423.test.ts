@@ -1,7 +1,12 @@
+import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { createTagger } from "../../features/magic-context/tagger";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { registerIssue423Tests } from "./issue-423-test-support.test";
 import { tagMessages } from "./tag-messages";
+
+// Deliberately cover the initial tool mass so the first pass has no candidates;
+// the later >=95% pass yields the window and can prove the episode latch still arms.
+const ISSUE_423_PROTECTED_TOKENS = 1_000_000;
 
 registerIssue423Tests("opencode", {
     raw: (fixture) => fixture.raw,
@@ -15,7 +20,12 @@ registerIssue423Tests("opencode", {
             tagged.targets,
             tagged.messageTagNumbers,
             {
-                protectedTags: 24,
+                protectedTags: 0,
+                protectedCutoff: getProtectionWindowForSession(
+                    db,
+                    sessionId,
+                    ISSUE_423_PROTECTED_TOKENS,
+                ).cutoff,
                 routine: false,
                 emergency: {
                     currentTotalInputTokens: percentage * 2040,

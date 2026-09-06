@@ -1160,7 +1160,7 @@ export const MagicContextConfigSchema = z
             .max(1_000_000)
             .optional()
             .describe(
-                "Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000; omitted -> derived default)",
+                "Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000). When omitted, the derived default is clamp(round(0.05 × usableSoft), min(16_000, round(0.08 × usableSoft)), 64_000).",
             ),
         protected_tags: z
             .unknown()
