@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
     __ignoredNotificationTest,
     flushIgnoredMessages,
@@ -9,6 +9,8 @@ import {
 const DEFAULT_TITLE = "New session - 2026-06-11T12:00:00.000Z";
 
 describe("sendIgnoredMessage", () => {
+    // Delivery-unit tests supply an idle harness; the lifecycle timeline is tested separately.
+    beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
     afterEach(() => {
         __ignoredNotificationTest.reset();
     });

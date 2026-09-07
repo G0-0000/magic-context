@@ -1,4 +1,5 @@
 import { clearRecompStaging } from "../../features/magic-context/compartment-storage";
+import { HAS_COMPARTMENT_CONTENT_SQL } from "../../features/magic-context/no-content-compartment";
 import {
     getOrCreateSessionMeta,
     updateSessionMeta,
@@ -54,7 +55,7 @@ const UPGRADE_REMINDER_TEXT = [
  *  which would otherwise TRAP the session — the old gate said "already upgraded"
  *  and refused to re-run (dogfood 2026-05-30, AFT session with 541 tierless rows).
  *  Single source of truth shared with the upgrade gate in recomp-orchestrator. */
-export const NEEDS_UPGRADE_SQL = "(legacy = 1 OR p1 IS NULL OR p1 = '')";
+export const NEEDS_UPGRADE_SQL = `(${HAS_COMPARTMENT_CONTENT_SQL} AND (legacy = 1 OR p1 IS NULL OR p1 = ''))`;
 
 /**
  * Count compartments that still need a v2 upgrade (pre-v2 `legacy=1` rows OR

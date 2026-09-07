@@ -3,7 +3,7 @@
 // to prevent the TUI toast path from intercepting sendIgnoredMessage calls.
 process.env.OPENCODE_CLIENT = "desktop";
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,6 +42,10 @@ import { autoEmbedAttemptedBySession, clearEmbedSessionState } from "./embed-ses
 import { createMagicContextHook, type MagicContextDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
 import { closeReadOnlySessionDb } from "./read-session-db";
+import { __ignoredNotificationTest } from "./send-session-notification";
+
+// Command-routing units model an already idle host; lifecycle ordering has its own timeline regression.
+beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
 
 type PromptMocks = {
     prompt?: ReturnType<typeof mock>;
@@ -88,6 +92,7 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     autoEmbedAttemptedBySession.clear();
     _resetProjectEmbeddingRegistryForTests();
     _setTestProviderFactoryForProject(null);
@@ -1116,4 +1121,39 @@ describe("magic-context hook", () => {
         expect(meta.observedSafeInputTokens).toBe(0);
         expect(meta.cacheAlertSent).toBe(false);
     });
+});
+
+it("the event hook flushes notices on session.idle, never on a terminal assistant update", async () => {
+    __ignoredNotificationTest.reset();
+    process.env.XDG_DATA_HOME = makeTempDir("hook-notice-idle-");
+    const promptMocks = createPromptMocks();
+    const deps = createMockDeps(promptMocks);
+    const hook = requireHook(createMagicContextHook(deps));
+    const sessionID = "ses-hook-notice-idle";
+    await hook.event!({
+        event: {
+            type: "message.updated",
+            properties: {
+                info: {
+                    id: "done",
+                    sessionID,
+                    role: "assistant",
+                    finish: "stop",
+                    time: { created: 1, completed: 2 },
+                },
+            },
+        },
+    } as never);
+    const { sendIgnoredMessage } = await import("./send-session-notification");
+    expect(
+        await sendIgnoredMessage(deps.client, sessionID, "⏳ Context at 95%", {
+            agent: "build",
+            variant: "high",
+            providerId: "local",
+            modelId: "27B",
+        }),
+    ).toBe("queued");
+    expect(promptMocks.prompt).not.toHaveBeenCalled();
+    await hook.event!({ event: { type: "session.idle", properties: { sessionID } } } as never);
+    expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
 });

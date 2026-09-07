@@ -41,6 +41,17 @@ pub struct DecayRenderCompartment {
     pub legacy: Option<i32>,
 }
 
+impl DecayRenderCompartment {
+    /// Empty payload rows advance coverage but are not summaries or decay inputs.
+    pub fn is_no_content(&self) -> bool {
+        self.title.is_empty()
+            && self.content.is_empty()
+            && [&self.p1, &self.p2, &self.p3, &self.p4]
+                .iter()
+                .all(|p| p.as_deref().unwrap_or("").is_empty())
+    }
+}
+
 impl From<&StoredCompartment> for DecayRenderCompartment {
     /// Project a stored compartment into the renderer's input shape. Empty tier
     /// strings stay empty (the `is_tiered_row`/`tier_body` logic distinguishes an
@@ -221,7 +232,7 @@ pub fn render_compartment_at_tier(c: &DecayRenderCompartment, tier: u8) -> Strin
 }
 
 fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
-    if tier >= 5 {
+    if c.is_no_content() || tier >= 5 {
         return String::new(); // archived
     }
     let heading = compartment_heading(c);
@@ -313,6 +324,20 @@ pub fn render_decayed_compartments(
     if compartments.is_empty() {
         return String::new();
     }
+    let filtered;
+    let compartments = if compartments
+        .iter()
+        .any(DecayRenderCompartment::is_no_content)
+    {
+        filtered = compartments
+            .iter()
+            .filter(|c| !c.is_no_content())
+            .cloned()
+            .collect::<Vec<_>>();
+        filtered.as_slice()
+    } else {
+        compartments
+    };
     let mut tiers = compute_tiers(compartments, history_budget_tokens);
 
     let render = |tiers: &[u8]| -> String {

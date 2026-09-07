@@ -20,6 +20,7 @@
  * the memory block separately; session facts are not a render input.
  */
 
+import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import { computeBudgetPressure, renderedTier, TIER_COST, type Tier } from "./decay-curve";
 import { estimateTokens } from "./read-session-formatting";
 
@@ -120,7 +121,7 @@ export function renderCompartmentAtTier(c: DecayRenderCompartment, tier: number)
 }
 
 function renderOneCompartment(c: DecayRenderCompartment, tier: number): string {
-    if (tier >= 5) return ""; // archived
+    if (isNoContentCompartment(c) || tier >= 5) return ""; // archived
     const heading = compartmentHeading(c);
 
     // Legacy rows AND malformed pseudo-v2 rows (legacy=0 but no usable p1, e.g.
@@ -188,7 +189,8 @@ export function renderDecayedCompartments(args: {
     compartments: DecayRenderCompartment[];
     historyBudgetTokens: number;
 }): string {
-    const { compartments, historyBudgetTokens } = args;
+    const { historyBudgetTokens } = args;
+    const compartments = args.compartments.filter((c) => !isNoContentCompartment(c));
     if (compartments.length === 0) return "";
 
     const tiers = computeTiers(compartments, historyBudgetTokens);

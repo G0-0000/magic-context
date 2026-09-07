@@ -11435,6 +11435,31 @@ impl McStore {
         }
     }
 
+    /// Append a boundary-only historian marker only if its assembly snapshot is still current.
+    /// Reverts and concurrent publications must not turn a scan of old noise into new coverage.
+    pub fn append_filtered_noise_marker(
+        &self,
+        session_id: &str,
+        marker: &StoredCompartment,
+        expected_revert_epoch: u64,
+        expected_generation: CompartmentSetGeneration,
+    ) -> Result<bool, McStoreError> {
+        Ok(self.inner.with_conn_fenced(|tx| {
+            let epoch: i64 = tx.query_row(
+                "SELECT COALESCE((SELECT json_extract(meta, '$.revert_epoch') FROM mc_cache_state WHERE session_id = ?1), 0)",
+                params![session_id], |row| row.get(0),
+            )?;
+            let (max_sequence, count): (i64, i64) = tx.query_row(
+                "SELECT COALESCE(MAX(sequence), 0), COUNT(*) FROM mc_compartments WHERE session_id = ?1",
+                params![session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if epoch as u64 != expected_revert_epoch || max_sequence != expected_generation.max_sequence || count != expected_generation.count {
+                return Ok(false);
+            }
+            Ok(matches!(append_compartments_tx(tx, session_id, std::slice::from_ref(marker))?, AppendCompartmentsTxnOutcome::Appended))
+        })?)
+    }
+
     /// Promote validated historian facts into project memories using exact-content
     /// de-duplication against the active render set. This path is additive only: it
     /// inserts new `mc_memories` rows and never writes mutation-log rows, so the next

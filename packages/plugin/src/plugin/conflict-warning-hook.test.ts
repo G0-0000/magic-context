@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import {
     __ignoredNotificationTest,
     flushIgnoredMessages,
+    observeIgnoredNotificationEvent,
 } from "../hooks/magic-context/send-session-notification";
 import { cleanupTestTempDir, createTestTempDir } from "../shared/test-temp-dir";
 import { __conflictWarningTest, sendStartupAnnouncement } from "./conflict-warning-hook";
@@ -64,6 +65,12 @@ describe("conflict-warning notifications", () => {
 
         process.env.MAGIC_CONTEXT_NOTICE_GATE = "bypass";
         await flushIgnoredMessages(sessionId);
+        expect(prompt).not.toHaveBeenCalled();
+        observeIgnoredNotificationEvent({
+            type: "session.idle",
+            properties: { sessionID: sessionId },
+        });
+        await flushIgnoredMessages(sessionId);
         expect(prompt).toHaveBeenCalledTimes(1);
         expect(markSeen).toHaveBeenCalledWith("9.9.9");
     });
@@ -78,8 +85,8 @@ describe("conflict-warning notifications", () => {
         );
         // These two assertions inspect the wire shape; runtime notification posts stay in the sender.
         const allowedSites = new Set([
-            "hooks/magic-context/hook.test.ts:569",
-            "hooks/magic-context/hook.test.ts:674",
+            "hooks/magic-context/hook.test.ts:574",
+            "hooks/magic-context/hook.test.ts:679",
         ]);
         const needle = ["noReply", "true"].join(": ");
         const violations = sourceFiles(sourceRoot)

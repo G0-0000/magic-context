@@ -200,6 +200,8 @@ export interface SessionChunk {
     hasMore: boolean;
     text: string;
     lines: SessionChunkLine[];
+    /** Raw rows positively excluded by the reader when the entire chunk has no content. */
+    filteredNoiseLines?: SessionChunkLine[];
     /** Number of distinct commit clusters — assistant blocks with commits separated by meaningful user turns */
     commitClusterCount: number;
     /**
@@ -840,6 +842,9 @@ export function readSessionChunk(
                 : totalMessageCount),
         text,
         lines: lineMeta,
+        ...(messagesProcessed === 0 && text.length === 0
+            ? { filteredNoiseLines: pendingNoiseMeta }
+            : {}),
         commitClusterCount: commitClusters,
         toolOnlyRanges,
         completedToolArcs,

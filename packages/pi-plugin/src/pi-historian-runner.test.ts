@@ -1073,3 +1073,29 @@ describe("runPiHistorian", () => {
 		});
 	});
 });
+
+it("persists a boundary-only marker for a fully filtered Pi head without spawning a producer", async () => {
+	const messages = rawMessages(3);
+	messages[0].parts = [{ type: "text", text: "ignored status", ignored: true }];
+	messages[1].role = "assistant";
+	messages[1].parts = [{ type: "reasoning", text: "aborted thinking" }];
+	const { db, runner } = await runHistorianWith({
+		providerMessages: messages,
+		boundarySnapshot: makeBoundarySnapshot({
+			protectedTailStart: 3,
+			eligibleEndOrdinal: 3,
+			rawMessageCountAtTrigger: 3,
+			usagePercentage: 114,
+		}),
+	});
+	try {
+		expect(runner.run).toHaveBeenCalledTimes(0);
+		const rows = getCompartments(db, "ses-historian");
+		expect(rows).toHaveLength(1);
+		expect(rows[0].endMessage).toBe(2);
+		expect(rows[0].content).toBe("");
+		expect(rows[0].endMessageId).toBe(messages[1].id);
+	} finally {
+		closeQuietly(db);
+	}
+});

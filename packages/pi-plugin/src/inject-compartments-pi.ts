@@ -33,6 +33,7 @@ import {
 import type { Memory } from "@magic-context/core/features/magic-context/memory/types";
 import { resolveMuralWire } from "@magic-context/core/features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "@magic-context/core/features/magic-context/mural/resolve-mural";
+import { isNoContentCompartment } from "@magic-context/core/features/magic-context/no-content-compartment";
 import {
 	type ContextDatabase,
 	clearCachedM0M1,
@@ -1881,7 +1882,11 @@ function renderM1PiWithMetadata(
 
 	const newCompartments = (
 		compartmentsOverride ?? getRenderableCompartmentsPi(db, state)
-	).filter((compartment) => compartment.sequence > markers.maxCompartmentSeq);
+	).filter(
+		(compartment) =>
+			compartment.sequence > markers.maxCompartmentSeq &&
+			!isNoContentCompartment(compartment),
+	);
 	if (newCompartments.length > 0) {
 		// New compartments are newest deltas → always render at P1 (full fidelity).
 		const body = newCompartments

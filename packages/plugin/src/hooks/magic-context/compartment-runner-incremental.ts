@@ -74,6 +74,7 @@ import {
 } from "./compartment-runner-validation";
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
+import { persistFilteredNoise } from "./persist-filtered-noise";
 import { producerWindowFailureReason } from "./producer-window-guard";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -377,6 +378,13 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         telemetry.chunkStartOrdinal = chunk.startIndex;
         telemetry.chunkEndOrdinal = chunk.endIndex;
         if (!chunk.text || chunk.messageCount === 0) {
+            if (persistFilteredNoise(db, sessionId, chunk, eligibleEndOrdinal)) {
+                telemetry.status = "noop";
+                telemetry.failureReason = "filtered noise skipped";
+                telemetry.chunkEndOrdinal = eligibleEndOrdinal - 1;
+                rollbackDrainReservation();
+                return;
+            }
             sessionLog(
                 sessionId,
                 `historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${eligibleEndOrdinal - 1}`,

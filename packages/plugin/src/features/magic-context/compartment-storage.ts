@@ -2,6 +2,7 @@ import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { isCompartmentLeaseHeld } from "./compartment-lease";
 import { getIncrementDepthStatement } from "./compression-depth-storage";
+import { isNoContentCompartment } from "./no-content-compartment";
 import { clearCachedM0M1 } from "./storage-meta-shared";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
@@ -185,7 +186,7 @@ function insertCompartmentRows(
             compartment.p4 ?? null,
             typeof compartment.importance === "number" ? compartment.importance : 50,
             compartment.episodeType ?? null,
-            hasTiers ? 0 : 1,
+            hasTiers || isNoContentCompartment(compartment) ? 0 : 1,
             now,
             getHarness(),
         );
@@ -436,6 +437,7 @@ export function buildCompartmentBlock(
     }
 
     for (const c of compartments) {
+        if (isNoContentCompartment(c)) continue;
         const dates = dateRanges?.byId.get(c.id);
         const dateAttr = dates ? ` start-date="${dates.start}" end-date="${dates.end}"` : "";
         lines.push(

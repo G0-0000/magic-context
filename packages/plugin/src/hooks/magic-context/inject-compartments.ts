@@ -18,6 +18,7 @@ import {
 import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
+import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     computeProjectDocsHash,
     GLOBAL_USER_PROFILE_PROJECT_PATH,
@@ -2647,7 +2648,9 @@ function renderM1WithMetadata(
 
     const newCompartments = withCompartmentDates(
         options.sessionId,
-        readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq),
+        readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq).filter(
+            (c) => !isNoContentCompartment(c),
+        ),
         options.temporalAwareness,
     );
     if (newCompartments.length > 0) {

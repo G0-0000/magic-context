@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +50,10 @@ import { getWindowReportsPath } from "../../features/magic-context/window-report
 import { createEventHandler as createPluginEventHandler } from "../../plugin/event";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { createEventHandler } from "./event-handler";
+import { __ignoredNotificationTest } from "./send-session-notification";
+
+// These alert-content units supply idle authorization independently of the harness event hook.
+beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
 
 type ContextUsageCacheEntry = {
     usage: ContextUsage;
@@ -62,6 +66,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     __resetMessageIndexAsyncForTests();
     transformDecisionLogTest.reset();
     closeDatabase();
