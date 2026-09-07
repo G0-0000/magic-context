@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
 import {
     __resetChildSpawnFenceProbeForTests,
@@ -21,6 +21,10 @@ import {
     STALE_PLUGIN_RESTART_NOTICE,
 } from "./child-session-spawn";
 
+import { __ignoredNotificationTest } from "./send-session-notification";
+
+// Schema-warning delivery is exercised with an idle parent, not an active model loop.
+beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
 const dbs: Database[] = [];
 
 function staleDatabase(): Database {
@@ -35,6 +39,7 @@ function staleDatabase(): Database {
 }
 
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     __resetChildSpawnFenceProbeForTests();
     __resetNotificationStateForTests();
     for (const db of dbs.splice(0)) db.close();

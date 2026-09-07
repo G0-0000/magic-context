@@ -53,7 +53,11 @@ import {
     resetNoteNudgeCooldownOnly,
 } from "./note-nudger";
 import { readRawSessionMessageById, readRawSessionMessages } from "./read-session-chunk";
-import { clearIgnoredMessages, flushIgnoredMessages } from "./send-session-notification";
+import {
+    clearIgnoredMessages,
+    flushIgnoredMessages,
+    observeIgnoredNotificationEvent,
+} from "./send-session-notification";
 import { variantChangeBustsProviderCache } from "./sentinel";
 import { matchStrippedMagicContextCommand } from "./stripped-command";
 import { normalizeTodoStateJson } from "./todo-view";
@@ -337,6 +341,7 @@ export function createEventHook(args: {
         args.latestAssistantMessageIdBySession ?? new Map<string, string>();
 
     return async (input: { event: { type: string; properties?: unknown } }) => {
+        observeIgnoredNotificationEvent(input.event);
         await args.eventHandler(input);
 
         if (input.event.type === "message.updated") {
@@ -469,9 +474,8 @@ export function createEventHook(args: {
             clearSessionTracking(sessionId);
         }
 
-        // Terminal message.updated/session events are the other existing idle
-        // boundary. `flushIgnoredMessages` checks the same DB signal again, so
-        // streaming deltas cannot accidentally release the queue mid-turn.
+        // The harness idle signal, not finish=stop, authorizes notice delivery.
+        // Other events may safely attempt a flush but cannot release the queue.
         if (input.event.type !== "session.deleted") {
             await flushIgnoredMessages(sessionId);
         }

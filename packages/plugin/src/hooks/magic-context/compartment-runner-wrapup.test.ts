@@ -5,7 +5,11 @@ import {
     acquireCompartmentLease,
     releaseCompartmentLease,
 } from "../../features/magic-context/compartment-lease";
-import { getCompartments } from "../../features/magic-context/compartment-storage";
+import {
+    appendCompartments,
+    getCompartments,
+    getLastCompartmentEndMessage,
+} from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -453,4 +457,57 @@ describe("runCompartmentAgent wrapup controls", () => {
             closeQuietly(db);
         }
     });
+});
+
+it("persists progress past an ignored notice and reasoning-only head without consuming the protected tail", async () => {
+    const db = createDb();
+    const sessionId = "ses-filtered-noise-head";
+    const messages = rawMessages(4);
+    messages[1].parts = [
+        {
+            type: "text",
+            text: "⏳ Context at 114% — Magic Context is comparting history…",
+            ignored: true,
+        },
+    ];
+    messages[2].role = "assistant";
+    messages[2].parts = [{ type: "reasoning", text: "aborted thought" }];
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "m-1",
+            endMessageId: "m-1",
+            title: "Prior",
+            content: "Prior content",
+            p1: "Prior content",
+        },
+    ]);
+    try {
+        await withProviderMessages(sessionId, messages, async () => {
+            expect(readSessionChunk(sessionId, 10_000, 2, 4).messageCount).toBe(0);
+            const snapshot = {
+                ...wrapupSnapshot(db, sessionId, 114),
+                offset: 2,
+                protectedTailStart: 4,
+                eligibleEndOrdinal: 4,
+                rawRangeFingerprint: "",
+            };
+            await runWithLease({ db, sessionId, snapshot, forceDrainQuota: true });
+            expect(getLastCompartmentEndMessage(db, sessionId)).toBe(3);
+            expect(getCompartments(db, sessionId)).toHaveLength(2);
+            expect(wrapupSnapshot(db, sessionId, 114).offset).toBe(4);
+            await runWithLease({
+                db,
+                sessionId,
+                snapshot: { ...snapshot, offset: 4 },
+                forceDrainQuota: true,
+            });
+            expect(getCompartments(db, sessionId)).toHaveLength(2);
+            expect(readSessionChunk(sessionId, 10_000, 4, 5).text).toContain("message 4");
+        });
+    } finally {
+        closeQuietly(db);
+    }
 });

@@ -3452,6 +3452,7 @@ impl Drop for WrapupSessionGuard {
 }
 
 enum PreparedWrapupAction {
+    FilteredNoiseSkipped,
     Busy(LiveHistorianCompletionWait),
     Nothing(String),
     FireReady(Box<HistorianFiringTask>),
@@ -5481,6 +5482,11 @@ impl McHandler {
                 firing.validate_options.force_keep_last_compartment = !firing.chunk.has_more;
                 firing
             }
+            Ok(AssembleHistorianFiringOutcome::NoFire(
+                historian_chunk::HistorianNoFireReason::FilteredNoiseSkipped { .. },
+            )) => {
+                return PreparedWrapupAction::FilteredNoiseSkipped;
+            }
             Ok(AssembleHistorianFiringOutcome::NoFire(reason)) => {
                 return PreparedWrapupAction::Nothing(format!("{reason:?}"));
             }
@@ -7159,6 +7165,7 @@ impl McHandler {
                 break;
             }
             match prepared {
+                PreparedWrapupAction::FilteredNoiseSkipped => continue,
                 PreparedWrapupAction::Busy(completion) => {
                     if let Err(reason) = self
                         .await_wrapup_historian_completion(completion, deadline)

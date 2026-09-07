@@ -95,6 +95,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
 import { producerWindowFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import {
 	createDefaultBoundarySnapshotForTests,
@@ -657,9 +658,17 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const forceKeepLastCompartmentForChunk =
 				forceKeepLastCompartment === true && !chunk.hasMore;
 			if (!chunk.text || chunk.messageCount === 0) {
+				if (persistFilteredNoise(db, sessionId, chunk, eligibleEndOrdinal)) {
+					telemetry.status = "noop";
+					telemetry.failureReason = "filtered noise skipped";
+					telemetry.chunkStartOrdinal = offset;
+					telemetry.chunkEndOrdinal = eligibleEndOrdinal - 1;
+					rollbackDrainReservation();
+					return;
+				}
 				sessionLog(
 					sessionId,
-					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
+					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${eligibleEndOrdinal - 1}`,
 				);
 				if (boundarySnapshot.usagePercentage < 80) {
 					if (!isWrapupInProgress(db, sessionId))
