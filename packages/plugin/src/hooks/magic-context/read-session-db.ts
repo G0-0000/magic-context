@@ -1,7 +1,12 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import {
+    claimOpenCodeDbDiagnosticOnce,
+    clearOpenCodeDbReadFailure,
+    type OpenCodeDbPathResolution,
+    openCodeDbPathExists,
+    recordOpenCodeDbReadFailure,
+    resolveOpenCodeDbPath,
+} from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
@@ -23,18 +28,9 @@ interface PartDataRow {
     data?: string | null;
 }
 
-function getOpenCodeDbPath(): string {
-    return join(getDataDir(), "opencode", "opencode.db");
-}
-
-/**
- * Whether OpenCode's session DB file exists. Raw-message readers consult this
- * before opening it so a harness with no OpenCode DB (a Pi-only install, or a
- * transform whose per-session RawMessageProvider was unregistered out-of-band)
- * degrades to "no messages" instead of throwing `unable to open database file`.
- */
+/** Whether the resolved OpenCode session database currently exists. */
 export function openCodeDbExists(): boolean {
-    return existsSync(getOpenCodeDbPath());
+    return openCodeDbPathExists(resolveOpenCodeDbPath());
 }
 
 let cachedReadOnlyDb: { path: string; db: Database } | null = null;
@@ -54,7 +50,13 @@ function closeCachedReadOnlyDb(): void {
 }
 
 function getReadOnlySessionDb(): Database {
-    const dbPath = getOpenCodeDbPath();
+    const resolution = resolveOpenCodeDbPath();
+    const dbPath = resolution.path;
+    if (!openCodeDbPathExists(resolution)) {
+        throw new Error(
+            `OpenCode session database is unavailable at ${dbPath} (source=${resolution.source})`,
+        );
+    }
     if (cachedReadOnlyDb?.path === dbPath) {
         return cachedReadOnlyDb.db;
     }
@@ -62,6 +64,7 @@ function getReadOnlySessionDb(): Database {
     closeCachedReadOnlyDb();
     const db = new Database(dbPath, { readonly: true });
     cachedReadOnlyDb = { path: dbPath, db };
+    clearOpenCodeDbReadFailure();
     return db;
 }
 
@@ -88,14 +91,256 @@ export function getRawSessionMessageCountFromDb(db: Database, sessionId: string)
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+interface MidTurnMessage {
+    info: Record<string, unknown>;
+    parts: readonly unknown[];
+}
+
+interface TrackedMessage {
+    id: string;
+    role: string;
+    timeCreated: number;
+    finish?: string;
+    parts: Map<string, unknown>;
+}
+
+interface TrackedSession {
+    messages: Map<string, TrackedMessage>;
+    sequence: number;
+}
+
+const trackedSessions = new Map<string, TrackedSession>();
+const pendingParts = new Map<string, Map<string, Map<string, unknown>>>();
+let probeLogObserverForTests: ((message: string) => void) | undefined;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function truthyStoredFlag(value: unknown): boolean {
+    return value === true || value === 1 || value === "true";
+}
+
+function isMachineGeneratedPart(value: unknown): boolean {
+    const part = asRecord(value);
+    if (!part) return false;
+    const metadata = asRecord(part.metadata);
+    const marker = asRecord(metadata?.marker);
+    return (
+        truthyStoredFlag(part.synthetic) ||
+        truthyStoredFlag(part.ignored) ||
+        (marker !== null && marker.kind !== null && marker.kind !== undefined)
+    );
+}
+
+function messageTimeCreated(message: MidTurnMessage, fallback: number): number {
+    const time = asRecord(message.info.time);
+    return typeof time?.created === "number" ? time.created : fallback;
+}
+
+function latestMessageByRole(
+    messages: readonly MidTurnMessage[],
+    role: "assistant" | "user",
+    realUserOnly = false,
+): { message: MidTurnMessage; timeCreated: number } | null {
+    let latest: { message: MidTurnMessage; timeCreated: number; index: number } | null = null;
+    for (const [index, message] of messages.entries()) {
+        if (message.info.role !== role) continue;
+        if (
+            realUserOnly &&
+            message.parts.length > 0 &&
+            message.parts.every(isMachineGeneratedPart)
+        ) {
+            continue;
+        }
+        const timeCreated = messageTimeCreated(message, index);
+        if (
+            latest === null ||
+            timeCreated > latest.timeCreated ||
+            (timeCreated === latest.timeCreated && index > latest.index)
+        ) {
+            latest = { message, timeCreated, index };
+        }
+    }
+    return latest;
+}
+
+/** Apply the OpenCode DB mid-turn predicate to the transform pass's own message array. */
+export function midTurnFromMessages(messages: readonly MidTurnMessage[]): boolean {
+    const latestAssistant = latestMessageByRole(messages, "assistant");
+    if (!latestAssistant) return false;
+    const assistantTime = asRecord(latestAssistant.message.info.time);
+    if (typeof assistantTime?.created !== "number") return false;
+    const latestRealUser = latestMessageByRole(messages, "user", true);
+    if (latestRealUser && latestRealUser.timeCreated > latestAssistant.timeCreated) return false;
+    if (latestAssistant.message.info.finish === "tool-calls") return true;
+    return latestAssistant.message.parts.some((value) => {
+        const part = asRecord(value);
+        return part?.type === "tool" && part.providerExecuted !== true;
+    });
+}
+
+/** Apply the notice-hold predicate to an in-memory OpenCode message array. */
+export function shouldHoldIgnoredNotificationFromMessages(
+    messages: readonly MidTurnMessage[],
+): boolean {
+    if (midTurnFromMessages(messages)) return true;
+    const latestAssistant = latestMessageByRole(messages, "assistant");
+    if (latestAssistant) {
+        const finish = latestAssistant.message.info.finish;
+        if (typeof finish !== "string" || finish.length === 0) return true;
+        if (finish === "tool-calls" || finish === "unknown") return true;
+    }
+    const latestRealUser = latestMessageByRole(messages, "user", true);
+    return (
+        latestRealUser !== null && latestRealUser.timeCreated > (latestAssistant?.timeCreated ?? -1)
+    );
+}
+
+function trackedMessages(session: TrackedSession): MidTurnMessage[] {
+    return [...session.messages.values()]
+        .sort((left, right) => left.timeCreated - right.timeCreated)
+        .map((message) => ({
+            info: {
+                id: message.id,
+                role: message.role,
+                time: { created: message.timeCreated },
+                ...(message.finish === undefined ? {} : { finish: message.finish }),
+            },
+            parts: [...message.parts.values()],
+        }));
+}
+
+function pendingMessageParts(sessionId: string, messageId: string): Map<string, unknown> {
+    return pendingParts.get(sessionId)?.get(messageId) ?? new Map<string, unknown>();
+}
+
+/** Track OpenCode events so turn-state checks work when no message array is directly available. */
+export function observeOpenCodeTurnEvent(type: string, properties: unknown): void {
+    const props = asRecord(properties);
+    if (!props) return;
+
+    if (type === "message.part.updated") {
+        const part = asRecord(props.part);
+        if (
+            !part ||
+            typeof part.sessionID !== "string" ||
+            typeof part.messageID !== "string" ||
+            typeof part.id !== "string"
+        ) {
+            return;
+        }
+        const tracked = trackedSessions.get(part.sessionID)?.messages.get(part.messageID);
+        if (tracked) {
+            tracked.parts.set(part.id, part);
+            return;
+        }
+        let byMessage = pendingParts.get(part.sessionID);
+        if (!byMessage) {
+            byMessage = new Map();
+            pendingParts.set(part.sessionID, byMessage);
+        }
+        let parts = byMessage.get(part.messageID);
+        if (!parts) {
+            parts = new Map();
+            byMessage.set(part.messageID, parts);
+        }
+        parts.set(part.id, part);
+        return;
+    }
+
+    if (type === "message.updated") {
+        const info = asRecord(props.info);
+        const time = asRecord(info?.time);
+        if (
+            !info ||
+            (info.role !== "assistant" && info.role !== "user") ||
+            typeof info.sessionID !== "string" ||
+            typeof info.id !== "string"
+        ) {
+            return;
+        }
+        let session = trackedSessions.get(info.sessionID);
+        if (!session) {
+            session = { messages: new Map(), sequence: 0 };
+            trackedSessions.set(info.sessionID, session);
+        }
+        session.sequence += 1;
+        const existing = session.messages.get(info.id);
+        session.messages.set(info.id, {
+            id: info.id,
+            role: info.role,
+            timeCreated:
+                typeof time?.created === "number"
+                    ? time.created
+                    : (existing?.timeCreated ?? session.sequence),
+            ...(typeof info.finish === "string" ? { finish: info.finish } : {}),
+            parts: existing?.parts ?? pendingMessageParts(info.sessionID, info.id),
+        });
+        pendingParts.get(info.sessionID)?.delete(info.id);
+        return;
+    }
+
+    if (type === "message.removed") {
+        if (typeof props.sessionID === "string" && typeof props.messageID === "string") {
+            trackedSessions.get(props.sessionID)?.messages.delete(props.messageID);
+            pendingParts.get(props.sessionID)?.delete(props.messageID);
+        }
+        return;
+    }
+
+    if (type === "session.deleted" && typeof props.sessionID === "string") {
+        clearTrackedOpenCodeSession(props.sessionID);
+    }
+}
+
+export function clearTrackedOpenCodeSession(sessionId: string): void {
+    trackedSessions.delete(sessionId);
+    pendingParts.delete(sessionId);
+}
+
+function logProbeFailureOnce(resolution: OpenCodeDbPathResolution, error: unknown): void {
+    const failure = recordOpenCodeDbReadFailure(resolution, error);
+    if (!claimOpenCodeDbDiagnosticOnce("session-state-probe", resolution)) return;
+    const message = `[magic-context] OpenCode DB probe failed: path=${resolution.path} source=${resolution.source} cause=${failure.message}`;
+    probeLogObserverForTests?.(message);
+    log(message);
+}
+
+function resolvedDbIsAvailable(): {
+    resolution: OpenCodeDbPathResolution;
+    available: boolean;
+} {
+    const resolution = resolveOpenCodeDbPath();
+    const available = openCodeDbPathExists(resolution);
+    if (available) clearOpenCodeDbReadFailure(resolution.path);
+    else logProbeFailureOnce(resolution, "opencode_db_missing");
+    return { resolution, available };
+}
+
 export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    const availability = resolvedDbIsAvailable();
+    const tracked = trackedSessions.get(sessionId);
+    if (tracked) return midTurnFromMessages(trackedMessages(tracked));
+    if (!availability.available) return false;
     try {
         return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
     } catch (error) {
-        log("[magic-context] failed to inspect OpenCode mid-turn state:", error);
+        logProbeFailureOnce(availability.resolution, error);
         return false;
     }
 }
+
+export const __openCodeTurnStateTest = {
+    reset(): void {
+        trackedSessions.clear();
+        pendingParts.clear();
+        probeLogObserverForTests = undefined;
+    },
+    setLogObserver(observer: (message: string) => void): void {
+        probeLogObserverForTests = observer;
+    },
+};
 
 /**
  * Whether a noReply/ignored status notice must be held instead of appended.
@@ -122,12 +367,16 @@ export function shouldHoldIgnoredNotificationFromOpenCodeDb(
 export function shouldHoldIgnoredNotification(sessionId: string): boolean {
     if (process.env.MAGIC_CONTEXT_NOTICE_GATE === "bypass") return false;
     if (process.env.MAGIC_CONTEXT_NOTICE_GATE === "hold") return true;
+    const availability = resolvedDbIsAvailable();
+    const tracked = trackedSessions.get(sessionId);
+    if (tracked) return shouldHoldIgnoredNotificationFromMessages(trackedMessages(tracked));
+    if (!availability.available) return false;
     try {
         return withReadOnlySessionDb((db) =>
             shouldHoldIgnoredNotificationFromOpenCodeDb(db, sessionId),
         );
     } catch (error) {
-        log("[magic-context] failed to inspect notice-hold state:", error);
+        logProbeFailureOnce(availability.resolution, error);
         return false;
     }
 }
@@ -280,7 +529,7 @@ export function getMessageTimesFromOpenCodeDb(
             }
         });
     } catch (error) {
-        log("[magic-context] failed to resolve message times from OpenCode DB:", error);
+        logProbeFailureOnce(resolveOpenCodeDbPath(), error);
     }
 
     return result;
@@ -317,7 +566,7 @@ export function findLastAssistantModelFromOpenCodeDb(
             };
         });
     } catch (error) {
-        log("[magic-context] failed to recover live model from OpenCode DB:", error);
+        logProbeFailureOnce(resolveOpenCodeDbPath(), error);
         return null;
     }
 }

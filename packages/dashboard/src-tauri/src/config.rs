@@ -319,11 +319,11 @@ pub struct ProjectConfigEntry {
 /// Discover projects with magic-context config files.
 ///
 /// Uses the Magic Context DB (`context.db`) as the primary source of project
-/// enumeration — the same authority as the Projects tab — so OpenCode Desktop
-/// (which does not create `opencode.db`) discovers project configs correctly.
-/// The OpenCode CLI DB (`opencode.db`) is consulted as a secondary source to
-/// enrich display names and pick up projects that have CLI sessions but no
-/// Magic Context data yet. Results are deduplicated by worktree path.
+/// enumeration — the same authority as the Projects tab — so projects remain
+/// discoverable even when OpenCode's resolved session DB is absent. The resolved
+/// OpenCode DB is consulted as a secondary source to enrich display names and
+/// pick up projects that have sessions but no Magic Context data yet. Results are
+/// deduplicated by worktree path.
 pub fn discover_project_configs() -> Vec<ProjectConfigEntry> {
     discover_project_configs_with_db(crate::db::resolve_db_path().as_ref())
 }
@@ -336,7 +336,7 @@ pub fn discover_project_configs_with_db(
     // ── 1. Collect project worktrees from context.db ──────────────
     // The Projects tab uses `get_projects` which queries context.db for project
     // identities and resolves filesystem paths. We use the same source so
-    // Desktop users (no opencode.db) see their projects.
+    // Users without a readable OpenCode DB still see their Magic Context projects.
     let mut worktree_map: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new(); // worktree_path → display_name
 
@@ -354,7 +354,7 @@ pub fn discover_project_configs_with_db(
         }
     }
 
-    // ── 2. Enrich from opencode.db (names + extra projects) ──────
+    // ── 2. Enrich from the resolved OpenCode DB (names + extra projects) ──
     let opencode_db = crate::db::resolve_opencode_db_path();
     if let Some(ref opencode_path) = opencode_db {
         if let Ok(conn) = rusqlite::Connection::open_with_flags(

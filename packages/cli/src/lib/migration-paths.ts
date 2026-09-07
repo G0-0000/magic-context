@@ -1,9 +1,7 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { resolveOpenCodeDbPath } from "@magic-context/core/shared/opencode-db-path";
 
 export function getOpenCodeDatabasePath(): string {
-    const dataHome = process.env.XDG_DATA_HOME?.trim();
-    return join(dataHome || join(homedir(), ".local", "share"), "opencode", "opencode.db");
+    return resolveOpenCodeDbPath().path;
 }
 
 /** Match Pi's platform-specific project-directory encoding for session folders. */

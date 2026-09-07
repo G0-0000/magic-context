@@ -44,9 +44,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { resolveOpenCodeDbPath } from "../../shared/opencode-db-path";
 import type { Database } from "../../shared/sqlite";
 
 /**
@@ -85,14 +84,8 @@ interface BackfillResult {
     durationMs: number;
 }
 
-/**
- * Resolve the OpenCode DB path. Mirrors `getOpenCodeDbPath()` in
- * `dreamer/runner.ts` and `compaction-marker.ts` — one source of truth
- * eventually, but staying duplicated for now to avoid an import cycle
- * at startup.
- */
 function resolveOpencodeDbPath(): string {
-    return join(getDataDir(), "opencode", "opencode.db");
+    return resolveOpenCodeDbPath().path;
 }
 
 function ensureBackfillStateTable(db: Database): void {

@@ -137,10 +137,16 @@ export interface SessionRow {
   is_subagent: boolean;
 }
 
+export interface SessionScanCondition {
+  code: string;
+  message: string;
+}
+
 export interface PagedSessions {
   rows: SessionRow[];
   total: number;
   has_more: boolean;
+  conditions: SessionScanCondition[];
 }
 
 export interface SessionMessageRow {

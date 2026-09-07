@@ -4,6 +4,7 @@ export type MagicContextEventType =
     | "session.created"
     | "session.error"
     | "message.updated"
+    | "message.part.updated"
     | "message.removed"
     | "session.compacted"
     | "session.deleted";

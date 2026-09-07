@@ -112,21 +112,343 @@ mod storage_path_tests {
     }
 }
 
-pub fn resolve_opencode_db_path() -> Option<PathBuf> {
-    // OpenCode also uses XDG_DATA_HOME or ~/.local/share on all platforms.
-    let data_dir = std::env::var("XDG_DATA_HOME")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCodeDbResolution {
+    pub path: PathBuf,
+    pub source: &'static str,
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedOpenCodeDbResolution {
+    key: String,
+    resolution: OpenCodeDbResolution,
+    existed: bool,
+}
+
+static OPENCODE_DB_RESOLUTION: OnceLock<RwLock<Option<CachedOpenCodeDbResolution>>> =
+    OnceLock::new();
+
+fn opencode_data_dir() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::home_dir()
                 .unwrap_or_default()
                 .join(".local")
                 .join("share")
-        });
-    let db_path = data_dir.join("opencode").join("opencode.db");
-    if db_path.exists() {
-        Some(db_path)
+        })
+        .join("opencode")
+}
+
+fn opencode_resolution_key(data_dir: &Path) -> String {
+    [
+        data_dir.to_string_lossy().to_string(),
+        std::env::var("OPENCODE_DB").unwrap_or_default(),
+        std::env::var("OPENCODE_DISABLE_CHANNEL_DB").unwrap_or_default(),
+        std::env::var("OPENCODE_CHANNEL").unwrap_or_default(),
+    ]
+    .join("\0")
+}
+
+fn opencode_channel_path(data_dir: &Path, channel: &str) -> PathBuf {
+    if matches!(channel, "latest" | "beta" | "prod") {
+        data_dir.join("opencode.db")
     } else {
+        data_dir.join(format!("opencode-{channel}.db"))
+    }
+}
+
+fn opencode_candidate_names(data_dir: &Path) -> Vec<String> {
+    let mut names = vec![
+        "opencode.db".to_string(),
+        "opencode-local.db".to_string(),
+        "opencode-dev.db".to_string(),
+    ];
+    let mut discovered = std::fs::read_dir(data_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let dynamic = name.starts_with("opencode-") && name.ends_with(".db");
+            (dynamic && !names.contains(&name)).then_some(name)
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    names.extend(discovered);
+    names
+}
+
+fn discover_opencode_db(data_dir: &Path) -> OpenCodeDbResolution {
+    let mut selected: Option<(PathBuf, u128, usize)> = None;
+    for (order, name) in opencode_candidate_names(data_dir).into_iter().enumerate() {
+        let path = data_dir.join(&name);
+        let Some(modified) = std::fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+        else {
+            continue;
+        };
+        let replace = selected
+            .as_ref()
+            .map_or(true, |(_, best_modified, best_order)| {
+                modified > *best_modified || (modified == *best_modified && order < *best_order)
+            });
+        if replace {
+            selected = Some((path, modified, order));
+        }
+    }
+
+    let Some((path, _, _)) = selected else {
+        return OpenCodeDbResolution {
+            path: data_dir.join("opencode.db"),
+            source: "default",
+            channel: None,
+        };
+    };
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let channel = if name == "opencode.db" {
         None
+    } else {
+        name.strip_prefix("opencode-")
+            .and_then(|value| value.strip_suffix(".db"))
+            .map(str::to_string)
+    };
+    OpenCodeDbResolution {
+        path,
+        source: "discovered",
+        channel,
+    }
+}
+
+fn resolve_opencode_db_fresh(
+    data_dir: &Path,
+    explicit: Option<&str>,
+    disable_channel_db: Option<&str>,
+    channel: Option<&str>,
+) -> OpenCodeDbResolution {
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+        let raw = PathBuf::from(explicit);
+        return OpenCodeDbResolution {
+            path: if explicit == ":memory:" || raw.is_absolute() {
+                raw
+            } else {
+                data_dir.join(raw)
+            },
+            source: "OPENCODE_DB",
+            channel: None,
+        };
+    }
+
+    if matches!(disable_channel_db, Some("1" | "true")) {
+        return OpenCodeDbResolution {
+            path: data_dir.join("opencode.db"),
+            source: "default",
+            channel: None,
+        };
+    }
+
+    if let Some(channel) = channel.filter(|value| !value.is_empty()) {
+        return OpenCodeDbResolution {
+            path: opencode_channel_path(data_dir, channel),
+            source: "channel",
+            channel: Some(channel.to_string()),
+        };
+    }
+
+    discover_opencode_db(data_dir)
+}
+
+pub fn resolve_opencode_db() -> OpenCodeDbResolution {
+    let data_dir = opencode_data_dir();
+    let key = opencode_resolution_key(&data_dir);
+    let cache = OPENCODE_DB_RESOLUTION.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.key == key && cached.existed && cached.resolution.path.exists() {
+                return cached.resolution.clone();
+            }
+        }
+    }
+
+    let explicit = std::env::var("OPENCODE_DB").ok();
+    let disable_channel_db = std::env::var("OPENCODE_DISABLE_CHANNEL_DB").ok();
+    let channel = std::env::var("OPENCODE_CHANNEL").ok();
+    let resolution = resolve_opencode_db_fresh(
+        &data_dir,
+        explicit.as_deref(),
+        disable_channel_db.as_deref(),
+        channel.as_deref(),
+    );
+    let existed = resolution.path != Path::new(":memory:") && resolution.path.exists();
+    if let Ok(mut guard) = cache.write() {
+        *guard = Some(CachedOpenCodeDbResolution {
+            key,
+            resolution: resolution.clone(),
+            existed,
+        });
+    }
+    resolution
+}
+
+pub fn resolve_opencode_db_path() -> Option<PathBuf> {
+    let resolution = resolve_opencode_db();
+    (resolution.path != Path::new(":memory:") && resolution.path.exists())
+        .then_some(resolution.path)
+}
+
+fn opencode_db_probe_descriptions(resolution: &OpenCodeDbResolution) -> Vec<String> {
+    let channel_db_disabled = matches!(
+        std::env::var("OPENCODE_DISABLE_CHANNEL_DB").as_deref(),
+        Ok("1" | "true")
+    );
+    if resolution.source == "OPENCODE_DB" || resolution.source == "channel" || channel_db_disabled {
+        return vec![resolution.path.to_string_lossy().to_string()];
+    }
+    let data_dir = resolution
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(opencode_data_dir);
+    vec![
+        data_dir.join("opencode.db").to_string_lossy().to_string(),
+        data_dir
+            .join("opencode-local.db")
+            .to_string_lossy()
+            .to_string(),
+        data_dir
+            .join("opencode-dev.db")
+            .to_string_lossy()
+            .to_string(),
+        data_dir
+            .join("opencode-<channel>.db")
+            .to_string_lossy()
+            .to_string(),
+    ]
+}
+
+fn opencode_db_missing_message(resolution: &OpenCodeDbResolution) -> String {
+    format!(
+        "Magic Context cannot find OpenCode's session database (looked for {}). History compaction (historian) and the mid-turn valve are disabled until it is found; set OPENCODE_DB if OpenCode stores it elsewhere.",
+        opencode_db_probe_descriptions(resolution).join(", ")
+    )
+}
+
+#[cfg(test)]
+mod opencode_path_tests {
+    use super::*;
+    use std::fs;
+    use std::time::Duration;
+
+    fn data_dir() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("opencode");
+        fs::create_dir_all(&data_dir).unwrap();
+        (root, data_dir)
+    }
+
+    #[test]
+    fn explicit_override_disable_and_channel_follow_opencode_order() {
+        let (_root, data_dir) = data_dir();
+        let absolute = data_dir.join("absolute.db");
+        assert_eq!(
+            resolve_opencode_db_fresh(&data_dir, absolute.to_str(), Some("true"), Some("dev")),
+            OpenCodeDbResolution {
+                path: absolute,
+                source: "OPENCODE_DB",
+                channel: None,
+            }
+        );
+        assert_eq!(
+            resolve_opencode_db_fresh(&data_dir, Some("relative.db"), None, None).path,
+            data_dir.join("relative.db")
+        );
+        assert_eq!(
+            resolve_opencode_db_fresh(&data_dir, None, Some("1"), Some("dev")),
+            OpenCodeDbResolution {
+                path: data_dir.join("opencode.db"),
+                source: "default",
+                channel: None,
+            }
+        );
+        assert_eq!(
+            resolve_opencode_db_fresh(&data_dir, None, None, Some("dev")),
+            OpenCodeDbResolution {
+                path: data_dir.join("opencode-dev.db"),
+                source: "channel",
+                channel: Some("dev".to_string()),
+            }
+        );
+        assert_eq!(
+            resolve_opencode_db_fresh(&data_dir, Some(":memory:"), None, None).path,
+            PathBuf::from(":memory:")
+        );
+    }
+
+    #[test]
+    fn discovery_selects_each_candidate_when_it_is_newest() {
+        for selected in [
+            "opencode.db",
+            "opencode-local.db",
+            "opencode-dev.db",
+            "opencode-nightly.db",
+        ] {
+            let (_root, data_dir) = data_dir();
+            for name in [
+                "opencode.db",
+                "opencode-local.db",
+                "opencode-dev.db",
+                "opencode-nightly.db",
+            ] {
+                if name != selected {
+                    fs::write(data_dir.join(name), b"old").unwrap();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            fs::write(data_dir.join(selected), b"newest").unwrap();
+            let resolution = discover_opencode_db(&data_dir);
+            assert_eq!(resolution.path, data_dir.join(selected));
+            assert_eq!(resolution.source, "discovered");
+            assert_eq!(
+                resolution.channel,
+                (selected != "opencode.db")
+                    .then(|| selected["opencode-".len()..selected.len() - ".db".len()].to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn missing_opencode_store_has_the_named_condition_text() {
+        let (_root, data_dir) = data_dir();
+        let resolution = discover_opencode_db(&data_dir);
+        assert_eq!(
+            resolution,
+            OpenCodeDbResolution {
+                path: data_dir.join("opencode.db"),
+                source: "default",
+                channel: None,
+            }
+        );
+        let condition = opencode_db_missing_condition(&resolution);
+        assert_eq!(condition.code, "opencode_db_missing");
+        assert_eq!(
+            condition.message,
+            format!(
+                "Magic Context cannot find OpenCode's session database (looked for {}, {}, {}, {}). History compaction (historian) and the mid-turn valve are disabled until it is found; set OPENCODE_DB if OpenCode stores it elsewhere.",
+                data_dir.join("opencode.db").to_string_lossy(),
+                data_dir.join("opencode-local.db").to_string_lossy(),
+                data_dir.join("opencode-dev.db").to_string_lossy(),
+                data_dir.join("opencode-<channel>.db").to_string_lossy(),
+            )
+        );
     }
 }
 
@@ -440,11 +762,25 @@ pub struct SessionRow {
     pub is_subagent: bool,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct SessionScanCondition {
+    pub code: String,
+    pub message: String,
+}
+
+fn opencode_db_missing_condition(resolution: &OpenCodeDbResolution) -> SessionScanCondition {
+    SessionScanCondition {
+        code: "opencode_db_missing".to_string(),
+        message: opencode_db_missing_message(resolution),
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct PagedSessions {
     pub rows: Vec<SessionRow>,
     pub total: u32,
     pub has_more: bool,
+    pub conditions: Vec<SessionScanCondition>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -4849,8 +5185,19 @@ pub fn list_all_sessions(filter: SessionFilter) -> Vec<SessionRow> {
 }
 
 pub fn list_sessions_paged(filter: SessionFilter) -> PagedSessions {
+    let include_opencode = filter
+        .harness
+        .map_or(true, |harness| harness == Harness::Opencode);
     let rows = list_all_sessions(filter.clone());
-    page_session_rows(rows, filter.offset, filter.limit)
+    let mut page = page_session_rows(rows, filter.offset, filter.limit);
+    if include_opencode {
+        let resolution = resolve_opencode_db();
+        if resolution.path == Path::new(":memory:") || !resolution.path.exists() {
+            page.conditions
+                .push(opencode_db_missing_condition(&resolution));
+        }
+    }
+    page
 }
 
 fn page_session_rows(
@@ -4872,6 +5219,7 @@ fn page_session_rows(
         rows: paged_rows,
         total: total_usize as u32,
         has_more: consumed < total_usize,
+        conditions: Vec::new(),
     }
 }
 

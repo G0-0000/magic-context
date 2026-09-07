@@ -101,7 +101,7 @@ async function trySendTuiToast(
     }
 }
 
-/** Test seams for the process-local queue; production uses the read-only OpenCode DB signal. */
+/** Test seams for the process-local queue; production uses tracked message events with a cold-start DB fallback. */
 export const __ignoredNotificationTest = {
     pendingTexts(sessionId: string): string[] {
         return (queuedIgnoredNotifications.get(sessionId) ?? []).map((item) => item.text);

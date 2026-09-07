@@ -126,6 +126,11 @@ export interface RawMessageProvider {
 
 const sessionProviders = new Map<string, RawMessageProvider>();
 
+/** Whether this session has an explicit non-OpenCode raw-history source. */
+export function hasRawMessageProvider(sessionId: string): boolean {
+    return sessionProviders.has(sessionId);
+}
+
 /**
  * Register a per-session source for raw message reading. Returns an
  * unregister function. Pass-through harnesses (OpenCode) never call
