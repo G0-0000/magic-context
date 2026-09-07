@@ -45,11 +45,11 @@ const RESULT_PREVIEW_LIMIT = 220;
  * Memories are curated, hand-written summaries — strongest signal.
  * Git commits are terse human-written descriptions — high signal.
  * Messages are raw history that survived compression — boosted above baseline
- * (1.15 in this release, up from 1.0) because by definition these are the
- * specific details the historian didn't preserve as memories or compartments,
- * which is exactly what ctx_search is most useful for. */
+ * because by definition these are the specific details the historian didn't
+ * preserve as memories or compartments. The 1.275 calibration improved
+ * conversation recall while preserving fact/rule recall. */
 const MEMORY_SOURCE_BOOST = 1.3;
-const MESSAGE_SOURCE_BOOST = 1.15;
+const MESSAGE_SOURCE_BOOST = 1.275;
 const GIT_COMMIT_SOURCE_BOOST = 1.2;
 const PRIMER_SOURCE_BOOST = 1.25;
 
@@ -1158,7 +1158,8 @@ function searchMessages(args: {
     }));
 }
 
-const NOTE_SEARCHABLE_STATUSES: Note["status"][] = ["active", "pending", "ready", "dismissed"];
+const NOTE_SEARCHABLE_STATUSES: Note["status"][] = ["active", "pending", "ready"];
+const MAX_NOTE_KEYWORD_SCORE = 3.5;
 
 function noteSearchText(note: Note): string {
     const reason = note.readyReason?.trim();
@@ -1188,6 +1189,10 @@ interface RankedNoteMatch {
     text: string;
 }
 
+function normalizeNoteKeywordScore(score: number): number {
+    return normalizeCosineScore(score / MAX_NOTE_KEYWORD_SCORE) * SINGLE_SOURCE_PENALTY;
+}
+
 function rankNotesForNeedle(notes: readonly Note[], needle: string): RankedNoteMatch[] {
     const normalizedNeedle = needle.trim().toLowerCase();
     if (normalizedNeedle.length === 0) {
@@ -1204,11 +1209,14 @@ function rankNotesForNeedle(notes: readonly Note[], needle: string): RankedNoteM
         if (!exact && matchedTokens === 0) {
             continue;
         }
+        const matchedUniqueTokens = new Set(needleTokens.filter((token) => noteTokens.has(token)))
+            .size;
         const coverage = needleTokens.length > 0 ? matchedTokens / needleTokens.length : 0;
-        const score =
-            (exact ? 2 : 0) +
-            coverage +
-            (needleTokens.length > 1 && matchedTokens === needleTokens.length ? 0.5 : 0);
+        const density = noteTokens.size > 0 ? matchedUniqueTokens / noteTokens.size : 0;
+        const exactPhrase =
+            exact && (needleTokens.length > 1 || normalizedText.trim() === normalizedNeedle);
+        const allTokens = needleTokens.length > 1 && matchedTokens === needleTokens.length;
+        const score = (exactPhrase ? 2 : 0) + coverage * density + (allTokens ? 0.5 * density : 0);
         ranked.push({ note, score, text });
     }
     return ranked.sort((left, right) => {
@@ -1255,10 +1263,10 @@ function searchNotes(args: {
 
     if (probes.length === 0) {
         const ranked = baseList.slice(0, args.limit);
-        return ranked.map((entry, rank) => ({
+        return ranked.map((entry) => ({
             source: "note" as const,
             content: previewText(entry.text),
-            score: linearDecayScore(rank, ranked.length),
+            score: normalizeNoteKeywordScore(entry.score),
             noteId: entry.note.id,
             status: entry.note.status,
             createdAt: entry.note.createdAt,
@@ -1271,40 +1279,28 @@ function searchNotes(args: {
     if (baseList.length > 0) {
         queryLists.push({ rows: baseList, weight: 1 });
     }
-    const probeWeights = new Map<string, number>();
     for (const probe of probes) {
         const rows = rankNotesForNeedle(notes, probe);
         if (rows.length === 0) {
             continue;
         }
         const weight = probeDiscriminationWeight(rows.length, notes.length);
-        probeWeights.set(probe, weight);
         queryLists.push({ rows, weight });
     }
 
     const fused = new Map<number, { entry: RankedNoteMatch; score: number }>();
     for (const list of queryLists) {
-        list.rows.forEach((row, rank) => {
-            const rrf = list.weight / (RRF_K + rank);
+        for (const row of list.rows) {
+            const relevance = row.score * list.weight;
             const existing = fused.get(row.note.id);
             if (existing) {
-                existing.score += rrf;
+                if (relevance > existing.score) {
+                    existing.entry = row;
+                    existing.score = relevance;
+                }
             } else {
-                fused.set(row.note.id, { entry: row, score: rrf });
+                fused.set(row.note.id, { entry: row, score: relevance });
             }
-        });
-    }
-
-    for (const match of fused.values()) {
-        let best = 0;
-        for (const probe of probes) {
-            const weight = probeWeights.get(probe) ?? 0;
-            if (weight > best && containsProbeVerbatim(match.entry.text, [probe])) {
-                best = weight;
-            }
-        }
-        if (best > 0) {
-            match.score += best * VERBATIM_RANK_BONUS;
         }
     }
 
@@ -1320,10 +1316,10 @@ function searchNotes(args: {
         })
         .slice(0, args.limit);
 
-    return ranked.map((entry, rank) => ({
+    return ranked.map((entry) => ({
         source: "note" as const,
         content: previewText(entry.entry.text),
-        score: linearDecayScore(rank, ranked.length),
+        score: normalizeNoteKeywordScore(entry.score),
         noteId: entry.entry.note.id,
         status: entry.entry.note.status,
         createdAt: entry.entry.note.createdAt,

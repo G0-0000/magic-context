@@ -14096,24 +14096,46 @@ impl McStore {
         session_id: &str,
         query: &str,
     ) -> Result<Vec<StoredNoteSearchRow>, McStoreError> {
-        if query.trim().is_empty() {
+        let terms = keyword_search_terms(query);
+        if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let pattern = sql_like_pattern(query);
-        let rows = self.inner.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, content, status, surface_condition, session_id, anchor_ordinal,
+        let predicates = terms
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let parameter = index + 3;
+                format!(
+                    "(LOWER(content) LIKE ?{parameter} ESCAPE '\\' \
+                          OR LOWER(COALESCE(surface_condition, '')) LIKE ?{parameter} ESCAPE '\\')"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT id, content, status, surface_condition, session_id, anchor_ordinal,
                         created_at_ms, updated_at_ms
-                    FROM mc_notes
+                   FROM mc_notes
                   WHERE project_path = ?1
-                    AND (type = 'smart' OR session_id = ?3)
-                    AND (LOWER(content) LIKE ?2 ESCAPE '\\'
-                      OR LOWER(COALESCE(surface_condition, '')) LIKE ?2 ESCAPE '\\')
+                    AND (type = 'smart' OR session_id = ?2)
+                    AND status IN ('active', 'pending', 'ready')
+                    AND ({predicates})
                   ORDER BY updated_at_ms DESC, id DESC
-                  LIMIT 100",
-            )?;
+                  LIMIT 100"
+        );
+        let mut parameters = vec![
+            SqlValue::Text(project_path.to_string()),
+            SqlValue::Text(session_id.to_string()),
+        ];
+        parameters.extend(
+            terms
+                .iter()
+                .map(|term| SqlValue::Text(sql_like_pattern(term))),
+        );
+        let rows = self.inner.with_conn(|conn| {
+            let mut stmt = conn.prepare(&sql)?;
             let mapped = stmt
-                .query_map(params![project_path, pattern, session_id], |r| {
+                .query_map(rusqlite::params_from_iter(parameters.iter()), |r| {
                     Ok(StoredNoteSearchRow {
                         id: r.get(0)?,
                         content: r.get(1)?,
@@ -17369,6 +17391,38 @@ fn memory_render_pool_filter_for_column(
         ),
         binds,
     )
+}
+
+fn keyword_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let push_current = |terms: &mut Vec<String>, current: &mut String| {
+        if current.len() > 1
+            && current.chars().any(|ch| ch.is_ascii_alphanumeric())
+            && !terms.contains(current)
+        {
+            terms.push(std::mem::take(current));
+        } else {
+            current.clear();
+        }
+    };
+    for ch in query.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | ':' | '-') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_current(&mut terms, &mut current);
+        }
+    }
+    if !current.is_empty() {
+        push_current(&mut terms, &mut current);
+    }
+    if terms.is_empty() {
+        let query = query.trim().to_lowercase();
+        if !query.is_empty() {
+            terms.push(query);
+        }
+    }
+    terms
 }
 
 fn sql_like_pattern(query: &str) -> String {

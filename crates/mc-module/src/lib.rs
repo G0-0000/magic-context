@@ -23639,10 +23639,20 @@ mod tests {
             json!({"action": "dismiss", "note_id": note_id, "content": "finished"}),
         )
         .await;
+        let dismissed_search = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "finished", "sources": ["note"]}),
+            )
+            .await,
+        );
+        assert!(!dismissed_search.contains("[note]"), "{dismissed_search}");
         let dismissed = store
-            .search_notes_like(project.to_str().unwrap(), "ses", "finished")
+            .get_note_by_id(project.to_str().unwrap(), "ses", note_id)
+            .unwrap()
             .unwrap();
-        assert_eq!(dismissed[0].status, "dismissed");
+        assert_eq!(dismissed.status, "dismissed");
         assert!(store
             .search_notes_like("/different/project", "ses", "lattice")
             .unwrap()
@@ -26307,7 +26317,7 @@ mod tests {
         assert!(
             all.contains("[message] score=0.90 compartment_id=1 range=10-20 match=fts title=C1")
         );
-        assert!(all.contains(&format!("[note] score=0.95 id=#{}", note.id)));
+        assert!(all.contains(&format!("[note] score=0.11 id=#{}", note.id)));
         assert!(all.contains("@msg 18"));
         assert!(all.contains("Use ctx_expand(start, end)"));
 
