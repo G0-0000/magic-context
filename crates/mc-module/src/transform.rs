@@ -2818,6 +2818,7 @@ fn apply_additive_only(
         || external_revision_changed
         || project_memory_epoch_hard_due;
     let ordinary_historian_veto = ctx.historian_active
+        && m1_signal.revision == loaded.meta.m1_revision
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
         && !loaded.meta.soft_refresh_pending
@@ -4130,6 +4131,7 @@ fn apply_once(
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
     ) || scheduler_outcome.drain_latch.is_active();
     let ordinary_historian_veto = ctx.historian_active
+        && current_m1_digest == loaded.meta.m1_revision
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
         && !emergency_arm_engaged
@@ -17719,11 +17721,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cc_publish_on_execute_applies_immediately_and_latch_bypasses_historian_veto() {
+    fn cc_publish_on_execute_drains_even_during_historian_without_latch() {
         for (latched, historian_active, applies) in [
             (false, false, true),
             (true, true, true),
-            (false, true, false),
+            (false, true, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());

@@ -4889,18 +4889,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
 	const historianRunning = inFlightHistorian.has(args.sessionId);
-	// A normal execute/deferred drain waits while the historian reads its raw
-	// snapshot. Only a fold that was persisted successfully may bypass the veto;
-	// an advisory mismatch or contention fallback cannot authorize mutations.
-	const bypassHistorianGate =
-		args.forceMaterialization === true || foldExecutedThisPass;
+	// Published summaries and reductions cannot change the historian's raw input.
+	// Share one permission across refresh and reduction lanes, including overlap.
+	const publishedWorkDrainAllowed =
+		args.schedulerDecision === "execute" ||
+		args.forceMaterialization === true ||
+		foldExecutedThisPass ||
+		hasPendingMaterialization(args.sessionId) ||
+		deferredMaterializeEligible;
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
 	const shouldRunHeuristics =
 		args.heuristics !== undefined &&
-		(!historianRunning || bypassHistorianGate) &&
+		publishedWorkDrainAllowed &&
 		(args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
 			deferredMaterializeEligible ||
@@ -5096,7 +5099,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
 	const shouldApplyPendingOps =
 		(baseShouldApplyPendingOps || deferredMaterialize) &&
-		(!historianRunning || bypassHistorianGate);
+		publishedWorkDrainAllowed;
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,

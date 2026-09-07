@@ -1845,6 +1845,7 @@ describe("postprocess emergency drop accounting", () => {
             }),
         );
 
+        expect(result.droppedTokens).toBeGreaterThan(0);
         expect(result.emergencyReclaimedTokens).toBeGreaterThan(0);
         expect(result.emergency).toBe(true);
     });

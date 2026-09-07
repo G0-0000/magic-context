@@ -2422,7 +2422,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("vetoes pending-op drain and heuristics while a historian is in flight except during force materialization", async () => {
+	it("drains pending ops and heuristics on one bust even while a historian is in flight", async () => {
 		async function runScenario(args: {
 			sessionId: string;
 			inFlightHistorian: boolean;
@@ -2544,9 +2544,9 @@ describe("registerPiContextHandler", () => {
 				inputTokens: 70_000,
 			}),
 		).toEqual({
-			dropStatus: "active",
-			readAStatus: "active",
-			pendingOps: 1,
+			dropStatus: "dropped",
+			readAStatus: "dropped",
+			pendingOps: 0,
 		});
 		expect(
 			await runScenario({

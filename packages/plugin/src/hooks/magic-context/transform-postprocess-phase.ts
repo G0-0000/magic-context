@@ -1269,25 +1269,18 @@ export async function runPostTransformPhase(
             `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass}`,
         );
     }
-    // Bypass the compartment-running veto when this pass is busting the Anthropic
-    // prefix REGARDLESS — so the pending-op drain + heuristics ride that one bust
-    // instead of being deferred into a SECOND bust ~a turn later. Two cases:
-    //   - forceMaterialization (the derived force band): overflow prevention trumps cache stability.
-    //   - foldExecutedThisPass: a HARD m[0] fold (model/system-hash/epoch/etc.) is
-    //     re-caching m[0] this pass; the prefix is already gone, so draining into
-    //     it is free. Without this, a hard fold landing while the historian runs
-    //     leaves the drop vetoed -> it spills to a later soft bust (observed: a
-    //     system-prompt change folded m[0], then the 1807-op backlog drained ~30s
-    //     later as a second bust). Pi already gates this way (context-handler.ts).
-    // Safe in both cases because the historian and the drain touch DISJOINT DBs:
-    //   - Historian reads RAW OpenCode messages from opencode.db (read-only); its
-    //     in-flight snapshot is validated by computeRawRangeFingerprint, which
-    //     hashes raw content only (ids/part-types/lengths), NOT tag/drop state.
-    //   - Drops mutate context.db (tags + pending_ops) + the in-memory wire only.
-    //   - The historian's post-publish queueDropsForCompartmentalizedMessages is
-    //     idempotent against already-dropped tags (status !== "active"), so any
-    //     drain/publish ordering is benign.
-    const bypassCompartmentGate = forceMaterialization || foldExecutedThisPass;
+    // A historian reads raw harness data, while reductions and rendered summaries
+    // write context.db and the outgoing request. Published rows can therefore
+    // drain on the same bust without changing the in-flight chunk's input.
+    // All published work shares one permission. Historian chunk publication keeps
+    // its own lease; rendering and drop writes cannot alter its raw input.
+    const publishedWorkDrainAllowed =
+        args.schedulerDecision === "execute" ||
+        materializationRequested ||
+        forceMaterialization ||
+        emergencyDropEligible ||
+        foldExecutedThisPass;
+
     const shouldReadPendingOps =
         !compactionOff &&
         (materializationRequested ||
@@ -1310,7 +1303,7 @@ export async function runPostTransformPhase(
             materializationRequested ||
             forceMaterialization ||
             foldExecutedThisPass) &&
-        (!compartmentRunning || bypassCompartmentGate);
+        publishedWorkDrainAllowed;
     // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
     // previously skipped heuristics entirely (via fullFeatureMode gate), which
     // meant their context grew unchecked until overflow. With this change,
@@ -1337,7 +1330,7 @@ export async function runPostTransformPhase(
     // approves for execution can fire heuristics.
     const shouldRunHeuristics =
         !compactionOff &&
-        (!compartmentRunning || bypassCompartmentGate) &&
+        publishedWorkDrainAllowed &&
         (materializationRequested ||
             forceMaterialization ||
             // The off-wire fold landed, so the prefix already busted. Heuristics
@@ -1351,25 +1344,8 @@ export async function runPostTransformPhase(
             emergencyDropEligible ||
             (args.schedulerDecision === "execute" &&
                 (!alreadyRanThisTurn || !args.fullFeatureMode)));
-    // Central cache-busting gate used by all mutation paths below.
-    //
-    // Definition: TRUE only when this pass actually mutates message state —
-    // either by applying pending ops or by running heuristic cleanup. This
-    // is the Oracle 2026-04-26 fix: the previous `isExplicitFlush ||
-    // shouldApplyPendingOps` definition was unsafe because `isExplicitFlush`
-    // could be true even on a defer pass where compartmentRunning blocked
-    // both materialization and heuristics, causing cache-busting-only
-    // cleanup (placeholder detection, sticky reminder retirement, nudge
-    // anchor retirement) to fire on a pass that produced no real mutations.
-    //
-    // Both `shouldApplyPendingOps` and `shouldRunHeuristics` already gate on
-    // `(!compartmentRunning || bypassCompartmentGate)` so they're
-    // genuine "will-actually-mutate" booleans. ORing them is the precise
-    // "did we mutate this pass" signal.
-    //
-    // Symmetry note: `system-prompt-hash.ts` and `inject-compartments.ts`
-    // remain narrow (each reads its own dedicated set) so adjunct refresh
-    // and history rebuild are decoupled from materialization timing.
+    // Every first-application lane and m[1] refresh uses this same permission.
+    // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics;
     // ctx_reduce stays frozen for prompt-hash stability, but observe the live
     // permission signal on the same busts so an operator knows guidance may be
@@ -1448,7 +1424,7 @@ export async function runPostTransformPhase(
         );
     }
     if (compartmentRunning && hasPendingUserOps) {
-        if (bypassCompartmentGate) {
+        if (publishedWorkDrainAllowed) {
             const bypassReason = forceMaterialization
                 ? `emergency >=${args.forceMaterializationPercentage}%`
                 : "m0 hard fold";
@@ -1470,7 +1446,12 @@ export async function runPostTransformPhase(
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
     let droppedCount = 0;
-    const droppedTokens = 0;
+    let droppedTokens = 0;
+    // Measure reduction deltas before history injection adds new prefix bytes.
+    // This is a local estimate, not a provider-reported billing token count.
+    const tokensBeforeReductions = isCacheBustingPass
+        ? estimateTokens(JSON.stringify(args.messages))
+        : 0;
     let emergencyReclaimedTokens = 0;
     let emergency = false;
     let m0M1InjectedThisPass = false;
@@ -1739,7 +1720,8 @@ export async function runPostTransformPhase(
             args.historyRebuiltThisPass ||
             args.compartmentInjectionRebuiltFromDb ||
             args.rebuiltHistoryFromInitialPrepare;
-        const toolReclaimApplicationOpportunity = toolReclaimExecutePass && alreadyMutatingThisPass;
+        const toolReclaimApplicationOpportunity =
+            isCacheBustingPass && toolReclaimExecutePass && alreadyMutatingThisPass;
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
         if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
@@ -1851,6 +1833,13 @@ export async function runPostTransformPhase(
         args.passOutcome?.record("pending-operation-failure");
         sessionLog(args.sessionId, "transform failed applying pending operations:", error);
         updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
+    }
+
+    if (isCacheBustingPass) {
+        droppedTokens = Math.max(
+            0,
+            tokensBeforeReductions - estimateTokens(JSON.stringify(args.messages)),
+        );
     }
 
     // Stale ctx_reduce strip is a REPLAY-class transform driven by a FROZEN,

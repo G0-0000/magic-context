@@ -20,7 +20,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
+import {
+    appendCompartments,
+    replaceAllCompartmentState,
+} from "../../features/magic-context/compartment-storage";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -165,17 +168,7 @@ function buildMessagesWithIgnoredCommandOutput(sessionId: string): TestMessage[]
 }
 
 describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
-    it("Test 1: historian publish while compartment is running — history rebuild is one-shot, materialization persists", async () => {
-        // Scenario from Oracle: historian publishes mid-session (signaling
-        // both historyRefresh + pendingMaterialization), but a different
-        // compartment run is still active so heuristics can't materialize
-        // yet. The pre-refactor bug: every subsequent defer pass would
-        // re-fire the flush flag and rebuild `<session-history>` until
-        // compartmentRunning lifted, burning cache reuse for nothing.
-        //
-        // After the fix: history rebuild fires exactly once (consumed by
-        // prepareCompartmentInjection then drained), and materialization
-        // intent persists across blocked passes until heuristics run.
+    it("Test 1: historian overlap drains an explicit history refresh exactly once", async () => {
         useTempDataHome("ctx-busting-test1-");
         const sessionId = "ses-historian-publish";
         const historyRefreshSessions = new Set<string>();
@@ -200,27 +193,16 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             client: testClient,
             directory: testDirectory,
         });
-
-        // First pass establishes the session in the DB.
         await transform({}, { messages: buildSimpleMessages(sessionId) });
-
-        // Simulate historian publication: signals BOTH history refresh and
-        // pending materialization (per the new producer rule).
         historyRefreshSessions.add(sessionId);
         pendingMaterializationSessions.add(sessionId);
-
-        // Block compartment using the in-memory promise registry (this is
-        // what postprocess actually consults).
         const lift = blockCompartmentRun(sessionId);
 
         try {
-            // Defer pass A: prepareCompartmentInjection consumes
-            // historyRefresh and drains it. Heuristics are blocked by
-            // compartmentRunning, so pendingMaterialization survives.
             await transform({}, { messages: buildSimpleMessages(sessionId) });
 
             expect(historyRefreshSessions.has(sessionId)).toBe(false); // drained
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true); // persisted
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
             lift();
         }
@@ -277,12 +259,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(historyRefreshSessions.has(sessionId)).toBe(false);
     });
 
-    it("Test 3: /ctx-flush while compartment is running — materialization survives the blocked pass and runs on next safe pass", async () => {
-        // Scenario from Oracle: user runs /ctx-flush, but compartment is
-        // still running. The flush MUST survive into the next pass once
-        // compartmentRunning lifts. The pre-refactor design coupled this
-        // signal to history rebuild, but the consumer logic was correct;
-        // the new design makes the persistence semantics explicit.
+    it("Test 3: /ctx-flush drains during a historian run without a second pass", async () => {
         useTempDataHome("ctx-busting-test3-");
         const sessionId = "ses-flush-during-compartment";
         const historyRefreshSessions = new Set<string>();
@@ -307,43 +284,24 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             client: testClient,
             directory: testDirectory,
         });
-
-        // Establish session.
         await transform({}, { messages: buildSimpleMessages(sessionId) });
-
-        // Block compartment using in-memory promise registry.
         const lift = blockCompartmentRun(sessionId);
 
         try {
-            // Simulate /ctx-flush: signals all three (we use the relevant two
-            // for this scope — system-prompt set is exercised in its own
-            // module's tests).
             historyRefreshSessions.add(sessionId);
             pendingMaterializationSessions.add(sessionId);
-
-            // Pass A: blocked. historyRefresh drained by injection rebuild.
-            // pendingMaterialization persists because heuristics can't run.
             await transform({}, { messages: buildSimpleMessages(sessionId) });
             expect(historyRefreshSessions.has(sessionId)).toBe(false);
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
-
-            // Lift the block (simulate compartment finishing).
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
             lift();
-
-            // Pass B: heuristics CAN run now. pendingMaterialization gets
-            // drained by the heuristics block (line ~360 of postprocess).
             await transform({}, { messages: buildSimpleMessages(sessionId) });
             expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
-            // Always lift if not already lifted (no-op if resolver was called).
             lift();
         }
     });
 
-    it("Test 4: delayed heuristic execution after the active run settles — pendingMaterialization drains exactly once", async () => {
-        // Variant of Test 3 emphasizing that pendingMaterialization
-        // drains on the FIRST safe pass after the block lifts, and stays
-        // drained on subsequent passes (no spurious re-add).
+    it("Test 4: explicit materialization stays drained after the active run settles", async () => {
         useTempDataHome("ctx-busting-test4-");
         const sessionId = "ses-delayed-drain";
         const historyRefreshSessions = new Set<string>();
@@ -368,31 +326,18 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             client: testClient,
             directory: testDirectory,
         });
-
-        // Establish session.
         await transform({}, { messages: buildSimpleMessages(sessionId) });
-
-        // Block compartment using in-memory promise registry + signal flush.
         const lift = blockCompartmentRun(sessionId);
         pendingMaterializationSessions.add(sessionId);
 
         try {
-            // Pass A: blocked.
-            await transform({}, { messages: buildSimpleMessages(sessionId) });
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
-
-            // Pass B: still blocked. Materialization still pending.
-            await transform({}, { messages: buildSimpleMessages(sessionId) });
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
-
-            // Lift block.
-            lift();
-
-            // Pass C: heuristics run, drain.
             await transform({}, { messages: buildSimpleMessages(sessionId) });
             expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
-
-            // Pass D: stays drained.
+            await transform({}, { messages: buildSimpleMessages(sessionId) });
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+            lift();
+            await transform({}, { messages: buildSimpleMessages(sessionId) });
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
             await transform({}, { messages: buildSimpleMessages(sessionId) });
             expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
@@ -479,7 +424,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         ).toBe(true);
     });
 
-    it("Test 9: deferred helper blocks active low-context runs", () => {
+    it("Test 9: deferred helper consumes published state during an active run", () => {
         expect(
             canConsumeDeferredOnThisPass({
                 schedulerDecision: "execute",
@@ -487,7 +432,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 justAwaitedPublication: false,
                 activeRunBlocksMaterialization: true,
             }),
-        ).toBe(false);
+        ).toBe(true);
     });
 
     it("Test 10: just-awaited publication overrides the active-run block", () => {
@@ -1078,7 +1023,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
     });
 
-    it("Test 13: active low-context execute does not consume deferred state", async () => {
+    it("Test 13: active low-context execute consumes deferred state", async () => {
         useTempDataHome("ctx-busting-test13-");
         const sessionId = "ses-active-execute";
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
@@ -1107,8 +1052,8 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 directory: testDirectory,
             });
             await transform({}, { messages: buildSimpleMessages(sessionId) });
-            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
-            expect(deferredMaterializationSessions.has(sessionId)).toBe(true);
+            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+            expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
             lift();
         }
@@ -1173,7 +1118,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
     });
 
-    it("Test 16: explicit blocked refresh materializes next pass without another history signal", async () => {
+    it("Test 16: explicit refresh is delivered during historian overlap", async () => {
         useTempDataHome("ctx-busting-test16-");
         const sessionId = "ses-explicit-blocked";
         const db = openDatabase();
@@ -1216,10 +1161,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         const lift = blockCompartmentRun(sessionId);
         let passAText = "";
         try {
-            // Warm-up: materialize m[0] first so pass A is a SOFT pass (not a
-            // first_render HARD fold). A hard fold would correctly drain through
-            // the compartment veto via fold-exec — this test specifically covers
-            // the blocked-defer path on a NON-busting pass.
             await transform({}, { messages: buildSimpleMessages(sessionId) });
             historyRefreshSessions.add(sessionId);
             pendingMaterializationSessions.add(sessionId);
@@ -1227,7 +1168,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             await transform({}, { messages: passA });
             passAText = JSON.stringify(passA[0]);
             expect(historyRefreshSessions.has(sessionId)).toBe(false);
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
             lift();
         }
@@ -1333,7 +1274,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
     });
 
-    it("Test 21: blocked explicit refresh retries materialization without rebuild", async () => {
+    it("Test 21: explicit refresh does not need a retry after historian overlap", async () => {
         useTempDataHome("ctx-busting-test21-");
         const sessionId = "ses-test21";
         const historyRefreshSessions = new Set<string>();
@@ -1375,10 +1316,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         });
 
         const lift = blockCompartmentRun(sessionId);
-        // Warm-up: materialize m[0] first so pass A is a SOFT pass (not a
-        // first_render HARD fold, which would correctly drain through the
-        // compartment veto via fold-exec). This test covers the blocked-defer
-        // retry path on a NON-busting pass.
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         historyRefreshSessions.add(sessionId);
         pendingMaterializationSessions.add(sessionId);
@@ -1386,7 +1323,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         try {
             await transform({}, { messages: passA });
             expect(historyRefreshSessions.has(sessionId)).toBe(false);
-            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         } finally {
             lift();
         }
@@ -1435,3 +1372,110 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
 
 // Reference unused imports to satisfy TS / silence linter:
 void getOrCreateSessionMeta;
+
+it("published A and queued drops drain together during historian B; B then waits for execute", async () => {
+    useTempDataHome("ctx-published-drain-");
+    const sessionId = "ses-published-drain";
+    const db = openDatabase();
+    let decision: "execute" | "defer" = "defer";
+    const deferredHistoryRefreshSessions = new Set<string>();
+    const deferredMaterializationSessions = new Set<string>();
+    const transform = createTransform({
+        db,
+        tagger: createTagger(),
+        scheduler: { shouldExecute: () => decision },
+        contextUsageMap: new Map([
+            [
+                sessionId,
+                { usage: { percentage: 75.02, inputTokens: 75020 }, updatedAt: Date.now() },
+            ],
+        ]),
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: new Set(),
+        deferredHistoryRefreshSessions,
+        deferredMaterializationSessions,
+        lastHeuristicsTurnId: new Map(),
+        clearReasoningAge: 100000,
+        protectedTokens: 1,
+        client: testClient,
+        directory: testDirectory,
+    });
+    const raw = (): TestMessage[] => [
+        ...buildSimpleMessages(sessionId),
+        {
+            info: { id: "old-tool", role: "assistant" },
+            parts: [
+                {
+                    type: "tool",
+                    callID: "old-call",
+                    state: { tool: "read", output: "old payload ".repeat(200) },
+                },
+            ],
+        },
+        {
+            info: { id: "latest-user", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "continue" }],
+        },
+    ];
+    await transform({}, { messages: raw() });
+    const publish = (sequence: number, title: string) => {
+        appendCompartments(db, sessionId, [
+            {
+                sequence,
+                startMessage: sequence,
+                endMessage: sequence,
+                startMessageId: "m-user",
+                endMessageId: "m-user",
+                title,
+                content: title,
+            },
+        ]);
+        deferredHistoryRefreshSessions.add(sessionId);
+        deferredMaterializationSessions.add(sessionId);
+    };
+    publish(1, "BASELINE");
+    await transform({}, { messages: raw() });
+    publish(2, "PUBLISHED_A");
+    const tag = getTagsBySession(db, sessionId).find((t) => t.messageId === "old-call");
+    expect(tag).toBeDefined();
+    for (let offset = 1; offset <= 3; offset++) {
+        insertTag(
+            db,
+            sessionId,
+            `newer-${offset}`,
+            "tool",
+            80000,
+            tag!.tagNumber + 100 + offset,
+            0,
+            "read",
+            0,
+            `newer-owner-${offset}`,
+            null,
+            { tokenCount: 20000, inputTokenCount: 0, reasoningTokenCount: 0 },
+        );
+    }
+    queuePendingOp(db, sessionId, tag!.tagNumber, "drop");
+    const lift = blockCompartmentRun(sessionId);
+    try {
+        decision = "execute";
+        const passN = raw();
+        await transform({}, { messages: passN });
+        expect(JSON.stringify(passN.slice(0, 2))).toContain("PUBLISHED_A");
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(JSON.stringify(passN)).not.toContain("old payload");
+        lift();
+        await Promise.resolve();
+        publish(3, "PUBLISHED_B");
+        decision = "defer";
+        const replay = raw();
+        await transform({}, { messages: replay });
+        expect(JSON.stringify(replay)).toBe(JSON.stringify(passN));
+        expect(JSON.stringify(replay)).not.toContain("PUBLISHED_B");
+        decision = "execute";
+        const nextBust = raw();
+        await transform({}, { messages: nextBust });
+        expect(JSON.stringify(nextBust.slice(0, 2))).toContain("PUBLISHED_B");
+    } finally {
+        lift();
+    }
+});

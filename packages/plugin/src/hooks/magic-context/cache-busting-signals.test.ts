@@ -55,7 +55,7 @@ describe("canConsumeDeferredOnThisPass", () => {
         ).toBe(true);
     });
 
-    it("blocks when an active run blocks materialization (below force threshold)", () => {
+    it("consumes published work despite an active historian below force threshold", () => {
         expect(
             canConsumeDeferredOnThisPass({
                 schedulerDecision: "execute",
@@ -63,6 +63,6 @@ describe("canConsumeDeferredOnThisPass", () => {
                 justAwaitedPublication: false,
                 activeRunBlocksMaterialization: true,
             }),
-        ).toBe(false);
+        ).toBe(true);
     });
 });
