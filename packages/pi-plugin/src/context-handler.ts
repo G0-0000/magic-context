@@ -128,6 +128,7 @@ import {
 	detectMidTurnBypassReason,
 	type SchedulerDeferReason,
 } from "@magic-context/core/hooks/magic-context/boundary-execution";
+import { hasReclaimRide } from "@magic-context/core/hooks/magic-context/cache-busting-signals";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -4759,11 +4760,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredMaterializeEligible =
 		canConsumeDeferredLate &&
 		deferredMaterializationSessions.has(args.sessionId);
-	// A HARD decision alone is not a cache bust. Execute it against a shadow
-	// message array first, then let pending drops, heuristics, and reasoning cleanup
-	// ride the bust only when m[0] actually materialized. Contention or any other
-	// suppressed attempt keeps defer replay immutable; the wire injection below
-	// still performs its own late decision for races after this preflight.
+	// Prepare prefix work on a shadow array. An execute with unchanged m[1] is
+	// not a ride; changed published bytes or an executed fold price the reductions.
 	const piHardSignals = args.injection
 		? (() => {
 				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
@@ -4816,13 +4814,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			)
 		: { value: false, reason: null };
 	let foldExecutedThisPass = false;
+	let publishedM1RefreshedThisPass = false;
+	const softRefreshOpportunity = args.schedulerDecision === "execute";
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold = getOrCreateSessionMeta(args.db, args.sessionId);
 	const m0CoverageBeforeFold =
 		persistedM0BeforeFold.cachedM0Bytes === null
 			? -1
 			: persistedM0BeforeFold.cachedM0MaxCompartmentSeq;
-	if (foldDueDecision.value && piM0State) {
+	if ((foldDueDecision.value || softRefreshOpportunity) && piM0State) {
 		try {
 			// Persist the fold before opening mutation gates. The shadow array keeps
 			// this pre-execution off the outgoing wire; the normal injection below
@@ -4832,10 +4832,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				[],
 				undefined,
-				false,
+				softRefreshOpportunity,
 			);
+			publishedM1RefreshedThisPass =
+				persistedM0BeforeFold.cachedM1Bytes?.toString("utf8") !==
+				getOrCreateSessionMeta(args.db, args.sessionId).cachedM1Bytes?.toString(
+					"utf8",
+				);
 			foldExecutedThisPass = foldExecutesThisPass(
-				foldDueDecision.value,
+				foldDueDecision.value || softRefreshOpportunity,
 				preFoldInjectionResult.m0Materialized === true,
 			);
 			const m0CoverageAfterFold = getOrCreateSessionMeta(
@@ -4901,10 +4906,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
-	const shouldRunHeuristics =
+	const rideSignals = {
+		hardFold: foldExecutedThisPass,
+		force: args.forceMaterialization === true || emergencyDropEligible,
+		explicitFlush: hasPendingMaterializeSignal || args.isCacheBusting,
+		publishedHistory:
+			publishedM1RefreshedThisPass ||
+			(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart),
+		agentDrop: false,
+	};
+	let isCacheBustingPass = hasReclaimRide(rideSignals);
+	let shouldRunHeuristics =
 		args.heuristics !== undefined &&
-		publishedWorkDrainAllowed &&
-		(args.forceMaterialization === true ||
+		isCacheBustingPass &&
+		(rideSignals.publishedHistory ||
+			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
 			deferredMaterializeEligible ||
 			// A fold persisted earlier in this pass already busted the prefix, so
@@ -5140,7 +5156,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				"applyPendingOperations",
 				tApplyPending,
 			);
-			executedWorkThisPass = true;
+			rideSignals.agentDrop = pendingOpsDidMutate;
+			isCacheBustingPass = hasReclaimRide(rideSignals);
+			if (pendingOpsDidMutate)
+				shouldRunHeuristics = args.heuristics !== undefined;
+			executedWorkThisPass ||= isCacheBustingPass;
 			// materializationSatisfiedThisPass enables the deferred-HISTORY drain
 			// below. OpenCode drains deferred-history on history-consumption alone
 			// (not heuristics success), so setting this right after pending-ops
@@ -5585,13 +5605,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	const toolReclaimExecutePass = args.schedulerDecision === "execute";
-	const alreadyMutatingThisPass =
-		pendingOpsDidMutate ||
-		heuristicOrReasoningDidMutate ||
-		foldExecutedThisPass;
-	const toolReclaimApplicationOpportunity =
-		toolReclaimExecutePass && alreadyMutatingThisPass;
+	const toolReclaimApplicationOpportunity = isCacheBustingPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
 	if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
@@ -5678,8 +5692,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
-				detect:
-					args.isCacheBusting || shouldApplyPendingOps || shouldRunHeuristics,
+				detect: isCacheBustingPass,
 				watermark: getMaxDroppedTagNumber(args.db, args.sessionId),
 				messageIdToMaxTag,
 				stableId: stableIdResolver,
@@ -5797,7 +5810,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				// re-render m[1] so the new compartment surfaces; gating on work alone
 				// (the prior behavior, masked by the now-removed cache clear) would
 				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
-				args.isCacheBusting || deferredHistoryRefresh || executedWorkThisPass,
+				isCacheBustingPass,
 			);
 			injectionResult = preFoldInjectionResult?.m0Materialized
 				? {

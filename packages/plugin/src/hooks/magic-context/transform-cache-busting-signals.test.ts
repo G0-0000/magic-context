@@ -26,6 +26,7 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
+    advanceToolReclaimWatermark,
     closeDatabase,
     getHiddenSeamPlaceholderIds,
     getOldestActiveUnprotectedToolTags,
@@ -754,6 +755,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             protectedTokens: 0,
         });
 
+        pendingMaterializationSessions.add(sessionId);
         await transform({}, { messages: sourceMessages(true, true) });
         expect(getTrailingBlankDecisions(db, sessionId).get("blank-owner")).toBe("strip");
         const toolTag = getTagsBySession(db, sessionId).find(
@@ -997,7 +999,22 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         const pendingMaterializationSessions = new Set<string>();
         const deferredMaterializationSessions = new Set<string>([sessionId]);
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
-        replaceAllCompartmentState(db, sessionId, [], []);
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m-user",
+                    endMessageId: "m-user",
+                    title: "Published summary",
+                    content: "Published summary",
+                },
+            ],
+            [],
+        );
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -1373,7 +1390,10 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
 // Reference unused imports to satisfy TS / silence linter:
 void getOrCreateSessionMeta;
 
-it("published A and queued drops drain together during historian B; B then waits for execute", async () => {
+it.each([
+    "queued",
+    "age",
+])("published A and %s drops drain together during historian B; B then waits for execute", async (dropLane) => {
     useTempDataHome("ctx-published-drain-");
     const sessionId = "ses-published-drain";
     const db = openDatabase();
@@ -1403,6 +1423,10 @@ it("published A and queued drops drain together during historian B; B then waits
     const raw = (): TestMessage[] => [
         ...buildSimpleMessages(sessionId),
         {
+            info: { id: "next-history", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "next history" }],
+        },
+        {
             info: { id: "old-tool", role: "assistant" },
             parts: [
                 {
@@ -1417,15 +1441,14 @@ it("published A and queued drops drain together during historian B; B then waits
             parts: [{ type: "text", text: "continue" }],
         },
     ];
-    await transform({}, { messages: raw() });
     const publish = (sequence: number, title: string) => {
         appendCompartments(db, sessionId, [
             {
                 sequence,
                 startMessage: sequence,
                 endMessage: sequence,
-                startMessageId: "m-user",
-                endMessageId: "m-user",
+                startMessageId: ["m-user", "m-assistant", "next-history"][sequence - 1]!,
+                endMessageId: ["m-user", "m-assistant", "next-history"][sequence - 1]!,
                 title,
                 content: title,
             },
@@ -1454,7 +1477,8 @@ it("published A and queued drops drain together during historian B; B then waits
             { tokenCount: 20000, inputTokenCount: 0, reasoningTokenCount: 0 },
         );
     }
-    queuePendingOp(db, sessionId, tag!.tagNumber, "drop");
+    if (dropLane === "queued") queuePendingOp(db, sessionId, tag!.tagNumber, "drop");
+    advanceToolReclaimWatermark(db, sessionId, tag!.tagNumber);
     const lift = blockCompartmentRun(sessionId);
     try {
         decision = "execute";

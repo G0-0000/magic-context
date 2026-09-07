@@ -54,6 +54,7 @@ function useTempDataHome(prefix: string): void {
     process.env.XDG_DATA_HOME = dir;
 }
 function createTestTransform(sessionId: string) {
+    const pendingMaterializationSessions = new Set<string>();
     const shouldExecute = mock<Scheduler["shouldExecute"]>(() => "defer");
     const scheduler: Scheduler = { shouldExecute };
     // Force providerID="anthropic" so the merged-assistants strip workaround
@@ -73,12 +74,12 @@ function createTestTransform(sessionId: string) {
         liveModelBySession,
         db: openDatabase(),
         historyRefreshSessions: new Set<string>(),
-        pendingMaterializationSessions: new Set<string>(),
+        pendingMaterializationSessions,
         lastHeuristicsTurnId: new Map<string, string>(),
         clearReasoningAge: 2,
         protectedTokens: 0,
     });
-    return { transform, shouldExecute };
+    return { transform, shouldExecute, pendingMaterializationSessions };
 }
 describe("createTransform index staleness regressions", () => {
     it("never truncates errored tool output (truncation removed — it busted prompt cache)", async () => {
@@ -246,7 +247,8 @@ describe("createTransform index staleness regressions", () => {
     it("replays processed-image stripping on defer passes (errored-tool truncation removed)", async () => {
         useTempDataHome("context-transform-defer-watermark-replay-");
         const sessionId = "ses-defer-watermark-replay";
-        const { transform, shouldExecute } = createTestTransform(sessionId);
+        const { transform, shouldExecute, pendingMaterializationSessions } =
+            createTestTransform(sessionId);
         const longDataUrl = `data:image/png;base64,${"A".repeat(300)}`;
         const longError = "E".repeat(180);
 
@@ -288,6 +290,7 @@ describe("createTransform index staleness regressions", () => {
         // The processed-image strip first-fires only on a cache-busting (execute)
         // pass, which freezes its id; afterwards it replays on every defer pass.
         shouldExecute.mockImplementationOnce(() => "execute");
+        pendingMaterializationSessions.add(sessionId);
         const bustPass = buildMessages();
         await transform({}, { messages: bustPass });
         expect(bustPass[0].parts[1]).toEqual({ type: "text", text: "" });

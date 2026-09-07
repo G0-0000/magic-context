@@ -31,3 +31,20 @@ export interface MaterializationPassSignals {
     /** True when postprocess observed newer m0_mutation_log ids than cached m[0]. */
     m0MutationDriftDetected: boolean;
 }
+
+/** Automatic reductions ride independently priced work, never pressure alone. */
+export function hasReclaimRide(signals: {
+    hardFold: boolean;
+    force: boolean;
+    explicitFlush: boolean;
+    publishedHistory: boolean;
+    agentDrop: boolean;
+}): boolean {
+    return (
+        signals.hardFold ||
+        signals.force ||
+        signals.explicitFlush ||
+        signals.publishedHistory ||
+        signals.agentDrop
+    );
+}

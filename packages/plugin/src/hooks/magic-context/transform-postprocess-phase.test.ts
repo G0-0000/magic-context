@@ -337,7 +337,7 @@ describe("Channel-2 measured-collapse cycle reset", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [], {
                 channel1StateBySession,
-                didMutateFromFlushedStatuses: true,
+                m0M1: { projectPath: "git:measured-collapse", projectDirectory: "/nonexistent" },
             }),
         );
 
@@ -587,6 +587,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 schedulerDeferReason: null,
                 resolvedProviderID: "anthropic",
                 hiddenMessagesAtCompactionSeam: hiddenAssistants,
@@ -952,6 +953,7 @@ describe("deferred compaction marker representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, firstMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 tagger: firstTagger,
                 targets: firstTagged.targets,
                 reasoningByMessage: firstTagged.reasoningByMessage,
@@ -2065,7 +2067,7 @@ describe("two-pass tool reclaim", () => {
         expect(tagStatuses(sessionId).get(1)).toBe("active");
     });
 
-    it("does not advance the watermark on a non-execute force-materialization pass", async () => {
+    it("advances the watermark on a force-materialization bust even without execute", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-reclaim-force-defer";
@@ -2082,7 +2084,7 @@ describe("two-pass tool reclaim", () => {
             }),
         );
 
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(1);
     });
 });
 
@@ -2810,7 +2812,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains pending ops but not two-pass reclaim or its watermark on a low-usage TTL fold", async () => {
+    it("drains pending ops and age reclaim on the same low-usage TTL fold", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-reclaim-drain";
@@ -2855,9 +2857,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
         expect(statuses.get(1)).toBe("dropped");
-        expect(statuses.get(2)).toBe("active");
+        expect(statuses.get(2)).toBe("dropped");
         expect(statuses.get(3)).toBe("active");
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
 
         const deferReplayBytes = JSON.stringify(messages);
         await runPostTransformPhase(
@@ -3024,6 +3026,7 @@ describe("postprocess empty-sentinel provider gate", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write-anthropic",
                 resolvedProviderID: "anthropic",
@@ -3105,6 +3108,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 messageTagNumbers: new Map([[userMessage, 1]]),
                 resolvedProviderID: "anthropic",
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-img",
             }),
@@ -3850,6 +3854,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
             }),
         );
@@ -3916,6 +3921,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions,
             }),
@@ -3989,6 +3995,7 @@ describe("final message representation", () => {
             const result = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, bust.messages, {
                     schedulerDecision: "execute",
+                    pendingMaterializationSessions: new Set([sessionId]),
                     resolvedProviderID: "anthropic",
                     trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
                 }),
@@ -4062,6 +4069,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, markerAbsent.messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions: markerAbsent.trailingBlankSourceDecisions,
             }),
@@ -4087,6 +4095,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, visibleBust.messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions: visibleBust.trailingBlankSourceDecisions,
             }),
@@ -4381,6 +4390,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
             }),
         );
@@ -4981,6 +4991,9 @@ async function runTodoGatePass(args: {
     await runPostTransformPhase(
         basePostTransformArgs(db, args.sessionId, args.messages, {
             schedulerDecision: args.schedulerDecision,
+            // These are todo rendering tests: execute represents an explicit bust.
+            pendingMaterializationSessions:
+                args.schedulerDecision === "execute" ? new Set([args.sessionId]) : new Set(),
             tagger,
             targets: tagged.targets,
             reasoningByMessage: tagged.reasoningByMessage,
@@ -5380,4 +5393,51 @@ describe("marker-drain reasoning representation", () => {
         );
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(frozenBeforeServe);
     });
+});
+
+it("age and heuristic candidates alone at 75 percent cannot originate a bust", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-age-ride-only";
+    const messages = [makeToolMessage("old-a"), makeToolMessage("old-b")];
+    const targets = new Map<number, TagTarget>();
+    for (let index = 0; index < messages.length; index++) {
+        insertTag(
+            db,
+            sessionId,
+            `old-${index}`,
+            "tool",
+            4000,
+            index + 1,
+            0,
+            "bash",
+            0,
+            `old-owner-${index}`,
+            null,
+            { tokenCount: 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+        );
+        targets.set(index + 1, makeDropTarget(messages[index]!));
+    }
+    padRecentToolSkeletonWindow(sessionId, 2);
+    advanceToolReclaimWatermark(db, sessionId, 2);
+    const before = JSON.stringify(messages);
+    const result = await runPostTransformPhase(
+        basePostTransformArgs(db, sessionId, messages, {
+            schedulerDecision: "execute",
+            contextUsage: { percentage: 75.02, inputTokens: 654172 },
+            // Replaying a previously frozen drop is not an independent new bust.
+            didMutateFromFlushedStatuses: true,
+            tags: getActiveTagsBySession(db, sessionId),
+            targets,
+            sessionMeta: getOrCreateSessionMeta(db, sessionId),
+        }),
+    );
+    expect(JSON.stringify(messages)).toBe(before);
+    expect(result.bustedThisPass).toBe(false);
+    expect(result.droppedTokens).toBe(0);
+    expect(
+        getTagsBySession(db, sessionId)
+            .filter((t) => t.tagNumber <= 2)
+            .every((t) => t.status === "active"),
+    ).toBe(true);
 });

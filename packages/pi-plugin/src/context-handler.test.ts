@@ -108,10 +108,10 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"const alreadyMutatingThisPass = pendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
+				"let isCacheBustingPass = hasReclaimRide(rideSignals)",
 			);
 			expect(src).toContain(
-				"const toolReclaimApplicationOpportunity = toolReclaimExecutePass && alreadyMutatingThisPass",
+				"const toolReclaimApplicationOpportunity = isCacheBustingPass",
 			);
 			expect(src).toContain(
 				"if (toolReclaimApplicationOpportunity && !emergencyDropEligible)",
@@ -2427,6 +2427,7 @@ describe("registerPiContextHandler", () => {
 			sessionId: string;
 			inFlightHistorian: boolean;
 			inputTokens: number;
+			queueDrop?: boolean;
 		}) {
 			const db = createTestDb();
 			let restoreInFlight: (() => void) | undefined;
@@ -2505,7 +2506,8 @@ describe("registerPiContextHandler", () => {
 							tag.messageId.startsWith("entry-drop:")),
 				);
 				if (!dropTag) throw new Error("expected queued-drop target tag");
-				queuePendingOp(db, args.sessionId, dropTag.tagNumber, "drop", 1);
+				if (args.queueDrop !== false)
+					queuePendingOp(db, args.sessionId, dropTag.tagNumber, "drop", 1);
 				updateSessionMeta(db, args.sessionId, {
 					lastResponseTime: Date.now(),
 					cacheTtl: "59m",
@@ -2537,6 +2539,14 @@ describe("registerPiContextHandler", () => {
 			}
 		}
 
+		expect(
+			await runScenario({
+				sessionId: "ses-age-only-execute",
+				inFlightHistorian: false,
+				inputTokens: 75_020,
+				queueDrop: false,
+			}),
+		).toEqual({ dropStatus: "active", readAStatus: "active", pendingOps: 0 });
 		expect(
 			await runScenario({
 				sessionId: "ses-historian-veto-execute",
@@ -2675,6 +2685,7 @@ describe("registerPiContextHandler", () => {
 				});
 
 				messages = buildMessages();
+				signalPiPendingMaterialization(sessionId);
 				await handler({ messages }, contextFor(messages, 70_000));
 				const reduceStatus = getTagsBySession(db, sessionId).find(
 					(tag) => tag.type === "tool" && tag.messageId === "reduce-1",

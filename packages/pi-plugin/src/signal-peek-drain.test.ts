@@ -265,7 +265,9 @@ describe("source contract: peek-then-drain in runPipeline (pending materializati
 		// `if` block (so a throw from applyPendingOperations skips the drain).
 		const idx = code.indexOf("applyPendingOperations(");
 		expect(idx).toBeGreaterThan(0);
-		const segment = code.slice(idx, idx + 800);
+		const catchIndex = code.indexOf("} catch", idx);
+		expect(catchIndex).toBeGreaterThan(idx);
+		const segment = code.slice(idx, catchIndex);
 		expect(segment).toContain("consumePendingMaterialization(args.sessionId)");
 		expect(segment).toMatch(/if\s*\(\s*hasPendingMaterializeSignal\s*\)/);
 	});
