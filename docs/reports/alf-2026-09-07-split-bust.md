@@ -175,3 +175,69 @@ All final revision gates completed unpiped with exit 0:
 - Changed-comment review completed; a flagged selection-class explanation was rewritten to distinguish selection eligibility from automatic-reduction permission. AFT's LSP producers remained unavailable; compiler/typecheck results are authoritative.
 
 The documentation guard initially rejected mentioning the removed configuration-key spelling in CONFIGURATION.md; the final sentence documents automatic-drop behavior without reintroducing that obsolete key. Cargo's unrelated local dependency-version normalization was restored again. No schema, lockfile, dists, or generated-schema changes are delivered.
+
+## Final gate revision: synthetic todos and persist-before-serve
+
+This section supersedes the earlier Q4 treatment of first-render/no-complete-cache fallback. The final TM-3.3 ruling distinguishes **cached replay** from **an unavoidable first-render or force bust**.
+
+### Rust synthetic todo is now ride-only
+
+`transform.rs` no longer treats ordinary scheduler Execute as an independent bust opportunity. Its classifier and boundaryless-todo promotion use the same independently priced opportunity as reductions: published prefix work, explicit flush, force/emergency, or actually selected reductions. A todo delta alone cannot promote a deferred plan to SOFT.
+
+The TypeScript reference is `applyTodoSynthesis` in `transform-postprocess-phase.ts:269`: it builds a new pair from current state only inside `if (args.isCacheBustingPass)` (around line 327); the other path rebuilds the persisted anchor. `runPostTransformPhase` forwards the existing shared permission rather than originating one for todo changes.
+
+The shared differential fixture is `crates/mc-module/testdata/todo-ride-only.json`, consumed by:
+
+- `synthetic todo ride-only differential golden matches Rust` — actual TypeScript postprocess output;
+- `transform::tests::synthetic_todo_ride_only_differential_golden_matches_typescript` — actual Rust transform output.
+
+Both execute the same bootstrap → todo-state change on otherwise empty ordinary Execute → independent flush → defer sequence. They compare synthetic todo state from the **served tool call**, and compare complete serialized outgoing arrays within each engine for the replay steps. The todo-only Execute stays SOFT+ byte-identical; the pair lands on the flush and replays thereafter. Native envelope differences are not hidden by claiming cross-engine JSON equality: the shared golden asserts normalized todo content and the same byte-replay transitions.
+
+The pre-fix Rust run failed at `todo-only execute`: expected no synthetic todo, received `Pending todo`. Existing state-sync and disabled-todo fixtures now explicitly supply an independent flush where they previously used bare Execute as shorthand; they additionally verify that pressure alone preserves the frozen pair.
+
+### Persist-before-serve protocol
+
+| Available state / pass | Chosen delivery | Reduction permission |
+| --- | --- | --- |
+| Complete cached pair, normal pass, preflight cannot persist | Replay the complete cached pair; no fresh rendering at delivery | Remains closed unless a separate allowed operation actually prices the pass |
+| Partial process-local state but complete persisted pair | Recover the persisted pair, including its cached boundary | Same cached-replay rule |
+| No complete pair, including a genuinely partial persisted cache | First render necessarily supplies a new prefix; a fresh recovery pair may be used | Opened **before** reduction gates as a first-render bust |
+| Force/emergency | Fresh recovery is allowed when either HARD or m1-only persistence fails | Force permission already admits the reductions |
+
+Both harnesses capture the selected prefix in a **pass-local immutable delivery snapshot**. Final injection replays that snapshot instead of retrying materialization after the reduction gates have run. A failed preflight therefore cannot become a successful, newly priced prefix rewrite later in the same pass while its reductions remain deferred. A complete cached snapshot also covers a thrown preflight error, not only the renderer's typed contention result.
+
+TypeScript's `prepareCachedM0M1Replay` captures cached bytes and the existing boundary from the cached row. `injectM0M1` can recover a persisted pair when local state is partial, and its `preparedPrefix` branch delivers the chosen messages. Modern `prepareCompartmentInjection` now keeps the persisted raw boundary until delivery; `trimToPreparedPrefix` advances it only with the chosen prefix. This matters beyond message[0]: otherwise a refused preflight could still remove the raw range that its cached summary does not cover. Deferred history/marker consumption also requires successful modern-prefix delivery, not a preparer's advisory alone.
+
+Pi's `replayCompletePiPrefix` similarly uses the complete persisted byte pair and boundary without requiring live marker normalization to succeed. `freezePrefixForPass` retains that exact provider content for delivery. Pi timestamps are envelope metadata, not provider content; they keep their existing position relative to the first retained raw message rather than adopting the empty off-wire array's wall-clock timestamp.
+
+The new regression sequences include two contended passes followed by an uncontended pass. They verify cached prefix equality, held reductions, then simultaneous published-history delivery and reduction application. The full TypeScript transform pin additionally verifies **whole-request equality including the raw boundary**, plus byte-identical defer replay after the successful drain. The contention fixture makes the writer available again by final delivery, so it also detects an incorrect second materialization attempt after gates closed.
+
+First-render and force cases are explicitly tested in both harnesses. The old cold/partial test expectation that every non-persisted fallback must deny all lanes was intentionally replaced: with no complete cached pair, the final ruling classifies the pass as busting by definition. Cached-pair contention still denies automatic rides. Force tests cover both HARD fallback and a contended **m1-only** refresh; neither recovery path depends on winning that write lock before serving fresh recovery content. No failed persistence is falsely reported as a successful durable materialization.
+
+### Restored final-round mutations
+
+All five controls followed `git add -A` → nonempty indexed diff → named red check → `git checkout -- <path> && touch <path>` → empty indexed diff. Each changed one line against one original line; Cargo's incidental lockfile normalization was restored with the Rust source.
+
+| Mutation | Named red test | Actual red / passing control |
+| --- | --- | --- |
+| Restore ordinary Execute as Rust's independent opportunity | `transform::tests::synthetic_todo_ride_only_differential_golden_matches_typescript` | Unexpected `Pending todo` on `todo-only execute`; exit 101. No other test selected. |
+| Ignore the complete persisted pair when TS local cache is partial | `contention replays the complete transform including the persisted raw boundary` | Fresh `PUBLISHED_A` entered m0 and the raw `world` message vanished; exit 1. TS todo differential control passed. |
+| Omit TS's prepared prefix at final delivery | `contended partial cache replays persisted prefix until one uncontended drain` | Late delivery served fresh `PUBLISHED_A` instead of the cached pair; exit 1. Persisted-preflight-byte control passed. |
+| Allow fresh Pi recovery on an ordinary frozen preflight | `Pi contended prefix replays cached bytes then drains on the next persisted fold` | Fresh `PUBLISHED_A` replaced the cached prefix; exit 1. Force-render recovery control passed. |
+| Disable Pi's immutable prepared-prefix delivery branch | `Pi contended prefix replays cached bytes then drains on the next persisted fold` | A late retry served fresh `PUBLISHED_A` after the denied preflight; exit 1. Force-render recovery control passed. |
+
+### Final-round gates and compatibility
+
+All final gates ran unpiped and returned exit 0:
+
+- Plugin: **4,578 passed**, 407 files.
+- Pi: **1,018 passed**, 88 files.
+- `cargo test -p mc-module -- --test-threads=1`: **1,090 unit tests passed, four ignored**, plus four integration/binary tests.
+- `cargo clippy -p mc-module --all-targets -- -D warnings`, repository `bun run typecheck`, both package Biome lint scripts, and Rust formatting: **passed**.
+- The existing 2,000-message benchmark recorded **p50=0.394ms, p95=0.588ms** in the final plugin suite.
+
+The restart-history omission fixture was strengthened: failed preparation must preserve the raw range **before as well as after** cache clearing. Its former assertion demonstrating loss without cache clearing is no longer valid because boundary advancement now waits for prefix delivery.
+
+Changed-comment review examined sixteen comments and found no unclear statements. AFT inspection completed with unavailable LSP producers; the compiler and test gates above are authoritative.
+
+No schema movement, migration, generated schema, or shipped dists changes. The new prepared-prefix messages, boundary, and delivery flags are process-local objects; older binaries cannot encounter them in persisted storage. Cached pair/boundary columns retain their existing encodings, and the earlier rollback table otherwise remains applicable. Rolling back would restore the old todo-promotion/fallback policy, not require data conversion.

@@ -143,7 +143,10 @@ import {
 	resolveExecuteThreshold,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
-import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import {
+	getVisibleMemoryIds,
+	hasCompleteCachedM0M1,
+} from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
 	markNoteNudgeDelivered,
 	onNoteTrigger,
@@ -221,6 +224,8 @@ import {
 	injectM0M1Pi,
 	mustMaterializePi,
 	type PiM0M1InjectionResult as PiInjectionResult,
+	type PiM0M1State,
+	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
@@ -4789,10 +4794,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				};
 			})()
 		: undefined;
+	const emergencyDropEligible =
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= forceMaterializationPercentage;
 	// Build the fold state once and reuse it for both the preflight and the wire
 	// injection. Omitting a render-affecting field from only one of those calls can
 	// manufacture a HARD signal that the real injection immediately disproves.
-	const piM0State =
+	const piM0State: PiM0M1State | undefined =
 		args.injection && piHardSignals
 			? {
 					sessionId: args.sessionId,
@@ -4804,6 +4812,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					historyBudgetTokens: args.injection.historyBudgetTokens,
 					hardSignals: piHardSignals,
 					muralEnabled: args.injection.muralEnabled === true,
+					freezePrefixForPass: true,
+					allowFreshContentionFallback:
+						args.forceMaterialization === true || emergencyDropEligible,
 				}
 			: undefined;
 	const foldDueDecision = piM0State
@@ -4813,10 +4824,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				getCompartments(args.db, args.sessionId),
 			)
 		: { value: false, reason: null };
+	const firstRenderBust =
+		piM0State !== undefined && !hasCompleteCachedM0M1(args.db, args.sessionId);
 	let foldExecutedThisPass = false;
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
+	const cachedPrefixBeforePreflight =
+		piM0State &&
+		(foldDueDecision.value || softRefreshOpportunity) &&
+		!emergencyDropEligible
+			? prepareCachedM0M1PiReplay(piM0State, args.db)
+			: undefined;
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold = getOrCreateSessionMeta(args.db, args.sessionId);
 	const m0CoverageBeforeFold =
@@ -4868,6 +4887,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				);
 			}
 		} catch (error) {
+			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
+			prefixPreflightContended = true;
 			sessionLog(
 				args.sessionId,
 				`pi m[0] HARD fold pre-execution failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4884,9 +4905,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Primary sessions run routine age-sensitive cleanup only once during an
 	// unbroken stretch of execute/emergency pressure. Later passes still evaluate
 	// emergency drops, but another batch requires pressure to clear and rise again.
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
 	const executePressureEligible =
 		args.schedulerDecision === "execute" || emergencyDropEligible;
 	if (!executePressureEligible) {
@@ -4905,6 +4923,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization === true ||
 		foldExecutedThisPass ||
+		firstRenderBust ||
 		hasPendingMaterialization(args.sessionId) ||
 		deferredMaterializeEligible;
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
@@ -4912,7 +4931,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
 	const rideSignals = {
-		hardFold: foldExecutedThisPass,
+		hardFold: foldExecutedThisPass || firstRenderBust,
 		force: args.forceMaterialization === true || emergencyDropEligible,
 		explicitFlush: hasPendingMaterializeSignal || args.isCacheBusting,
 		publishedHistory:
@@ -4932,6 +4951,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// A fold persisted earlier in this pass already busted the prefix, so
 			// reductions may ride it without causing an independent bust.
 			foldExecutedThisPass ||
+			firstRenderBust ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes when ctx_reduce
@@ -5080,6 +5100,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.forceMaterialization ||
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
+			firstRenderBust ||
 			historianRunning);
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
@@ -5107,7 +5128,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal ||
-		foldExecutedThisPass;
+		foldExecutedThisPass ||
+		firstRenderBust;
 	// `canConsumeDeferredLate` is computed ONCE, earlier (above shouldRunHeuristics),
 	// as a mid-turn-aware gate independent of shouldRunHeuristics — mirroring
 	// OpenCode's canConsumeDeferredOnThisPass. It must NOT be re-derived from
@@ -6067,6 +6089,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const materialized = injectionResult?.m0Materialized === true;
 	const materializeReason = injectionResult?.m0Reason ?? null;
 	const bustedThisPass =
+		firstRenderBust ||
 		didMutateFromFlushedStatuses ||
 		pendingOpsDidMutate ||
 		heuristicOrReasoningDidMutate ||

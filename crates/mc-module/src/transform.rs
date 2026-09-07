@@ -4338,10 +4338,7 @@ fn apply_once(
     // The drain latch can remain active after pressure falls below the force threshold.
     // It does not mean this request is already rewriting the cached prefix: pending m1
     // publications still need Execute or an independently authorized repair/force/flush.
-    let independent_bust_opportunity =
-        (matches!(scheduler_outcome.pass, scheduler::PassDecision::Execute)
-            && !ordinary_historian_veto)
-            || supersession_ride_available;
+    let independent_bust_opportunity = supersession_ride_available;
     let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
     let mut plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
@@ -4356,9 +4353,8 @@ fn apply_once(
             || loaded.meta.soft_refresh_pending
             || todo_injection_pending,
         reductions_pending: reductions_pending_now,
-        // Scheduler Execute is a genuine deferred-work consumption opportunity even when
-        // no reduction was selected. An active historian is the one ordinary-pass veto;
-        // hard/force/emergency arms bypass it.
+        // Todo state is deferred work, not an independent bust. It may join
+        // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
     });
     // A todo-only delta does not need a coverage anchor: it inserts a frozen pair between the
@@ -4367,7 +4363,7 @@ fn apply_once(
     // defer result when an independent bust opportunity already exists. Reconcile defers remain
     // untouched because they must clear or rebuild the boundary state first.
     if todo_injection_pending
-        && independent_bust_opportunity
+        && bust_opportunity
         && !loaded.core.reconcile_pending
         && matches!(plan, PassPlan::Defer)
     {
@@ -18533,12 +18529,81 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn state_sync_todo_pending_rides_execute_to_native_wire_and_defers_identically() {
+    fn synthetic_todo_ride_only_differential_golden_matches_typescript() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/todo-ride-only.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = req(
+            "todo-golden",
+            "cfg0",
+            vec![item("u1", 1, "please help"), item("a1", 2, "on it")],
+        );
+        request.todo_tool_present = Some(true);
+        let mut context = pctx("git:proj", "/nonexistent-docs", 0);
+        context.cache_ttl = "never".into();
+        let mut previous = Vec::new();
+        for step in golden["steps"].as_array().unwrap() {
+            if !step["state"].is_null() {
+                let mut loaded = s.load("todo-golden").unwrap();
+                loaded.meta.last_todo_state = Some(serde_json::to_string(&step["state"]).unwrap());
+                s.commit(
+                    "todo-golden",
+                    loaded.row_version,
+                    &loaded.core,
+                    &loaded.meta,
+                )
+                .unwrap();
+            }
+            if step["flush"] == true {
+                s.arm_soft_refresh("todo-golden").unwrap();
+            }
+            let response = transform(
+                &s,
+                &with_usage(
+                    request.clone(),
+                    if step["execute"] == true { 75 } else { 10 },
+                    100,
+                ),
+                &context,
+            )
+            .unwrap();
+            let todos = response
+                .messages()
+                .iter()
+                .flat_map(|m| &m.content)
+                .find_map(|block| {
+                    if let ck_wire::CkKind::ToolCall {
+                        id, name, input, ..
+                    } = &block.kind
+                    {
+                        if name == "todowrite" && id.starts_with("mc_synthetic_todo_") {
+                            return Some(input["todos"].clone());
+                        }
+                    }
+                    None
+                })
+                .unwrap_or(serde_json::Value::Null);
+            assert_eq!(todos, step["expectedTodo"], "{}", step["name"]);
+            let wire = serde_json::to_vec(response.messages()).unwrap();
+            if step["replay"] == true {
+                assert_eq!(response.action, "SOFT+", "{}", step["name"]);
+                assert_eq!(wire, previous, "{}", step["name"]);
+            } else {
+                assert_ne!(wire, previous);
+            }
+            previous = wire;
+        }
+    }
+
+    #[test]
+    fn state_sync_todo_waits_for_priced_execute_and_defers_identically() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut request = req("todo-sync", "cfg0", vec![item("a", 1, "raw")]);
         request.todo_tool_present = Some(true);
-        assert_eq!(run(&s, &request, &spine()).action, "HARD");
+        let bootstrap = run(&s, &request, &spine());
+        assert_eq!(bootstrap.action, "HARD");
 
         let state_json =
             r#"[{"content":"State sync todo","status":"in_progress","priority":"high"}]"#;
@@ -18579,6 +18644,10 @@ pub(crate) mod tests {
         })
         .unwrap();
 
+        let pending = run(&s, &with_usage(request.clone(), 70, 100), &spine());
+        assert_eq!(pending.action, "SOFT+");
+        assert_eq!(pending.messages(), bootstrap.messages());
+        s.arm_soft_refresh("todo-sync").unwrap();
         let bust = run(&s, &with_usage(request.clone(), 70, 100), &spine());
         assert_eq!(bust.action, "SOFT");
         let expected_call_id = "mc_synthetic_todo_c4a22134ee90be17";
@@ -18668,6 +18737,10 @@ pub(crate) mod tests {
             Some("todo-before")
         );
 
+        let pressure_only = run(&s, &with_usage(disabled.clone(), 70, 100), &spine());
+        assert_eq!(pressure_only.action, "SOFT+");
+        assert_eq!(synthetic_todo_pair_bytes(&pressure_only), frozen_pair);
+        s.arm_soft_refresh("todo-disabled").unwrap();
         let bust = run(&s, &with_usage(disabled, 70, 100), &spine());
         assert!(bust.committed);
         assert!(bust.messages().iter().all(|message| {

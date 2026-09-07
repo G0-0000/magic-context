@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	appendCompartments,
+	getCompartments,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
@@ -75,6 +78,7 @@ import {
 	getPiChannel1Baseline,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
+import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -4051,6 +4055,182 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingOps(db, sessionId)).toHaveLength(0);
 			} finally {
 				restoreObserver();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it("Pi contended prefix replays cached bytes then drains on the next persisted fold", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-persist-before-serve";
+			let restoreInjection = () => {};
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				const raw = buildMessages();
+				const baseline = await handler(
+					{ messages: raw },
+					contextFor(sessionId, raw),
+				);
+				const cachedBytes = JSON.stringify(baseline.messages.slice(0, 2));
+				appendCompartments(db, sessionId, [
+					{
+						sequence: 1,
+						startMessage: 1,
+						endMessage: 1,
+						startMessageId: "entry-user",
+						endMessageId: "entry-user",
+						title: "PUBLISHED_A",
+						content: "PUBLISHED_A",
+					},
+				]);
+				db.prepare(
+					"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
+				).run(sessionId);
+				let contend = true;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (!contend || args[2].length > 0) return injectM0M1Pi(...args);
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							return injectM0M1Pi(...args);
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+				for (let pass = 0; pass < 3; pass++) {
+					contend = pass < 2;
+					const messages = buildMessages();
+					const result = await handler(
+						{ messages },
+						contextFor(sessionId, messages),
+					);
+					if (contend) {
+						expect(JSON.stringify(result.messages.slice(0, 2))).toBe(
+							cachedBytes,
+						);
+						expect(getPendingOps(db, sessionId)).toHaveLength(1);
+						expect(
+							getTagsBySession(db, sessionId).find(
+								(t) => t.tagNumber === toolTagNumber,
+							)?.status,
+						).toBe("active");
+					} else {
+						expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
+							"PUBLISHED_A",
+						);
+						expect(getPendingOps(db, sessionId)).toHaveLength(0);
+						expect(
+							getTagsBySession(db, sessionId).find(
+								(t) => t.tagNumber === toolTagNumber,
+							)?.status,
+						).toBe("dropped");
+					}
+				}
+			} finally {
+				restoreInjection();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it.each([
+			"first",
+			"force",
+			"force-soft",
+		])("Pi %s-render recovery admits drops when contention requires fresh bytes", async (mode) => {
+			const db = createTestDb();
+			const sessionId = `ses-pi-fresh-${mode}`;
+			let restoreInjection = () => {};
+			try {
+				if (mode === "force-soft")
+					appendCompartments(db, sessionId, [
+						{
+							sequence: 1,
+							startMessage: 1,
+							endMessage: 1,
+							startMessageId: "entry-user",
+							endMessageId: "entry-user",
+							title: "BASELINE",
+							content: "BASELINE",
+						},
+					]);
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				appendCompartments(db, sessionId, [
+					{
+						sequence: mode === "force-soft" ? 2 : 1,
+						startMessage: mode === "force-soft" ? 2 : 1,
+						endMessage: mode === "force-soft" ? 2 : 1,
+						startMessageId:
+							mode === "force-soft" ? "new-covered" : "entry-user",
+						endMessageId: mode === "force-soft" ? "new-covered" : "entry-user",
+						title: "FRESH_RECOVERY",
+						content: "FRESH_RECOVERY",
+					},
+				]);
+				if (mode !== "force-soft")
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
+					).run(sessionId);
+				if (mode === "first")
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL WHERE session_id = ?",
+					).run(sessionId);
+				let sawFallback = false;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (mode === "force-soft" && args[2].length === 0)
+							expect(
+								mustMaterializePi(args[0], db, getCompartments(db, sessionId))
+									.value,
+							).toBe(false);
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							const result = injectM0M1Pi(...args);
+							sawFallback ||=
+								result.contentionExhausted && !result.m0Materialized;
+							return result;
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+				const messages = buildMessages();
+				const ctx = {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages),
+					getContextUsage: () => ({
+						tokens: mode.startsWith("force") ? 90000 : 4000,
+						percent: mode.startsWith("force") ? 90 : 4,
+						contextWindow: 100000,
+					}),
+				} as never;
+				const result = await handler({ messages }, ctx);
+				expect(sawFallback).toBe(true);
+				expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
+					"FRESH_RECOVERY",
+				);
+				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(t) => t.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("dropped");
+			} finally {
+				restoreInjection();
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);
 			}

@@ -86,12 +86,15 @@ import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     clearInjectionCache,
     getVisibleMemoryIds,
+    hasCompleteCachedM0M1,
+    type InjectM0M1Result,
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
     type MaterializeDecision,
     mustMaterialize,
     type PreparedCompartmentInjection,
+    prepareCachedM0M1Replay,
     renderCompartmentInjection,
 } from "./inject-compartments";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
@@ -1203,6 +1206,15 @@ export async function runPostTransformPhase(
                   hardSignals: args.m0M1.hardSignals,
               })
             : { value: false, reason: null };
+    const firstRenderBust = m0M1EnabledForFold && !hasCompleteCachedM0M1(args.db, args.sessionId);
+    let preparedPrefix: InjectM0M1Result | undefined;
+    const cachedPrefixBeforePreflight =
+        (foldDueDecision.value || args.schedulerDecision === "execute") &&
+        m0M1EnabledForFold &&
+        !firstRenderBust &&
+        !emergencyDropEligible
+            ? prepareCachedM0M1Replay(args.db, args.sessionId)
+            : undefined;
     let foldExecutedThisPass = false;
     let publishedM1RefreshedThisPass = false;
     const softRefreshOpportunity = args.schedulerDecision === "execute";
@@ -1231,10 +1243,12 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass: true,
+                allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
             });
+            preparedPrefix = foldResult;
             foldExecutedThisPass = foldExecutesThisPass(
                 foldDueDecision.value || softRefreshOpportunity,
                 foldResult.m0RematerializedThisPass,
@@ -1260,6 +1274,7 @@ export async function runPostTransformPhase(
                 sessionLog(args.sessionId, "channel2 fold-cycle reset failed (ignored):", error);
             }
         } catch (error) {
+            preparedPrefix = cachedPrefixBeforePreflight;
             args.passOutcome?.record("m0-m1-fold-preexecution-degradation");
             sessionLog(
                 args.sessionId,
@@ -1282,7 +1297,8 @@ export async function runPostTransformPhase(
         materializationRequested ||
         forceMaterialization ||
         emergencyDropEligible ||
-        foldExecutedThisPass;
+        foldExecutedThisPass ||
+        firstRenderBust;
 
     const shouldReadPendingOps =
         !compactionOff &&
@@ -1290,6 +1306,7 @@ export async function runPostTransformPhase(
             args.schedulerDecision === "execute" ||
             forceMaterialization ||
             foldExecutedThisPass ||
+            firstRenderBust ||
             compartmentRunning);
     const pendingOps = shouldReadPendingOps ? getPendingOps(args.db, args.sessionId) : [];
     const hasPendingUserOps = pendingOps.length > 0;
@@ -1305,15 +1322,16 @@ export async function runPostTransformPhase(
         (args.schedulerDecision === "execute" ||
             materializationRequested ||
             forceMaterialization ||
-            foldExecutedThisPass) &&
+            foldExecutedThisPass ||
+            firstRenderBust) &&
         publishedWorkDrainAllowed;
     // Automatic cleanup waits for a separately priced prefix refresh or drop.
     // Subagents retain the force-band escape even without a historian.
     // A prepared legacy block is delivery evidence only when no m0/m1 renderer
     // owns the prefix. With m0/m1 enabled, require its persisted preflight result;
-    // a fresh non-persisted contention fallback cannot price automatic reductions.
+    // first render and force are separate known-bust exceptions to cached replay.
     const rideSignals = {
-        hardFold: foldExecutedThisPass,
+        hardFold: foldExecutedThisPass || firstRenderBust,
         force: forceMaterialization || emergencyDropEligible,
         explicitFlush: isExplicitFlush,
         publishedHistory:
@@ -1335,6 +1353,7 @@ export async function runPostTransformPhase(
             // may ride it and bypass the once-per-turn guard without creating an
             // independent mid-turn rewrite.
             foldExecutedThisPass ||
+            firstRenderBust ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
@@ -1454,6 +1473,7 @@ export async function runPostTransformPhase(
     let emergencyReclaimedTokens = 0;
     let emergency = false;
     let m0M1InjectedThisPass = false;
+    let deliveredPrefix: InjectM0M1Result | undefined;
     let prependedMessageCount = 0;
     const reasoningMutatedMessages = new Set<MessageLike>();
     let reasoningMutationTargetUnknown = false;
@@ -1917,6 +1937,8 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass,
+                preparedPrefix,
+                allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 // Compaction-off materializes through the zero-compartment
@@ -1924,6 +1946,7 @@ export async function runPostTransformPhase(
                 // compartment rows never reach <session-history>.
                 compactionOff,
             });
+            deliveredPrefix = result;
             if (result.injected) {
                 m0M1InjectedThisPass = true;
                 prependedMessageCount += result.prependedMessageCount;
@@ -2165,6 +2188,9 @@ export async function runPostTransformPhase(
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
     const historyWasConsumedThisPass =
+        (!m0M1Enabled ||
+            (deliveredPrefix?.injected === true &&
+                !deliveredPrefix.materializationContentionRetryExhausted)) &&
         args.historyRebuiltThisPass &&
         (args.canConsumeDeferredLate ||
             args.phaseJustAwaitedPublication ||
@@ -2433,6 +2459,7 @@ export async function runPostTransformPhase(
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
     let bustedThisPass =
+        firstRenderBust ||
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||

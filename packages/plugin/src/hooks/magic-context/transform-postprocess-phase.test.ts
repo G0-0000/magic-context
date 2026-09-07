@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
@@ -5449,7 +5450,8 @@ describe("prefix preflight persistence pins", () => {
         "cached",
         "fresh",
         "partial",
-    ])("%s contention fallback cannot price ride-only reductions", async (cacheShape) => {
+        "force",
+    ])("%s contention fallback follows cached replay or unavoidable bust", async (cacheShape) => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = `ses-preflight-${cacheShape}`;
@@ -5467,7 +5469,20 @@ describe("prefix preflight persistence pins", () => {
         ]);
         const state = getOrCreateSessionMeta(db, sessionId);
         const m0M1 = { projectPath, projectDirectory: "/nonexistent" };
-        if (cacheShape === "cached") injectM0M1({ db, sessionId, state, ...m0M1 });
+        if (cacheShape === "cached" || cacheShape === "force")
+            injectM0M1({ db, sessionId, state, ...m0M1 });
+        if (cacheShape === "force")
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 2,
+                    startMessage: 2,
+                    endMessage: 2,
+                    startMessageId: "new-covered",
+                    endMessageId: "new-covered",
+                    title: "FORCE_FRESH",
+                    content: "FORCE_FRESH",
+                },
+            ]);
         if (cacheShape === "partial")
             state.cachedM0Bytes = Buffer.from("<session-history>partial</session-history>");
         queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
@@ -5480,7 +5495,8 @@ describe("prefix preflight persistence pins", () => {
         padRecentToolSkeletonWindow(sessionId, 1);
         advanceToolReclaimWatermark(db, sessionId, 1);
         state.toolReclaimWatermark = 1;
-        if (cacheShape === "cached") queuePendingOp(db, sessionId, 1, "drop");
+        if (cacheShape === "cached" || cacheShape === "force")
+            queuePendingOp(db, sessionId, 1, "drop");
         const served: compartmentInjection.InjectM0M1Result[] = [];
         const original = compartmentInjection.injectM0M1;
         const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
@@ -5496,8 +5512,13 @@ describe("prefix preflight persistence pins", () => {
             },
         );
         try {
+            const messages = [message];
             const result = await runPostTransformPhase(
-                basePostTransformArgs(db, sessionId, [message], {
+                basePostTransformArgs(db, sessionId, messages, {
+                    contextUsage: {
+                        percentage: cacheShape === "force" ? 90 : 20,
+                        inputTokens: 1000,
+                    },
                     sessionMeta: state,
                     m0M1,
                     targets: new Map([[1, makeDropTarget(message)]]),
@@ -5527,13 +5548,23 @@ describe("prefix preflight persistence pins", () => {
                         call.materializationContentionRetryExhausted,
                 ),
             ).toBe(true);
-            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
-                "active",
-            );
-            expect(result.droppedTokens).toBe(0);
             expect(result.materialized).toBe(false);
-            if (cacheShape === "cached") expect(getPendingOps(db, sessionId)).toHaveLength(1);
-            else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+            if (cacheShape === "cached") {
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
+                ).toBe("active");
+                expect(result.droppedTokens).toBe(0);
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            } else {
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
+                ).toBe("dropped");
+                expect(result.droppedTokens).toBeGreaterThan(0);
+                expect(result.bustedThisPass).toBe(true);
+                if (cacheShape === "force")
+                    expect(JSON.stringify(messages.slice(0, 2))).toContain("FORCE_FRESH");
+                else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+            }
         } finally {
             injection.mockRestore();
         }
@@ -5733,4 +5764,182 @@ describe("ride-only configuration table", () => {
         runBands,
     );
     it("compaction-off performs no reclaim at any band", () => runBands("compaction-off"));
+});
+
+it("synthetic todo ride-only differential golden matches Rust", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-todo-ride-golden";
+    let previous = "";
+    for (const step of todoRideGolden.steps) {
+        if (step.state)
+            updateSessionMeta(db, sessionId, { lastTodoState: JSON.stringify(step.state) });
+        const messages = buildTodoGateMessages(sessionId);
+        const tagger = createTagger();
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: step.execute ? "execute" : "defer",
+                pendingMaterializationSessions: step.flush ? new Set([sessionId]) : new Set(),
+                m0M1: { projectPath: "git:todo-golden", projectDirectory: "/nonexistent" },
+                tagger,
+                targets: tagged.targets,
+                reasoningByMessage: tagged.reasoningByMessage,
+                messageTagNumbers: tagged.messageTagNumbers,
+                batch: tagged.batch,
+            }),
+        );
+        const todo = findTodoPart(messages) as { state: { input: { todos: unknown } } } | null;
+        expect(todo?.state.input.todos ?? null).toEqual(step.expectedTodo);
+        const wire = JSON.stringify(messages);
+        if (step.replay) expect(wire).toBe(previous);
+        else expect(wire).not.toBe(previous);
+        previous = wire;
+    }
+});
+
+it("contended partial cache replays persisted prefix until one uncontended drain", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-persist-before-serve";
+    const m0M1 = { projectPath: "git:persist-before-serve", projectDirectory: "/nonexistent" };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "covered",
+            endMessageId: "covered",
+            title: "OLD_BASELINE",
+            content: "OLD_BASELINE",
+        },
+    ]);
+    const cached: MessageLike[] = [];
+    injectM0M1({
+        db,
+        sessionId,
+        state: getOrCreateSessionMeta(db, sessionId),
+        messages: cached,
+        ...m0M1,
+    });
+    const cachedBytes = JSON.stringify(cached);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "new-covered",
+            endMessageId: "new-covered",
+            title: "PUBLISHED_A",
+            content: "PUBLISHED_A",
+        },
+    ]);
+    insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+        tokenCount: 1000,
+        inputTokenCount: 0,
+        reasoningTokenCount: 0,
+    });
+    padRecentToolSkeletonWindow(sessionId, 1);
+    advanceToolReclaimWatermark(db, sessionId, 1);
+    let contend = true;
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
+        original({
+            ...options,
+            beforePhase3ForTest:
+                contend && !options.messages
+                    ? () => {
+                          queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+                      }
+                    : undefined,
+        }),
+    );
+    try {
+        for (let pass = 0; pass < 3; pass++) {
+            contend = pass < 2;
+            const state = getOrCreateSessionMeta(db, sessionId);
+            if (contend) state.cachedM1Bytes = null;
+            const message = makeToolMessage("old-tool");
+            const messages = [message];
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    m0M1,
+                    sessionMeta: state,
+                    schedulerDecision: "execute",
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: new Map([[1, makeDropTarget(message)]]),
+                }),
+            );
+            if (contend) {
+                expect(JSON.stringify(messages.slice(0, 2))).toBe(cachedBytes);
+                expect(result.droppedTokens).toBe(0);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "active",
+                );
+            } else {
+                expect(JSON.stringify(messages.slice(0, 2))).toContain("PUBLISHED_A");
+                expect(result.droppedTokens).toBeGreaterThan(0);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "dropped",
+                );
+            }
+        }
+    } finally {
+        injection.mockRestore();
+    }
+});
+
+it("force soft-refresh contention serves fresh recovery bytes", () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-force-soft-contention";
+    const state = getOrCreateSessionMeta(db, sessionId);
+    const options = {
+        db,
+        sessionId,
+        state,
+        projectPath: "git:force-soft",
+        projectDirectory: "/nonexistent",
+    };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "old",
+            endMessageId: "old",
+            title: "BASELINE",
+            content: "BASELINE",
+        },
+    ]);
+    injectM0M1(options);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "new",
+            endMessageId: "new",
+            title: "FORCE_SOFT_FRESH",
+            content: "FORCE_SOFT_FRESH",
+        },
+    ]);
+    expect(compartmentInjection.mustMaterialize(options).value).toBe(false);
+    const exec = db.exec.bind(db);
+    const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+        if (sql === "BEGIN IMMEDIATE")
+            throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        return exec(sql);
+    });
+    try {
+        const result = injectM0M1({
+            ...options,
+            isCacheBustingPass: true,
+            allowFreshContentionFallback: true,
+        });
+        expect(result.materializationContentionRetryExhausted).toBe(true);
+        expect(JSON.stringify(result.preparedMessages)).toContain("FORCE_SOFT_FRESH");
+    } finally {
+        blocker.mockRestore();
+    }
 });

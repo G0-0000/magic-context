@@ -15,7 +15,7 @@
  * or dropped /ctx-flush intent.
  */
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +35,7 @@ import {
     getStrippedPlaceholderIds,
     getTagsBySession,
     openDatabase,
+    queueM0Mutation,
     queuePendingOp,
 } from "../../features/magic-context/storage";
 import { getTrailingBlankDecisions } from "../../features/magic-context/storage-meta-persisted";
@@ -48,6 +49,7 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { createChatMessageHook } from "./hook-handlers";
+import * as prefixRenderer from "./inject-compartments";
 import { createTransform } from "./transform";
 
 /**
@@ -1500,6 +1502,129 @@ it.each([
         await transform({}, { messages: nextBust });
         expect(JSON.stringify(nextBust.slice(0, 2))).toContain("PUBLISHED_B");
     } finally {
+        lift();
+    }
+});
+
+it("contention replays the complete transform including the persisted raw boundary", async () => {
+    useTempDataHome("ctx-whole-pass-contention-");
+    const sessionId = "ses-whole-pass-contention";
+    const db = openDatabase();
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "m-user",
+            endMessageId: "m-user",
+            title: "BASELINE",
+            content: "BASELINE",
+        },
+    ]);
+    let decision: "execute" | "defer" = "defer";
+    const deferredHistoryRefreshSessions = new Set<string>();
+    const deferredMaterializationSessions = new Set<string>();
+    const transform = createTransform({
+        db,
+        tagger: createTagger(),
+        scheduler: { shouldExecute: () => decision },
+        contextUsageMap: new Map([
+            [sessionId, { usage: { percentage: 75, inputTokens: 75000 }, updatedAt: Date.now() }],
+        ]),
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: new Set(),
+        deferredHistoryRefreshSessions,
+        deferredMaterializationSessions,
+        lastHeuristicsTurnId: new Map(),
+        clearReasoningAge: 100000,
+        protectedTokens: 1,
+        client: testClient,
+        directory: testDirectory,
+    });
+    const raw = (): TestMessage[] => [
+        ...buildSimpleMessages(sessionId),
+        {
+            info: { id: "old-tool", role: "assistant" },
+            parts: [
+                {
+                    type: "tool",
+                    callID: "old-call",
+                    state: { tool: "read", output: "old output ".repeat(200) },
+                },
+            ],
+        },
+        {
+            info: { id: "latest-user", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "continue" }],
+        },
+    ];
+    const baseline = raw();
+    await transform({}, { messages: baseline });
+    const frozen = JSON.stringify(baseline);
+    const tool = getTagsBySession(db, sessionId).find((t) => t.messageId === "old-call")!;
+    for (let n = 1; n <= 3; n++)
+        insertTag(
+            db,
+            sessionId,
+            `pad-${n}`,
+            "tool",
+            80000,
+            tool.tagNumber + 100 + n,
+            0,
+            "read",
+            0,
+            `pad-owner-${n}`,
+            null,
+            { tokenCount: 20000, inputTokenCount: 0, reasoningTokenCount: 0 },
+        );
+    advanceToolReclaimWatermark(db, sessionId, tool.tagNumber);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "m-assistant",
+            endMessageId: "m-assistant",
+            title: "PUBLISHED_A",
+            content: "PUBLISHED_A",
+        },
+    ]);
+    deferredHistoryRefreshSessions.add(sessionId);
+    deferredMaterializationSessions.add(sessionId);
+    let contend = true;
+    const original = prefixRenderer.injectM0M1;
+    const injection = spyOn(prefixRenderer, "injectM0M1").mockImplementation((options) => {
+        if (contend && !options.preparedPrefix) options.state.cachedM1Bytes = null;
+        return original({
+            ...options,
+            beforePhase3ForTest:
+                contend && !options.messages
+                    ? () => {
+                          queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+                      }
+                    : undefined,
+        });
+    });
+    const lift = blockCompartmentRun(sessionId);
+    try {
+        decision = "execute";
+        for (let pass = 0; pass < 2; pass++) {
+            const messages = raw();
+            await transform({}, { messages });
+            expect(JSON.stringify(messages)).toBe(frozen);
+            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+        }
+        contend = false;
+        const delivered = raw();
+        await transform({}, { messages: delivered });
+        expect(JSON.stringify(delivered.slice(0, 2))).toContain("PUBLISHED_A");
+        expect(JSON.stringify(delivered)).not.toContain("old output");
+        decision = "defer";
+        const replay = raw();
+        await transform({}, { messages: replay });
+        expect(JSON.stringify(replay)).toBe(JSON.stringify(delivered));
+    } finally {
+        injection.mockRestore();
         lift();
     }
 });
