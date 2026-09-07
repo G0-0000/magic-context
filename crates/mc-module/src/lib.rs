@@ -17366,6 +17366,7 @@ mod tests {
         await_results: Mutex<VecDeque<Result<ProducerOutput, HistorianProducerError>>>,
         outputs: Mutex<VecDeque<String>>,
         next_fact: Mutex<Option<String>>,
+        fact_each_run: Mutex<Option<String>>,
         prompts: Mutex<Vec<String>>,
         systems: Mutex<Vec<String>>,
         models: Mutex<Vec<String>>,
@@ -17441,7 +17442,19 @@ mod tests {
             {
                 return result;
             }
-            let output = match self.state.next_fact.lock().expect("next fact mutex").take() {
+            let one_shot_fact = self.state.next_fact.lock().expect("next fact mutex").take();
+            let repeated_fact = self
+                .state
+                .fact_each_run
+                .lock()
+                .expect("fact each run mutex")
+                .clone();
+            let output = match one_shot_fact.or_else(|| {
+                repeated_fact.map(|prefix| {
+                    let (start, end) = prompt_ordinal_range(prompt).unwrap_or((1, 3));
+                    format!("{prefix} {start}-{end}")
+                })
+            }) {
                 Some(fact) => {
                     let (start, end) = prompt_ordinal_range(prompt).unwrap_or((1, 3));
                     historian_output_with_fact(start, end, &fact)
@@ -28918,6 +28931,39 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(final_end, 300, "the drain must reach the keep watermark");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rust_wrapup_finality_uses_the_full_target_and_promotes_every_non_final_round() {
+        let producer = Arc::new(ProducerState::default());
+        *producer.fact_each_run.lock().unwrap() = Some("rust wrapup fact".to_string());
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_messages(&handler, wrapup_messages(320, 800));
+
+        let body = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+
+        assert_eq!(body["disposition"], json!("completed"), "{body}");
+        let rounds = producer.starts.load(Ordering::SeqCst);
+        assert!(
+            rounds >= 6,
+            "fixture must span several wrapup rounds: {rounds}"
+        );
+        let facts = store
+            .load_active_memories(project.to_str().unwrap(), 0)
+            .unwrap();
+        assert_eq!(
+            facts.len(),
+            rounds - 1,
+            "Rust measures has_more against the full wrapup target: every non-final round promotes and only the final weak-lookahead round skips"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

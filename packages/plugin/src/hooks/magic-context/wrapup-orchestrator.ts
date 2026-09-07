@@ -243,9 +243,11 @@ async function runOneWrapupIteration(args: {
         preserveInjectionCacheUntilConsumed: true,
         compartmentLeaseHolderId: leaseHolderId,
         forceDrainQuota: true,
-        // Wrapup wants coverage on the actual final chunk. The runner downgrades
-        // this hint whenever readSessionChunk reports more raw history remains.
-        forceKeepLastCompartment: true,
+        // The boundary resolver caps each run's window, so chunk.hasMore cannot see
+        // beyond that window. Only request weak-lookahead preservation when this
+        // window reaches the wrapup's full drain target; the runner still downgrades
+        // the hint if its own chunk reader stops early within the window.
+        forceKeepLastCompartment: plan.snapshot.eligibleEndOrdinal >= plan.targetEligibleEndOrdinal,
         refreshBoundarySnapshot: () =>
             buildPlan(ctx, sessionId, messagesToKeep, anchorRawMessageCount).snapshot,
         onCompartmentStatePublished: (sid) => {

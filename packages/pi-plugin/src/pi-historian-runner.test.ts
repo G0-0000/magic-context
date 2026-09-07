@@ -140,6 +140,16 @@ function successXmlWithUserObservation(observation: string) {
 	return `${successXml()}\n<user_observations>\n* ${observation}\n</user_observations>`;
 }
 
+function successXmlWithEvent(fact: string) {
+	return `${successXml(fact)}
+<events>
+<causal_incident at_compartment="1">
+<summary>Pi wrapup promotion regression</summary>
+<disposition>fixed</disposition>
+</causal_incident>
+</events>`;
+}
+
 function twoCompartmentSuccessXml() {
 	return `<compartment start="1" end="2" title="Initial Pi slice"><p1>Summarized the first Pi turn.</p1></compartment>
 <compartment start="3" end="4" title="Provisional Pi slice"><p1>Summarized the provisional Pi turn.</p1></compartment>
@@ -546,8 +556,12 @@ describe("runPiHistorian", () => {
 			closeQuietly(db);
 		}
 	});
-	it("runs the Pi subagent, parses output, and publishes compartments and facts", async () => {
-		const { db, runner } = await runHistorianWith({ outputs: [successXml()] });
+	it("runs the Pi subagent and records facts and events that actually publish", async () => {
+		const { db, runner } = await runHistorianWith({
+			outputs: [
+				successXmlWithEvent("Pi historian facts can promote to memory."),
+			],
+		});
 		try {
 			expect(runner.run).toHaveBeenCalledTimes(1);
 			expect(getCompartments(db, "ses-historian")).toEqual([
@@ -565,6 +579,20 @@ describe("runPiHistorian", () => {
 			expect(
 				getMemoriesByProject(db, projectPath).map((m) => m.content),
 			).toContain("Pi historian facts can promote to memory.");
+			const row = db
+				.prepare(
+					"SELECT facts_emitted, events_emitted, facts_by_category_json FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+				)
+				.get("ses-historian") as {
+				facts_emitted: number;
+				events_emitted: number;
+				facts_by_category_json: string;
+			};
+			expect(row.facts_emitted).toBe(1);
+			expect(row.events_emitted).toBe(1);
+			expect(JSON.parse(row.facts_by_category_json)).toEqual(
+				expect.objectContaining({ facts_promoted: 1, events_published: 1 }),
+			);
 		} finally {
 			closeQuietly(db);
 		}
@@ -954,14 +982,38 @@ describe("runPiHistorian", () => {
 			closeQuietly(midLoop.db);
 		}
 
+		const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(
+			() => {},
+		);
 		const finalChunk = await runHistorianWith({
-			outputs: [successXml("Pi final wrapup facts stay deferred.")],
+			outputs: [successXmlWithEvent("Pi final wrapup facts stay deferred.")],
 			forceKeepLastCompartment: true,
 		});
 		try {
 			expect(getCompartments(finalChunk.db, "ses-historian")).toHaveLength(1);
 			expect(getMemoriesByProject(finalChunk.db, projectPath)).toEqual([]);
+			const row = finalChunk.db
+				.prepare(
+					"SELECT facts_emitted, events_emitted, facts_by_category_json FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+				)
+				.get("ses-historian") as {
+				facts_emitted: number;
+				events_emitted: number;
+				facts_by_category_json: string;
+			};
+			expect(row.facts_emitted).toBe(1);
+			expect(row.events_emitted).toBe(1);
+			expect(JSON.parse(row.facts_by_category_json)).toEqual(
+				expect.objectContaining({ facts_promoted: 0, events_published: 0 }),
+			);
+			expect(logSpy).toHaveBeenCalledWith(
+				"ses-historian",
+				expect.stringContaining(
+					"historian unanchored promotion skipped: reason=weak_lookahead_final_compartment",
+				),
+			);
 		} finally {
+			logSpy.mockRestore();
 			closeQuietly(finalChunk.db);
 		}
 	});

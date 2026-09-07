@@ -156,7 +156,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             compartmentIdMax: telemetry.compartmentIdMax ?? null,
             factsEmitted: telemetry.factsEmitted ?? 0,
             factsByCategory: telemetry.factsByCategory ?? null,
+            factsPromoted: telemetry.factsPromoted ?? 0,
             eventsEmitted: telemetry.eventsEmitted ?? 0,
+            eventsPublished: telemetry.eventsPublished ?? 0,
             importanceMin: telemetry.importanceMin ?? null,
             importanceMax: telemetry.importanceMax ?? null,
             importanceAvg: telemetry.importanceAvg ?? null,
@@ -658,7 +660,20 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             }
             return true;
         });
+        const unanchoredPromotionSkipReason = discardedLast
+            ? "discarded_last"
+            : weakLookaheadFinalCompartment
+              ? "weak_lookahead_final_compartment"
+              : null;
+        if (unanchoredPromotionSkipReason) {
+            sessionLog(
+                sessionId,
+                `historian unanchored promotion skipped: reason=${unanchoredPromotionSkipReason} facts=${validatedPass.facts?.length ?? 0} user_observations=${validatedPass.userObservations?.length ?? 0} primers=${validatedPass.primerCandidates?.length ?? 0} events_publishable=${publishableEvents.length}/${validatedPass.events?.length ?? 0}`,
+            );
+        }
         let promotedFactRefs: Array<{ memoryId: number; content: string }> = [];
+        let promotedFactCount = 0;
+        let publishedEventCount = 0;
         let persistedIds: number[] = [];
 
         // Append new compartments (existing stay untouched in DB) and publish all
@@ -701,12 +716,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // project memories.
             if (promotionActive && !skipUnanchoredPromotion) {
                 try {
-                    promotedFactRefs = promoteSessionFactsDurable(
+                    const promotion = promoteSessionFactsDurable(
                         db,
                         sessionId,
                         promotionProjectIdentity,
                         validatedPass.facts ?? [],
                     );
+                    promotedFactRefs = promotion.newMemoryRefs;
+                    promotedFactCount = promotion.factsPromoted;
                 } catch (error) {
                     if (error instanceof ModuleMemoryAuthorityError) {
                         // A project flipped back to the TS transform can still have
@@ -716,6 +733,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                         // entirely, which starves overflow recovery. Skip the facts,
                         // keep the compartments.
                         promotedFactRefs = [];
+                        promotedFactCount = 0;
                         sessionLog(
                             sessionId,
                             "fact promotion skipped: project memory is module-managed; compartments publish without facts",
@@ -733,6 +751,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             if (publishableEvents.length > 0) {
                 try {
                     insertCompartmentEvents(db, sessionId, publishableEvents, persistedIds);
+                    publishedEventCount = publishableEvents.length;
                     sessionLog(
                         sessionId,
                         `stored ${publishableEvents.length} compartment event(s)`,
@@ -822,7 +841,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             telemetry.compartmentIdMax = validIds.length > 0 ? Math.max(...validIds) : null;
             telemetry.factsEmitted = facts.length;
             telemetry.factsByCategory = facts.length > 0 ? tallyFactsByCategory(facts) : null;
-            telemetry.eventsEmitted = publishableEvents.length;
+            telemetry.factsPromoted = promotedFactCount;
+            telemetry.eventsEmitted = (validatedPass.events ?? []).length;
+            telemetry.eventsPublished = publishedEventCount;
             telemetry.importanceMin = imp.min;
             telemetry.importanceMax = imp.max;
             telemetry.importanceAvg = imp.avg;

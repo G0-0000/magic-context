@@ -47,8 +47,12 @@ export interface HistorianRunInput {
     factsEmitted?: number;
     /** `{ [category]: count }` of emitted facts. */
     factsByCategory?: Record<string, number> | null;
+    /** Valid emitted facts persisted as new memories or re-observations. */
+    factsPromoted?: number;
     /** Events emitted (causal_incident / trajectory_correction). */
     eventsEmitted?: number;
+    /** Events successfully inserted into compartment_events. */
+    eventsPublished?: number;
     /** Importance distribution across persisted compartments. */
     importanceMin?: number | null;
     importanceMax?: number | null;
@@ -91,7 +95,11 @@ export function recordHistorianRun(db: Database, input: HistorianRunInput): numb
                 input.compartmentIdMin ?? null,
                 input.compartmentIdMax ?? null,
                 input.factsEmitted ?? 0,
-                input.factsByCategory ? JSON.stringify(input.factsByCategory) : null,
+                JSON.stringify({
+                    ...(input.factsByCategory ?? {}),
+                    facts_promoted: input.factsPromoted ?? 0,
+                    events_published: input.eventsPublished ?? 0,
+                }),
                 input.eventsEmitted ?? 0,
                 input.importanceMin ?? null,
                 input.importanceMax ?? null,

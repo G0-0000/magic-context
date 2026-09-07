@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import {
     acquireCompartmentLease,
     releaseCompartmentLease,
@@ -14,6 +14,7 @@ import { reserveProtectedTailDrainTokens } from "../../features/magic-context/st
 import { getPrimerCandidatesForProject } from "../../features/magic-context/storage-primers";
 import { getUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
 import type { PluginContext } from "../../plugin/types";
+import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runCompartmentAgent } from "./compartment-runner";
@@ -125,6 +126,12 @@ function historianXml(): string {
 <facts><PROJECT_RULES>
 * Keep regression tests around wrapup promotion.
 </PROJECT_RULES></facts>
+<events>
+<causal_incident at_compartment="1">
+<summary>Wrapup promotion regression</summary>
+<disposition>fixed</disposition>
+</causal_incident>
+</events>
 <user_observations>
 * User prefers regression tests for wrapup behavior.
 </user_observations>
@@ -219,6 +226,7 @@ async function runWithLease(args: {
             compartmentLeaseHolderId: holderId,
             forceKeepLastCompartment: args.forceKeepLastCompartment,
             forceDrainQuota: args.forceDrainQuota,
+            preserveInjectionCacheUntilConsumed: true,
             refreshBoundarySnapshot: args.refreshBoundarySnapshot,
         });
     } finally {
@@ -251,9 +259,53 @@ describe("runCompartmentAgent wrapup controls", () => {
                 } else {
                     expect(getMemoriesByProject(db, project).length).toBeGreaterThan(0);
                 }
+                const row = db
+                    .prepare(
+                        "SELECT facts_emitted, events_emitted, facts_by_category_json FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    )
+                    .get(sessionId) as {
+                    facts_emitted: number;
+                    events_emitted: number;
+                    facts_by_category_json: string;
+                };
+                expect(row.facts_emitted).toBe(1);
+                expect(row.events_emitted).toBe(1);
+                expect(JSON.parse(row.facts_by_category_json)).toEqual(
+                    expect.objectContaining({
+                        facts_promoted: forceKeepLastCompartment ? 0 : 1,
+                        events_published: forceKeepLastCompartment ? 0 : 1,
+                    }),
+                );
             } finally {
                 closeQuietly(db);
             }
+        }
+    });
+
+    it("logs why the final weak-lookahead window skips unanchored promotion", async () => {
+        const db = createDb();
+        const sessionId = "ses-force-final-log";
+        const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        try {
+            await withProvider(sessionId, 3, () =>
+                runWithLease({
+                    db,
+                    sessionId,
+                    snapshot: wrapupSnapshot(db, sessionId),
+                    forceKeepLastCompartment: true,
+                    forceDrainQuota: true,
+                }),
+            );
+
+            expect(logSpy).toHaveBeenCalledWith(
+                sessionId,
+                expect.stringContaining(
+                    "historian unanchored promotion skipped: reason=weak_lookahead_final_compartment",
+                ),
+            );
+        } finally {
+            logSpy.mockRestore();
+            closeQuietly(db);
         }
     });
 

@@ -12,6 +12,9 @@ import {
 	getCompartments,
 	getLastCompartmentEndMessage,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { promoteSessionFactsDurable } from "@magic-context/core/features/magic-context/memory/promotion";
+import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
@@ -197,6 +200,64 @@ describe("Pi /ctx-wrapup", () => {
 		expect(parseWrapupArgs(" 7 ")).toEqual({ ok: true, messagesToKeep: 7 });
 		expect(parseWrapupArgs("0").ok).toBe(false);
 		expect(parseWrapupArgs("two").ok).toBe(false);
+	});
+
+	it("promotes facts from every non-final wrapup window and skips only the final window", async () => {
+		const db = createDb();
+		try {
+			const sessionId = "pi-wrapup-multi-promotion";
+			const project = resolveProjectIdentity("/tmp/pi-wrapup");
+			const forceKeepFlags: boolean[] = [];
+			const runPiHistorianForWrapup = mock(async (args) => {
+				const finalWindow = args.forceKeepLastCompartment === true;
+				forceKeepFlags.push(finalWindow);
+				const chunkNumber = forceKeepFlags.length;
+				if (!finalWindow) {
+					promoteSessionFactsDurable(db, sessionId, project, [
+						{
+							category: "PROJECT_RULES",
+							content: `Durable Pi wrapup fact from chunk ${chunkNumber}.`,
+						},
+					]);
+				}
+				const start = Math.max(
+					1,
+					getLastCompartmentEndMessage(db, sessionId) + 1,
+				);
+				const end = args.boundarySnapshot.eligibleEndOrdinal - 1;
+				appendRange(db, sessionId, start, end);
+				args.onPublished?.();
+			});
+
+			const longBranch = branch(12).map((entry) => ({
+				...entry,
+				message: {
+					...entry.message,
+					content: `${entry.message.content} ${"alpha beta gamma delta ".repeat(5_000)}`,
+				},
+			}));
+			const result = await runPiWrapup(
+				pi().api,
+				deps(db, { runPiHistorianForWrapup }),
+				ctx(sessionId, longBranch),
+				sessionId,
+				3,
+			);
+
+			expect(result).not.toContain("Magic Wrapup — Partial");
+			expect(forceKeepFlags.length).toBeGreaterThan(1);
+			expect(forceKeepFlags.at(-1)).toBe(true);
+			expect(forceKeepFlags.slice(0, -1).every((flag) => !flag)).toBe(true);
+			const promoted = getMemoriesByProject(db, project).map(
+				(memory) => memory.content,
+			);
+			expect(promoted).toHaveLength(forceKeepFlags.length - 1);
+			expect(promoted).not.toContain(
+				`Durable Pi wrapup fact from chunk ${forceKeepFlags.length}.`,
+			);
+		} finally {
+			closeQuietly(db);
+		}
 	});
 
 	it("refuses subagent sessions", async () => {
