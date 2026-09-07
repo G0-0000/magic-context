@@ -35,6 +35,11 @@ use crate::m1_compose::{
 use crate::memory_render::{render_m0, workspace_source_names, M0Inputs, M1_PLACEHOLDER};
 use crate::project_docs::read_project_docs_canonical;
 use crate::prompt_surface::{PromptSurfacePreset, PromptSurfaceSelection};
+use crate::protection_window::{
+    resolve_floor_snapshot, FloorPass, ProtectionWindow, TagNumberCutoffProjection,
+};
+#[cfg(test)]
+use crate::protection_window::{CoordinateSpace, TagNumber};
 use crate::scheduler::{
     self, BoundaryBypass, ContextUsage, DeferredExecute, ExecuteThresholdConfig, LatchState,
     SchedulerConfig, SchedulerInputs, SessionMeta, TailState,
@@ -578,6 +583,9 @@ pub struct ProducerContext<'a> {
     /// Execute threshold resolved by the host for this request, or the route-bind fallback for
     /// older hosts that omit `effective_execute_threshold`.
     pub execute_threshold_percentage: f64,
+    /// Hostless protected-token floor resolved from module config and this pass's usable geometry.
+    pub protected_tokens_floor: u64,
+    pub protected_tokens_provenance: &'static str,
     /// Whether the full compaction pipeline is enabled. When false, the module emits only
     /// additive m0/m1 memory and project-doc blocks ahead of the unchanged live array.
     pub compaction_enabled: bool,
@@ -674,9 +682,15 @@ pub struct TransformRequest {
     /// Primary sessions compose the cache prefix; subagents retain only reduction plumbing.
     #[serde(default)]
     pub is_subagent: bool,
-    /// Number of newest active tag rows protected from emergency reduction.
+    /// Deprecated count retained for older senders. It is parsed for compatibility and ignored.
     #[serde(default = "default_protected_tags")]
     pub protected_tags: usize,
+    /// Whether the deprecated field was present on the incoming wire object.
+    #[serde(skip_serializing)]
+    pub protected_tags_present: bool,
+    /// Host-resolved token floor. Older and hostless senders omit it and use module resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_tokens_effective: Option<u64>,
     /// Canonical provider id used by the native serializer gate. Empty sentinels are
     /// safe only for the OpenCode Anthropic adapter, matching TS `modelAcceptsEmptyContent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -897,6 +911,33 @@ fn default_protected_tags() -> usize {
     20
 }
 
+fn claim_protected_tags_deprecation(req: &TransformRequest) -> bool {
+    if !req.protected_tags_present {
+        return false;
+    }
+    static WARNED_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    WARNED_SESSIONS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("protected_tags warning mutex")
+        .insert(req.session_id.clone())
+}
+
+fn emit_protected_tags_deprecation_once(req: &TransformRequest) {
+    if claim_protected_tags_deprecation(req) {
+        eprintln!(
+            "mc-module: deprecated protected_tags is ignored for session {}; use protected_tokens",
+            req.session_id
+        );
+    }
+}
+
+fn present_deprecated_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 struct TransformRequestWire {
     #[serde(default)]
@@ -913,8 +954,10 @@ struct TransformRequestWire {
     upgrade_state: String,
     #[serde(default)]
     is_subagent: bool,
-    #[serde(default = "default_protected_tags")]
-    protected_tags: usize,
+    #[serde(default, deserialize_with = "present_deprecated_value")]
+    protected_tags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protected_tokens_effective: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1022,6 +1065,13 @@ impl<'de> Deserialize<'de> for TransformRequest {
         } else {
             wire.messages
         };
+        let protected_tags_present = wire.protected_tags.is_some();
+        let protected_tags = wire
+            .protected_tags
+            .as_ref()
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or_else(default_protected_tags);
         Ok(Self {
             kind: wire.kind,
             v: wire.v,
@@ -1031,7 +1081,9 @@ impl<'de> Deserialize<'de> for TransformRequest {
             system_prompt_hash: wire.system_prompt_hash,
             upgrade_state: wire.upgrade_state,
             is_subagent: wire.is_subagent,
-            protected_tags: wire.protected_tags,
+            protected_tags,
+            protected_tags_present,
+            protected_tokens_effective: wire.protected_tokens_effective,
             provider_id: wire.provider_id,
             model_key: wire.model_key,
             clear_reasoning_age: wire.clear_reasoning_age,
@@ -1838,7 +1890,7 @@ struct Channel1NudgeInputs<'a, 'ctx> {
     baseline: Option<&'a TailHygieneBaseline>,
     channel1_appends: &'a [Channel1AppendRow],
     mutation_exempt_mid: Option<&'a str>,
-    protected_tags: usize,
+    protection_cutoff: &'a TagNumberCutoffProjection,
     pending_drop_target_ids: &'a HashSet<String>,
     agent_drops_applied_this_pass: bool,
 }
@@ -2167,6 +2219,7 @@ fn apply_once_with_estimator_and_projection(
     output_cache: Option<&Mutex<SerializedOutputCache>>,
     projection_cache: Option<&ProjectionCacheInput>,
 ) -> Result<TransformWithProjection, TransformError> {
+    emit_protected_tags_deprecation_once(req);
     let mut attempt = 0;
     let mut boundary_divergence_retry = false;
     loop {
@@ -4048,7 +4101,20 @@ fn apply_once(
     } else {
         false
     };
-    let hard_fold_requested = first_fold_due
+    let pre_snapshot_inputs_changed = req.protected_tokens_effective.is_none()
+        && loaded.meta.protected_tokens_effective.is_none()
+        && crate::protection_window::pre_snapshot_inputs_changed(
+            store.tag_cache_namespace(),
+            &req.session_id,
+            ctx.protected_tokens_floor,
+            req.geometry
+                .as_ref()
+                .map(|geometry| geometry.usable_soft)
+                .or_else(|| req.usage.as_ref().map(|usage| usage.context_limit_tokens))
+                .unwrap_or(200_000),
+        );
+    let hard_fold_requested = pre_snapshot_inputs_changed
+        || first_fold_due
         || boundary_divergence_recut.is_some()
         || scheduler_outcome.idle_ttl_fired
         || system_absorb_hard_due
@@ -4128,26 +4194,27 @@ fn apply_once(
             loaded.meta.synthetic_todo.as_ref(),
             todo_synthesis_verdict(req),
         );
-    let tag_window_protected_block_ids = if tagging_surface_requested {
-        // Same-pass bootstrap mints have never been provider-visible and must not protect a block
-        // from reduction before its first render. Hydrated rows retain their normal protection;
-        // the newly minted suffix becomes eligible on the next pass after this atomic commit.
-        let protection_tags = if suppress_bootstrap_reduction_tag_overlay {
-            &tag_rows[..hydrated_tag_count]
+    let floor_resolution = resolve_floor_snapshot(
+        req.protected_tokens_effective,
+        loaded.meta.protected_tokens_effective,
+        ctx.protected_tokens_floor,
+        if pass_already_busting
+            || (scheduler_outcome.pass == scheduler::PassDecision::Execute
+                && !ordinary_historian_veto)
+        {
+            FloorPass::CacheBust
         } else {
-            tag_rows.as_slice()
-        };
-        newest_active_tag_block_ids(
-            &loaded.core,
-            &loaded.meta,
-            &projection,
-            protection_tags,
-            mutation_exempt_mid,
-            req.protected_tags,
-        )
-    } else {
-        HashSet::new()
-    };
+            FloorPass::Defer
+        },
+    );
+    let protected_tokens_floor = floor_resolution.effective;
+    // Pending same-pass mints are not persisted rows yet. Every consumer view below is projected
+    // from this one walk over the hydrated mc_tags baseline, independent of the served array.
+    let protection_window = ProtectionWindow::from_persisted_rows(
+        &tag_rows[..hydrated_tag_count],
+        protected_tokens_floor,
+    );
+    let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
     let exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
@@ -4204,10 +4271,6 @@ fn apply_once(
                 ceiling_tokens: context_limit_tokens
                     * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
                     / 100.0,
-                protected_cutoff_ordinal: protected_tail_cutoff_ordinal(
-                    &projection,
-                    &protected_block_ids,
-                ),
                 last_execute_ordinal: if loaded.core.reconcile_pending {
                     0
                 } else {
@@ -4221,7 +4284,9 @@ fn apply_once(
                 first_applied_agent_drop_ids,
                 pass_already_busting,
                 supersession_ride_available,
-                tag_window_protected_block_ids,
+                emergency_window_yields: scheduler_outcome.pass
+                    == scheduler::PassDecision::Emergency95,
+                tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
                 exempt_message_protected_block_ids,
             },
             &SelectionConfig {
@@ -4340,6 +4405,9 @@ fn apply_once(
     if transition_due {
         materialize_reason = Some("renderer_transition".to_string());
     }
+    if pre_snapshot_inputs_changed {
+        materialize_reason = Some("protected_tokens_inputs_changed".to_string());
+    }
 
     timings.planning = elapsed_ms(planning_started_at);
     let state_clone_started_at = Instant::now();
@@ -4419,6 +4487,26 @@ fn apply_once(
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
+    if !lineage_anchor_failure {
+        meta.protected_tokens_effective = floor_resolution.persisted;
+        if meta.protected_tokens_effective != loaded.meta.protected_tokens_effective {
+            eprintln!(
+                "mc-module: protected_tokens session={} floor={} provenance={} usable_soft={}",
+                req.session_id,
+                protected_tokens_floor,
+                if floor_resolution.source == "host" {
+                    "host"
+                } else {
+                    ctx.protected_tokens_provenance
+                },
+                req.geometry
+                    .as_ref()
+                    .map(|geometry| geometry.usable_soft)
+                    .or_else(|| req.usage.as_ref().map(|usage| usage.context_limit_tokens))
+                    .unwrap_or(200_000),
+            );
+        }
+    }
     let user_hint_started_at = Instant::now();
     if auto_search_active {
         if let Some(hint) = maybe_decide_live_user_hint(
@@ -4486,7 +4574,10 @@ fn apply_once(
     let new_caveman_units = new_caveman_units(
         &loaded.core,
         req,
-        &tag_rows,
+        CavemanTagState {
+            rows: &tag_rows,
+            protection_cutoff: &protection_window.cutoff,
+        },
         &live,
         loaded.meta.coverage_ordinal,
         is_bust_pass,
@@ -5309,7 +5400,7 @@ fn apply_once(
         &core,
         meta.coverage_ordinal,
         &hygiene_tag_rows,
-        req.protected_tags,
+        &protection_window.tag_numbers,
         &protected_block_ids,
         &pending_drop_target_ids,
     );
@@ -5371,7 +5462,7 @@ fn apply_once(
                 baseline: current_hygiene_baseline.as_ref(),
                 channel1_appends: &channel1_appends,
                 mutation_exempt_mid,
-                protected_tags: req.protected_tags,
+                protection_cutoff: &protection_window.cutoff,
                 pending_drop_target_ids: &pending_drop_target_ids,
                 agent_drops_applied_this_pass,
             },
@@ -5631,7 +5722,7 @@ fn apply_once(
             tag_rows: &hygiene_tag_rows,
             baseline: current_hygiene_baseline.as_ref(),
             mutation_exempt_mid,
-            protected_tags: req.protected_tags,
+            protection_cutoff: &protection_window.cutoff,
             pending_drop_target_ids: &pending_drop_target_ids,
         },
         &mut meta,
@@ -6543,10 +6634,15 @@ fn caveman_target_depth(position: usize, total: usize) -> u8 {
 /// durably by the caller with the same commit as these units, so newly minted tags cannot change
 /// this cycle's eligible population. The original tag source is authoritative, so a later tier
 /// shift never compresses an already-compressed payload.
+struct CavemanTagState<'a> {
+    rows: &'a [McTagRow],
+    protection_cutoff: &'a TagNumberCutoffProjection,
+}
+
 fn new_caveman_units(
     core: &CoreState,
     req: &TransformRequest,
-    tag_rows: &[McTagRow],
+    tag_state: CavemanTagState<'_>,
     live: &[&FlatBlock],
     coverage: Option<u64>,
     is_bust_pass: bool,
@@ -6556,8 +6652,8 @@ fn new_caveman_units(
         return Vec::new();
     }
 
-    let protected_cutoff = age_basis_tag.saturating_sub(req.protected_tags as u64);
-    let tags_by_block = tag_rows
+    let tags_by_block = tag_state
+        .rows
         .iter()
         .filter(|row| row.kind == "message")
         .map(|row| (row.block_id.as_str(), row))
@@ -6576,7 +6672,12 @@ fn new_caveman_units(
             }
             let row = tags_by_block.get(block.id.as_str())?;
             let tag_number = u64::try_from(row.tag_number).ok()?;
-            if tag_number > protected_cutoff || row.source_bytes.len() < req.caveman_min_chars {
+            if tag_state
+                .protection_cutoff
+                .cutoff
+                .is_some_and(|cutoff| row.tag_number >= cutoff.0)
+                || row.source_bytes.len() < req.caveman_min_chars
+            {
                 return None;
             }
             let source = String::from_utf8(row.source_bytes.clone()).ok()?;
@@ -8452,66 +8553,6 @@ fn taggable_kind(block: &FlatBlock) -> Option<TaggableKind> {
     taggable_source(block).map(|(kind, _)| kind)
 }
 
-/// Compute the newest protected tags as exact block ids over the current canonical tail.
-/// Stored provenance must still match the live carrier before a row can occupy a slot.
-fn newest_active_tag_block_ids(
-    core: &CoreState,
-    meta: &ModuleMeta,
-    projection: &FlatProjection,
-    tag_rows: &[McTagRow],
-    mutation_exempt_mid: Option<&str>,
-    protected_tags: usize,
-) -> HashSet<String> {
-    let block_by_id = projection
-        .blocks
-        .iter()
-        .map(|block| (block.id.as_str(), block))
-        .collect::<HashMap<_, _>>();
-    let frozen_targets = frozen_red_targets(core);
-    let mut active = tag_rows
-        .iter()
-        .filter(|row| {
-            let Some(block) = block_by_id.get(row.block_id.as_str()) else {
-                return false;
-            };
-            if !is_tail(block.ordinal, meta.coverage_ordinal)
-                || frozen_targets.contains(block.id())
-                || mutation_exempt_mid == Some(block.mid.as_str())
-            {
-                return false;
-            }
-            let Some((kind, source)) = taggable_source(block) else {
-                return false;
-            };
-            row.kind == kind.as_store_kind() && row.source_bytes == source.as_bytes()
-        })
-        .collect::<Vec<_>>();
-    active.sort_by(|left, right| {
-        right
-            .tag_number
-            .cmp(&left.tag_number)
-            .then_with(|| right.block_id.cmp(&left.block_id))
-    });
-    active
-        .into_iter()
-        .take(protected_tags)
-        .map(|row| row.block_id.clone())
-        .collect()
-}
-
-fn protected_tail_cutoff_ordinal(
-    projection: &FlatProjection,
-    protected_block_ids: &HashSet<String>,
-) -> u64 {
-    projection
-        .blocks
-        .iter()
-        .filter(|block| protected_block_ids.contains(&block.id))
-        .map(|block| block.ordinal)
-        .min()
-        .unwrap_or(0)
-}
-
 fn tag_overlay_state(
     tag_rows: &[McTagRow],
     temporal_marks: &[TemporalMarkRow],
@@ -9806,7 +9847,7 @@ fn maybe_append_channel1_nudge(
         &existing_blocks,
         input.mutation_exempt_mid,
     )?;
-    let hint = oldest_reclaimable_hint(&active_tags, input.protected_tags, &queued_tag_numbers);
+    let hint = oldest_reclaimable_hint(&active_tags, input.protection_cutoff, &queued_tag_numbers);
     let reminder = build_channel1_reminder(
         decision.level,
         decision.reclaimable_tokens,
@@ -9908,7 +9949,10 @@ fn active_tags_for_nudge(
             && !frozen_targets.contains(block.id())
             && mutation_exempt_mid != Some(block.mid.as_str())
     }) {
-        if let Some(row) = tag_by_block.get(block.id.as_str()) {
+        if let Some(row) = tag_by_block
+            .get(block.id.as_str())
+            .filter(|row| crate::protection_window::is_tool_kind(&row.kind))
+        {
             out.push(ActiveTagForNudge {
                 tag_number: row.tag_number,
                 kind: row.kind.clone(),
@@ -9971,7 +10015,7 @@ struct Channel2DirectiveInput<'a> {
     tag_rows: &'a [McTagRow],
     baseline: Option<&'a TailHygieneBaseline>,
     mutation_exempt_mid: Option<&'a str>,
-    protected_tags: usize,
+    protection_cutoff: &'a TagNumberCutoffProjection,
     pending_drop_target_ids: &'a HashSet<String>,
 }
 
@@ -10050,7 +10094,7 @@ fn channel2_pressure(
             input.mutation_exempt_mid,
         );
         let queued_tag_numbers = queued_tag_numbers(input.tag_rows, input.pending_drop_target_ids);
-        oldest_channel2_hint(&active_tags, input.protected_tags, &queued_tag_numbers)
+        oldest_channel2_hint(&active_tags, input.protection_cutoff, &queued_tag_numbers)
     } else {
         Vec::new()
     };
@@ -10173,16 +10217,6 @@ fn channel2_directive_id(session_id: &str, arming_watermark: u64) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn protected_tag_cutoff(active_tags: &[ActiveTagForNudge], protected_tags: usize) -> Option<i64> {
-    if protected_tags == 0 {
-        return None;
-    }
-    active_tags
-        .get(active_tags.len().checked_sub(protected_tags)?)
-        .map(|tag| tag.tag_number)
-        .or(Some(i64::MIN))
-}
-
 fn channel2_token_aggregate(baseline: Option<&TailHygieneBaseline>) -> Option<(i64, i64)> {
     let baseline = baseline?;
     if !baseline.evaluable || baseline.generation_invalidated {
@@ -10195,15 +10229,18 @@ fn channel2_token_aggregate(baseline: Option<&TailHygieneBaseline>) -> Option<(i
 
 fn oldest_channel2_hint(
     active_tags: &[ActiveTagForNudge],
-    protected_tags: usize,
+    protection_cutoff: &TagNumberCutoffProjection,
     queued_tag_numbers: &HashSet<i64>,
 ) -> Vec<(i64, String)> {
-    let protected_cutoff = protected_tag_cutoff(active_tags, protected_tags);
     active_tags
         .iter()
         .filter(|tag| tag.kind == "tool_result")
         .filter(|tag| !queued_tag_numbers.contains(&tag.tag_number))
-        .filter(|tag| protected_cutoff.is_none_or(|cutoff| tag.tag_number < cutoff))
+        .filter(|tag| {
+            protection_cutoff
+                .cutoff
+                .is_none_or(|cutoff| tag.tag_number < cutoff.0)
+        })
         .filter(|tag| tag.token_count >= 100)
         .take(4)
         .map(|tag| (tag.tag_number, "tool".to_string()))
@@ -10346,6 +10383,10 @@ fn decide_channel1(
 mod nudge_formula_tests {
     use super::*;
     use serde::Deserialize;
+
+    fn no_protection_cutoff() -> TagNumberCutoffProjection {
+        ProtectionWindow::from_persisted_rows(&[], 16_000).cutoff
+    }
 
     fn baseline(u: i64, t: i64) -> TailHygieneBaseline {
         TailHygieneBaseline {
@@ -10492,7 +10533,7 @@ mod nudge_formula_tests {
                 tag(6, "aft_search", 900),
                 tag(7, "read", 900),
             ],
-            0,
+            &no_protection_cutoff(),
             &HashSet::new(),
         );
 
@@ -10516,7 +10557,11 @@ mod nudge_formula_tests {
             tool_name: tool_name.to_string(),
         };
         let queued = HashSet::from([1]);
-        let hint = oldest_reclaimable_hint(&[tag(1, "bash"), tag(2, "read")], 0, &queued);
+        let hint = oldest_reclaimable_hint(
+            &[tag(1, "bash"), tag(2, "read")],
+            &no_protection_cutoff(),
+            &queued,
+        );
 
         assert_eq!(hint, vec![(2, "read".to_string())]);
     }
@@ -10544,7 +10589,7 @@ mod nudge_formula_tests {
                     tool_name: "bash_status".to_string(),
                 },
             ],
-            0,
+            &no_protection_cutoff(),
             &HashSet::new(),
         );
 
@@ -10747,7 +10792,7 @@ mod nudge_formula_tests {
                 tag_rows: &tags,
                 baseline: Some(&due_baseline),
                 mutation_exempt_mid: None,
-                protected_tags: 0,
+                protection_cutoff: &no_protection_cutoff(),
                 pending_drop_target_ids: &HashSet::new(),
             },
             &mut stale,
@@ -10767,7 +10812,7 @@ mod nudge_formula_tests {
                 tag_rows: &tags,
                 baseline: Some(&due_baseline),
                 mutation_exempt_mid: None,
-                protected_tags: 0,
+                protection_cutoff: &no_protection_cutoff(),
                 pending_drop_target_ids: &HashSet::new(),
             },
             &mut stale,
@@ -10823,10 +10868,9 @@ fn tool_result_can_carry_channel1(block: &CkWireBlock) -> bool {
 
 fn oldest_reclaimable_hint(
     active_tags: &[ActiveTagForNudge],
-    protected_tags: usize,
+    protection_cutoff: &TagNumberCutoffProjection,
     queued_tag_numbers: &HashSet<i64>,
 ) -> Vec<(i64, String)> {
-    let configured_cutoff = protected_tag_cutoff(active_tags, protected_tags);
     let mut candidates = active_tags
         .iter()
         .filter(|tag| {
@@ -10834,7 +10878,9 @@ fn oldest_reclaimable_hint(
                 && !queued_tag_numbers.contains(&tag.tag_number)
                 && tag.token_count >= AGE_RECLAIM_MIN_TOKENS as i64
                 && !is_reclaim_hint_excluded_tool(&tag.tool_name)
-                && configured_cutoff.is_none_or(|cutoff| tag.tag_number < cutoff)
+                && protection_cutoff
+                    .cutoff
+                    .is_none_or(|cutoff| tag.tag_number < cutoff.0)
         })
         .map(|tag| (tag.tag_number, tag.tool_name.clone()))
         .collect::<Vec<_>>();
@@ -11239,10 +11285,11 @@ fn new_frozen_strip_units(
         .iter()
         .map(|unit| unit.key.as_str())
         .collect();
+    const STRUCTURAL_PROTECTED_MESSAGE_COUNT: usize = 40;
     let protected_start = req
         .messages
         .len()
-        .saturating_sub(req.protected_tags.saturating_mul(2));
+        .saturating_sub(STRUCTURAL_PROTECTED_MESSAGE_COUNT);
     let age_cutoff = tag_age_cutoff(req, tag_numbers);
     let reasoning_mutation_exempt_mid =
         latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
@@ -15007,8 +15054,11 @@ pub(crate) mod tests {
             1,
             &["Keep this authored request.\n\n<system-reminder>hidden transport</system-reminder>"],
         );
-        let mut request = req("surgical-strip", "cfg0", vec![mixed]);
-        request.protected_tags = 0;
+        let mut messages = vec![mixed];
+        messages.extend(
+            (2..=41).map(|ordinal| item(&format!("tail-{ordinal}"), ordinal, "authored tail")),
+        );
+        let request = req("surgical-strip", "cfg0", messages);
 
         let bust = run(&store, &request, &spine());
         assert_eq!(bust.action, "HARD");
@@ -15277,6 +15327,13 @@ pub(crate) mod tests {
         }
     }
 
+    fn protection_cutoff(cutoff: Option<i64>) -> TagNumberCutoffProjection {
+        TagNumberCutoffProjection {
+            coordinate_space: CoordinateSpace::TagNumber,
+            cutoff: cutoff.map(TagNumber),
+        }
+    }
+
     fn req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
@@ -15293,6 +15350,8 @@ pub(crate) mod tests {
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
+            protected_tags_present: false,
+            protected_tokens_effective: None,
             provider_id: None,
             model_key: None,
             clear_reasoning_age: DEFAULT_CLEAR_REASONING_AGE,
@@ -15335,6 +15394,36 @@ pub(crate) mod tests {
             constituents: Vec::new(),
             compaction_observed: false,
         }
+    }
+
+    #[test]
+    fn deprecated_protected_tags_is_wire_inert_and_noticed_once_per_session() {
+        let base = req("deprecated-count-wire-once", "cfg", Vec::new());
+        let mut wire = serde_json::to_value(base).unwrap();
+        wire["protected_tags"] = json!({ "legacy": "arbitrary" });
+        wire["protected_tokens_effective"] = json!(24_000);
+        let parsed: TransformRequest = serde_json::from_value(wire).unwrap();
+
+        assert!(parsed.protected_tags_present);
+        assert_eq!(parsed.protected_tags, default_protected_tags());
+        assert_eq!(parsed.protected_tokens_effective, Some(24_000));
+        assert!(claim_protected_tags_deprecation(&parsed));
+        assert!(!claim_protected_tags_deprecation(&parsed));
+
+        let mut legacy_only_wire =
+            serde_json::to_value(req("deprecated-count-does-not-convert", "cfg", Vec::new()))
+                .unwrap();
+        legacy_only_wire["protected_tags"] = json!(999_999);
+        legacy_only_wire
+            .as_object_mut()
+            .unwrap()
+            .remove("protected_tokens_effective");
+        let legacy_only: TransformRequest = serde_json::from_value(legacy_only_wire).unwrap();
+        assert_eq!(legacy_only.protected_tokens_effective, None);
+
+        let absent = req("deprecated-count-wire-absent", "cfg", Vec::new());
+        assert!(!absent.protected_tags_present);
+        assert!(!claim_protected_tags_deprecation(&absent));
     }
 
     fn spine() -> Vec<ReductionDecision> {
@@ -15482,6 +15571,8 @@ pub(crate) mod tests {
             temporal_awareness: true,
             now_ms,
             execute_threshold_percentage: 65.0,
+            protected_tokens_floor: 16_000,
+            protected_tokens_provenance: "derived",
             compaction_enabled: true,
             smart_drops: false,
             cache_ttl: "5m".to_string(),
@@ -28982,28 +29073,36 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn channel1_hygiene_ratio_nudge_replays_and_suppresses_refire() {
+    fn channel1_hygiene_ratio_nudge_replays_and_structural_minimum_suppresses_refire() {
         run_active_surface_test(|| {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
             let huge = "word ".repeat(40_000);
-            let messages = vec![
-                assistant_tool_call("call1", 1, "c1"),
-                tool_result("result1", 2, "c1", &huge),
-                assistant_tool_call("call2", 3, "c2"),
-                tool_result("result2", 4, "c2", &huge),
-            ];
+            let mut messages = Vec::new();
+            for number in 1..=5 {
+                messages.push(assistant_tool_call(
+                    &format!("call{number}"),
+                    number * 2 - 1,
+                    &format!("c{number}"),
+                ));
+                messages.push(tool_result(
+                    &format!("result{number}"),
+                    number * 2,
+                    &format!("c{number}"),
+                    &huge,
+                ));
+            }
             let mut request = active_cc_req("nudge", "cfg0", messages.clone());
             request.protected_tags = 0;
             let request = with_usage(request, 900, 1024);
             run(&s, &request, &spine());
             let first = run(&s, &request, &spine());
-            let first_result = tail_bytes(&first, "result2").to_string();
+            let first_result = tail_bytes(&first, "result5").to_string();
             assert!(first_result.contains("<system-reminder>"));
             assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
 
             let replay = run(&s, &request, &spine());
-            assert_eq!(tail_bytes(&replay, "result2"), first_result);
+            assert_eq!(tail_bytes(&replay, "result5"), first_result);
             assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
 
             let mut grace_meta = s.load("nudge").unwrap();
@@ -29021,7 +29120,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             let grace_replay = run(&s, &request, &spine());
-            assert_eq!(tail_bytes(&grace_replay, "result2"), first_result);
+            assert_eq!(tail_bytes(&grace_replay, "result5"), first_result);
             assert_eq!(
                 grace_replay
                     .messages()
@@ -29052,40 +29151,41 @@ pub(crate) mod tests {
             .unwrap();
 
             let mut refire_messages = messages;
-            refire_messages.push(assistant_tool_call("call3", 5, "c3"));
-            refire_messages.push(tool_result("result3", 6, "c3", &huge));
+            refire_messages.push(assistant_tool_call("call6", 11, "c6"));
+            let refire_huge = huge.repeat(3);
+            refire_messages.push(tool_result("result6", 12, "c6", &refire_huge));
             let mut refire_request = active_cc_req("nudge", "cfg0", refire_messages.clone());
             refire_request.protected_tags = 0;
             let refire_request = with_usage(refire_request, 900, 1024);
             let sticky = run(&s, &refire_request, &spine());
-            let sticky_result = tail_bytes(&sticky, "result3").to_string();
+            let sticky_result = tail_bytes(&sticky, "result6").to_string();
             assert_eq!(
-                tail_bytes(&sticky, "result2"),
+                tail_bytes(&sticky, "result5"),
                 first_result,
-                "the first reminder span is frozen while the new cache-busting tail appends its own span"
+                "the first reminder stays frozen while the structural minimum suppresses a new span"
             );
             assert!(
-                sticky_result.contains("Reminder: "),
-                "expected sticky refire, got {sticky_result}"
+                !sticky_result.contains("Reminder: "),
+                "the newest-three structural minimum must suppress this refire"
             );
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
+            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
             let sticky_replay = run(&s, &refire_request, &spine());
-            assert_eq!(tail_bytes(&sticky_replay, "result3"), sticky_result);
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
+            assert_eq!(tail_bytes(&sticky_replay, "result6"), sticky_result);
+            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
 
             let mut loaded = s.load("nudge").unwrap();
             loaded.meta.channel1_reduce_suppressed = true;
             s.commit("nudge", loaded.row_version, &loaded.core, &loaded.meta)
                 .unwrap();
-            refire_messages.push(assistant_tool_call("call4", 7, "c4"));
-            refire_messages.push(tool_result("result4", 8, "c4", &huge));
+            refire_messages.push(assistant_tool_call("call7", 13, "c7"));
+            refire_messages.push(tool_result("result7", 14, "c7", &huge));
             let mut suppressed_request = active_cc_req("nudge", "cfg0", refire_messages);
             suppressed_request.protected_tags = 0;
             let suppressed = run(&s, &with_usage(suppressed_request, 900, 1024), &spine());
-            assert!(tail_bytes(&suppressed, "result2").contains("<system-reminder>"));
-            assert!(tail_bytes(&suppressed, "result3").contains("<system-reminder>"));
-            assert!(!tail_bytes(&suppressed, "result4").contains("<system-reminder>"));
-            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
+            assert!(tail_bytes(&suppressed, "result5").contains("<system-reminder>"));
+            assert!(!tail_bytes(&suppressed, "result6").contains("<system-reminder>"));
+            assert!(!tail_bytes(&suppressed, "result7").contains("<system-reminder>"));
+            assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 1);
         });
     }
 
@@ -29120,7 +29220,7 @@ pub(crate) mod tests {
             s.append_pending_agent_drops_with_command(
                 "drop-grace",
                 Some("drop-two-arcs"),
-                &["result4#0".to_string()],
+                &["result1#0".to_string()],
                 1,
                 false,
             )
@@ -29134,7 +29234,7 @@ pub(crate) mod tests {
             let applying = run(&s, &applying_request, &spine());
             let after_applying = s.load("drop-grace").unwrap();
             assert!(
-                frozen_red_targets(&after_applying.core).contains("result4#0"),
+                frozen_red_targets(&after_applying.core).contains("result1#0"),
                 "pending drop was not applied: {:?}",
                 s.load_pending_agent_drops("drop-grace").unwrap(),
             );
@@ -29737,8 +29837,10 @@ pub(crate) mod tests {
         let initial_store = store(dir.path());
         let messages = vec![
             item("covered", 0, "covered"),
-            item("first", 1, "first"),
-            item("held", 2, "held"),
+            assistant_tool_call("call1", 1, "c1"),
+            tool_result("result1", 2, "c1", "first"),
+            assistant_tool_call("call2", 3, "c2"),
+            tool_result("result2", 4, "c2", "held"),
         ];
         initial_store
             .replace_compartments("held-output", &[comp(1, 0, 0, "covered", "summary")])
@@ -29752,7 +29854,7 @@ pub(crate) mod tests {
             .append_pending_agent_drops_with_command(
                 "held-output",
                 Some("command-a"),
-                &["first#0".to_string(), "held#0".to_string()],
+                &["result1#0".to_string(), "result2#0".to_string()],
                 1,
                 false,
             )
@@ -29804,7 +29906,7 @@ pub(crate) mod tests {
             assert!(
                 frozen_red_payload(
                     &store_after_restart.load("held-output").unwrap().core,
-                    "held#0",
+                    "result2#0",
                 )
                 .is_none(),
                 "a held remainder must remain unfrozen until a ride opportunity"
@@ -29913,214 +30015,332 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn newest_tag_block_set_isolates_protected_and_applied_pending_rows() {
+    fn persisted_tool_row_set_protects_pending_drops_by_exact_identity() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        // The protected set is the newest 20 ACTIVE tags as exact block ids.
-        // This fixture is built so every cheaper implementation class fails at
-        // the rank-20 boundary itself, not just at the extremes:
-        //   - ACTIVE numbers have holes: m23#0 is stale-provenance and three
-        //     "ghost" rows hold the TOP numbers (26-28) for blocks absent from
-        //     the array, so any numeric-threshold cutoff (from the active max
-        //     or the global max) lands on the wrong rows.
-        //   - Ordinal 24 carries TWO tagged blocks (m24#0, m24#1), so
-        //     one-block-per-ordinal counting shifts the boundary by one.
-        // Active numbers: {1..22, 24, 25} (24 rows). Newest 20 by number:
-        // {5..22, 24, 25} — the boundary pair is number 5 (rank 20, protected)
-        // vs number 4 (rank 21, applied), and both carry pending drops.
-        let mut messages = (1..=24)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-            .collect::<Vec<_>>();
-        messages[23] = two_block_item("m24", 24, "text 24", "attachment 24");
-
-        let mut tags = (1..=24)
-            .map(|ordinal| TagMintInput {
-                block_id: format!("m{ordinal}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: if ordinal == 23 {
-                    // Stale provenance: stored bytes no longer match the live
-                    // carrier, so this row must not occupy a protected slot.
-                    b"text from a previous life".to_vec()
-                } else {
-                    format!("text {ordinal}").into_bytes()
-                },
-            })
-            .collect::<Vec<_>>();
-        tags.push(TagMintInput {
-            block_id: "m24#1".to_string(),
-            kind: "message".to_string(),
-            token_count: 1,
-            source_bytes: b"attachment 24".to_vec(),
-        });
-        for ghost in 1..=3 {
-            tags.push(TagMintInput {
-                block_id: format!("ghost{ghost}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: b"ghost".to_vec(),
-            });
+        let payload = "word ".repeat(1_000);
+        let mut messages = Vec::new();
+        for number in 1..=5 {
+            messages.push(assistant_tool_call(
+                &format!("call{number}"),
+                number * 2 - 1,
+                &format!("c{number}"),
+            ));
+            messages.push(tool_result(
+                &format!("result{number}"),
+                number * 2,
+                &format!("c{number}"),
+                &payload,
+            ));
         }
-        store.seed_tags_for_test("protected", &tags, 1).unwrap();
-        store
-            .append_pending_agent_drops_with_command(
-                "protected",
-                Some("range-command"),
-                &["m4#0".to_string(), "m5#0".to_string(), "m24#1".to_string()],
-                99,
-                false,
-            )
-            .unwrap();
-
-        let response = run(
-            &store,
-            &active_cc_req("protected", "cfg0", messages),
-            &spine(),
-        );
-        assert_eq!(response.action, "HARD");
-        let loaded = store.load("protected").unwrap();
-        // Rank 21 (number 4) is just outside the protected set: applied.
-        assert_eq!(frozen_red_payload(&loaded.core, "m4#0"), Some("[dropped]"));
-        // Rank 20 (number 5) is the last protected slot: retained. Under a
-        // threshold cutoff (active-max 25 - 20, or global-max 28 - 20) or
-        // one-per-ordinal counting this row loses protection and applies.
-        assert_eq!(frozen_red_payload(&loaded.core, "m5#0"), None);
-        // The second block on ordinal 24 is itself active and protected; an
-        // implementation that counts one block per ordinal applies this drop.
-        assert_eq!(frozen_red_payload(&loaded.core, "m24#1"), None);
-        let mut retained = store
-            .load_pending_agent_drops("protected")
-            .unwrap()
-            .into_iter()
-            .map(|row| row.target_id)
-            .collect::<Vec<_>>();
-        retained.sort();
-        assert_eq!(retained, vec!["m24#1".to_string(), "m5#0".to_string()]);
-        let pending = store.load_pending_agent_drops("protected").unwrap();
-        assert!(pending.iter().all(|row| {
-            row.command_id.as_deref() == Some("range-command")
-                && row.command_first_applied_at_ms.is_some()
-        }));
-        let replay = store
-            .append_pending_agent_drops_with_command(
-                "protected",
-                Some("range-command"),
-                &["m5#0".to_string(), "m24#1".to_string()],
-                100,
-                false,
-            )
-            .unwrap();
-        assert_eq!(replay.queued, 0);
-        assert!(replay.duplicate);
-        assert_eq!(
-            store.load_pending_agent_drops("protected").unwrap(),
-            pending
-        );
-    }
-
-    #[test]
-    fn frozen_row_does_not_consume_a_protection_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        // 21 tagged live blocks, numbers 1..21. m21#0 is frozen by an earlier
-        // active pass, so the ACTIVE set is exactly m1..m20 — all 20 fit the
-        // protected window and the oldest row's pending drop must be retained.
-        // If frozen rows still consumed slots, m21 would take one, m1 would
-        // fall to rank 21, and its drop would apply.
-        let messages = (1..=21)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-            .collect::<Vec<_>>();
-        let tags = (1..=21)
-            .map(|ordinal| TagMintInput {
-                block_id: format!("m{ordinal}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: format!("text {ordinal}").into_bytes(),
-            })
-            .collect::<Vec<_>>();
-        store.seed_tags_for_test("slot-free", &tags, 1).unwrap();
-
-        // Pass 1 bootstraps, then the freeze is seeded directly in durable state
-        // (selection itself refuses to reduce a protected newest tag, so a
-        // pre-existing freeze — e.g. from an earlier phase with more tags — is
-        // the realistic way a high-ranked block arrives already frozen).
-        let request = active_cc_req("slot-free", "cfg0", messages);
+        let mut request = active_cc_req("protected-row-identities", "cfg0", messages);
+        request.protected_tokens_effective = Some(4_000);
         run(&store, &request, &spine());
-        let seeded = store.load("slot-free").unwrap();
-        let mut core = seeded.core.clone();
-        core.frozen_units
-            .push(red_unit("m21#0", "drop", "[dropped]"));
         store
-            .commit("slot-free", seeded.row_version, &core, &seeded.meta)
+            .append_pending_agent_drops(
+                "protected-row-identities",
+                &["result1#0".to_string(), "result2#0".to_string()],
+                99,
+            )
             .unwrap();
-        assert_eq!(
-            frozen_red_payload(&store.load("slot-free").unwrap().core, "m21#0"),
-            Some("[dropped]"),
-            "precondition: m21#0 frozen before the tested pass"
-        );
 
-        // Pass 2 (tested): a render-config change forces a producing HARD so the
-        // pending row is genuinely selected against the protected set — a defer
-        // pass would retain it regardless and prove nothing.
-        store
-            .append_pending_agent_drops("slot-free", &["m1#0".to_string()], 99)
-            .unwrap();
-        let producing = active_cc_req(
-            "slot-free",
-            "cfg1",
-            (1..=21)
-                .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-                .collect::<Vec<_>>(),
+        request.render_config = "cfg1".to_string();
+        let tested = run(&store, &request, &spine());
+        assert_eq!(tested.action, "HARD");
+        let loaded = store.load("protected-row-identities").unwrap();
+        assert_eq!(
+            frozen_red_payload(&loaded.core, "result1#0"),
+            Some("[dropped]")
         );
-        let tested = run(&store, &producing, &spine());
-        assert_eq!(tested.action, "HARD", "tested pass must produce");
-        let loaded = store.load("slot-free").unwrap();
-        assert_eq!(frozen_red_payload(&loaded.core, "m1#0"), None);
-        let pending = store.load_pending_agent_drops("slot-free").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].target_id, "m1#0");
+        assert_eq!(frozen_red_payload(&loaded.core, "result2#0"), None);
+        assert_eq!(
+            store
+                .load_pending_agent_drops("protected-row-identities")
+                .unwrap()
+                .into_iter()
+                .map(|row| row.target_id)
+                .collect::<Vec<_>>(),
+            vec!["result2#0".to_string()]
+        );
     }
 
     #[test]
-    fn newest_tag_block_set_excludes_stale_provenance_from_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        // Exactly 21 tagged live blocks. The NEWEST row (m21#0) has stale
-        // provenance. Under exact semantics it cannot hold a slot, so the
-        // protected 20 are m20..m1 and a pending drop on m1#0 (rank 21 by
-        // number, rank 20 among ACTIVE rows) is PROTECTED. An implementation
-        // that skips the provenance re-check frees m1#0 and applies the drop.
-        let messages = (1..=21)
-            .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("text {ordinal}")))
-            .collect::<Vec<_>>();
-        let tags = (1..=21)
-            .map(|ordinal| TagMintInput {
-                block_id: format!("m{ordinal}#0"),
-                kind: "message".to_string(),
-                token_count: 1,
-                source_bytes: if ordinal == 21 {
-                    b"stale bytes".to_vec()
-                } else {
-                    format!("text {ordinal}").into_bytes()
-                },
+    fn frozen_persisted_tool_row_remains_a_protection_member() {
+        let rows = (1..=4)
+            .map(|number| McTagRow {
+                tag_number: number,
+                block_id: format!("result{number}#0"),
+                kind: "tool_result".to_string(),
+                token_count: 1_500,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
             })
             .collect::<Vec<_>>();
-        store.seed_tags_for_test("stale-slot", &tags, 1).unwrap();
-        store
-            .append_pending_agent_drops("stale-slot", &["m1#0".to_string()], 2)
-            .unwrap();
+        let window = ProtectionWindow::from_persisted_rows(&rows, 4_000);
 
-        let response = run(
-            &store,
-            &active_cc_req("stale-slot", "cfg0", messages),
-            &spine(),
+        assert!(window.row_identities.block_ids.contains("result4#0"));
+        assert!(window.row_identities.block_ids.contains("result2#0"));
+        assert_eq!(window.cutoff.cutoff, Some(TagNumber(2)));
+    }
+
+    #[test]
+    fn floor_snapshot_geometry_move_changes_hint_only_after_bust() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = (1..=5)
+            .map(|number| McTagRow {
+                tag_number: number,
+                block_id: format!("result{number}#0"),
+                kind: "tool_result".to_string(),
+                token_count: 1_000,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let applying_window = ProtectionWindow::from_persisted_rows(&rows, 4_000);
+        let active = rows
+            .iter()
+            .map(|row| ActiveTagForNudge {
+                tag_number: row.tag_number,
+                kind: row.kind.clone(),
+                token_count: row.token_count,
+                tool_name: "bash".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let applying_hint = serde_json::to_vec(&oldest_reclaimable_hint(
+            &active,
+            &applying_window.cutoff,
+            &HashSet::new(),
+        ))
+        .unwrap();
+
+        let mut meta = ModuleMeta {
+            protected_tokens_effective: Some(4_000),
+            ..ModuleMeta::default()
+        };
+        let db = store(dir.path());
+        db.commit("marker-invariance", None, &CoreState::default(), &meta)
+            .unwrap();
+        let recomputed_window = ProtectionWindow::from_persisted_rows(&rows, 8_000);
+        let recomputed_hint = serde_json::to_vec(&oldest_reclaimable_hint(
+            &active,
+            &recomputed_window.cutoff,
+            &HashSet::new(),
+        ))
+        .unwrap();
+        assert_ne!(
+            recomputed_hint, applying_hint,
+            "moving geometry would observably rewrite the hint bytes if defer recomputed the floor"
         );
-        assert_eq!(response.action, "HARD");
-        let loaded = store.load("stale-slot").unwrap();
-        assert_eq!(frozen_red_payload(&loaded.core, "m1#0"), None);
-        let pending = store.load_pending_agent_drops("stale-slot").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].target_id, "m1#0");
+        let defer_floor = resolve_floor_snapshot(
+            None,
+            meta.protected_tokens_effective,
+            8_000,
+            FloorPass::Defer,
+        );
+        meta.protected_tokens_effective = defer_floor.persisted;
+        assert_eq!(defer_floor.effective, 4_000);
+        drop(db);
+
+        let restarted = store(dir.path());
+        let replay_meta = restarted.load("marker-invariance").unwrap().meta;
+        let replay_window = ProtectionWindow::from_persisted_rows(
+            &rows,
+            replay_meta.protected_tokens_effective.unwrap(),
+        );
+        let replay_hint = serde_json::to_vec(&oldest_reclaimable_hint(
+            &active,
+            &replay_window.cutoff,
+            &HashSet::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(replay_window.cutoff, applying_window.cutoff);
+        assert_eq!(replay_window.member_rows, applying_window.member_rows);
+        assert_eq!(replay_hint, applying_hint);
+        assert_eq!(
+            restarted
+                .load("marker-invariance")
+                .unwrap()
+                .meta
+                .protected_tokens_effective,
+            Some(4_000)
+        );
+    }
+
+    #[test]
+    fn unsnapshotted_defer_inputs_survive_restart_and_changes_surface_as_hard() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = store(dir.path());
+        let request = active_cc_req(
+            "pre-snapshot-lifecycle",
+            "cfg",
+            vec![item("m1", 1, "unchanged")],
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.protected_tokens_floor = 4_000;
+        transform(&db, &request, &ctx).unwrap();
+        let mut legacy = db.load(&request.session_id).unwrap();
+        legacy.meta.protected_tokens_effective = None;
+        db.commit(
+            &request.session_id,
+            legacy.row_version,
+            &legacy.core,
+            &legacy.meta,
+        )
+        .unwrap();
+        let first = transform(&db, &request, &ctx).unwrap();
+        assert_eq!(first.action, "SOFT+");
+        assert_eq!(
+            db.load(&request.session_id)
+                .unwrap()
+                .meta
+                .protected_tokens_effective,
+            None
+        );
+        drop(db);
+        let restarted = store(dir.path());
+        let replay = transform(&restarted, &request, &ctx).unwrap();
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(first.messages()).unwrap(),
+            serde_json::to_vec(replay.messages()).unwrap()
+        );
+        assert_eq!(
+            restarted
+                .load(&request.session_id)
+                .unwrap()
+                .meta
+                .protected_tokens_effective,
+            None
+        );
+        ctx.protected_tokens_floor = 8_000;
+        let changed = transform(&restarted, &request, &ctx).unwrap();
+        assert_eq!(changed.action, "HARD");
+        assert_eq!(
+            changed.materialize_reason.as_deref(),
+            Some("protected_tokens_inputs_changed")
+        );
+        assert_eq!(
+            restarted
+                .load(&request.session_id)
+                .unwrap()
+                .meta
+                .protected_tokens_effective,
+            Some(8_000)
+        );
+    }
+
+    #[test]
+    fn three_pass_marker_contraction_defer_and_reexpansion_preserve_window_and_hints() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = store(dir.path());
+        let mut messages = vec![item("prefix", 1, "immutable prefix")];
+        for n in 1..=5 {
+            messages.push(assistant_tool_call(
+                &format!("call{n}"),
+                n * 2,
+                &format!("c{n}"),
+            ));
+            messages.push(tool_result(
+                &format!("result{n}"),
+                n * 2 + 1,
+                &format!("c{n}"),
+                &"word ".repeat(1_000),
+            ));
+        }
+        let mut request = active_cc_req("window-three-pass", "cfg0", messages);
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        ctx.protected_tokens_floor = 4_000;
+        transform(&db, &request, &ctx).unwrap();
+        request.render_config = "cfg1".to_string();
+        let applying = transform(&db, &request, &ctx).unwrap();
+        assert_eq!(applying.action, "HARD");
+        let observe = |db: &McStore| {
+            let loaded = db.load("window-three-pass").unwrap();
+            let rows = db.load_tags_for_session("window-three-pass").unwrap();
+            let window = ProtectionWindow::from_persisted_rows(
+                &rows,
+                loaded.meta.protected_tokens_effective.unwrap(),
+            );
+            let active = rows
+                .iter()
+                .map(|row| ActiveTagForNudge {
+                    tag_number: row.tag_number,
+                    kind: row.kind.clone(),
+                    token_count: row.token_count,
+                    tool_name: "bash".to_string(),
+                })
+                .collect::<Vec<_>>();
+            let hint = serde_json::to_vec(&oldest_reclaimable_hint(
+                &active,
+                &window.cutoff,
+                &HashSet::new(),
+            ))
+            .unwrap();
+            (
+                window.cutoff,
+                window.row_identities,
+                hint,
+                serde_json::to_vec(&loaded.core.frozen_units).unwrap(),
+            )
+        };
+        let before = observe(&db);
+        let full = request.messages.clone();
+        request.messages.drain(1..5);
+        request.channel2_nudge_state = "pending".to_string();
+        ctx.protected_tokens_floor = 8_000;
+        let contracted = transform(&db, &request, &ctx).unwrap();
+        assert_eq!(contracted.action, "SOFT+");
+        assert_eq!(observe(&db), before);
+        request.messages = full;
+        let expanded = transform(&db, &request, &ctx).unwrap();
+        assert_eq!(expanded.action, "SOFT+");
+        assert_eq!(observe(&db), before);
+        assert_eq!(
+            serde_json::to_vec(applying.messages()).unwrap(),
+            serde_json::to_vec(expanded.messages()).unwrap()
+        );
+        drop(db);
+        let restarted = store(dir.path());
+        let replay = transform(&restarted, &request, &ctx).unwrap();
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(observe(&restarted), before);
+        assert_eq!(
+            serde_json::to_vec(expanded.messages()).unwrap(),
+            serde_json::to_vec(replay.messages()).unwrap()
+        );
+    }
+
+    #[test]
+    fn persisted_tool_membership_does_not_depend_on_live_source_provenance() {
+        let rows = vec![
+            McTagRow {
+                tag_number: 7,
+                block_id: "missing-from-projection#0".to_string(),
+                kind: "tool_result".to_string(),
+                token_count: 4_000,
+                created_at_ms: 0,
+                source_bytes: b"old source".to_vec(),
+            },
+            McTagRow {
+                tag_number: 8,
+                block_id: "live#0".to_string(),
+                kind: "tool_result".to_string(),
+                token_count: 4_000,
+                created_at_ms: 0,
+                source_bytes: b"new source".to_vec(),
+            },
+        ];
+        let window = ProtectionWindow::from_persisted_rows(&rows, 4_000);
+
+        assert_eq!(window.row_identities.block_ids.len(), 2);
+        assert!(
+            window
+                .row_identities
+                .block_ids
+                .contains("missing-from-projection#0"),
+            "membership is computed from persisted rows before projection lookup"
+        );
     }
 
     #[test]
@@ -31517,7 +31737,10 @@ pub(crate) mod tests {
         let no_units = new_caveman_units(
             &CoreState::default(),
             &request,
-            &tags,
+            CavemanTagState {
+                rows: &tags,
+                protection_cutoff: &protection_cutoff(None),
+            },
             &live,
             None,
             false,
@@ -31525,7 +31748,18 @@ pub(crate) mod tests {
         );
         assert!(no_units.is_empty(), "defer must not mint a cav unit");
 
-        let units = new_caveman_units(&CoreState::default(), &request, &tags, &live, None, true, 1);
+        let units = new_caveman_units(
+            &CoreState::default(),
+            &request,
+            CavemanTagState {
+                rows: &tags,
+                protection_cutoff: &protection_cutoff(None),
+            },
+            &live,
+            None,
+            true,
+            1,
+        );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].key, "cav:m1#0");
         assert_eq!(units[0].reset_rule, "3");
@@ -31719,7 +31953,18 @@ pub(crate) mod tests {
             created_at_ms: 0,
             source_bytes: source.as_bytes().to_vec(),
         }];
-        let units = new_caveman_units(&core, &request, &tags, &live, None, true, 1);
+        let units = new_caveman_units(
+            &core,
+            &request,
+            CavemanTagState {
+                rows: &tags,
+                protection_cutoff: &protection_cutoff(None),
+            },
+            &live,
+            None,
+            true,
+            1,
+        );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].reset_rule, "3");
         assert!(units[0].frozen_payload.len() <= lite.len());
@@ -31753,7 +31998,10 @@ pub(crate) mod tests {
         assert!(new_caveman_units(
             &CoreState::default(),
             &subagent,
-            std::slice::from_ref(&tag),
+            CavemanTagState {
+                rows: std::slice::from_ref(&tag),
+                protection_cutoff: &protection_cutoff(None),
+            },
             &live,
             None,
             true,
@@ -31777,7 +32025,10 @@ pub(crate) mod tests {
         assert!(new_caveman_units(
             &CoreState::default(),
             &reasoning,
-            std::slice::from_ref(&tag),
+            CavemanTagState {
+                rows: std::slice::from_ref(&tag),
+                protection_cutoff: &protection_cutoff(None),
+            },
             &live,
             None,
             true,
@@ -31798,7 +32049,10 @@ pub(crate) mod tests {
         assert!(new_caveman_units(
             &CoreState::default(),
             &protected,
-            &[tag],
+            CavemanTagState {
+                rows: &[tag],
+                protection_cutoff: &protection_cutoff(Some(1)),
+            },
             &live,
             None,
             true,
@@ -33121,7 +33375,6 @@ pub(crate) mod tests {
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 1_000.0,
                 ceiling_tokens: 2_000.0,
-                protected_cutoff_ordinal: 0,
                 last_execute_ordinal: 1,
                 scheduler_pressure_execute: true,
                 prior_input_sample: 0.0,
@@ -33131,6 +33384,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: true,
                 supersession_ride_available: false,
+                emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),
             },
@@ -33391,7 +33645,6 @@ pub(crate) mod tests {
                 pass_class: PassClass::Execute,
                 current_total_input_tokens: 0.0,
                 ceiling_tokens: 0.0,
-                protected_cutoff_ordinal: 0,
                 last_execute_ordinal: 0,
                 scheduler_pressure_execute: false,
                 prior_input_sample: 0.0,
@@ -33401,6 +33654,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: false,
                 supersession_ride_available: true,
+                emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),
             },

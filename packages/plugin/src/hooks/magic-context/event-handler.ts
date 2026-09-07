@@ -100,7 +100,6 @@ export interface EventHandlerDeps {
     onSessionDeleted?: (sessionId: string) => Promise<void> | void;
     rustSessionCleanup?: boolean;
     config: {
-        protected_tags: number;
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };

@@ -119,7 +119,7 @@ describe("storage-tags", () => {
             insertTag(db, "ses-hint", "msg-4", "tool", 100, 4, 0, null);
             insertTag(db, "ses-hint", "msg-5", "tool", 100, 5, 0, "bash");
 
-            const hints = getOldestActiveUnprotectedToolTags(db, "ses-hint", 2, 4);
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-hint", new Set([4, 5]), 4);
 
             expect(hints).toEqual([
                 { tagNumber: 3, toolName: "grep" },
@@ -178,7 +178,7 @@ describe("storage-tags", () => {
                 reasoningTokenCount: 0,
             });
 
-            const hints = getOldestActiveUnprotectedToolTags(db, "ses-todo", 0, 4);
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-todo", new Set(), 4);
 
             expect(hints).toEqual([{ tagNumber: 2, toolName: "bash" }]);
         });
@@ -215,7 +215,7 @@ describe("storage-tags", () => {
             tag(6, "aft_search", 900);
             tag(7, "read", 900);
 
-            const hints = getOldestActiveUnprotectedToolTags(db, "ses-priority", 0, 4);
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-priority", new Set(), 4);
 
             expect(hints).toEqual([
                 { tagNumber: 4, toolName: "bash" },
@@ -255,7 +255,9 @@ describe("storage-tags", () => {
                 );
             }
 
-            expect(getOldestActiveUnprotectedToolTags(db, "ses-control-only", 0, 4)).toEqual([]);
+            expect(
+                getOldestActiveUnprotectedToolTags(db, "ses-control-only", new Set(), 4),
+            ).toEqual([]);
         });
 
         it("#then keeps tags with NO cached token count (cannot size → never hidden by the floor)", () => {
@@ -263,7 +265,7 @@ describe("storage-tags", () => {
             // This insertTag call supplies only a byte size (no token counts), leaving token_count and input_token_count NULL.
             insertTag(db, "ses-null", "msg-1", "tool", 5000, 1, 0, "read");
 
-            const hints = getOldestActiveUnprotectedToolTags(db, "ses-null", 0, 4);
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-null", new Set(), 4);
 
             expect(hints).toEqual([{ tagNumber: 1, toolName: "read" }]);
         });
@@ -859,7 +861,7 @@ describe("storage-tags", () => {
         });
     });
 
-    describe("#given getActiveTagTokenAggregate with protectedTags", () => {
+    describe("#given getActiveTagTokenAggregate with an exact protected cutoff", () => {
         function insertToolTag(
             d: Database,
             sessionId: string,
@@ -872,30 +874,30 @@ describe("storage-tags", () => {
             ).run(sessionId, `call:${tagNumber}`, tagNumber, outputTokens);
         }
 
-        it("#when protectedTags=0 #then counts all active tool output", () => {
+        it("#when cutoff is absent #then counts all active tool output", () => {
             db = makeMemoryDatabase();
             insertToolTag(db, "ses-1", 1, 100);
             insertToolTag(db, "ses-1", 2, 200);
             insertToolTag(db, "ses-1", 3, 300);
-            expect(getActiveTagTokenAggregate(db, "ses-1", 0).toolOutput).toBe(600);
+            expect(getActiveTagTokenAggregate(db, "ses-1", null).toolOutput).toBe(600);
         });
 
-        it("#when protectedTags=2 #then excludes the top-2 active tag numbers from reclaimable", () => {
+        it("#when cutoff is 3 #then excludes tags 3 and 4 from reclaimable", () => {
             db = makeMemoryDatabase();
             insertToolTag(db, "ses-1", 1, 100);
             insertToolTag(db, "ses-1", 2, 200);
             insertToolTag(db, "ses-1", 3, 300); // protected (top 2)
             insertToolTag(db, "ses-1", 4, 400); // protected (top 2)
             // only tags 1 and 2 are reclaimable: 100 + 200 = 300
-            expect(getActiveTagTokenAggregate(db, "ses-1", 2).toolOutput).toBe(300);
+            expect(getActiveTagTokenAggregate(db, "ses-1", 3).toolOutput).toBe(300);
         });
 
-        it("#when fewer active tags than protectedTags #then nothing is reclaimable", () => {
+        it("#when the cutoff is the oldest tag #then nothing is reclaimable", () => {
             db = makeMemoryDatabase();
             insertToolTag(db, "ses-1", 1, 100);
             insertToolTag(db, "ses-1", 2, 200);
             // all 2 tags are within the protected window of 20 → reclaimable 0
-            expect(getActiveTagTokenAggregate(db, "ses-1", 20).toolOutput).toBe(0);
+            expect(getActiveTagTokenAggregate(db, "ses-1", 1).toolOutput).toBe(0);
         });
 
         it("#when protected #then liveTail (conversation+toolCall) is NOT narrowed", () => {

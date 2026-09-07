@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { computeProtectionWindow } from "@magic-context/core/features/magic-context/protection-window";
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import {
 	decideChannel1,
@@ -43,10 +44,13 @@ type FixtureTag = {
 	tag_number: number;
 	block_id: string;
 	kind: "message" | "tool" | "file";
+	token_count: number;
 };
 type Fixture = {
 	id: string;
+	/** Retained only to prove the deprecated count does not affect parity. */
 	protected_tags: number;
+	protected_tokens_effective: number;
 	messages: FixtureMessage[];
 	tags: FixtureTag[];
 	pending_drop_tag_numbers?: number[];
@@ -173,6 +177,15 @@ function toTags(fixture: Fixture, pi = false): TagEntry[] {
 	});
 }
 
+function protectedTagNumbers(fixture: Fixture): Set<number> {
+	// The golden stores persisted-row mass and the epoch floor, so every JavaScript
+	// leg derives canonical membership exactly as the production callers do.
+	return computeProtectionWindow(
+		fixture.tags,
+		fixture.protected_tokens_effective,
+	).tagNumberSet.tagNumbers;
+}
+
 function toPiMessages(fixture: Fixture): object[] {
 	return fixture.messages.map((message) => {
 		const toolResult = message.blocks.find(
@@ -275,24 +288,25 @@ function assertLeg(
 
 describe("nudge hygiene three-leg differential corpus", () => {
 	it("keeps TypeScript and Pi aligned with the Rust-consumed golden", () => {
-		expect(golden.schema).toBe(1);
-		expect(golden.provenance.generator_version).toBe("nudge-hygiene-ts-v2");
+		expect(golden.schema).toBe(2);
+		expect(golden.provenance.generator_version).toBe("nudge-hygiene-ts-v3");
 		expect(golden.cases.length).toBeGreaterThanOrEqual(12);
 
 		for (const fixture of golden.cases) {
+			const protectedNumbers = protectedTagNumbers(fixture);
 			const pendingDropTagNumbers = new Set(
 				fixture.pending_drop_tag_numbers ?? [],
 			);
 			const core = measureTailHygiene({
 				messages: toCoreMessages(fixture),
 				tags: toTags(fixture),
-				protectedTags: fixture.protected_tags,
+				protectedTagNumbers: protectedNumbers,
 				pendingDropTagNumbers,
 			});
 			const pi = measurePiTailHygiene({
 				messages: toPiMessages(fixture),
 				tags: toTags(fixture, true),
-				protectedTags: fixture.protected_tags,
+				protectedTagNumbers: protectedNumbers,
 				pendingDropTagNumbers,
 				stableId: (message) =>
 					typeof (message as { _mid?: unknown })._mid === "string"
@@ -304,6 +318,16 @@ describe("nudge hygiene three-leg differential corpus", () => {
 			if (fixture.id === "queued-tool-arc-full-mass") {
 				expect(core.u).toBe(fixture.expected.u);
 				expect(pi.u).toBe(fixture.expected.u);
+			}
+			if (fixture.id === "protected-recency-reserve") {
+				expect(protectedNumbers).toContain(2);
+			}
+			if (fixture.id === "protected-token-window-spans-more-than-one-tag") {
+				expect(protectedNumbers).toEqual(new Set([1, 2, 3, 4]));
+			}
+			if (fixture.id === "empty-protected-token-window") {
+				expect(fixture.protected_tags).toBe(99);
+				expect(protectedNumbers).toEqual(new Set());
 			}
 		}
 	});
@@ -321,15 +345,16 @@ describe("nudge hygiene three-leg differential corpus", () => {
 					sum + estimateTokens(repeated(block.unit, block.repeat)),
 				0,
 			);
+		const protectedNumbers = protectedTagNumbers(fixture);
 		const core = measureTailHygiene({
 			messages: toCoreMessages(fixture),
 			tags: toTags(fixture),
-			protectedTags: fixture.protected_tags,
+			protectedTagNumbers: protectedNumbers,
 		});
 		const pi = measurePiTailHygiene({
 			messages: toPiMessages(fixture),
 			tags: toTags(fixture, true),
-			protectedTags: fixture.protected_tags,
+			protectedTagNumbers: protectedNumbers,
 			stableId: (message) => (message as { _mid?: string })._mid,
 		});
 

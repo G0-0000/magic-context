@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
@@ -240,7 +241,10 @@ function basePostTransformArgs(
         deferredMaterializationSessions: new Set(),
         lastHeuristicsTurnId: new Map(),
         clearReasoningAge: 999,
-        protectedTags: 0,
+        protectedTagIds: new Set(),
+        protectedTagNumbers: new Set(),
+        protectedCutoff: null,
+        protectedCount: 0,
         pendingCompartmentInjection: null,
         didMutateFromFlushedStatuses: false,
         watermark: 0,
@@ -1794,7 +1798,10 @@ describe("postprocess emergency drop accounting", () => {
             deferredMaterializationSessions: new Set(),
             lastHeuristicsTurnId: new Map(),
             clearReasoningAge: 999,
-            protectedTags: 0,
+            protectedTagIds: new Set(),
+            protectedTagNumbers: new Set(),
+            protectedCutoff: null,
+            protectedCount: 0,
             emergencyCeilingTokens: 6000,
             pendingCompartmentInjection: null,
             didMutateFromFlushedStatuses: false,
@@ -2114,7 +2121,6 @@ describe("issue #386 sustained execute-pressure batching", () => {
             contextUsage: { percentage: 90, inputTokens: 90_000 },
             emergencyCeilingTokens: Math.floor(contextLimit * (executeThresholdPercentage / 100)),
             forceMaterializationPercentage: 85,
-            protectedTags: 12,
             clearReasoningAge: 30,
             smartDrops: true,
             cavemanTextCompression: { enabled: true, minChars: 300 },
@@ -2166,14 +2172,21 @@ describe("issue #386 sustained execute-pressure batching", () => {
                 "bash",
                 0,
                 `tool-${tagNumber}`,
+                null,
+                { tokenCount: 1_000, inputTokenCount: 0, reasoningTokenCount: 0 },
             );
         }
         updateSessionMeta(db, sessionId, { cacheTtl: "5m" });
         const lastHeuristicsTurnId = new Map([[sessionId, turnId]]);
         const executeThresholdPercentage = 50;
         const contextLimit = 100_000;
-        const runPressurePass = async (inputTokens: number) =>
-            runPostTransformPhase(
+        // A 12k token floor recreates the old twelve-tag geometry for these 1k-token rows.
+        // That keeps the batching assertion focused on the pressure latch rather than changing
+        // which historical outputs constitute the working set.
+        const protectedTokens = 12_000;
+        const runPressurePass = async (inputTokens: number) => {
+            const protectionWindow = getProtectionWindowForSession(db, sessionId, protectedTokens);
+            return runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "execute",
                     contextUsage: { percentage: 90, inputTokens },
@@ -2181,7 +2194,10 @@ describe("issue #386 sustained execute-pressure batching", () => {
                         contextLimit * (executeThresholdPercentage / 100),
                     ),
                     forceMaterializationPercentage: 85,
-                    protectedTags: 12,
+                    protectedTagIds: protectionWindow.protectedTagNumbers,
+                    protectedTagNumbers: protectionWindow.protectedTagNumbers,
+                    protectedCutoff: protectionWindow.cutoff,
+                    protectedCount: protectionWindow.status.protectedCount,
                     clearReasoningAge: 30,
                     smartDrops: true,
                     cavemanTextCompression: { enabled: true, minChars: 300 },
@@ -2193,6 +2209,7 @@ describe("issue #386 sustained execute-pressure batching", () => {
                     sessionMeta: getOrCreateSessionMeta(db, sessionId),
                 }),
             );
+        };
 
         await runPressurePass(90_000);
         const firstStatuses = new Map(
@@ -2201,6 +2218,8 @@ describe("issue #386 sustained execute-pressure batching", () => {
         for (let tagNumber = 1; tagNumber <= 18; tagNumber += 1) {
             expect(firstStatuses.get(tagNumber)).toBe("dropped");
         }
+        expect(firstStatuses.get(19)).toBe("active");
+        expect(firstStatuses.get(20)).toBe("active");
         const pricedPrefix = JSON.stringify(messages.slice(0, 30));
 
         for (let tagNumber = 31; tagNumber <= 32; tagNumber += 1) {
@@ -2218,6 +2237,8 @@ describe("issue #386 sustained execute-pressure batching", () => {
                 "bash",
                 0,
                 `tool-${tagNumber}`,
+                null,
+                { tokenCount: 1_000, inputTokenCount: 0, reasoningTokenCount: 0 },
             );
         }
 

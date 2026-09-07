@@ -151,6 +151,11 @@ import {
 import { logTransformTiming } from "./transform-stage-logger";
 
 const DEGRADE_CACHE_WARNING_THRESHOLD = 10;
+/**
+ * Keep the newest host-message tail intact when retiring system-only notifications.
+ * This is an actionable-message heuristic, not the persisted tag protection window.
+ */
+const SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES = 40;
 // Bounded (LRU, max 100) so a crashed/never-reset session can't leak an entry
 // forever in a long-running process — matches the other per-session caches.
 const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
@@ -856,7 +861,14 @@ interface RunPostTransformPhaseArgs {
     deferredMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
     clearReasoningAge: number;
-    protectedTags: number;
+    /** Canonical token-window membership consumed by pending-operation application. */
+    protectedTagIds: ReadonlySet<number>;
+    /** Canonical token-window membership in tag-number space. */
+    protectedTagNumbers: ReadonlySet<number>;
+    /** Canonical token-window cutoff in tag-number space. */
+    protectedCutoff: number | null;
+    /** Number of persisted tool rows in the canonical token window. */
+    protectedCount: number;
     /**
      * Ceiling for the tiered emergency drop = contextLimit × executeThreshold%.
      * Undefined when the context limit isn't resolved (cold start) — the
@@ -1501,7 +1513,7 @@ export async function runPostTransformPhase(
                 args.sessionId,
                 args.db,
                 args.targets,
-                args.protectedTags,
+                args.protectedTagIds,
                 undefined,
                 pendingOps,
             );
@@ -1567,7 +1579,8 @@ export async function runPostTransformPhase(
                 args.targets,
                 args.messageTagNumbers,
                 {
-                    protectedTags: args.protectedTags,
+                    protectedTagNumbers: args.protectedTagNumbers,
+                    protectedCutoff: args.protectedCutoff,
                     // Tiered emergency drop fires only at the derived force band (both primary and
                     // subagent) AND only when the ceiling is known. Undefined
                     // ceiling (cold start) or below-threshold usage → no
@@ -1598,7 +1611,8 @@ export async function runPostTransformPhase(
                     args.targets,
                     args.messageTagNumbers,
                     {
-                        protectedTags: args.protectedTags,
+                        protectedTagNumbers: args.protectedTagNumbers,
+                        protectedCutoff: args.protectedCutoff,
                         routine: true,
                         caveman: cavemanConfig,
                     },
@@ -1742,7 +1756,7 @@ export async function runPostTransformPhase(
             // Merged into the same gated apply as the age-based sweep. Dedupe
             // against those ops (a tag can qualify under more than one rule).
             // The newest 20 owner messages remain untouched, matching the module
-            // lane's continuation floor independently of protected_tags.
+            // lane's continuation floor independently of the token-mass protection window.
             const editMarkerTagIds = new Set<number>();
             if (args.smartDrops) {
                 const recentMessageIds = recentSupersessionOwnerMessageIds(args.db, args.sessionId);
@@ -1753,6 +1767,7 @@ export async function runPostTransformPhase(
                     targets: args.targets,
                     pendingOps,
                     recentMessageIds,
+                    protectedTagNumbers: args.protectedTagNumbers,
                 });
                 for (const op of supersessionOps) {
                     if (!selectedIds.has(op.tagId)) {
@@ -1766,6 +1781,7 @@ export async function runPostTransformPhase(
                     targets: args.targets,
                     pendingOps,
                     recentMessageIds,
+                    protectedTagNumbers: args.protectedTagNumbers,
                 });
                 for (const op of editReclaim.ops) {
                     // A superseded edit only compresses if no earlier rule already
@@ -1784,7 +1800,7 @@ export async function runPostTransformPhase(
                     args.sessionId,
                     args.db,
                     args.targets,
-                    args.protectedTags,
+                    args.protectedTagIds,
                     undefined,
                     [],
                     syntheticPendingOps,
@@ -1846,8 +1862,8 @@ export async function runPostTransformPhase(
     //   • DETECT (cache-busting passes only): additionally find aged ctx_reduce
     //     calls past the protected window, strip them, and CAS-persist their ids
     //     so future passes replay them.
-    // The earlier "run every pass with a live messages.length-protectedTags
-    // boundary" version busted the Anthropic cache: tail growth moved the
+    // The earlier version recomputed a live message-count boundary on every
+    // pass and busted the Anthropic cache: tail growth moved the
     // boundary, so a DEFER pass newly stripped an older ctx_reduce call
     // mid-prefix (empty sentinel filtered for Anthropic + dropped tool_result →
     // adjacent assistants merge → the message vanishes and the array shifts).
@@ -1861,7 +1877,7 @@ export async function runPostTransformPhase(
             const frozenStaleReduceIds = getStaleReduceStrippedIds(args.db, args.sessionId);
             const staleReduceResult = dropStaleReduceCalls(args.messages, frozenStaleReduceIds, {
                 detect: isCacheBustingPass,
-                protectedCount: args.protectedTags,
+                protectedCount: args.protectedCount,
             });
             if (isCacheBustingPass && staleReduceResult.newlyStrippedIds.length > 0) {
                 addStaleReduceStrippedIds(
@@ -2072,7 +2088,10 @@ export async function runPostTransformPhase(
                 args.messages,
                 args.resolvedProviderID,
             );
-            const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
+            const protectedTailStart = Math.max(
+                0,
+                args.messages.length - SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES,
+            );
             const systemInjectedResult = stripSystemInjectedMessages(
                 args.messages,
                 protectedTailStart,
@@ -2706,7 +2725,7 @@ export async function runPostTransformPhase(
     let assertedBaseline:
         | {
               tags: TagEntry[];
-              protectedTags: number;
+              protectedTagNumbers: ReadonlySet<number>;
               contentSignature: string;
               structuralSignature: TailHygieneStructuralSignature;
           }
@@ -2726,7 +2745,7 @@ export async function runPostTransformPhase(
                 const baseline = refreshTailHygieneBaseline({
                     messages: args.messages,
                     tags,
-                    protectedTags: args.protectedTags,
+                    protectedTagNumbers: args.protectedTagNumbers,
                     pendingDropTagNumbers,
                     cacheBusting: bustedThisPass,
                     previous,
@@ -2763,7 +2782,7 @@ export async function runPostTransformPhase(
                     oldestReclaimableToolTags: getOldestActiveUnprotectedToolTags(
                         args.db,
                         args.sessionId,
-                        args.protectedTags,
+                        args.protectedTagNumbers,
                     ),
                 });
                 try {
@@ -2781,7 +2800,7 @@ export async function runPostTransformPhase(
                 }
                 assertedBaseline = {
                     tags,
-                    protectedTags: args.protectedTags,
+                    protectedTagNumbers: args.protectedTagNumbers,
                     contentSignature: baseline.contentSignature,
                     structuralSignature,
                 };
@@ -2824,7 +2843,7 @@ export async function runPostTransformPhase(
             assertTailHygieneContentUnchanged({
                 messages: args.messages,
                 tags: assertedBaseline.tags,
-                protectedTags: assertedBaseline.protectedTags,
+                protectedTagNumbers: assertedBaseline.protectedTagNumbers,
                 expectedSignature: assertedBaseline.contentSignature,
             });
         }

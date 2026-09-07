@@ -23,7 +23,7 @@ Add the schema line for editor validation and autocomplete:
 ```
 
 :::note
-Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Profile definitions in `profiles` are user-level only; a project may set only `profile` to choose a named user profile. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
+Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Profile definitions in `profiles` are user-level only; a project may set only `profile` to choose a named user profile. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Project `protected_tokens` may likewise only raise the effective user/default protection floor. Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
 :::
 
 ## Top-level switches
@@ -67,7 +67,8 @@ When and how aggressively Magic Context manages the session's context window. Pe
 | `execute_threshold_percentage` | number (20–90) \\| map<string, number (20–90)> | `65` | Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE |
 | `execute_threshold_tokens` | object | — | Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 90% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000. |
 | `execute_threshold_tokens.default` | number (5000–2000000) | — |  |
-| `protected_tags` | number (1–100) | — | Number of recent tags to protect from dropping (min: 1, max: 100, default: 20) |
+| `protected_tokens` | integer (4000–1000000) | — | Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000). When omitted, the derived default is clamp(round(0.05 × usableSoft), min(16_000, round(0.08 × usableSoft)), 64_000). |
+| `protected_tags` | unknown | — | Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead. |
 | `clear_reasoning_age` | number (10–) | `50` | Clear reasoning/thinking blocks older than N tags (default: 50) |
 | `history_budget_percentage` | number (0.05–0.5) | `0.15` | Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15) |
 

@@ -163,7 +163,7 @@ function createMockDeps(promptMocks: PromptMocks = createPromptMocks()): MagicCo
         scheduler,
         compactionHandler,
         directory: "/tmp",
-        config: { protected_tags: 3, cache_ttl: "5m" },
+        config: { protected_tokens: 4_000, cache_ttl: "5m" },
     };
 }
 

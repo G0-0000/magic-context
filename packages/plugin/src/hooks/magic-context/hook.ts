@@ -141,7 +141,7 @@ export interface MagicContextDeps {
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     liveSessionState?: LiveSessionState;
     config: {
-        protected_tags: number;
+        protected_tokens?: number;
         /** User-level setting that lets a session started exactly in the canonical home directory use it as the project. */
         allow_home_project?: boolean;
         language?: string;
@@ -1126,7 +1126,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         channel1StateBySession,
         channel2DirectiveTextBySession,
-        protectedTags: deps.config.protected_tags,
+        protectedTokens: deps.config.protected_tokens,
         smartDrops: deps.config.smart_drops === true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
         commitClusterTrigger: deps.config.commit_cluster_trigger,
@@ -1354,7 +1354,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const commandHandler = createMagicContextCommandHandler({
         db,
-        protectedTags: deps.config.protected_tags,
         compactionOff,
         toastDurationMs: deps.config.toast_duration_ms,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
@@ -1507,7 +1506,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const systemPromptHash = createSystemPromptHashHandler({
         db,
-        protectedTags: deps.config.protected_tags,
         dreamerEnabled: dreamerRunnable,
         // Gates ctx_memory guidance out of the prompt when memory is off (the
         // ctx_memory TOOL is gated in tool-registry.ts on the same flag).
@@ -1557,7 +1555,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         lastHeuristicsTurnId,
         commitSeenLastPass,
         client: deps.client,
-        protectedTags: deps.config.protected_tags,
     });
 
     const hooks = {

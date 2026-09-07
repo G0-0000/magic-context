@@ -39,6 +39,7 @@ pub mod memory_render;
 pub mod memory_tool;
 pub mod project_docs;
 pub mod prompt_surface;
+pub mod protection_window;
 mod retained_size;
 pub mod scheduler;
 pub mod selection;
@@ -672,7 +673,6 @@ const GUIDANCE_TEXT: &str = prompt_surface::GUIDANCE_FULL_PRIMARY;
 /// Matches the default OpenCode protected tag window. The Claude Code facade has no
 /// request-local transform config, so acknowledgement validation uses the durable tag
 /// ordering with the same default recency window as an omitted transform field.
-const DEFAULT_PROTECTED_TAGS: usize = 20;
 /// Mirrors packages/plugin/src/config/schema/magic-context.ts commit_cluster_trigger.enabled default.
 const DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED: bool = true;
 /// Mirrors packages/plugin/src/config/schema/magic-context.ts commit_cluster_trigger.min_clusters default.
@@ -3875,6 +3875,8 @@ impl McHandler {
                 execute_threshold_user_config: None,
                 execute_threshold_user_configured: false,
                 execute_threshold_project_config: None,
+                protected_tokens_user: None,
+                protected_tokens_project: None,
                 compaction_enabled: true,
                 memory_enabled: true,
                 auto_search: crate::config::AutoSearchConfig::default(),
@@ -8488,8 +8490,23 @@ impl McHandler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
-        // Bind frames have no model identity. Emit the resolved threshold once on the first
-        // transform for this binding, when the host's model and optional override are available.
+        let hostless_usable_soft = parsed
+            .geometry
+            .as_ref()
+            .map(|geometry| geometry.usable_soft)
+            .or_else(|| {
+                parsed
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.context_limit_tokens)
+                    .filter(|limit| *limit >= scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT)
+            })
+            .unwrap_or(200_000);
+        let resolved_protected_tokens = binding
+            .config
+            .resolve_protected_tokens(hostless_usable_soft);
+        // Bind frames have no model identity. Emit resolved policy once on the first transform for
+        // this binding, when the host's model and optional overrides are available.
         if self
             .threshold_logged_routes
             .lock()
@@ -8506,6 +8523,21 @@ impl McHandler {
                 resolved.provenance,
                 parsed.execute_threshold_or(resolved.percentage),
                 if parsed.effective_execute_threshold.is_some() { "host" } else { "config" },
+            );
+            if let Some(warning) = &resolved_protected_tokens.warning {
+                eprintln!("mc-module: config warning: {warning}");
+            }
+            eprintln!(
+                "mc-module: protected_tokens channel={channel} provenance={} effective={} source={}",
+                resolved_protected_tokens.provenance,
+                parsed
+                    .protected_tokens_effective
+                    .unwrap_or(resolved_protected_tokens.floor),
+                if parsed.protected_tokens_effective.is_some() {
+                    "host"
+                } else {
+                    "config"
+                },
             );
         }
         let run_transform = || {
@@ -8547,6 +8579,12 @@ impl McHandler {
                         .resolve_execute_threshold(parsed.model_key.as_deref())
                         .percentage,
                 ),
+                protected_tokens_floor: resolved_protected_tokens.floor,
+                protected_tokens_provenance: if resolved_protected_tokens.provenance == "derived" {
+                    "derived"
+                } else {
+                    "absolute"
+                },
                 // Route-bound configuration selects either the full pipeline or the
                 // additive-only memory/docs transform for every consumer profile.
                 compaction_enabled: binding.config.compaction_enabled,
@@ -10975,22 +11013,28 @@ impl McHandler {
             ));
         }
 
-        let protected_start = tags
-            .len()
-            .checked_sub(DEFAULT_PROTECTED_TAGS)
-            .and_then(|index| tags.get(index))
-            .map(|tag| tag.tag_number as u64)
-            .unwrap_or(0);
-        let (deferred, immediate): (Vec<_>, Vec<_>) = queueable
-            .iter()
-            .copied()
-            .partition(|number| protected_start != 0 && *number >= protected_start);
+        let loaded = match store.load(session_id) {
+            Ok(loaded) => loaded,
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        let floor = loaded
+            .meta
+            .protected_tokens_effective
+            .or_else(|| {
+                protection_window::pre_snapshot_floor(store.tag_cache_namespace(), session_id)
+            })
+            .unwrap_or_else(|| protection_window::derive_default_floor(200_000));
+        let window = protection_window::ProtectionWindow::from_persisted_rows(&tags, floor);
+        let (deferred, immediate): (Vec<_>, Vec<_>) =
+            queueable.iter().copied().partition(|number| {
+                window
+                    .tag_numbers
+                    .tag_numbers
+                    .contains(&protection_window::TagNumber(*number as i64))
+            });
         let mut details = Vec::new();
         if !immediate.is_empty() {
             details.push(format!("drop {}", format_tag_numbers(&immediate)));
-        }
-        if !deferred.is_empty() {
-            details.push(format!("deferred drop {}", format_tag_numbers(&deferred)));
         }
         let validation_detail = ctx_reduce_ack_details(&unknown, &already_queued);
         if !validation_detail.is_empty() {
@@ -10998,7 +11042,18 @@ impl McHandler {
         }
         // This acknowledgement validates the durable tag state but deliberately does not
         // mutate it. The response observer owns asynchronous delivery on this facade.
-        mcp_text_result(format!("Queued: {}.", details.join("; ")), false)
+        let mut reply = if details.is_empty() {
+            String::new()
+        } else {
+            format!("Queued: {}.", details.join("; "))
+        };
+        if !deferred.is_empty() {
+            if !reply.is_empty() {
+                reply.push(' ');
+            }
+            reply.push_str(&ctx_reduce_held_reply(&deferred));
+        }
+        mcp_text_result(reply, false)
     }
 
     async fn handle_ctx_memory_facade(&self, channel: u16, request: &Value) -> HandlerOutcome {
@@ -14226,6 +14281,15 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
         | ck_wire::CkKind::Reasoning { .. }
         | ck_wire::CkKind::RedactedReasoning { .. }
         | ck_wire::CkKind::Opaque(_) => None,
+    }
+}
+
+fn ctx_reduce_held_reply(held: &[u64]) -> String {
+    let tags = format_tag_numbers(held);
+    if held.len() == 1 {
+        format!("Held: {tags} is inside the protected working set; it applies once newer work displaces it.")
+    } else {
+        format!("Held: {tags} are inside the protected working set; they apply once newer work displaces them.")
     }
 }
 
@@ -17704,6 +17768,8 @@ mod tests {
             execute_threshold_user_config: None,
             execute_threshold_user_configured: false,
             execute_threshold_project_config: None,
+            protected_tokens_user: None,
+            protected_tokens_project: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
@@ -24669,6 +24735,12 @@ mod tests {
         assert!(!bounded.text.contains("[11] U (user)"));
     }
 
+    #[test]
+    fn ctx_reduce_held_copy_has_no_totals_or_countdown() {
+        assert_eq!(ctx_reduce_held_reply(&[7]), "Held: §7§ is inside the protected working set; it applies once newer work displaces it.");
+        assert_eq!(ctx_reduce_held_reply(&[7, 8]), "Held: §7§, §8§ are inside the protected working set; they apply once newer work displaces them.");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn facade_ctx_reduce_resolves_the_session_before_validating_tags() {
         let producer = Arc::new(ProducerState::default());
@@ -24703,7 +24775,7 @@ mod tests {
             .map(|number| TagMintInput {
                 block_id: format!("m{number}#0"),
                 kind: "tool_result".to_string(),
-                token_count: 10,
+                token_count: 800,
                 source_bytes: format!("output {number}").into_bytes(),
             })
             .collect::<Vec<_>>();
@@ -24718,7 +24790,7 @@ mod tests {
             .await,
         );
         assert!(mixed_ack.contains("drop §1§"));
-        assert!(mixed_ack.contains("deferred drop §21§"));
+        assert!(mixed_ack.contains("Held: §21§ is inside the protected working set; it applies once newer work displaces it."));
         assert!(mixed_ack.contains("tags 99, 100 not found"));
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
@@ -24755,7 +24827,7 @@ mod tests {
 
         let queued_ack =
             tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 2, 99" })).await);
-        assert!(queued_ack.contains("deferred drop §2§"));
+        assert!(queued_ack.contains("Held: §2§ is inside the protected working set; it applies once newer work displaces it."), "{queued_ack}");
         assert!(queued_ack.contains("tags 1 already queued"));
         assert!(queued_ack.contains("tags 99 not found"));
 
@@ -30424,6 +30496,8 @@ mod tests {
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
+                protected_tokens_floor: 16_000,
+                protected_tokens_provenance: "derived",
                 compaction_enabled: true,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),
@@ -31223,6 +31297,8 @@ mod tests {
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
+                protected_tokens_floor: 16_000,
+                protected_tokens_provenance: "derived",
                 compaction_enabled: true,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),

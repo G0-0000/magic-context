@@ -220,31 +220,19 @@ export interface ActiveTagTokenAggregate {
 }
 
 /**
- * @param protectedTags When > 0, the `toolOutput` (reclaimable) total EXCLUDES
- * the top-N active tag numbers — the exact set `ctx_reduce` refuses to drop (it
- * defers the N highest active tag numbers; see ctx-reduce/tools.ts). The nudge's
- * "reclaimable" figure must match what the agent can actually drop, or it nags
- * about protected tail output the agent cannot act on (re-firing forever).
- * `conversation`/`toolCall` are NOT narrowed — they feed `usable`, the full
- * working range, where protected content still counts. Default 0 = no exclusion.
+ * `protectedCutoff` is the canonical token-window suffix cutoff. Reclaimable
+ * tool output excludes rows at or above it; null applies no threshold.
+ * `conversation`/`toolCall` are not narrowed because protected content remains
+ * part of the live working range.
  */
 export function getActiveTagTokenAggregate(
     db: Database,
     sessionId: string,
-    protectedTags = 0,
+    protectedCutoff: number | null = null,
 ): ActiveTagTokenAggregate {
-    // Reclaimable tool output excludes the protected top-N tags. The cutoff is
-    // the N-th highest active tag number; a tag is droppable iff its number is
-    // strictly below it. When there are fewer than N active tags the subquery
-    // yields NULL → `tag_number < NULL` is never true → reclaimable 0 (everything
-    // protected), which is correct. protectedTags <= 0 takes the unfiltered path.
     const toolOutputExpr =
-        protectedTags > 0
-            ? `COALESCE(SUM(CASE WHEN type = 'tool' AND tag_number < (
-                    SELECT tag_number FROM tags
-                    WHERE session_id = ? AND status = 'active'
-                    ORDER BY tag_number DESC LIMIT 1 OFFSET ?
-                ) THEN COALESCE(token_count, 0) ELSE 0 END), 0)`
+        protectedCutoff !== null
+            ? `COALESCE(SUM(CASE WHEN type = 'tool' AND tag_number < ? THEN COALESCE(token_count, 0) ELSE 0 END), 0)`
             : `COALESCE(SUM(CASE WHEN type = 'tool' THEN COALESCE(token_count, 0) ELSE 0 END), 0)`;
     const sql = `SELECT
                 COALESCE(SUM(CASE WHEN type != 'tool' THEN COALESCE(token_count, 0) ELSE 0 END), 0)
@@ -254,7 +242,7 @@ export function getActiveTagTokenAggregate(
                 COALESCE(SUM(CASE WHEN token_count IS NULL THEN 1 ELSE 0 END), 0) AS null_count
              FROM tags
              WHERE session_id = ? AND status = 'active'`;
-    const params = protectedTags > 0 ? [sessionId, protectedTags - 1, sessionId] : [sessionId];
+    const params = protectedCutoff !== null ? [protectedCutoff, sessionId] : [sessionId];
     const row = db.prepare(sql).get(...params) as
         | { conversation: number; tool_call: number; tool_output: number; null_count: number }
         | undefined;
@@ -277,9 +265,9 @@ export interface AgeReclaimToolTag extends ToolReclaimHintTag {
 }
 
 /**
- * Oldest active tool tags the agent can actually drop (excludes the protected
- * newest active tag window, matching ctx_reduce/applyPendingOperations). Used
- * only to render lightweight nudge hints; it never mutates tag state.
+ * Oldest active tool tags the agent can actually drop. The supplied set is the
+ * exact canonical token-window membership used by ctx_reduce and pending-op
+ * application. This reader only renders lightweight hints; it never mutates.
  */
 /**
  * Tool results that are useful to coordinate with but are poor suggestions for
@@ -315,19 +303,11 @@ function isReclaimHintExcludedTool(toolName: string | null): boolean {
 export function getOldestActiveUnprotectedToolTags(
     db: Database,
     sessionId: string,
-    protectedTags = 0,
+    protectedTagNumbers: ReadonlySet<number> = new Set(),
     limit = 4,
 ): ToolReclaimHintTag[] {
     if (limit <= 0) return [];
     const boundedLimit = Math.max(1, Math.min(10, Math.floor(limit)));
-    const whereProtected =
-        protectedTags > 0
-            ? `AND tag_number < (
-                    SELECT tag_number FROM tags
-                    WHERE session_id = ? AND status = 'active'
-                    ORDER BY tag_number DESC LIMIT 1 OFFSET ?
-                )`
-            : "";
     // Unsized tags (both token columns NULL) pass the floor clause so a
     // not-yet-backfilled large output is never wrongly hidden. Tier selection
     // is applied after the SQL query so it reuses the emergency-drop classifier.
@@ -335,10 +315,7 @@ export function getOldestActiveUnprotectedToolTags(
             (token_count IS NULL AND input_token_count IS NULL)
             OR (COALESCE(token_count, 0) + COALESCE(input_token_count, 0)) >= ?
         )`;
-    const params =
-        protectedTags > 0
-            ? [sessionId, AGE_RECLAIM_MIN_TOKENS, sessionId, protectedTags - 1]
-            : [sessionId, AGE_RECLAIM_MIN_TOKENS];
+    const params = [sessionId, AGE_RECLAIM_MIN_TOKENS];
     const rows = db
         .prepare(
             `SELECT tag_number, tool_name
@@ -350,9 +327,8 @@ export function getOldestActiveUnprotectedToolTags(
                           AND pending_ops.tag_id = tags.tag_number
                           AND pending_ops.operation = 'drop'
                     )
-                    ${valueFloor}
-             ${whereProtected}
-             ORDER BY tag_number ASC, id ASC`,
+                     ${valueFloor}
+              ORDER BY tag_number ASC, id ASC`,
         )
         .all(...params) as Array<{ tag_number?: unknown; tool_name?: unknown }>;
     return rows
@@ -364,7 +340,10 @@ export function getOldestActiveUnprotectedToolTags(
             tagNumber: row.tag_number,
             toolName: typeof row.tool_name === "string" ? row.tool_name : null,
         }))
-        .filter((tag) => !isReclaimHintExcludedTool(tag.toolName))
+        .filter(
+            (tag) =>
+                !protectedTagNumbers.has(tag.tagNumber) && !isReclaimHintExcludedTool(tag.toolName),
+        )
         .sort(
             (left, right) =>
                 resolveToolTier(right.toolName) - resolveToolTier(left.toolName) ||
@@ -1949,7 +1928,7 @@ export function getTagsForPendingOperations(
     db: Database,
     sessionId: string,
     pendingTagNumbers: readonly number[],
-    protectedTags: number,
+    protectedCount: number,
     recentToolWindow: number,
 ): TagEntry[] {
     const byNumber = new Map<number, TagEntry>();
@@ -1968,7 +1947,7 @@ export function getTagsForPendingOperations(
         `SELECT ${TAG_SELECT_COLUMNS} FROM tags
          WHERE session_id = ? AND status = 'active'
          ORDER BY tag_number DESC, id DESC LIMIT ?`,
-        protectedTags,
+        protectedCount,
     );
     addRows(
         `SELECT ${TAG_SELECT_COLUMNS} FROM tags

@@ -12,7 +12,6 @@ import {
     pullMemoryMirrorOnce,
     reconcileAuthorityProject,
 } from "../../features/magic-context/context-authority";
-import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import {
     resolveProjectIdentity,
     resolveProjectIdentityForSession,
@@ -36,6 +35,7 @@ import {
     isProviderOverflowFailClosedProven,
     isProviderOverflowReconfirmed,
     loadProtectedTailMeta,
+    resolveEpochFloorForPass,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -1438,7 +1438,6 @@ function buildTransformBody(args: {
         system_prompt_hash: args.systemPromptHash,
         upgrade_state: args.upgradeState,
         is_subagent: args.passInputs.is_subagent === true,
-        protected_tags: args.passInputs.protected_tags ?? DEFAULT_PROTECTED_TAGS,
         messages: args.input,
         native_messages: args.nativeMessages,
         tool_input_key_orders: args.toolInputKeyOrders ?? toolInputKeyOrders(args.input),
@@ -1477,6 +1476,9 @@ function buildTransformBody(args: {
         prompt_surface_guidance_override: args.passInputs.prompt_surface_guidance_override,
         mural: args.passInputs.mural,
         effective_execute_threshold: args.passInputs.effective_execute_threshold,
+        ...(typeof args.passInputs.protected_tokens_effective === "number"
+            ? { protected_tokens_effective: args.passInputs.protected_tokens_effective }
+            : {}),
         auto_search_enabled: args.passInputs.auto_search_enabled === true,
         auto_search_score_threshold: args.passInputs.auto_search_score_threshold,
         auto_search_min_prompt_chars: args.passInputs.auto_search_min_prompt_chars,
@@ -2188,6 +2190,29 @@ export function createRustModeTransform(
                       )
                     : undefined;
             const mural = muralInputForWire(resolvedMural);
+            const protectionFloorCacheBustingPass =
+                schedulerDecision === "execute" ||
+                deps.historyRefreshSessions.has(sessionId) ||
+                deps.pendingMaterializationSessions.has(sessionId) ||
+                deps.deferredHistoryRefreshSessions?.has(sessionId) === true ||
+                deps.deferredMaterializationSessions?.has(sessionId) === true;
+            const protectionFloorResolution = resolveEpochFloorForPass(deps.db, sessionId, {
+                configuredOverride: deps.protectedTokens,
+                usableSoft: transformGeometry?.usable_soft ?? 128_000,
+                isCacheBustingPass: protectionFloorCacheBustingPass,
+            });
+            if (protectionFloorResolution.snapshotChanged) {
+                sessionLog(
+                    sessionId,
+                    `protected token floor snapshot: floor=${protectionFloorResolution.floor} provenance=${protectionFloorResolution.provenance === "override" ? "absolute" : "derived"} usableSoft=${transformGeometry?.usable_soft ?? 128_000}`,
+                );
+            } else if (protectionFloorResolution.preSnapshotInputChanged) {
+                sessionLog(
+                    sessionId,
+                    `protected token floor remains frozen until next priced pass: floor=${protectionFloorResolution.floor} reason=${protectionFloorResolution.preSnapshotBustReason}`,
+                );
+            }
+            const effectiveFloor = protectionFloorResolution.floor;
             const passInputs: Record<string, unknown> = {
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,
@@ -2217,7 +2242,7 @@ export function createRustModeTransform(
                 prompt_surface_tool_descriptions: deps.promptSurface?.tool_descriptions ?? {},
                 prompt_surface_guidance_override: promptSurfaceGuidance?.primaryOverride,
                 mural,
-                protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
+                protected_tokens_effective: effectiveFloor,
                 temporal_awareness: deps.experimentalTemporalAwareness === true,
                 channel2_nudge_state: getChannel2NudgeState(deps.db, sessionId),
                 emergency_recovery_armed:

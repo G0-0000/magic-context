@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { removeJsoncValue } from "../shared/jsonc-edit";
 
 /**
  * Config-LOCATION migration: move Magic Context config from the per-harness
@@ -284,6 +285,7 @@ function sortJson(value: unknown): unknown {
     if (value && typeof value === "object") {
         const sorted: Record<string, unknown> = {};
         for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+            if (key === "protected_tags") continue;
             sorted[key] = sortJson((value as Record<string, unknown>)[key]);
         }
         return sorted;
@@ -357,36 +359,6 @@ function acquireConfigMigrationLock(lockDir: string): (() => void) | null {
 }
 
 // ── Atomic writes ────────────────────────────────────────────
-
-function atomicCopyConfigFile(sourcePath: string, targetPath: string): void {
-    mkdirSync(dirname(targetPath), { recursive: true });
-    const tmpPath = join(
-        dirname(targetPath),
-        `.${basename(targetPath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
-    );
-    let fd: number | null = null;
-    try {
-        fd = openSync(tmpPath, "wx", 0o600);
-        writeFileSync(fd, readFileSync(sourcePath));
-        closeSync(fd);
-        fd = null;
-        renameSync(tmpPath, targetPath);
-    } catch (err) {
-        if (fd !== null) {
-            try {
-                closeSync(fd);
-            } catch {
-                // best-effort close before cleanup
-            }
-        }
-        try {
-            unlinkSync(tmpPath);
-        } catch {
-            // best-effort temp cleanup
-        }
-        throw err;
-    }
-}
 
 function atomicWriteConfigFile(targetPath: string, content: string): void {
     mkdirSync(dirname(targetPath), { recursive: true });
@@ -567,7 +539,22 @@ export function migrateConfigFile(opts: ConfigFileMigrationOptions): ConfigFileM
             return { migrated: false, conflict: true, targetPath: opts.targetPath, warnings };
         }
 
-        atomicCopyConfigFile(first.path, opts.targetPath);
+        let migratedContent = first.content;
+        let strippedProtectedTags = false;
+        try {
+            const stripped = removeJsoncValue(first.content, ["protected_tags"]);
+            if (stripped !== first.content) {
+                migratedContent = stripped;
+                strippedProtectedTags = true;
+            }
+        } catch {
+            // Keep original content if jsonc editing fails
+        }
+
+        atomicWriteConfigFile(opts.targetPath, migratedContent);
+        if (strippedProtectedTags) {
+            info?.(`Stripped deprecated "protected_tags" key during config location migration`);
+        }
         info?.(
             `Migrated Magic Context ${opts.scope} config from ${first.path} to ${opts.targetPath}`,
         );

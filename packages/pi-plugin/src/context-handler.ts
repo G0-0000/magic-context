@@ -281,6 +281,20 @@ import { createPiTranscript } from "./transcript-pi";
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
 
+function newestActiveTagNumbersByCount(
+	tags: readonly { tagNumber: number; status: string }[],
+	count: number,
+): Set<number> {
+	if (count <= 0) return new Set();
+	return new Set(
+		tags
+			.filter((tag) => tag.status === "active")
+			.map((tag) => tag.tagNumber)
+			.sort((left, right) => right - left)
+			.slice(0, count),
+	);
+}
+
 function isPiHardCacheExpired(
 	lastResponseTime: number,
 	ttlMs: number,
@@ -3253,7 +3267,6 @@ export function registerPiContextHandler(
 						sessionId,
 					);
 					const protectedTagNumbers = windowResult.tagNumberSet.tagNumbers;
-					const protectedTags = options.protectedTags ?? 20;
 					// Queued ctx_reduce drops are completed agent decisions. Their bytes
 					// remain in T until a cache-busting materialization, but not in U.
 					const pendingDropTagNumbers = new Set(
@@ -3268,7 +3281,6 @@ export function registerPiContextHandler(
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
 						tags,
-						protectedTags,
 						protectedTagNumbers,
 						pendingDropTagNumbers,
 						stableId,
@@ -3298,7 +3310,7 @@ export function registerPiContextHandler(
 					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
 						options.db,
 						sessionId,
-						protectedTags,
+						protectedTagNumbers,
 					);
 					const channelState = {
 						...baseline,
@@ -3306,7 +3318,7 @@ export function registerPiContextHandler(
 						realUserTurnCount: countRealPiUserMessages({
 							messages: outputMessages,
 							tags,
-							protectedTags,
+							protectedTagNumbers,
 							pendingDropTagNumbers,
 							stableId,
 							syntheticLeadingCount: result.syntheticLeadingCount,
@@ -3342,7 +3354,7 @@ export function registerPiContextHandler(
 						assertPiTailHygieneContentUnchanged({
 							messages: outputMessages,
 							tags,
-							protectedTags,
+							protectedTagNumbers,
 							pendingDropTagNumbers,
 							stableId,
 							syntheticLeadingCount: result.syntheticLeadingCount,
@@ -5113,7 +5125,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				args.protectedTags,
+				newestActiveTagNumbersByCount(pendingOperationTags, args.protectedTags),
 				pendingOperationTags,
 				pendingOps,
 			);
@@ -5636,7 +5648,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				args.protectedTags,
+				newestActiveTagNumbersByCount(
+					getActiveTagsBySession(args.db, args.sessionId),
+					args.protectedTags,
+				),
 				undefined,
 				[],
 				syntheticPendingOps,

@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { computeProtectionWindow } from "../../../packages/plugin/src/features/magic-context/protection-window";
 import type { TagEntry } from "../../../packages/plugin/src/features/magic-context/types";
 import {
     decideChannel1,
@@ -34,10 +35,13 @@ type FixtureTag = {
     tag_number: number;
     block_id: string;
     kind: "message" | "tool" | "file";
+    token_count: number;
 };
 type Fixture = {
     id: string;
+    /** Migration sentinel only. The generated parity contract never reads this count. */
     protected_tags: number;
+    protected_tokens_effective: number;
     messages: FixtureMessage[];
     tags: FixtureTag[];
     pending_drop_tag_numbers?: number[];
@@ -49,91 +53,149 @@ const fixtures: Fixture[] = [
     {
         id: "live-incident-mixed-tail",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
-            { mid: "conversation", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "prose ", repeat: 87_000 }] },
+            { mid: "conversation", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "prose ", repeat: 302_195 }] },
             { mid: "tool-owner", ordinal: 2, role: "assistant", blocks: [{ type: "tool_call", id: "call-live", name: "read", input: { path: "fixture" } }] },
             { mid: "tool-result", ordinal: 3, role: "user", blocks: [{ type: "tool_result", id: "call-live", name: "read", unit: "result ", repeat: 162_000 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "tool-result#0", kind: "tool" }],
+        tags: [
+            { tag_number: 0, block_id: "conversation#0", kind: "message", token_count: 302_197 },
+            { tag_number: 1, block_id: "tool-result#0", kind: "tool", token_count: 162_006 },
+        ],
     },
     {
         id: "queued-tool-arc-full-mass",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "queued-owner", ordinal: 1, role: "assistant", blocks: [{ type: "tool_call", id: "queued-call", name: "read", input: { payload: "queued input has attributed mass" } }] },
             { mid: "queued-result", ordinal: 2, role: "user", blocks: [{ type: "tool_result", id: "queued-call", name: "read", unit: "queued output ", repeat: 4_000 }] },
+            { mid: "kept-owner-1", ordinal: 3, role: "assistant", blocks: [{ type: "tool_call", id: "kept-call-1", name: "read", input: { path: "one" } }] },
+            { mid: "kept-result-1", ordinal: 4, role: "user", blocks: [{ type: "tool_result", id: "kept-call-1", name: "read", unit: "kept one ", repeat: 2_000 }] },
+            { mid: "kept-owner-2", ordinal: 5, role: "assistant", blocks: [{ type: "tool_call", id: "kept-call-2", name: "read", input: { path: "two" } }] },
+            { mid: "kept-result-2", ordinal: 6, role: "user", blocks: [{ type: "tool_result", id: "kept-call-2", name: "read", unit: "kept two ", repeat: 2_000 }] },
+            { mid: "kept-owner-3", ordinal: 7, role: "assistant", blocks: [{ type: "tool_call", id: "kept-call-3", name: "read", input: { path: "three" } }] },
+            { mid: "kept-result-3", ordinal: 8, role: "user", blocks: [{ type: "tool_result", id: "kept-call-3", name: "read", unit: "kept three ", repeat: 2_000 }] },
         ],
-        tags: [{ tag_number: 7, block_id: "queued-result#0", kind: "tool" }],
+        tags: [
+            { tag_number: 7, block_id: "queued-result#0", kind: "tool", token_count: 8_000 },
+            { tag_number: 8, block_id: "kept-result-1#0", kind: "tool", token_count: 6_000 },
+            { tag_number: 9, block_id: "kept-result-2#0", kind: "tool", token_count: 6_000 },
+            { tag_number: 10, block_id: "kept-result-3#0", kind: "tool", token_count: 6_000 },
+        ],
         pending_drop_tag_numbers: [7],
     },
     {
         id: "protected-recency-reserve",
         protected_tags: 1,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "old", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "old reclaimable ", repeat: 24_000 }] },
-            { mid: "recent", ordinal: 2, role: "assistant", blocks: [{ type: "text", unit: "recent protected ", repeat: 24_000 }] },
+            { mid: "recent-owner", ordinal: 2, role: "assistant", blocks: [{ type: "tool_call", id: "recent-call", name: "read", input: { path: "recent" } }] },
+            { mid: "recent-result", ordinal: 3, role: "user", blocks: [{ type: "tool_result", id: "recent-call", name: "read", unit: "recent protected ", repeat: 24_000 }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "old#0", kind: "message" },
-            { tag_number: 2, block_id: "recent#0", kind: "message" },
+            { tag_number: 1, block_id: "old#0", kind: "message", token_count: 96_001 },
+            { tag_number: 2, block_id: "recent-result#0", kind: "tool", token_count: 48_001 },
+        ],
+    },
+    {
+        id: "protected-token-window-spans-more-than-one-tag",
+        protected_tags: 1,
+        protected_tokens_effective: 16_000,
+        messages: [
+            { mid: "older-visible", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "visible backlog ", repeat: 20_000 }] },
+            { mid: "owner-1", ordinal: 2, role: "assistant", blocks: [{ type: "tool_call", id: "window-1", name: "read", input: { path: "one" } }] },
+            { mid: "result-1", ordinal: 3, role: "user", blocks: [{ type: "tool_result", id: "window-1", name: "read", unit: "window one ", repeat: 2_000 }] },
+            { mid: "owner-2", ordinal: 4, role: "assistant", blocks: [{ type: "tool_call", id: "window-2", name: "read", input: { path: "two" } }] },
+            { mid: "result-2", ordinal: 5, role: "user", blocks: [{ type: "tool_result", id: "window-2", name: "read", unit: "window two ", repeat: 2_000 }] },
+            { mid: "owner-3", ordinal: 6, role: "assistant", blocks: [{ type: "tool_call", id: "window-3", name: "read", input: { path: "three" } }] },
+            { mid: "result-3", ordinal: 7, role: "user", blocks: [{ type: "tool_result", id: "window-3", name: "read", unit: "window three ", repeat: 2_000 }] },
+            { mid: "owner-4", ordinal: 8, role: "assistant", blocks: [{ type: "tool_call", id: "window-4", name: "read", input: { path: "four" } }] },
+            { mid: "result-4", ordinal: 9, role: "user", blocks: [{ type: "tool_result", id: "window-4", name: "read", unit: "window four ", repeat: 2_000 }] },
+        ],
+        tags: [
+            { tag_number: 0, block_id: "older-visible#0", kind: "message", token_count: 40_001 },
+            { tag_number: 1, block_id: "result-1#0", kind: "tool", token_count: 4_000 },
+            { tag_number: 2, block_id: "result-2#0", kind: "tool", token_count: 4_000 },
+            { tag_number: 3, block_id: "result-3#0", kind: "tool", token_count: 4_000 },
+            { tag_number: 4, block_id: "result-4#0", kind: "tool", token_count: 4_000 },
+        ],
+    },
+    {
+        id: "empty-protected-token-window",
+        protected_tags: 99,
+        protected_tokens_effective: 16_000,
+        messages: [
+            { mid: "message-only", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "message only ", repeat: 4_000 }] },
+        ],
+        tags: [
+            { tag_number: 1, block_id: "message-only#0", kind: "message", token_count: 8_001 },
         ],
     },
     {
         id: "reasoning-excluded-both-terms",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "visible", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "visible work ", repeat: 30_000 }] },
             { mid: "thinking", ordinal: 2, role: "assistant", blocks: [{ type: "reasoning", unit: "private chain ", repeat: 80_000 }] },
             { mid: "answer", ordinal: 3, role: "assistant", blocks: [{ type: "text", unit: "answer prose ", repeat: 30_000 }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "visible#0", kind: "message" },
-            { tag_number: 2, block_id: "answer#0", kind: "message" },
+            { tag_number: 1, block_id: "visible#0", kind: "message", token_count: 8_000 },
+            { tag_number: 2, block_id: "answer#0", kind: "message", token_count: 8_000 },
         ],
     },
     {
         id: "synthetic-carrier-excluded",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "m0", ordinal: 1, role: "user", synthetic: true, blocks: [{ type: "text", unit: "synthetic memory ", repeat: 100_000 }] },
             { mid: "real", ordinal: 2, role: "user", blocks: [{ type: "text", unit: "small real tail ", repeat: 500 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "m0#0", kind: "message" }],
+        tags: [{ tag_number: 1, block_id: "m0#0", kind: "message", token_count: 8_000 }],
     },
     {
         id: "dropped-tool-arc-excluded",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "owner", ordinal: 1, role: "assistant", blocks: [{ type: "tool_call", id: "call-drop", name: "read", input: { payload: "original-large-input" } }] },
             { mid: "result", ordinal: 2, role: "user", blocks: [{ type: "tool_result", id: "call-drop", name: "read", unit: "[truncated §2§]", repeat: 1 }] },
             { mid: "kept", ordinal: 3, role: "user", blocks: [{ type: "text", unit: "kept prose ", repeat: 2_000 }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "result#0", kind: "tool" },
-            { tag_number: 2, block_id: "kept#0", kind: "message" },
+            { tag_number: 1, block_id: "result#0", kind: "tool", token_count: 8_000 },
+            { tag_number: 2, block_id: "kept#0", kind: "message", token_count: 8_000 },
         ],
     },
     {
         id: "caveman-rendered-not-original-weight",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "caveman", ordinal: 1, role: "assistant", blocks: [{ type: "text", unit: "[caveman depth=2] compacted sentence. ", repeat: 4_000 }] },
             { mid: "untagged-context", ordinal: 2, role: "user", blocks: [{ type: "text", unit: "visible context ", repeat: 2_000 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "caveman#0", kind: "message" }],
+        tags: [{ tag_number: 1, block_id: "caveman#0", kind: "message", token_count: 8_000 }],
     },
     {
         id: "channel1-reminder-span-excluded",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "reminder-owner", ordinal: 1, role: "assistant", blocks: [{ type: "tool_call", id: "call-reminder", name: "read", input: { path: "reminder" } }] },
             { mid: "reminder-result", ordinal: 2, role: "user", blocks: [{ type: "tool_result", id: "call-reminder", name: "read", unit: "kept output\n\n<system-reminder>\nreasoning-sized reminder bytes must not count\n</system-reminder>", repeat: 1 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "reminder-result#0", kind: "tool" }],
+        tags: [{ tag_number: 1, block_id: "reminder-result#0", kind: "tool", token_count: 8_000 }],
     },
     {
         id: "user-reminder-span-excluded-from-both-terms",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             {
                 mid: "user-reminder",
@@ -148,40 +210,44 @@ const fixtures: Fixture[] = [
                 ],
             },
         ],
-        tags: [{ tag_number: 1, block_id: "user-reminder#0", kind: "message" }],
+        tags: [{ tag_number: 1, block_id: "user-reminder#0", kind: "message", token_count: 8_000 }],
     },
     {
         id: "post-fold-fresh-tail",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "fold-summary", ordinal: 1, role: "user", synthetic: true, blocks: [{ type: "text", unit: "compacted history ", repeat: 100_000 }] },
             { mid: "fresh-tail", ordinal: 2, role: "user", blocks: [{ type: "text", unit: "fresh visible tail ", repeat: 10_000 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "fresh-tail#0", kind: "message" }],
+        tags: [{ tag_number: 1, block_id: "fresh-tail#0", kind: "message", token_count: 8_000 }],
     },
     {
         id: "tiny-t-minimum-guard",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "tiny", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "x ", repeat: 59_000 }] },
         ],
-        tags: [{ tag_number: 1, block_id: "tiny#0", kind: "message" }],
+        tags: [{ tag_number: 1, block_id: "tiny#0", kind: "message", token_count: 8_000 }],
     },
     {
         id: "image-and-file-total",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "image", ordinal: 1, role: "user", blocks: [{ type: "file", mime: "image/png", url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" }] },
             { mid: "file", ordinal: 2, role: "user", blocks: [{ type: "file", mime: "text/plain", url: "file content" }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "image#0", kind: "file" },
-            { tag_number: 2, block_id: "file#0", kind: "file" },
+            { tag_number: 1, block_id: "image#0", kind: "file", token_count: 8_000 },
+            { tag_number: 2, block_id: "file#0", kind: "file", token_count: 8_000 },
         ],
     },
     {
         id: "unambiguous-legacy-orphan",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "before", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "before ", repeat: 500 }] },
             { mid: "orphan-owner", ordinal: 2, role: "assistant", blocks: [{ type: "tool_call", id: "legacy-call", name: "read", input: { path: "legacy" } }] },
@@ -189,14 +255,15 @@ const fixtures: Fixture[] = [
             { mid: "after", ordinal: 4, role: "user", blocks: [{ type: "text", unit: "after ", repeat: 500 }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "before#0", kind: "message" },
-            { tag_number: 2, block_id: "legacy-call", kind: "tool" },
-            { tag_number: 3, block_id: "after#0", kind: "message" },
+            { tag_number: 1, block_id: "before#0", kind: "message", token_count: 8_000 },
+            { tag_number: 2, block_id: "legacy-call", kind: "tool", token_count: 8_000 },
+            { tag_number: 3, block_id: "after#0", kind: "message", token_count: 8_000 },
         ],
     },
     {
         id: "recurring-call-id-ambiguous",
         protected_tags: 0,
+        protected_tokens_effective: 16_000,
         messages: [
             { mid: "before", ordinal: 1, role: "user", blocks: [{ type: "text", unit: "before ", repeat: 500 }] },
             { mid: "owner-a", ordinal: 2, role: "assistant", blocks: [{ type: "tool_call", id: "repeat", name: "read", input: { path: "a" } }] },
@@ -206,9 +273,9 @@ const fixtures: Fixture[] = [
             { mid: "after", ordinal: 6, role: "user", blocks: [{ type: "text", unit: "after ", repeat: 500 }] },
         ],
         tags: [
-            { tag_number: 1, block_id: "before#0", kind: "message" },
-            { tag_number: 2, block_id: "repeat", kind: "tool" },
-            { tag_number: 3, block_id: "after#0", kind: "message" },
+            { tag_number: 1, block_id: "before#0", kind: "message", token_count: 8_000 },
+            { tag_number: 2, block_id: "repeat", kind: "tool", token_count: 8_000 },
+            { tag_number: 3, block_id: "after#0", kind: "message", token_count: 8_000 },
         ],
     },
 ];
@@ -294,10 +361,16 @@ function band(u: number, t: number): string {
 }
 
 const cases = fixtures.map((fixture) => {
+    // Goldens carry persisted-row mass plus the snapshotted floor. This is the same
+    // projection production passes to the hygiene walk; protected_tags stays inert.
+    const protectedTagNumbers = computeProtectionWindow(
+        fixture.tags,
+        fixture.protected_tokens_effective,
+    ).tagNumberSet.tagNumbers;
     const measured = measureTailHygiene({
         messages: toMessages(fixture),
         tags: toTags(fixture),
-        protectedTags: fixture.protected_tags,
+        protectedTagNumbers,
         pendingDropTagNumbers: fixture.pending_drop_tag_numbers
             ? new Set(fixture.pending_drop_tag_numbers)
             : undefined,
@@ -320,10 +393,10 @@ if (flagship.expected.band !== "urgent" || Math.abs(flagshipSeverity - 0.651) > 
 const canonical = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 const inputSha256 = createHash("sha256").update(canonical(fixtures)).digest("hex");
 const golden = {
-    schema: 1,
+    schema: 2,
     provenance: {
         generator: "crates/mc-module/gen/gen-nudge-hygiene-golden.ts",
-        generator_version: "nudge-hygiene-ts-v2",
+        generator_version: "nudge-hygiene-ts-v3",
         input_sha256: inputSha256,
     },
     cases,

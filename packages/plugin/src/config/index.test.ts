@@ -211,7 +211,7 @@ describe("loadPluginConfig — parse failure diagnostics", () => {
 
     it("keeps file parse and invalid-leaf warning classes distinct", () => {
         const parseResult = loadWithUserConfig('\\{\n  "cache_ttl": "1h"\n}');
-        const leafResult = loadWithUserConfig('{"protected_tags":"bogus"}');
+        const leafResult = loadWithUserConfig('{"protected_tokens":"bogus"}');
 
         expect(parseResult.configWarningDetails?.[0]?.warningClass).toBe("file-parse");
         expect(

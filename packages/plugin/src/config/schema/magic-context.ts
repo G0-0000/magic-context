@@ -1,7 +1,6 @@
 import { homedir } from "node:os";
 import { z } from "zod";
 import { isValidLanguageCode } from "../../agents/language-directive";
-import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { isValidCron } from "../../features/magic-context/dreamer/cron";
 import type {
     AGENTIC_DREAM_TASKS,
@@ -871,7 +870,8 @@ export interface MagicContextConfig {
      *  this overrides `execute_threshold_percentage` for that model. Useful for hard caps
      *  matching provider input limits. Values above 90% × context_limit are clamped with a warning. */
     execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
-    protected_tags: number;
+    protected_tokens?: number;
+    protected_tags?: number;
     clear_reasoning_age: number;
     history_budget_percentage: number;
     historian_timeout_ms: number;
@@ -1153,13 +1153,20 @@ export const MagicContextConfigSchema = z
             .describe(
                 "Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 90% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000.",
             ),
-        protected_tags: z
+        protected_tokens: z
             .number()
-            .min(1)
-            .max(100)
+            .int()
+            .min(4000)
+            .max(1_000_000)
             .optional()
             .describe(
-                "Number of recent tags to protect from dropping (min: 1, max: 100, default: 20)",
+                "Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000). When omitted, the derived default is clamp(round(0.05 × usableSoft), min(16_000, round(0.08 × usableSoft)), 64_000).",
+            ),
+        protected_tags: z
+            .unknown()
+            .optional()
+            .describe(
+                "Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead.",
             ),
         clear_reasoning_age: z
             .number()
@@ -1466,6 +1473,24 @@ export const MagicContextConfigSchema = z
     .transform((data): MagicContextConfig => {
         return {
             ...data,
-            protected_tags: data.protected_tags ?? DEFAULT_PROTECTED_TAGS,
+            protected_tags: data.protected_tags as number | undefined,
         };
     });
+
+/**
+ * Derived default protected_tokens formula:
+ * clamp(round(0.05 × usableSoft), min(16000, round(0.08 × usableSoft)), 64000)
+ *
+ * Sizing table:
+ *   100k -> 8,000
+ *   200k -> 16,000
+ *   372k -> 18,600
+ *   872k -> 43,600
+ *   1M   -> 50,000
+ */
+export function deriveDefaultProtectedTokens(usableSoft: number): number {
+    const clampedUsable = Math.max(0, usableSoft);
+    const lowerBound = Math.min(16_000, Math.round(0.08 * clampedUsable));
+    const target = Math.round(0.05 * clampedUsable);
+    return Math.min(64_000, Math.max(lowerBound, target));
+}

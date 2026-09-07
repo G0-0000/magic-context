@@ -130,7 +130,12 @@ export function planEmergencyDrop(input: {
      */
     floorTags: readonly EmergencyDropTag[];
     maxTag: number;
-    protectedTags: number;
+    /**
+     * Union projection form: exact tag-number cutoff directly.
+     * Coordinate space: tag-number space (number | null).
+     * Empty-window behavior: branches on absent cutoff (null), applying no tag-number threshold.
+     */
+    protectedCutoff: number | null;
     /** Provider-proven or estimated pressure; at 95% only open arcs and exemplars survive. */
     usagePercentage?: number;
     currentTotalInputTokens: number;
@@ -150,8 +155,6 @@ export function planEmergencyDrop(input: {
     const {
         tags,
         floorTags,
-        maxTag,
-        protectedTags,
         currentTotalInputTokens,
         ceilingTokens,
         priorInputSample,
@@ -206,7 +209,13 @@ export function planEmergencyDrop(input: {
     }
 
     const absoluteEmergency = (input.usagePercentage ?? 0) >= 95;
-    const protectedCutoff = absoluteEmergency ? maxTag : maxTag - protectedTags;
+
+    // Union projection form: exact tag-number cutoff directly.
+    // Coordinate space: tag-number space (number | null).
+    // Empty-window behavior: branches on absent cutoff (null), applying no tag-number threshold.
+    // At >=95%, the token window and newest-3 minimum yield (parity with #423).
+    const cutoff = input.protectedCutoff;
+    const windowYields = absoluteEmergency;
 
     // Below 95%, reserve the newest ceil(20%) of T1/T2 as continuation context.
     // At absolute emergency pressure, only open arcs and ctx_reduce exemplars remain protected.
@@ -241,7 +250,20 @@ export function planEmergencyDrop(input: {
     const byTier: Record<Tier, EmergencyDropTag[]> = { 1: [], 2: [], 3: [] };
     for (const tag of tags) {
         if (tag.status !== "active" || tag.type !== "tool") continue;
-        if (tag.tagNumber > protectedCutoff) continue; // global protected tail
+
+        // Window protection check:
+        // When window yields (>=95%), window does not protect tags.
+        // Below 95%:
+        // If cutoff is present (non-null), tool tags with tag_number >= cutoff are protected.
+        // If cutoff is ABSENT (null), branch explicitly on absence and apply NO tag-number threshold!
+        if (!windowYields) {
+            if (cutoff !== null) {
+                if (tag.tagNumber >= cutoff) continue;
+            } else {
+                // Branch: cutoff is absent (empty window) -> apply no tag-number threshold
+            }
+        }
+
         if (protectedCtxReduceTags.has(tag.tagNumber)) continue;
         const tier = resolveToolTier(tag.toolName);
         if ((tier === 1 || tier === 2) && reserved.has(tag.tagNumber)) continue;

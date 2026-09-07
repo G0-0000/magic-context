@@ -52,6 +52,13 @@ export function buildSupersessionReclaimOps(input: {
     targets: Map<number, TagTarget>;
     pendingOps?: readonly PendingOp[];
     recentMessageIds?: ReadonlySet<string>;
+    /**
+     * Union projection form: protectedTagNumbers (tag-number set form).
+     * Coordinate space: tag-number space.
+     * Empty-window behavior: empty set means zero tool tags are protected by the token window;
+     * non-tool tags are never reclaim targets.
+     */
+    protectedTagNumbers?: ReadonlySet<number>;
 }): PendingOp[] {
     const realPendingTagIds = new Set((input.pendingOps ?? []).map((op) => op.tagId));
     const tags = getActiveTagsBySession(input.db, input.sessionId);
@@ -66,6 +73,9 @@ export function buildSupersessionReclaimOps(input: {
     let ctxReduceSeen = 0;
 
     for (const tag of toolTags) {
+        if (input.protectedTagNumbers?.has(tag.tagNumber)) {
+            continue;
+        }
         const name = tag.toolName;
         if (!name) continue;
 
@@ -124,6 +134,12 @@ export function buildEditSupersessionReclaim(input: {
     targets: Map<number, TagTarget>;
     pendingOps?: readonly PendingOp[];
     recentMessageIds?: ReadonlySet<string>;
+    /**
+     * Union projection form: protectedTagNumbers (tag-number set form).
+     * Coordinate space: tag-number space.
+     * Empty-window behavior: empty set means zero tool tags are protected by the token window.
+     */
+    protectedTagNumbers?: ReadonlySet<number>;
 }): { ops: PendingOp[]; editMarkerTagIds: Set<number> } {
     const realPendingTagIds = new Set((input.pendingOps ?? []).map((op) => op.tagId));
     const tags = getActiveTagsBySession(input.db, input.sessionId);
@@ -138,6 +154,9 @@ export function buildEditSupersessionReclaim(input: {
     const editMarkerTagIds = new Set<number>();
 
     for (const tag of editTags) {
+        if (input.protectedTagNumbers?.has(tag.tagNumber)) {
+            continue;
+        }
         const filePath = readFilePath(input.targets.get(tag.tagNumber));
         // No resolvable filePath → cannot prove supersession by file identity;
         // leave it alone (fail safe).

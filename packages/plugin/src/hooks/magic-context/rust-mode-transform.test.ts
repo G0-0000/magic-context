@@ -215,7 +215,7 @@ function makeDeps(db: ContextDatabase, moduleClient: RustModeModuleClient): Tran
         scheduler: {} as TransformDeps["scheduler"],
         contextUsageMap: new Map(),
         db,
-        protectedTags: 4,
+        protectedTokens: 4,
         clearReasoningAge: 50,
         historyRefreshSessions: new Set(),
         pendingMaterializationSessions: new Set(),
@@ -5649,5 +5649,35 @@ describe("authoritySeedRows — supersede pointer resolution (issue #377)", () =
         } finally {
             closeQuietly(db);
         }
+    });
+});
+
+describe("rust-mode wire transport (protected_tokens_effective)", () => {
+    it("transports resolved floor scalar protected_tokens_effective on the wire alongside effective_execute_threshold and never sends protected_tags", async () => {
+        const sessionId = `rust-floor-wire-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const transformBodies: Array<Record<string, unknown>> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform") {
+                    transformBodies.push(structuredClone(body) as Record<string, unknown>);
+                    return { decision: "PASSTHROUGH", native_messages: [] };
+                }
+                return { ok: true };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.protectedTokens = 24_000;
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const input = makeMessages(sessionId);
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+
+        expect(transformBodies).toHaveLength(1);
+        const wirePayload = transformBodies[0]!;
+        expect(wirePayload.effective_execute_threshold).toBeDefined();
+        expect(wirePayload.protected_tokens_effective).toBe(24_000);
+        expect(wirePayload.protected_tags).toBeUndefined();
     });
 });

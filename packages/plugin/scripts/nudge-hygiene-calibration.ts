@@ -2,6 +2,7 @@ import { realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
+import { computeProtectionWindow } from "../src/features/magic-context/protection-window";
 import type { TagEntry } from "../src/features/magic-context/types";
 import {
     decideChannel1,
@@ -28,7 +29,7 @@ const CALIBRATION_SESSIONS = [
         sessionId: "ses_ff48ad7efffeL51ppGolXXefEd",
     },
 ] as const;
-const PROTECTED_TAGS = 20;
+const PROTECTED_TOKEN_FLOOR = 16_000;
 const WALK_SAMPLES = 31;
 
 type MessageRow = { id: string; data: string };
@@ -262,7 +263,7 @@ function measureWalkCostGate(): {
             toolOwnerMessageId: "tool-owner",
         },
     ];
-    const input = { messages, tags, protectedTags: 0 };
+    const input = { messages, tags, protectedTagNumbers: new Set<number>() };
     const measured = measureTailHygiene(input);
     const durations: number[] = [];
     for (let sample = 0; sample < WALK_SAMPLES; sample += 1) {
@@ -294,7 +295,10 @@ function replaySession(
     const input = {
         messages: messages as unknown as MessageLike[],
         tags: hygieneTags,
-        protectedTags: PROTECTED_TAGS,
+        protectedTagNumbers: computeProtectionWindow(
+            hygieneTags,
+            PROTECTED_TOKEN_FLOOR,
+        ).protectedTagNumbers,
     };
     const measured = measureTailHygiene(input);
     const durations: number[] = [];
@@ -356,7 +360,7 @@ try {
         {
             formula: "clamp(U / max(T, 1), 0, 1)",
             constantsChanged: false,
-            protectedTags: PROTECTED_TAGS,
+            protectedTokenFloor: PROTECTED_TOKEN_FLOOR,
             snapshotMode: "readonly VACUUM-INTO fixture replay",
             results,
             distribution,

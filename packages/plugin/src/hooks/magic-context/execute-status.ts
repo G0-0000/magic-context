@@ -8,6 +8,7 @@ import type {
     DreamTaskProgress,
 } from "../../features/magic-context/dreamer/task-registry";
 import { formatDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-registry";
+import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
@@ -67,7 +68,6 @@ function formatExecuteThreshold(detail: ExecuteThresholdDetail, contextLimit: nu
 export function executeStatus(
     db: Database,
     sessionId: string,
-    protectedTags: number,
     executeThresholdPercentageConfig:
         | number
         | { default: number; [modelKey: string]: number } = DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
@@ -106,6 +106,7 @@ export function executeStatus(
         const meta = getOrCreateSessionMeta(db, sessionId);
         const tags = getTagsBySession(db, sessionId);
         const pendingOps = getPendingOps(db, sessionId);
+        const protectionWindow = getProtectionWindowForSession(db, sessionId);
 
         const activeTags = tags.filter((t) => t.status === "active");
         const droppedTags = tags.filter((t) => t.status === "dropped");
@@ -179,7 +180,8 @@ export function executeStatus(
             `- Execute threshold: ${formatExecuteThreshold(thresholdDetail, displayContextLimit)}`,
             `- Last input tokens: ${displayInputTokens.toLocaleString()} tokens`,
             "",
-            `**Protected tags:** ${protectedTags}`,
+            `**Protected tool tags:** ${protectionWindow.status.protectedCount} (${protectionWindow.status.protectedMass.toLocaleString()} tokens)`,
+            `**Protection floor:** ${protectionWindow.status.floor.toLocaleString()} tokens`,
             `**Subagent session:** ${meta.isSubagent}`,
         ];
 

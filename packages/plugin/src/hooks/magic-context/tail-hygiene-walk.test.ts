@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { computeProtectionWindow } from "../../features/magic-context/protection-window";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import type { TagEntry } from "../../features/magic-context/types";
 import { buildChannel1Reminder, decideChannel1 } from "./ctx-reduce-nudge";
@@ -66,7 +67,7 @@ describe("tail hygiene single-walk instrument", () => {
         ];
         const tags = [tag(2, "call-live", "tool", { toolOwnerMessageId: "tool-owner" })];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const severity = measured.u / measured.t;
         const oldInputRelativeSeverity = measured.u / 648_000;
         const oldRebasedPressure = 0.2;
@@ -77,6 +78,48 @@ describe("tail hygiene single-walk instrument", () => {
         expect(severity).toBeGreaterThanOrEqual(0.55);
         expect(severity).toBeLessThan(0.7);
         expect(oldWouldFire).toBe(false);
+    });
+
+    it("consumes token-window membership derived from the floor and persisted tag mass", () => {
+        const messages: MessageLike[] = [];
+        const tags: TagEntry[] = [];
+        const persistedRows: Array<{
+            tag_number: number;
+            block_id: string;
+            kind: "tool";
+            token_count: number;
+        }> = [];
+        for (let number = 1; number <= 4; number += 1) {
+            const owner = `owner-${number}`;
+            const callId = `call-${number}`;
+            messages.push(nativeTool(owner, callId, { path: String(number) }, `result ${number}`));
+            tags.push(tag(number, callId, "tool", { toolOwnerMessageId: owner }));
+            persistedRows.push({
+                tag_number: number,
+                block_id: callId,
+                kind: "tool",
+                token_count: 4_000,
+            });
+        }
+        const protectedTagNumbers = computeProtectionWindow(persistedRows, 16_000).tagNumberSet
+            .tagNumbers;
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers });
+
+        expect(protectedTagNumbers).toEqual(new Set([1, 2, 3, 4]));
+        expect(measured.u).toBe(0);
+        expect(measured.t).toBeGreaterThan(0);
+
+        const emptyProtectedTagNumbers = computeProtectionWindow(
+            [{ tag_number: 5, block_id: "message:p0", kind: "message", token_count: 8_000 }],
+            16_000,
+        ).tagNumberSet.tagNumbers;
+        const emptyWindowMeasured = measureTailHygiene({
+            messages: [textMessage("message", "still reclaimable")],
+            tags: [tag(5, "message:p0", "message")],
+            protectedTagNumbers: emptyProtectedTagNumbers,
+        });
+        expect(emptyProtectedTagNumbers).toEqual(new Set());
+        expect(emptyWindowMeasured.u).toBe(emptyWindowMeasured.t);
     });
 
     it("is invariant to raw tag weights and measures only final rendered content", () => {
@@ -98,8 +141,10 @@ describe("tail hygiene single-walk instrument", () => {
             inputByteSize: entry.inputByteSize + 200_000,
         }));
 
-        expect(measureTailHygiene({ messages, tags: driftedTags, protectedTags: 0 })).toEqual(
-            measureTailHygiene({ messages, tags: normalTags, protectedTags: 0 }),
+        expect(
+            measureTailHygiene({ messages, tags: driftedTags, protectedTagNumbers: new Set() }),
+        ).toEqual(
+            measureTailHygiene({ messages, tags: normalTags, protectedTagNumbers: new Set() }),
         );
     });
 
@@ -122,11 +167,11 @@ describe("tail hygiene single-walk instrument", () => {
             }),
         ];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const compressedOnly = measureTailHygiene({
             messages: [messages[0]],
             tags: [tags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
 
         expect(measured.u).toBe(compressedOnly.u);
@@ -149,8 +194,16 @@ describe("tail hygiene single-walk instrument", () => {
         ];
         const tags = [tag(1, "m:p0", "message")];
 
-        const expected = measureTailHygiene({ messages: base, tags, protectedTags: 0 });
-        const actual = measureTailHygiene({ messages: withReasoning, tags, protectedTags: 0 });
+        const expected = measureTailHygiene({
+            messages: base,
+            tags,
+            protectedTagNumbers: new Set(),
+        });
+        const actual = measureTailHygiene({
+            messages: withReasoning,
+            tags,
+            protectedTagNumbers: new Set(),
+        });
         expect({ u: actual.u, t: actual.t }).toEqual({ u: expected.u, t: expected.t });
     });
 
@@ -181,7 +234,11 @@ describe("tail hygiene single-walk instrument", () => {
         ];
 
         expect(
-            measureTailHygiene({ messages: syntheticMessages, tags: [], protectedTags: 0 }),
+            measureTailHygiene({
+                messages: syntheticMessages,
+                tags: [],
+                protectedTagNumbers: new Set(),
+            }),
         ).toMatchObject({ u: 0, t: 0 });
     });
 
@@ -201,7 +258,7 @@ describe("tail hygiene single-walk instrument", () => {
             }),
         );
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const protectedTagNumbers = new Set(
             measured.parts.filter((part) => part.protected).map((part) => part.tagNumber),
         );
@@ -228,7 +285,7 @@ describe("tail hygiene single-walk instrument", () => {
             tag(1, "file-owner:file0", "file"),
             tag(2, "call-subset", "tool", { toolOwnerMessageId: "tool-owner" }),
         ];
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
 
         expect(measured.u).toBeGreaterThan(0);
         expect(measured.u).toBeLessThan(measured.t);
@@ -252,31 +309,31 @@ describe("tail hygiene single-walk instrument", () => {
             tag(102, "later-after:p0", "message"),
         ];
 
-        const both = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const both = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const legacyOnly = measureTailHygiene({
             messages: messages.slice(0, 3),
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const legacyProseOnly = measureTailHygiene({
             messages: [messages[0], messages[2]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const laterOnly = measureTailHygiene({
             messages: messages.slice(3),
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const laterProseOnly = measureTailHygiene({
             messages: [messages[3], messages[5]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const allProse = measureTailHygiene({
             messages: [messages[0], messages[2], messages[3], messages[5]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         const legacyToolU = legacyOnly.u - legacyProseOnly.u;
 
@@ -299,13 +356,13 @@ describe("tail hygiene single-walk instrument", () => {
             tag(11, "after:p0", "message"),
         ];
 
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         // The neighboring tagged prose still contributes U even though both orphan rows are rejected.
         expect(measured.u).toBeGreaterThan(0);
         const textOnly = measureTailHygiene({
             messages: [messages[0], messages[2]],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         });
         expect(measured.u).toBe(textOnly.u);
         expect(measured.t).toBeGreaterThan(measured.u);
@@ -319,13 +376,13 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const bust = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: bust,
         });
@@ -342,28 +399,28 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             textMessage("untagged", "mass ".repeat(30_000)),
         ];
         const tags = [tag(1, "queued:p0", "message"), tag(2, "remaining:p0", "message")];
-        const initial = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const initial = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         const queuedMass = measureTailHygiene({
             messages: [messages[0]],
             tags: [tags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         }).u;
         const baseline = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const queued = measureTailHygiene({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
         });
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
@@ -407,13 +464,13 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: [served],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const replay = refreshTailHygieneBaseline({
             messages: [served],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             pendingDropTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
@@ -430,7 +487,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: baseMessages,
             tags: baseTags,
-            protectedTags: 1,
+            protectedTagNumbers: new Set([1]),
             cacheBusting: true,
         });
         const messages = [
@@ -453,7 +510,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const defer = refreshTailHygieneBaseline({
             messages,
             tags,
-            protectedTags: 1,
+            protectedTagNumbers: new Set([1]),
             cacheBusting: false,
             previous: baseline,
         });
@@ -474,19 +531,19 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: before,
             tags: beforeTags,
-            protectedTags: 2,
+            protectedTagNumbers: new Set([1, 2]),
             cacheBusting: true,
         });
         const oldMass = measureTailHygiene({
             messages: [before[0]],
             tags: [beforeTags[0]],
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
         }).t;
         const appended = textMessage("newest", "newest protected ".repeat(100));
         const defer = refreshTailHygieneBaseline({
             messages: [...before, appended],
             tags: [...beforeTags, tag(3, "newest:p0", "message")],
-            protectedTags: 2,
+            protectedTagNumbers: new Set([2, 3]),
             cacheBusting: false,
             previous: baseline,
         });
@@ -503,7 +560,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: [original],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const mutated = structuredClone(original) as MessageLike;
@@ -512,7 +569,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const defer = refreshTailHygieneBaseline({
             messages: [mutated],
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: baseline,
         });
@@ -529,21 +586,21 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         const baseline = refreshTailHygieneBaseline({
             messages: original,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
         });
         const changed = [textMessage("m", "changed content")];
         const defer = refreshTailHygieneBaseline({
             messages: changed,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: false,
             previous: baseline,
         });
         const rewalk = refreshTailHygieneBaseline({
             messages: changed,
             tags,
-            protectedTags: 0,
+            protectedTagNumbers: new Set(),
             cacheBusting: true,
             previous: defer,
         });
@@ -559,14 +616,14 @@ describe("tail hygiene baseline and defer-window deltas", () => {
     it("detects a byte mutation after the walk with a content-hash assertion", () => {
         const messages = [textMessage("m", "stable content")];
         const tags = [tag(1, "m:p0", "message")];
-        const measured = measureTailHygiene({ messages, tags, protectedTags: 0 });
+        const measured = measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
         (messages[0].parts[0] as { text: string }).text = "mutated bytes!";
 
         expect(() =>
             assertTailHygieneContentUnchanged({
                 messages,
                 tags,
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
                 expectedSignature: measured.contentSignature,
             }),
         ).toThrow(/tail hygiene walk was not the last byte-affecting operation/i);
@@ -580,7 +637,7 @@ describe("tail hygiene walk performance", () => {
         const durations: number[] = [];
         for (let iteration = 0; iteration < 25; iteration += 1) {
             const start = performance.now();
-            measureTailHygiene({ messages, tags, protectedTags: 0 });
+            measureTailHygiene({ messages, tags, protectedTagNumbers: new Set() });
             durations.push(performance.now() - start);
         }
         durations.sort((left, right) => left - right);
@@ -643,5 +700,69 @@ describe("tail hygiene structural signature", () => {
         expect(
             sameTailHygieneStructuralSignature(before, tailHygieneStructuralSignature(messages)),
         ).toBe(true);
+    });
+});
+
+describe("tail hygiene protectedTagNumbers set form (token window)", () => {
+    it("consumes protectedTagNumbers set in tag-number coordinate space and excludes protected tool tags from U", () => {
+        const messages = [
+            nativeTool("owner-1", "call-1", { cmd: "test" }, "tool output 1 ".repeat(100)),
+            nativeTool("owner-2", "call-2", { cmd: "test" }, "tool output 2 ".repeat(100)),
+        ];
+        const tags = [
+            tag(10, "call-1", "tool", { toolOwnerMessageId: "owner-1" }),
+            tag(20, "call-2", "tool", { toolOwnerMessageId: "owner-2" }),
+        ];
+
+        // Coordinate space: tag-number space. Tag 20 is in the token protection window
+        const protectedTagNumbers: ReadonlySet<number> = new Set([20]);
+
+        const measured = measureTailHygiene({
+            messages,
+            tags,
+            protectedTagNumbers,
+        });
+
+        // Tag 10 is unprotected -> included in U
+        // Tag 20 is protected -> excluded from U
+        expect(measured.t).toBeGreaterThan(0);
+        expect(measured.u).toBeGreaterThan(0);
+        expect(measured.u).toBeLessThan(measured.t);
+
+        const part10 = measured.parts.find((p) => p.tagNumber === 10);
+        const part20 = measured.parts.find((p) => p.tagNumber === 20);
+        expect(part10?.protected).toBe(false);
+        expect(part10?.uTokens).toBeGreaterThan(0);
+        expect(part20?.protected).toBe(true);
+        expect(part20?.uTokens).toBe(0);
+    });
+
+    it("declares empty-window behavior: empty set protects 0 tool tags, non-tool tags are never reclaim targets", () => {
+        const messages = [
+            textMessage("msg-1", "prose message text ".repeat(50)),
+            nativeTool("owner-1", "call-1", { cmd: "test" }, "tool output 1 ".repeat(50)),
+        ];
+        const tags = [
+            tag(5, "msg-1:p0", "message"),
+            tag(10, "call-1", "tool", { toolOwnerMessageId: "owner-1" }),
+        ];
+
+        // Empty window: protectedTagNumbers = empty set
+        const protectedTagNumbers: ReadonlySet<number> = new Set();
+
+        const measured = measureTailHygiene({
+            messages,
+            tags,
+            protectedTagNumbers,
+        });
+
+        // Tool tag 10 is unprotected
+        const toolPart = measured.parts.find((p) => p.tagNumber === 10);
+        expect(toolPart?.protected).toBe(false);
+        expect(toolPart?.uTokens).toBeGreaterThan(0);
+
+        // Non-tool message tag 5 has its eligibility decided solely by independent protections (prose text)
+        const msgPart = measured.parts.find((p) => p.tagNumber === 5);
+        expect(msgPart?.kind).toBe("text");
     });
 });

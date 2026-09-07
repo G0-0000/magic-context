@@ -319,13 +319,34 @@ function redactConfigValue(value: unknown): string {
     return typeof value;
 }
 
-function parsePluginConfig(
+let warnedProtectedTagsDeprecation = false;
+
+export function resetProtectedTagsDeprecationWarningForTest(): void {
+    warnedProtectedTagsDeprecation = false;
+}
+
+export function warnProtectedTagsDeprecationOnce(): void {
+    if (!warnedProtectedTagsDeprecation) {
+        warnedProtectedTagsDeprecation = true;
+        console.warn(
+            "[magic-context] protected_tags is deprecated and ignored; use protected_tokens instead.",
+        );
+    }
+}
+
+export function parsePluginConfig(
     rawConfig: Record<string, unknown>,
     recoveredTopLevelKeys: string[] = [],
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
     // Pre-Zod shim: reshape legacy experimental.* graduated keys so the user's
     // opt-in/out state survives upgrades even when they never run `doctor`.
     const preMigrationWarnings: string[] = [];
+    if (Object.hasOwn(rawConfig, "protected_tags")) {
+        warnProtectedTagsDeprecationOnce();
+        preMigrationWarnings.push(
+            "protected_tags is deprecated and ignored; use protected_tokens instead.",
+        );
+    }
     const migratedExperimental = migrateLegacyExperimental(rawConfig, preMigrationWarnings);
     // Dreamer v2: convert the legacy v1 dreamer shape (window schedule, tasks
     // array, user_memories/pin_key_files blocks) into the per-task `tasks` record.

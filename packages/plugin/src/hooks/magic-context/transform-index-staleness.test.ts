@@ -76,7 +76,7 @@ function createTestTransform(sessionId: string) {
         pendingMaterializationSessions: new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
         clearReasoningAge: 2,
-        protectedTags: 0,
+        protectedTokens: 0,
     });
     return { transform, shouldExecute };
 }

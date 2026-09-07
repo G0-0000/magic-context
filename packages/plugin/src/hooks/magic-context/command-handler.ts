@@ -556,7 +556,6 @@ async function executeDreaming(
 
 export function createMagicContextCommandHandler(deps: {
     db: Database;
-    protectedTags: number;
     /** Boot-resolved mode; command paths must not re-read configuration. */
     compactionOff?: boolean;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
@@ -859,7 +858,6 @@ export function createMagicContextCommandHandler(deps: {
                         const statusOutput = executeStatus(
                             deps.db,
                             sessionId,
-                            deps.protectedTags,
                             deps.executeThresholdPercentage,
                             liveModelKey,
                             deps.historyBudgetPercentage,
@@ -902,7 +900,7 @@ export function createMagicContextCommandHandler(deps: {
                     );
                     combinedStatus = rustMode
                         ? "## Magic Status — Unavailable\n\nRust module status failed while formatting. Canonical session usage, tags, and compartments live in mc-store, so context.db mirror values are intentionally omitted."
-                        : executeStatus(deps.db, sessionId, deps.protectedTags);
+                        : executeStatus(deps.db, sessionId);
                 }
                 result += result ? `\n\n${combinedStatus}` : combinedStatus;
             }

@@ -165,7 +165,8 @@ describe("applyHeuristicCleanup", () => {
 
                 //#when
                 applyHeuristicCleanup(SESSION, db, targets, buildMessageTagNumbers([[1, msg]]), {
-                    protectedTags: 0,
+                    protectedTagNumbers: new Set(),
+                    protectedCutoff: null,
                 });
 
                 //#then — reasoning preserved because it has real content
@@ -201,24 +202,28 @@ describe("applyHeuristicCleanup", () => {
             //#when 10 tags × 4000 bytes × 0.25 = 10000 tokens of tail; usage 10000,
             // ceiling 6000 → target = 0 + 0.30×6000 = 1800 → reclaim ≈ 8200 tokens.
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 2,
-                emergency: { currentTotalInputTokens: 10_000, ceilingTokens: 6_000 },
+                protectedTagNumbers: new Set([9, 10]),
+                protectedCutoff: 9,
+                emergency: {
+                    currentTotalInputTokens: 10_000,
+                    ceilingTokens: 6_000,
+                    usagePercentage: 95,
+                },
             });
 
-            //#then the oldest tags drop first, including the bash tool at tag 3, while the newest protected window retains its persisted skeleton.
-            expect(result.droppedTools).toBeGreaterThan(0);
+            //#then the >=95% backstop yields the token window and drops oldest-first until the target is met.
+            expect(result.droppedTools).toBe(9);
             const tags = getTagsBySession(db, SESSION);
             const dropped = tags
                 .filter((t) => t.status === "dropped")
                 .map((t) => t.tagNumber)
                 .sort((a, b) => a - b);
-            // protected tail (tags 9,10) never dropped.
-            expect(dropped).not.toContain(9);
-            expect(dropped).not.toContain(10);
-            // oldest dropped first.
-            expect(dropped[0]).toBe(1);
+            // Nine 1k-token drops are needed to exceed the 8.2k reclaim target;
+            // tag 10 survives because selection stops once that target is met.
+            expect(dropped).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            expect(tags.find((tag) => tag.tagNumber === 10)?.status).toBe("active");
             expect(
-                tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "truncated"),
+                tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "full"),
             ).toBe(true);
         });
 
@@ -244,14 +249,16 @@ describe("applyHeuristicCleanup", () => {
             const emergency = { currentTotalInputTokens: 10_000, ceilingTokens: 10_000 };
 
             const first = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(first.emergencyDroppedTools).toBeGreaterThan(0);
             expect(getEmergencyInputSample(db, SESSION)).toBe(10_000);
 
             const latched = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(latched.emergencyDroppedTools).toBe(0);
@@ -260,7 +267,8 @@ describe("applyHeuristicCleanup", () => {
             // sample the latch normally waits for, so the abort path releases it.
             clearEmergencyDropSample(db, SESSION);
             const retry = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency,
             });
             expect(retry.emergencyDroppedTools).toBeGreaterThan(0);
@@ -279,7 +287,8 @@ describe("applyHeuristicCleanup", () => {
             ]);
             // usage 1000 well under ceiling 100000 → reclaim negative → no-op.
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
                 emergency: { currentTotalInputTokens: 1_000, ceilingTokens: 100_000 },
             });
             expect(result.droppedTools).toBe(0);
@@ -297,7 +306,8 @@ describe("applyHeuristicCleanup", () => {
                 );
             }
             const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
             // No routine tool drops anymore — only dedup/injection-strip run.
             expect(result.droppedTools).toBe(0);
@@ -358,7 +368,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msgB, 60);
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             //#then — neither tag is deduplicated (cross-owner pair).
@@ -401,7 +412,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msg, 80); // newest
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             //#then — older tag dropped, newer kept.
@@ -435,7 +447,8 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msg, 100);
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                protectedTags: 0,
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
             });
 
             expect(result.deduplicatedTools).toBe(0);

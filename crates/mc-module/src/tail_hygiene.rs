@@ -11,6 +11,9 @@ use mc_store::{
 use sha2::{Digest, Sha256};
 
 use crate::ck_wire::{FlatBlock, FlatProjection};
+#[cfg(test)]
+use crate::protection_window::CoordinateSpace;
+use crate::protection_window::{TagNumber, TagNumberProjection};
 
 pub(crate) const CHANNEL1_MIN_TOKENS: i64 = 60_000;
 pub(crate) const CHANNEL1_FLOOR_TOKENS: i64 = 25_000;
@@ -442,20 +445,6 @@ fn tag_numbers_by_block_and_arc(
     (by_block, by_arc)
 }
 
-fn protected_tag_numbers(tag_rows: &[McTagRow], protected_tags: usize) -> HashSet<i64> {
-    if protected_tags == 0 {
-        return HashSet::new();
-    }
-    tag_rows
-        .iter()
-        .map(|row| row.tag_number)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .rev()
-        .take(protected_tags)
-        .collect()
-}
-
 fn red_targets(core: &CoreState) -> HashSet<&str> {
     core.frozen_units
         .iter()
@@ -487,11 +476,11 @@ fn block_tag_number(
 fn block_is_protected(
     block: &FlatBlock,
     tag_number: Option<i64>,
-    protected_numbers: &HashSet<i64>,
+    protected_numbers: &TagNumberProjection,
     protected_block_ids: &HashSet<String>,
     protected_arc_ids: &HashSet<&str>,
 ) -> bool {
-    tag_number.is_some_and(|number| protected_numbers.contains(&number))
+    tag_number.is_some_and(|number| protected_numbers.tag_numbers.contains(&TagNumber(number)))
         || protected_block_ids.contains(&block.id)
         || block
             .arc_id
@@ -503,20 +492,41 @@ fn block_is_protected(
 // agent drops leave U); this unqueued form remains as the tests' baseline
 // reference for delta/parity assertions.
 #[cfg(test)]
+fn legacy_tag_number_projection(
+    tag_rows: &[McTagRow],
+    legacy_protected_count: usize,
+) -> TagNumberProjection {
+    let tag_numbers = tag_rows
+        .iter()
+        .map(|row| row.tag_number)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .rev()
+        .take(legacy_protected_count)
+        .map(TagNumber)
+        .collect();
+    TagNumberProjection {
+        coordinate_space: CoordinateSpace::TagNumber,
+        tag_numbers,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn measure_tail_hygiene(
     projection: &FlatProjection,
     core: &CoreState,
     coverage_ordinal: Option<u64>,
     tag_rows: &[McTagRow],
-    protected_tags: usize,
+    legacy_protected_count: usize,
     protected_block_ids: &HashSet<String>,
 ) -> TailHygieneMeasurement {
+    let projection_tag_numbers = legacy_tag_number_projection(tag_rows, legacy_protected_count);
     measure_tail_hygiene_with_pending_drops(
         projection,
         core,
         coverage_ordinal,
         tag_rows,
-        protected_tags,
+        &projection_tag_numbers,
         protected_block_ids,
         &HashSet::new(),
     )
@@ -538,12 +548,11 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
     core: &CoreState,
     coverage_ordinal: Option<u64>,
     tag_rows: &[McTagRow],
-    protected_tags: usize,
+    protected_tag_numbers: &TagNumberProjection,
     protected_block_ids: &HashSet<String>,
     pending_drop_target_ids: &HashSet<String>,
 ) -> TailHygieneMeasurement {
     let (tags_by_block, tags_by_arc) = tag_numbers_by_block_and_arc(projection, tag_rows);
-    let protected_numbers = protected_tag_numbers(tag_rows, protected_tags);
     let queued_numbers = queued_tag_numbers(tag_rows, pending_drop_target_ids);
     let protected_arc_ids = projection
         .blocks
@@ -595,7 +604,7 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         let protected = block_is_protected(
             block,
             tag_number,
-            &protected_numbers,
+            protected_tag_numbers,
             protected_block_ids,
             &protected_arc_ids,
         );
@@ -894,6 +903,74 @@ mod tests {
     }
 
     #[test]
+    fn token_window_excludes_call_and_result_mass_from_channel1_u() {
+        let mut messages = Vec::new();
+        let mut tags = Vec::new();
+        for n in 1..=5 {
+            messages.push(message(
+                &format!("call{n}"),
+                n * 20,
+                "assistant",
+                vec![CkKind::ToolCall {
+                    id: format!("c{n}"),
+                    name: "read".to_string(),
+                    input: json!({"path": format!("file{n}")}),
+                    provider_executed: false,
+                }],
+            ));
+            messages.push(message(
+                &format!("result{n}"),
+                n * 20 + 1,
+                "user",
+                vec![CkKind::ToolResult {
+                    id: format!("c{n}"),
+                    tool_name: "read".to_string(),
+                    output: CkToolOutput::bare(CkOutputKind::Text {
+                        text: "mass ".repeat(1_000),
+                    }),
+                    provider_executed: false,
+                }],
+            ));
+            tags.push(McTagRow {
+                kind: "tool_result".to_string(),
+                token_count: 4_000,
+                ..tag(n as i64, &format!("result{n}#0"))
+            });
+        }
+        let window = crate::protection_window::ProtectionWindow::from_persisted_rows(&tags, 16_000);
+        let projection = project_messages(&messages).unwrap();
+        let measured = measure_tail_hygiene_with_pending_drops(
+            &projection,
+            &CoreState::default(),
+            None,
+            &tags,
+            &window.tag_numbers,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let all = measure_tail_hygiene(
+            &projection,
+            &CoreState::default(),
+            None,
+            &tags,
+            0,
+            &HashSet::new(),
+        );
+        let first = measure_tail_hygiene(
+            &project_messages(&messages[..2]).unwrap(),
+            &CoreState::default(),
+            None,
+            &tags[..1],
+            0,
+            &HashSet::new(),
+        );
+        assert!(first.u > 0);
+        assert_eq!(measured.u, first.u);
+        assert_eq!(measured.t, all.t);
+        assert!(measured.u < all.u);
+    }
+
+    #[test]
     fn real_user_turn_count_ignores_interleaved_synthetic_user_rows() {
         let real = text("real", 1, "continue");
         let mut reminder = text(
@@ -974,7 +1051,7 @@ mod tests {
             &CoreState::default(),
             None,
             &tags,
-            0,
+            &legacy_tag_number_projection(&tags, 0),
             &HashSet::new(),
             &queued_targets,
         );
@@ -1045,7 +1122,7 @@ mod tests {
             &CoreState::default(),
             None,
             &tags,
-            0,
+            &legacy_tag_number_projection(&tags, 0),
             &HashSet::new(),
             &HashSet::from(["result#0".to_string()]),
         );
@@ -1108,7 +1185,9 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct HygieneGoldenCase {
         id: String,
+        /// Inert migration sentinel retained by the cross-language fixture contract.
         protected_tags: usize,
+        protected_tokens_effective: u64,
         messages: Vec<HygieneFixtureMessage>,
         tags: Vec<HygieneFixtureTag>,
         #[serde(default)]
@@ -1163,6 +1242,7 @@ mod tests {
         tag_number: i64,
         block_id: String,
         kind: String,
+        token_count: i64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -1176,6 +1256,7 @@ mod tests {
     struct HygieneFixtureInput<'a> {
         id: &'a str,
         protected_tags: usize,
+        protected_tokens_effective: u64,
         messages: &'a [HygieneFixtureMessage],
         tags: &'a [HygieneFixtureTag],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1188,6 +1269,7 @@ mod tests {
             .map(|case| HygieneFixtureInput {
                 id: &case.id,
                 protected_tags: case.protected_tags,
+                protected_tokens_effective: case.protected_tokens_effective,
                 messages: &case.messages,
                 tags: &case.tags,
                 pending_drop_tag_numbers: (!case.pending_drop_tag_numbers.is_empty())
@@ -1272,7 +1354,7 @@ mod tests {
             tag_number: input.tag_number,
             block_id: input.block_id.clone(),
             kind: input.kind.clone(),
-            token_count: 0,
+            token_count: input.token_count,
             created_at_ms: 0,
             source_bytes: Vec::new(),
         }
@@ -1283,14 +1365,14 @@ mod tests {
         let golden: HygieneGolden =
             serde_json::from_str(include_str!("../testdata/nudge-hygiene-golden.json"))
                 .expect("parse nudge hygiene golden");
-        assert_eq!(golden.schema, 1);
-        assert_eq!(golden.provenance.generator_version, "nudge-hygiene-ts-v2");
+        assert_eq!(golden.schema, 2);
+        assert_eq!(golden.provenance.generator_version, "nudge-hygiene-ts-v3");
         assert_eq!(
             hygiene_fixture_hash(&golden.cases),
             golden.provenance.input_sha256,
             "committed fixture inputs must match the TypeScript generator provenance"
         );
-        assert!(golden.cases.len() >= 12);
+        assert!(golden.cases.len() >= 14);
 
         for case in &golden.cases {
             let messages = case
@@ -1299,6 +1381,12 @@ mod tests {
                 .map(fixture_message)
                 .collect::<Vec<_>>();
             let tags = case.tags.iter().map(fixture_tag).collect::<Vec<_>>();
+            // Rust independently walks its persisted rows with the same fixture floor; only
+            // the resulting tag-number projection enters the hygiene instrument.
+            let protection = crate::protection_window::ProtectionWindow::from_persisted_rows(
+                &tags,
+                case.protected_tokens_effective,
+            );
             let projection = project_messages(&messages).expect("project parity fixture");
             let pending_numbers = case
                 .pending_drop_tag_numbers
@@ -1315,7 +1403,7 @@ mod tests {
                 &CoreState::default(),
                 None,
                 &tags,
-                case.protected_tags,
+                &protection.tag_numbers,
                 &HashSet::new(),
                 &pending_targets,
             );
@@ -1330,12 +1418,13 @@ mod tests {
                 );
             }
             if case.id == "queued-tool-arc-full-mass" {
-                let unqueued = measure_tail_hygiene(
+                let unqueued = measure_tail_hygiene_with_pending_drops(
                     &projection,
                     &CoreState::default(),
                     None,
                     &tags,
-                    case.protected_tags,
+                    &protection.tag_numbers,
+                    &HashSet::new(),
                     &HashSet::new(),
                 );
                 assert_eq!(
@@ -1347,6 +1436,21 @@ mod tests {
                     measured.u, case.expected.u,
                     "Rust and TS queued U must agree"
                 );
+            }
+            if case.id == "protected-recency-reserve" {
+                assert!(protection.tag_numbers.tag_numbers.contains(&TagNumber(2)));
+            }
+            if case.id == "protected-token-window-spans-more-than-one-tag" {
+                assert_eq!(
+                    protection.tag_numbers.tag_numbers,
+                    [TagNumber(1), TagNumber(2), TagNumber(3), TagNumber(4)]
+                        .into_iter()
+                        .collect()
+                );
+            }
+            if case.id == "empty-protected-token-window" {
+                assert_eq!(case.protected_tags, 99);
+                assert!(protection.tag_numbers.tag_numbers.is_empty());
             }
             if case.id == "reasoning-excluded-both-terms" {
                 let reasoning_tokens = case

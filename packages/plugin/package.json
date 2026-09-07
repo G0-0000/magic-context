@@ -29,7 +29,6 @@
     "src/shared",
     "src/config",
     "src/agents",
-    "src/features/magic-context/defaults.ts",
     "src/features/magic-context/dreamer/cron.ts",
     "src/features/magic-context/dreamer/task-registry.ts",
     "README.md"

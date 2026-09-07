@@ -45,6 +45,15 @@ function buildMessages(): TestMessage[] {
             parts: [{ type: "text", text: "continue" }],
         },
         {
+            info: { id: "m-injection", role: "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    text: "[Category+Skill Reminder]\nUse task()\n\nVisible answer",
+                },
+            ],
+        },
+        {
             info: { id: "m-tool", role: "assistant" },
             parts: [
                 {
@@ -58,15 +67,6 @@ function buildMessages(): TestMessage[] {
                         tool: "mcp_read",
                         input: { path: "a.ts" },
                     },
-                },
-            ],
-        },
-        {
-            info: { id: "m-injection", role: "assistant" },
-            parts: [
-                {
-                    type: "text",
-                    text: "[Category+Skill Reminder]\nUse task()\n\nVisible answer",
                 },
             ],
         },
@@ -164,7 +164,7 @@ describe("createTransform heuristic cleanup persistence", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: undefined,
             directory: testDirectory,
             getHistorianChunkTokens: () => 20_000,
@@ -216,7 +216,7 @@ describe("createTransform heuristic cleanup persistence", () => {
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 1,
+            protectedTokens: 1,
             client: undefined,
             directory: testDirectory,
             getHistorianChunkTokens: () => 20_000,
