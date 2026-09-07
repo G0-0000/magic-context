@@ -1,5 +1,12 @@
 import { formatCacheTtlDisplay } from "./cache-ttl-display";
 import { formatConfigParseStatusLine } from "./config-diagnostics";
+import {
+    formatOpenCodeDbMissingStatusLine,
+    formatOpenCodeDbReadFailureStatusLine,
+    getOpenCodeDbReadFailure,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "./opencode-db-path";
 import type { StatusDetail } from "./rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "./rust-mode-status";
 
@@ -29,12 +36,20 @@ export function formatStatusDetailMarkdown(detail: StatusDetail): string {
             ? undefined
             : `coverage ${detail.coverageOrdinal === null ? "none" : detail.coverageOrdinal}`,
     ].filter((value): value is string => value !== undefined);
+    const openCodeDbResolution = resolveOpenCodeDbPath();
+    const openCodeDbReadFailure = getOpenCodeDbReadFailure();
+    const openCodeDbStatusLine = !openCodeDbPathExists(openCodeDbResolution)
+        ? formatOpenCodeDbMissingStatusLine(openCodeDbResolution)
+        : openCodeDbReadFailure?.path === openCodeDbResolution.path
+          ? formatOpenCodeDbReadFailureStatusLine(openCodeDbReadFailure)
+          : null;
     const mode =
         detail.compaction_enabled === false
             ? "native compaction (Magic Context history compaction disabled)"
             : "Magic Context compaction";
 
     const lines = [
+        ...(openCodeDbStatusLine ? [openCodeDbStatusLine, ""] : []),
         ...(detail.configParseFailures ?? []).map(formatConfigParseStatusLine),
         ...((detail.configParseFailures?.length ?? 0) > 0 ? [""] : []),
         "## Magic Context Status",

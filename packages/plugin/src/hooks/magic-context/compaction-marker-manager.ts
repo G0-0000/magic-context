@@ -12,7 +12,6 @@
  * transform receives only the live tail.
  */
 
-import { join } from "node:path";
 import {
     closeCompactionMarkerDb,
     compareOpenCodeMessagesByCanonicalOrder,
@@ -37,9 +36,13 @@ import {
     getTagNumberByMessageId,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
-import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import { log, sessionLog } from "../../shared/logger";
+import {
+    claimOpenCodeDbDiagnosticOnce,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "../../shared/opencode-db-path";
 import type { Database } from "../../shared/sqlite";
 import { Database as SqliteDb } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -708,7 +711,16 @@ export function closeCompactionMarkerConnection(): void {
  * Called once at plugin startup. Safe to call multiple times (idempotent).
  */
 export function checkCompactionMarkerConsistency(db: Database): void {
-    const opencodeDbPath = join(getDataDir(), "opencode", "opencode.db");
+    const resolution = resolveOpenCodeDbPath();
+    const opencodeDbPath = resolution.path;
+    if (!openCodeDbPathExists(resolution)) {
+        if (claimOpenCodeDbDiagnosticOnce("compaction-marker-consistency", resolution)) {
+            log(
+                `[magic-context] compaction-marker consistency check skipped: reason=opencode_db_missing path=${opencodeDbPath} source=${resolution.source}`,
+            );
+        }
+        return;
+    }
     let opencodeDb: SqliteDb;
     try {
         // Read-only + immutable-less: we only need read access for the existence

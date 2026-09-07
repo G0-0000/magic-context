@@ -29,9 +29,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { resolveOpenCodeDbPath } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
@@ -81,7 +80,7 @@ export function generatePartId(timestampMs: number, counter = 0n, identity = "")
 // ── DB Access ────────────────────────────────────────────────────
 
 export function getOpenCodeDbPath(): string {
-    return join(getDataDir(), "opencode", "opencode.db");
+    return resolveOpenCodeDbPath().path;
 }
 
 let cachedWriteDb: { path: string; db: Database } | null = null;
@@ -159,7 +158,8 @@ function isOpenCodeSchemaCompatible(db: Database, dbPath: string): boolean {
 }
 
 function getWritableOpenCodeDb(): Database {
-    const dbPath = getOpenCodeDbPath();
+    const resolution = resolveOpenCodeDbPath();
+    const dbPath = resolution.path;
     if (cachedWriteDb?.path === dbPath) {
         return cachedWriteDb.db;
     }
@@ -178,7 +178,9 @@ function getWritableOpenCodeDb(): Database {
     // Callers on such installs must not reach this at all (harness-gated);
     // this guard keeps the failure loud and side-effect-free if one does.
     if (!existsSync(dbPath)) {
-        throw new Error(`OpenCode database not found at ${dbPath} (is OpenCode installed?)`);
+        throw new Error(
+            `OpenCode database not found at ${dbPath} (source=${resolution.source}; is OpenCode installed?)`,
+        );
     }
     const db = new Database(dbPath);
     // busy_timeout BEFORE journal_mode=WAL: setting WAL can need the file lock, so

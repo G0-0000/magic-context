@@ -20,6 +20,12 @@ import {
     getMagicContextStorageResolution,
 } from "@magic-context/core/shared/data-path";
 import { parseJsoncRecovering } from "@magic-context/core/shared/jsonc-parser";
+import {
+    formatOpenCodeDbDoctorLine,
+    type OpenCodeDbPathResolution,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "@magic-context/core/shared/opencode-db-path";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import {
@@ -76,6 +82,17 @@ import { reportAuthorityMarkers } from "./doctor-authority";
 import { clearPluginCache } from "./doctor-opencode-cache";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
+
+export function describeOpenCodeDatabaseDoctorCheck(
+    resolution: OpenCodeDbPathResolution,
+    exists = openCodeDbPathExists(resolution),
+): { ok: boolean; message: string } {
+    if (!exists) return { ok: false, message: formatOpenCodeDbDoctorLine(resolution) };
+    return {
+        ok: true,
+        message: `OpenCode session database: ${resolution.path} (source=${resolution.source}${resolution.channel ? `, channel=${resolution.channel}` : ""})`,
+    };
+}
 
 /**
  * Resolve the MC compaction mode for the doctor using the SAME loader the
@@ -733,6 +750,10 @@ export async function runDoctor(
                 : `OpenCode ${activeInstallation.version} installed`,
         );
     }
+
+    const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(resolveOpenCodeDbPath());
+    if (openCodeDbCheck.ok) pass(openCodeDbCheck.message);
+    else fail(openCodeDbCheck.message);
 
     // 1b. CLI vs npm latest
     const selfVersion = getSelfVersion();

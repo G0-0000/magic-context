@@ -22,6 +22,13 @@ import { getMagicContextStorageResolution } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
 import { formatThresholdClampNote } from "../../shared/format-threshold";
 import { sessionLog } from "../../shared/logger";
+import {
+    formatOpenCodeDbMissingStatusLine,
+    formatOpenCodeDbReadFailureStatusLine,
+    getOpenCodeDbReadFailure,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "../../shared/opencode-db-path";
 import type { TailHygieneStatus } from "../../shared/rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 import type { Database } from "../../shared/sqlite";
@@ -102,6 +109,13 @@ export function executeStatus(
         },
     );
     const executeThresholdPercentage = thresholdDetail.percentage;
+    const openCodeDbResolution = resolveOpenCodeDbPath();
+    const openCodeDbReadFailure = getOpenCodeDbReadFailure();
+    const openCodeDbStatusLine = !openCodeDbPathExists(openCodeDbResolution)
+        ? formatOpenCodeDbMissingStatusLine(openCodeDbResolution)
+        : openCodeDbReadFailure?.path === openCodeDbResolution.path
+          ? formatOpenCodeDbReadFailureStatusLine(openCodeDbReadFailure)
+          : null;
     try {
         const meta = getOrCreateSessionMeta(db, sessionId);
         const tags = getTagsBySession(db, sessionId);
@@ -151,6 +165,7 @@ export function executeStatus(
             formatConfigParseStatusLine,
         );
         const lines: string[] = [
+            ...(openCodeDbStatusLine ? [openCodeDbStatusLine, ""] : []),
             ...parseFailureLines,
             ...(parseFailureLines.length > 0 ? [""] : []),
             "## Magic Status",

@@ -1,16 +1,23 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    __openCodeTurnStateTest,
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
     hasNewerRealUserMessage,
+    isMidTurn,
     isMidTurnFromOpenCodeDb,
+    midTurnFromMessages,
+    observeOpenCodeTurnEvent,
+    shouldHoldIgnoredNotification,
+    shouldHoldIgnoredNotificationFromMessages,
     shouldHoldIgnoredNotificationFromOpenCodeDb,
 } from "./read-session-db";
 
@@ -21,6 +28,8 @@ afterEach(() => {
     // Close any cached OpenCode read-only DB handle so the new XDG_DATA_HOME
     // points to a fresh DB on the next test case.
     closeReadOnlySessionDb();
+    __openCodeTurnStateTest.reset();
+    resetOpenCodeDbPathStateForTesting();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const dir of tempDirs) {
@@ -42,6 +51,40 @@ function createMidTurnDb(): Database {
         "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
     return db;
+}
+
+function messagesFromDb(db: Database, sessionId: string) {
+    const messages = db
+        .prepare(
+            "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC",
+        )
+        .all(sessionId) as Array<{ id: string; data: string; time_created: number }>;
+    return messages.map((row) => ({
+        info: {
+            id: row.id,
+            ...(JSON.parse(row.data) as Record<string, unknown>),
+            time: { created: row.time_created },
+        },
+        parts: (
+            db
+                .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
+                .all(sessionId, row.id) as Array<{ data: string }>
+        ).map((part) => JSON.parse(part.data) as unknown),
+    }));
+}
+
+function expectMidTurn(db: Database, sessionId: string, expected: boolean): void {
+    const fromDb = isMidTurnFromOpenCodeDb(db, sessionId);
+    const fromMessages = midTurnFromMessages(messagesFromDb(db, sessionId));
+    expect(fromDb).toBe(expected);
+    expect(fromMessages).toBe(fromDb);
+}
+
+function expectNoticeHold(db: Database, sessionId: string, expected: boolean): void {
+    const fromDb = shouldHoldIgnoredNotificationFromOpenCodeDb(db, sessionId);
+    const fromMessages = shouldHoldIgnoredNotificationFromMessages(messagesFromDb(db, sessionId));
+    expect(fromDb).toBe(expected);
+    expect(fromMessages).toBe(fromDb);
 }
 
 function insertAssistant(
@@ -85,7 +128,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("is not mid-turn when a newer real user message ends a stale tool-calls tail", () => {
@@ -93,7 +136,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("does not release mid-turn for synthetic-part user messages after a stale tool-calls tail", () => {
@@ -106,7 +149,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("is mid-turn when the latest assistant has a non-provider-executed tool part", () => {
@@ -117,7 +160,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             providerExecuted: false,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("is not mid-turn when a newer real user message ends an unexecuted tool tail", () => {
@@ -129,7 +172,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("is not mid-turn for provider-executed tool parts", () => {
@@ -140,7 +183,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             providerExecuted: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("is not mid-turn when the latest assistant has no tool parts", () => {
@@ -148,7 +191,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
         insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("does not release mid-turn for marker-part user messages after a stale tool-calls tail", () => {
@@ -167,7 +210,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("releases mid-turn for an @mention operator prompt with a synthetic agent part", () => {
@@ -184,7 +227,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("releases mid-turn for a partless user message (vacuous-ALL fence)", () => {
@@ -193,7 +236,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
         // No parts inserted — partless messages must count as real.
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("releases mid-turn when a user message has a marker part AND a real text part", () => {
@@ -210,7 +253,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "real input with marker",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("releases for real text with a file attachment part", () => {
@@ -227,7 +270,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "file:///tmp/example.txt",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("releases for a file-only user message without machine markers", () => {
@@ -240,7 +283,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "data:image/png;base64,AAAA",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("releases when step boundary parts accompany real text", () => {
@@ -254,7 +297,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertPart(db, "session-1", "user-1", "part-3", { type: "step-finish" });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("does not release when every part is synthetic, including a patch part", () => {
@@ -273,13 +316,13 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("is not mid-turn when there is no assistant message", () => {
         const db = createMidTurnDb();
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("does not release mid-turn for an ignored-only user part after a stale tool-calls tail", () => {
@@ -292,7 +335,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             ignored: true,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("releases mid-turn when a user message has an ignored part AND a real text part", () => {
@@ -309,7 +352,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "actually do the thing",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectMidTurn(db, "session-1", false);
     });
 
     it("does not release mid-turn when ignored is numeric 1 (truthy variant)", () => {
@@ -322,7 +365,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             ignored: 1,
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("does not release mid-turn for interrupt marker parts after a stale tool-calls tail", () => {
@@ -341,7 +384,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("hasNewerRealUserMessage excludes ignored-only rows so they cannot release the mid-turn lock", () => {
@@ -355,7 +398,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
 
         expect(hasNewerRealUserMessage(db, "session-1", 100)).toBe(false);
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 
     it("does not release mid-turn for message marker parts after a stale tool-calls tail", () => {
@@ -374,7 +417,7 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", true);
     });
 });
 
@@ -388,15 +431,15 @@ describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
             text: "do the thing",
         });
 
-        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
-        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectMidTurn(db, "session-1", false);
+        expectNoticeHold(db, "session-1", true);
     });
 
     it("holds while the latest assistant has no finish (generation in flight)", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", {}, 100);
 
-        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(true);
+        expectNoticeHold(db, "session-1", true);
     });
 
     it("does not hold after a finished assistant with no newer real user", () => {
@@ -404,7 +447,7 @@ describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
 
-        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectNoticeHold(db, "session-1", false);
     });
 
     it("does not treat an ignored-only notice as an unanswered real user", () => {
@@ -418,7 +461,86 @@ describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
         });
 
         expect(hasNewerRealUserMessage(db, "session-1", 100)).toBe(false);
-        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(false);
+        expectNoticeHold(db, "session-1", false);
+    });
+});
+
+describe("tracked out-of-pass turn state", () => {
+    it("keeps answering after the selected DB disappears and logs the missing path once", () => {
+        useTempDataHome("read-session-db-tracked-disappears-");
+        const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        mkdirSync(dirname(dbPath), { recursive: true });
+        writeFileSync(dbPath, "sqlite fixture");
+        observeOpenCodeTurnEvent("message.updated", {
+            info: {
+                id: "assistant-live",
+                sessionID: "session-live",
+                role: "assistant",
+                finish: "tool-calls",
+                time: { created: 100 },
+            },
+        });
+        rmSync(dbPath);
+        const logs: string[] = [];
+        __openCodeTurnStateTest.setLogObserver((message) => logs.push(message));
+
+        expect(isMidTurn(undefined, "session-live")).toBe(true);
+        expect(shouldHoldIgnoredNotification("session-live")).toBe(true);
+        expect(isMidTurn(undefined, "session-live")).toBe(true);
+        expect(logs).toEqual([
+            `[magic-context] OpenCode DB probe failed: path=${dbPath} source=default cause=opencode_db_missing`,
+        ]);
+    });
+
+    it("tracks real and ignored user parts without reading the store", () => {
+        useTempDataHome("read-session-db-tracked-parts-");
+        observeOpenCodeTurnEvent("message.updated", {
+            info: {
+                id: "assistant-live",
+                sessionID: "session-live",
+                role: "assistant",
+                finish: "tool-calls",
+                time: { created: 100 },
+            },
+        });
+        observeOpenCodeTurnEvent("message.part.updated", {
+            part: {
+                id: "ignored-part",
+                messageID: "ignored-user",
+                sessionID: "session-live",
+                type: "text",
+                ignored: true,
+            },
+        });
+        observeOpenCodeTurnEvent("message.updated", {
+            info: {
+                id: "ignored-user",
+                sessionID: "session-live",
+                role: "user",
+                time: { created: 200 },
+            },
+        });
+        expect(isMidTurn(undefined, "session-live")).toBe(true);
+
+        observeOpenCodeTurnEvent("message.part.updated", {
+            part: {
+                id: "real-part",
+                messageID: "real-user",
+                sessionID: "session-live",
+                type: "text",
+                text: "continue",
+            },
+        });
+        observeOpenCodeTurnEvent("message.updated", {
+            info: {
+                id: "real-user",
+                sessionID: "session-live",
+                role: "user",
+                time: { created: 300 },
+            },
+        });
+        expect(isMidTurn(undefined, "session-live")).toBe(false);
+        expect(shouldHoldIgnoredNotification("session-live")).toBe(true);
     });
 });
 

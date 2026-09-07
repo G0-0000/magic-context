@@ -111,7 +111,7 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { readRawSessionMessages } from "./read-session-chunk";
-import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb, midTurnFromMessages } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -1380,7 +1380,7 @@ export function createTransform(deps: TransformDeps) {
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
-        const midTurn = isMidTurn(deps, resolvedSessionId);
+        const midTurn = midTurnFromMessages(messages);
         const bypassReason = detectMidTurnBypassReason({
             contextUsage: contextUsageEarly,
             sessionMeta,

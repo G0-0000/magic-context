@@ -49,6 +49,7 @@ import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
+    getMessageUpdatedInfo,
     getSessionCreatedInfo,
     getSessionErrorInfo,
     getSessionProperties,
@@ -62,7 +63,11 @@ import {
 import { dropSlot } from "./lkg-slot";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
-import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
+import {
+    clearTrackedOpenCodeSession,
+    findLastAssistantModelFromOpenCodeDb,
+    observeOpenCodeTurnEvent,
+} from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
 import { clearMessageTokensCache } from "./transform";
@@ -260,6 +265,7 @@ function cleanupRemovedMessageState(
 export function createEventHandler(deps: EventHandlerDeps) {
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
         evictExpiredUsageEntries(deps.contextUsageMap);
+        observeOpenCodeTurnEvent(input.event.type, input.event.properties);
 
         const properties = getSessionProperties(input.event.properties);
 
@@ -417,6 +423,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
         if (input.event.type === "message.updated") {
             const info = getMessageUpdatedAssistantInfo(input.event.properties);
             if (!info) {
+                const genericInfo = getMessageUpdatedInfo(input.event.properties);
+                if (genericInfo?.role === "user") return;
                 const sessionId = properties ? resolveSessionId(properties) : null;
                 if (sessionId) {
                     sessionLog(
@@ -884,6 +892,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             dropSlot(sessionId, "session.deleted");
+            clearTrackedOpenCodeSession(sessionId);
             try {
                 // Commit the retry marker before any deletion work. clearSession removes
                 // it in the same transaction as the session data, so a BUSY/rollback

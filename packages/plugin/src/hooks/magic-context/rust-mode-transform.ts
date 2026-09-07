@@ -105,7 +105,7 @@ import {
 } from "./module-wire";
 import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
-import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb, midTurnFromMessages } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
@@ -2166,7 +2166,7 @@ export function createRustModeTransform(
                 deps.executeThresholdTokens,
                 resolvedContextLimit,
             );
-            const midTurn = isMidTurn(deps, sessionId);
+            const midTurn = midTurnFromMessages(messages);
             const requestObservedAtMs = Date.now();
             const recoveryNoHeadEscape =
                 overflowState.needsEmergencyRecovery &&

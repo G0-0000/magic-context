@@ -54,6 +54,11 @@ import { insertUserMemoryCandidates } from "../../features/magic-context/user-me
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import {
+    claimOpenCodeDbDiagnosticOnce,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "../../shared/opencode-db-path";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
@@ -79,7 +84,7 @@ import {
     selectPerRunCap,
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
-import { readSessionChunk } from "./read-session-chunk";
+import { hasRawMessageProvider, readSessionChunk } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { buildReferenceBlocks } from "./reference-retrieval";
@@ -198,6 +203,18 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
+        const openCodeDbResolution = resolveOpenCodeDbPath();
+        if (!openCodeDbPathExists(openCodeDbResolution) && !hasRawMessageProvider(sessionId)) {
+            telemetry.status = "noop";
+            telemetry.failureReason = "opencode_db_missing";
+            if (claimOpenCodeDbDiagnosticOnce("historian-no-fire", openCodeDbResolution)) {
+                sessionLog(
+                    sessionId,
+                    `historian no-fire: reason=opencode_db_missing path=${openCodeDbResolution.path} source=${openCodeDbResolution.source}`,
+                );
+            }
+            return;
+        }
         const priorCompartments = getCompartments(db, sessionId);
         // v2: session facts are no longer read here — the unbounded existing_state
         // dump is gone. Facts dedup against <project-memory> in the prompt instead.

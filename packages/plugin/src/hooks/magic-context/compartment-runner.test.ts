@@ -1266,6 +1266,30 @@ describe("runCompartmentAgent", () => {
         expect(prompt).toHaveBeenCalled();
     });
 
+    it("records opencode_db_missing as a historian no-fire instead of silently returning", async () => {
+        useTempDataHome("compartment-runner-missing-opencode-db-");
+        const db = openDatabase();
+
+        await runCompartmentAgentWithLease({
+            client: {} as PluginContext["client"],
+            db,
+            sessionId: "ses-missing-opencode-db",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        expect(getOrCreateSessionMeta(db, "ses-missing-opencode-db").compartmentInProgress).toBe(
+            false,
+        );
+        expect(
+            db
+                .prepare(
+                    "SELECT status, failure_reason FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                )
+                .get("ses-missing-opencode-db"),
+        ).toEqual({ status: "noop", failure_reason: "opencode_db_missing" });
+    });
+
     it("clears compartment-in-progress after successful compartment generation", async () => {
         useTempDataHome("compartment-runner-reset-");
         createOpenCodeDb("ses-1", [

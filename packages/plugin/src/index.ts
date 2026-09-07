@@ -77,6 +77,12 @@ import {
     resolveOpenCodeAgentOverrides,
 } from "./shared/model-resolution";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
+import {
+    claimOpenCodeDbDiagnosticOnce,
+    formatOpenCodeDbMissingBanner,
+    openCodeDbPathExists,
+    resolveOpenCodeDbPath,
+} from "./shared/opencode-db-path";
 import { createPromptSurfaceRuntime } from "./shared/prompt-surface-runtime";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
@@ -199,6 +205,38 @@ const server: Plugin = async (ctx) => {
                     // Intentional: config warning delivery must not crash startup
                 }
             }, 3000);
+    }
+
+    const openCodeDbResolution = resolveOpenCodeDbPath();
+    if (
+        !openCodeDbPathExists(openCodeDbResolution) &&
+        claimOpenCodeDbDiagnosticOnce("boot-banner", openCodeDbResolution)
+    ) {
+        const missingDbBanner = formatOpenCodeDbMissingBanner(openCodeDbResolution);
+        log(
+            `[magic-context] opencode_db_missing path=${openCodeDbResolution.path} source=${openCodeDbResolution.source}`,
+        );
+        setTimeout(async () => {
+            try {
+                const { sendIgnoredMessage } = await import(
+                    "./hooks/magic-context/send-session-notification"
+                );
+                type SessionListFn = () => Promise<
+                    { data?: Array<{ id?: string }> } | Array<{ id?: string }>
+                >;
+                const clientWithSessions = ctx.client as unknown as {
+                    session?: { list?: SessionListFn };
+                };
+                const sessions = await Promise.resolve(clientWithSessions.session?.list?.()).catch(
+                    () => null,
+                );
+                const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
+                const sessionId = sessionList?.[0]?.id;
+                if (sessionId) await sendIgnoredMessage(ctx.client, sessionId, missingDbBanner, {});
+            } catch {
+                // A diagnostic banner must never make plugin startup fail.
+            }
+        }, 3000);
     }
 
     configMs = performance.now() - configStartedAt;

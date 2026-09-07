@@ -126,6 +126,10 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "VERDICT",
         reason: "Saved: the promise has a 60-second TTL, including rejections, and discovery is retried after expiry.",
     },
+    "packages/plugin/src/shared/opencode-db-path.ts:lastReadFailure": {
+        classification: "DIAGNOSTIC",
+        reason: "Most-recent OpenCode DB read diagnostic: a successful open clears it, and path discovery re-probes after disappearance.",
+    },
     "packages/plugin/src/shared/models-dev-cache.ts:authRewarmDone": {
         classification: "VERDICT",
         reason: "Saved: refreshModelLimitsAfterAuthOnce resets the latch when its warm fails.",

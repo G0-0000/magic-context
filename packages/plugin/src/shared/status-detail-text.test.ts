@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { formatOpenCodeDbMissingStatusLine, resolveOpenCodeDbPath } from "./opencode-db-path";
 import type { StatusDetail } from "./rpc-types";
 import { formatStatusDetailMarkdown } from "./status-detail-text";
 
@@ -68,8 +69,9 @@ const STATUS_FIXTURE: StatusDetail = {
 };
 
 describe("formatStatusDetailMarkdown", () => {
-    test("renders the fixed TUI status payload as compact markdown", () => {
-        expect(formatStatusDetailMarkdown(STATUS_FIXTURE)).toBe(`## Magic Context Status
+    test("renders a missing-store condition before the fixed TUI status payload", () => {
+        expect(formatStatusDetailMarkdown(STATUS_FIXTURE)).toBe(
+            `${formatOpenCodeDbMissingStatusLine(resolveOpenCodeDbPath())}\n\n## Magic Context Status
 
 - **Mode:** Magic Context compaction
 - **Active profile:** work
@@ -78,7 +80,8 @@ describe("formatStatusDetailMarkdown", () => {
 - **Historian:** running; boundary present; coverage 12
 - **Memory:** 8 active; 3 injected
 - **Tags:** 4 active, 1 dropped; 2 pending drops
-- **Execute threshold:** 65.0%`);
+- **Execute threshold:** 65.0%`,
+        );
     });
 
     test("shows module-routed host paths only in Rust-mode chat fallback", () => {

@@ -19,6 +19,7 @@ import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import {
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
+    describeOpenCodeDatabaseDoctorCheck,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
     migrateLegacyAgentEnabledConfigForDoctor,
@@ -33,6 +34,25 @@ function migrate(input: Record<string, unknown>) {
     });
     return { config: input, logs, result };
 }
+
+describe("OpenCode database doctor surface", () => {
+    it("reports the resolved path on success and the explicit candidate on failure", () => {
+        const resolution = {
+            path: "/tmp/custom-opencode.db",
+            source: "OPENCODE_DB" as const,
+            channel: null,
+        };
+        expect(describeOpenCodeDatabaseDoctorCheck(resolution, true)).toEqual({
+            ok: true,
+            message: "OpenCode session database: /tmp/custom-opencode.db (source=OPENCODE_DB)",
+        });
+        expect(describeOpenCodeDatabaseDoctorCheck(resolution, false)).toEqual({
+            ok: false,
+            message:
+                "FAIL OpenCode session database: not found (looked for /tmp/custom-opencode.db); set OPENCODE_DB if OpenCode stores it elsewhere.",
+        });
+    });
+});
 
 describe("doctor OpenCode legacy agent enabled migration", () => {
     it("migrates legacy enabled fields with conflict rules and warning text", () => {
