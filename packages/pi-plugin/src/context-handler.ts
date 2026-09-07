@@ -4815,6 +4815,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		: { value: false, reason: null };
 	let foldExecutedThisPass = false;
 	let publishedM1RefreshedThisPass = false;
+	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold = getOrCreateSessionMeta(args.db, args.sessionId);
@@ -4834,11 +4835,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				undefined,
 				softRefreshOpportunity,
 			);
+			prefixPreflightContended =
+				preFoldInjectionResult.contentionExhausted === true;
 			publishedM1RefreshedThisPass =
+				!prefixPreflightContended &&
 				persistedM0BeforeFold.cachedM1Bytes?.toString("utf8") !==
-				getOrCreateSessionMeta(args.db, args.sessionId).cachedM1Bytes?.toString(
-					"utf8",
-				);
+					getOrCreateSessionMeta(
+						args.db,
+						args.sessionId,
+					).cachedM1Bytes?.toString("utf8");
 			foldExecutedThisPass = foldExecutesThisPass(
 				foldDueDecision.value || softRefreshOpportunity,
 				preFoldInjectionResult.m0Materialized === true,
@@ -4911,8 +4916,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		force: args.forceMaterialization === true || emergencyDropEligible,
 		explicitFlush: hasPendingMaterializeSignal || args.isCacheBusting,
 		publishedHistory:
-			publishedM1RefreshedThisPass ||
-			(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart),
+			!prefixPreflightContended &&
+			(publishedM1RefreshedThisPass ||
+				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 		agentDrop: false,
 	};
 	let isCacheBustingPass = hasReclaimRide(rideSignals);

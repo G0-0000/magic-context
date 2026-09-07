@@ -4121,11 +4121,9 @@ fn apply_once(
         || system_absorb_hard_due
         || external_revision_changed
         || project_memory_epoch_hard_due;
-    // Bust-opportunity table (the deferred-work invariant): bootstrap/legacy/reconcile/shape
-    // repair, render-config or epoch HARD, requested HARD, TTL/system HARD, refresh/flush,
-    // Force/Emergency drives, first reduction application, and every ordinary Execute are
-    // opportunities. An active historian vetoes only the ordinary-pass arms so publication
-    // can be coalesced into the next materializing pass.
+    // Prefix work, explicit refresh, and force/emergency drives supply opportunities.
+    // Historian activity only vetoes ordinary executes without published work or
+    // pending agent drops; unpublished in-flight work remains pending.
     let emergency_arm_engaged = matches!(
         scheduler_outcome.pass,
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
@@ -4140,17 +4138,21 @@ fn apply_once(
         && !render_config_changed
         && !reconcile_hard_due
         && loaded.meta.initialized;
-    let supersession_ride_available = !loaded.meta.initialized
-        || render_config_changed
-        || hard_fold_requested
-        || reconcile_hard_due
+    // Subagents execute a reductions-only branch, not the prefix plan. Inherited
+    // HARD/reconcile advisories cannot price automatic reductions without a fold.
+    let prefix_materialization_enabled = !req.is_subagent;
+    let supersession_ride_available = (prefix_materialization_enabled
+        && (!loaded.meta.initialized
+            || render_config_changed
+            || hard_fold_requested
+            || reconcile_hard_due
+            || (scheduler_outcome.pass == scheduler::PassDecision::Execute
+                && current_m1_digest != loaded.meta.m1_revision)))
         || matches!(
             scheduler_outcome.pass,
             scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
         )
-        || loaded.meta.soft_refresh_pending
-        || (scheduler_outcome.pass == scheduler::PassDecision::Execute
-            && current_m1_digest != loaded.meta.m1_revision);
+        || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
     // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
     // full-array consumer (healing::tail_reclaim is true for all of them), so the request
@@ -4169,8 +4171,9 @@ fn apply_once(
                 || hard_fold_requested
                 || cached_m1_missing_due,
         );
-    // Hard advisory requests use the normal Execute path so queued work can be processed
-    // during the fold, but only context pressure reported by the scheduler enables age reclaim.
+    // Keep selection deferred when the producer gate or historian veto blocks it.
+    // An execute selection class still needs the separate ride permission above
+    // before it can choose automatic reductions.
     let selection_class = if producer_gate && !ordinary_historian_veto {
         selection_pass_class(scheduler_outcome.pass)
     } else {
@@ -17639,6 +17642,71 @@ pub(crate) mod tests {
         ctx.observed_last_response_at_ms = Some(1);
         let observed = transform(&s, &req("ses", "cfg0", vec![item("a", 1, "raw")]), &ctx).unwrap();
         assert_eq!(observed.action, "HARD");
+    }
+
+    fn assert_advisory_without_prefix_materialization(reconcile: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.last_execute_ordinal = 99;
+        if reconcile {
+            loaded.core.boundary_id = "missing#0".into();
+            loaded.core.reconcile_pending = true;
+        }
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let before = loaded.core.frozen_units.clone();
+        let mut owner = assistant_tool_call("owner", 2, "old");
+        owner
+            .ck
+            .content
+            .extend(assistant_tool_call("unused", 2, "new").ck.content);
+        for block in &mut owner.ck.content {
+            if let ck_wire::CkKind::ToolCall { name, .. } = &mut block.kind {
+                *name = "mcp_read".into();
+            }
+        }
+        let mut results = tool_result("results", 3, "old", &"old output ".repeat(400));
+        results.ck.content.extend(
+            tool_result("unused-result", 3, "new", "new output")
+                .ck
+                .content,
+        );
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    owner,
+                    results,
+                    item("tail", 5, "continue"),
+                ],
+            ),
+            75,
+            100,
+        );
+        // The reductions-only subagent branch never executes a prefix plan,
+        // even if it receives inherited HARD or reconcile state.
+        request.is_subagent = true;
+        let mut context = pctx("git:proj", "/nonexistent-docs", 300_002);
+        context.observed_last_response_at_ms = Some(1);
+        let response = transform(&s, &request, &context).unwrap();
+        assert_ne!(response.action, "HARD");
+        let after = s.load("ses").unwrap();
+        assert_eq!(after.core.frozen_units, before, "reconcile={reconcile}");
+        assert_eq!(after.meta.last_execute_ordinal, 99);
+    }
+
+    #[test]
+    fn hard_advisory_without_prefix_materialization_cannot_price_reductions() {
+        assert_advisory_without_prefix_materialization(false);
+    }
+
+    #[test]
+    fn reconcile_advisory_without_prefix_materialization_cannot_price_reductions() {
+        assert_advisory_without_prefix_materialization(true);
     }
 
     #[test]

@@ -1240,6 +1240,7 @@ export async function runPostTransformPhase(
                 foldResult.m0RematerializedThisPass,
             );
             publishedM1RefreshedThisPass =
+                !foldResult.materializationContentionRetryExhausted &&
                 previousM1 !== args.sessionMeta.cachedM1Bytes?.toString("utf8");
             m0RematerializedThisPass = foldResult.m0RematerializedThisPass;
             m0MaterializeReason = foldResult.decision.reason;
@@ -1308,13 +1309,17 @@ export async function runPostTransformPhase(
         publishedWorkDrainAllowed;
     // Automatic cleanup waits for a separately priced prefix refresh or drop.
     // Subagents retain the force-band escape even without a historian.
+    // A prepared legacy block is delivery evidence only when no m0/m1 renderer
+    // owns the prefix. With m0/m1 enabled, require its persisted preflight result;
+    // a fresh non-persisted contention fallback cannot price automatic reductions.
     const rideSignals = {
         hardFold: foldExecutedThisPass,
         force: forceMaterialization || emergencyDropEligible,
         explicitFlush: isExplicitFlush,
         publishedHistory:
             publishedM1RefreshedThisPass ||
-            ((args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
+            (!m0M1EnabledForFold &&
+                (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
                 (args.historyRebuiltThisPass ||
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),

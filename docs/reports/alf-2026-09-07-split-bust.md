@@ -98,3 +98,80 @@ Final gates were unpiped, with captured exit codes:
 - Comment review: no final changed-comment issues flagged.
 
 Dependencies were installed inside the worktree with `bun install --frozen-lockfile`; no manifest or lockfile change is delivered. Cargo repeatedly normalized an unrelated local `subc-core` version in Cargo.lock; that drift was restored. An intermediate parallel embedding-cache TTL test was flaky and an isolated sidebar test required its package working directory; the final package-script full suites passed. Rust's unchanged `unaffected_transition_golden_is_byte_identical_and_detection_is_constant_time` exceeded its 50µs timing assertion under concurrent suite load (207µs observed), passed in isolation, and the entire final Rust suite passed serially without exclusions. No dists were edited or built, and no master push was performed.
+
+## Gate revision: executed proof, preflight, configuration, and rollback pins
+
+### Executed-fold proof (Q7)
+
+The TypeScript pin now drives **real `MaterializeContentionError` retry exhaustion** through `beforePhase3ForTest`, not a mocked advisory result. The cached-pair case observes two injection calls with `decision.value=true`, `m0RematerializedThisPass=false`, and `materializationContentionRetryExhausted=true`. Queued drops remain pending and their targets remain active. Pi's existing suppressed-fold observer fixture now explicitly models `contentionExhausted=true` and verifies that pending-op, heuristic, and reasoning gates remain closed.
+
+Rust has no equivalent cached-pair contention fallback in its atomic primary HARD path: failure returns an error rather than committing a partial primary transform. The new pins exercise the **actual non-materializing branch**: an inherited primary prefix reaches a reductions-only subagent request carrying either a requested-HARD or missing-boundary reconcile advisory. Neither advisory executes a prefix plan there. The previous ride expression nevertheless admitted automatic age/dedup work. Prefix-plan operands now require `prefix_materialization_enabled`; actual agent drops, explicit flushes, and force/emergency reclaim remain independent opportunities. Separate HARD and reconcile fixtures assert unchanged frozen units and watermark when no prefix materialization executes.
+
+Restored mutation results:
+
+| Control | Named red test | Captured result |
+| --- | --- | --- |
+| TS executed-fold proof replaced by `foldDueDecision.value` | `prefix preflight persistence pins > cached contention fallback cannot price ride-only reductions` | Expected active target, received dropped; exit 1. Persisted-m1 replay control passed. |
+| Pi executed-fold proof replaced by `foldDueDecision.value` | `registerPiContextHandler > executed m[0] hard-fold folds the execute pass in > keeps every mutation gate closed when a due fold is suppressed` | `foldExecuted`, pending-op, heuristic, and reasoning gates all became true instead of false; exit 1. No other test selected. |
+| Rust enables prefix-advisory rides in the non-materializing subagent branch | `transform::tests::hard_advisory_without_prefix_materialization_cannot_price_reductions` | `reconcile=false`: new `red:owner#*` and `red:results#*` frozen units; exit 101. No other test selected. |
+| Same Rust mutation, independently staged/restored | `transform::tests::reconcile_advisory_without_prefix_materialization_cannot_price_reductions` | `reconcile=true`: new `red:owner#0` and `red:results#0` full drops; exit 101. No other test selected. |
+
+The initial reconcile fixture used ordinary `read` calls, which do not exercise same-owner dedup while reconciliation suppresses the age watermark: that mutation remained green. The fixture was corrected to eligible `mcp_read` duplicates, then the **same production mutation went red**. Both outcomes are recorded rather than treating the first run as proof. All controls used stage → nonempty indexed diff → named check → checkout-and-touch restore → empty indexed diff. TS and Pi advisory mutations changed one line versus four original lines; each Rust mutation changed one line versus one.
+
+### Persisted preflight delivery and benchmark (Q4)
+
+A prepared history block is no longer accepted as a ride for the modern m0/m1 path when persistence fails. Only the legacy path may use that evidence directly. Contention-exhausted m1 preflights do not supply the changed-prefix signal; Pi likewise excludes a contended preflight from deferred-publication ride admission. Independent force/flush/applied-agent-drop opportunities are not vetoed by this guard.
+
+The fresh and partial-cache tests execute the real fresh non-persisted fallback in `inject-compartments.ts:3241–3275` twice, once off-wire and once on the outgoing array. They assert no persisted m1 buffer, no automatic drops, and no materialization claim. Removing the modern-prefix evidence guard makes `fresh contention fallback cannot price ride-only reductions` fail (active → dropped), while the successful persisted-m1 control stays green. Its indexed diff was one insertion/one deletion, restored to empty.
+
+The successful-path pin samples m1 from the database **immediately after the off-wire call**, requires that those bytes contain `PERSISTED_A`, then compares the independently served m1 text to that captured buffer. It does not compare the database to itself after the wire call.
+
+Benchmark command:
+
+```text
+bun test src/hooks/magic-context/transform-postprocess-phase.test.ts -t 'ride-only configuration table|off-wire m1 preflight'
+m1-preflight 2000-message execute p50=0.387ms p95=0.462ms samples=25 baselineCompartments=20 deltaCompartments=1
+```
+
+The fixture runs thirty real postprocess execute passes with 2,000 outgoing messages, discards five warmups, and times only the actual off-wire `injectM0M1` invocation. It seeds twenty baseline compartments and one published delta. The off-wire call checks prefix identities and renders/persists the m1 delta (published compartments and any eligible memory/profile surfaces), while reusing m0. It does **not** render or scan the 2,000-message tail; the rest of postprocess is outside this timing. The measured p95 is below 5ms. This is a local benchmark line, not a platform-independent performance ceiling.
+
+### Configuration matrix (Q1)
+
+Named tests cover:
+
+- `ride-only defers routine reclaim to force band under historian-disabled`
+- `ride-only defers routine reclaim to force band under no_models`
+- `ride-only defers routine reclaim to force band under wrapup-only`
+- `compaction-off performs no reclaim at any band`
+
+These exercise the post-producer state: no automatic publication exists to price routine cleanup. `no_models` and wrapup-only describe operational states, not new configuration keys. Routine 75% passes preserve all tool bytes; force-band passes reclaim for the three historian modes. Compaction-off preserves bytes at 20%, 75%, 85%, 90%, and 95%.
+
+The chair explicitly resolved the initial Q1 wording conflict in favor of CONFIGURATION.md's existing contract: **compaction-off is the no-reclaim exception**, including the force band, because native compaction owns its window. The configuration reference now documents that automatic tool drops, formerly configured by the removed `auto_drop_tool_age` key, ride folds and flushes instead of creating pressure-only busts.
+
+### Rollback compatibility (Q6)
+
+**No schema movement, migration, serialization-version bump, new persisted enum, or new persisted field.** Rolling back restores the older binary's selection policy; it does not require a data conversion.
+
+| Persisted value | What changed | What an older binary reads |
+| --- | --- | --- |
+| `transform_decisions.dropped_tokens` | TS changes the former literal-zero placeholder into a nonnegative estimated reduction delta. | An ordinary numeric token count. Existing readers can display/sum it; it is not a control flag. Older writers resume writing zero. Harmless to cache/state decoding. |
+| TS/Pi `session_meta.tool_reclaim_watermark` | Advancement follows an independently priced application opportunity, including low-usage folds, rather than requiring execute pressure. Its coordinate remains a tag number. | The same integer tag watermark. Old selection compares tag numbers normally and resumes the old cadence; no unknown representation or reset is needed. |
+| Rust module meta `last_execute_ordinal` | Same opportunity/cadence change; coordinate remains a message ordinal. | The same numeric ordinal. Older code applies its prior pressure gate to that watermark. Rollback can restore the old reclaim timing, not corrupt data. |
+| Cached m0/m1 bytes and their existing snapshot/coverage markers | Persistence can happen in off-wire preflight earlier in the same pass. Meanings and encodings are unchanged; failed fresh fallbacks are not persisted as successful folds. | The same cached byte pair and numeric/string markers. Older code replays or rematerializes using its normal rules. |
+| Existing tag status/drop-mode rows, frozen reduction units, and pending operation rows | Which pass first applies them changes; payload/status meanings do not. | Existing `active`/`dropped` states and established drop/skeleton representations, replayed normally. Remaining queued work is ordinary pending work. |
+| Pi `session_meta.pending_pi_compaction_marker_state` | The successful-drain timing can change with the shared permission. The CAS-managed JSON payload is unchanged. | The same existing marker object, or null after successful drain. An older process can rehydrate/drain a remaining marker normally. |
+
+Pi's `pendingMaterializationSessions`, `deferredHistoryRefreshSessions`, and `deferredMaterializationSessions` are **process-local Sets**, not new persisted peek/signal state. Peeks do not consume them; successful drains clear them. On restart, an older binary sees only the unchanged durable marker/compartment state from which its existing code rehydrates work. The new preflight/ride booleans are also process-local. No other persisted value changes meaning; reasoning/image/placeholder decisions and emergency samples retain their established formats and semantics.
+
+### Revision verification
+
+All final revision gates completed unpiped with exit 0:
+
+- Plugin full suite: **4,573 passed**, 407 files (`bun run --cwd packages/plugin test`).
+- Pi full suite: **1,014 passed**, 88 files (`bun run --cwd packages/pi-plugin test`).
+- Rust: **1,089 unit tests passed, four ignored**, plus four integration/binary tests (`cargo test -p mc-module -- --test-threads=1`).
+- `cargo clippy -p mc-module --all-targets -- -D warnings`, `bun run typecheck`, both package Biome lint scripts, and `cargo fmt -p mc-module -- --check`: **passed**.
+- The full plugin run independently recorded the benchmark at **p50=0.367ms, p95=0.522ms**, consistent with the isolated measurement above.
+- Changed-comment review completed; a flagged selection-class explanation was rewritten to distinguish selection eligibility from automatic-reduction permission. AFT's LSP producers remained unavailable; compiler/typecheck results are authoritative.
+
+The documentation guard initially rejected mentioning the removed configuration-key spelling in CONFIGURATION.md; the final sentence documents automatic-drop behavior without reintroducing that obsolete key. Cargo's unrelated local dependency-version normalization was restored again. No schema, lockfile, dists, or generated-schema changes are delivered.

@@ -4086,7 +4086,7 @@ describe("registerPiContextHandler", () => {
 						m0Reason: "model_change",
 						m0Bytes: 1,
 						m1Bytes: 1,
-						contentionExhausted: false,
+						contentionExhausted: true,
 						renderedBoundary: { endMessageId: null, ordinal: null },
 						m1RenderedCoverage: null,
 						syntheticLeadingCount: 0,

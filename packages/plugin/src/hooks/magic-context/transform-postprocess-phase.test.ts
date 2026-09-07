@@ -16,6 +16,7 @@ import {
     getChannel2NudgeState,
     getOrCreateSessionMeta,
     getPendingCompactionMarkerState,
+    getPendingOps,
     getProcessedImageStrippedIds,
     getStrippedPlaceholderIds,
     getTagsBySession,
@@ -55,6 +56,7 @@ import { registerActiveCompartmentRun } from "./compartment-runner";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
+import * as compartmentInjection from "./inject-compartments";
 import { injectM0M1, type M0HardSignals } from "./inject-compartments";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
@@ -5440,4 +5442,295 @@ it("age and heuristic candidates alone at 75 percent cannot originate a bust", a
             .filter((t) => t.tagNumber <= 2)
             .every((t) => t.status === "active"),
     ).toBe(true);
+});
+
+describe("prefix preflight persistence pins", () => {
+    it.each([
+        "cached",
+        "fresh",
+        "partial",
+    ])("%s contention fallback cannot price ride-only reductions", async (cacheShape) => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-preflight-${cacheShape}`;
+        const projectPath = "git:preflight-pin";
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "Published",
+                content: "Published history",
+            },
+        ]);
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const m0M1 = { projectPath, projectDirectory: "/nonexistent" };
+        if (cacheShape === "cached") injectM0M1({ db, sessionId, state, ...m0M1 });
+        if (cacheShape === "partial")
+            state.cachedM0Bytes = Buffer.from("<session-history>partial</session-history>");
+        queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+        const message = makeToolMessage("old-tool");
+        insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+            tokenCount: 1000,
+            inputTokenCount: 0,
+            reasoningTokenCount: 0,
+        });
+        padRecentToolSkeletonWindow(sessionId, 1);
+        advanceToolReclaimWatermark(db, sessionId, 1);
+        state.toolReclaimWatermark = 1;
+        if (cacheShape === "cached") queuePendingOp(db, sessionId, 1, "drop");
+        const served: compartmentInjection.InjectM0M1Result[] = [];
+        const original = compartmentInjection.injectM0M1;
+        const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
+            (options) => {
+                const result = original({
+                    ...options,
+                    beforePhase3ForTest: () => {
+                        queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+                    },
+                });
+                served.push(result);
+                return result;
+            },
+        );
+        try {
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [message], {
+                    sessionMeta: state,
+                    m0M1,
+                    targets: new Map([[1, makeDropTarget(message)]]),
+                    tags: getActiveTagsBySession(db, sessionId),
+                    pendingCompartmentInjection:
+                        cacheShape === "cached"
+                            ? null
+                            : {
+                                  block: "published",
+                                  compartmentEndMessage: 1,
+                                  compartmentEndMessageId: "covered",
+                                  compartmentCount: 1,
+                                  skippedVisibleMessages: 0,
+                                  factCount: 0,
+                                  memoryCount: 0,
+                                  rebuiltFromDb: true,
+                              },
+                    rebuiltHistoryFromInitialPrepare: cacheShape !== "cached",
+                }),
+            );
+            expect(served).toHaveLength(2);
+            expect(
+                served.every(
+                    (call) =>
+                        call.decision.value &&
+                        !call.m0RematerializedThisPass &&
+                        call.materializationContentionRetryExhausted,
+                ),
+            ).toBe(true);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+                "active",
+            );
+            expect(result.droppedTokens).toBe(0);
+            expect(result.materialized).toBe(false);
+            if (cacheShape === "cached") expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+        } finally {
+            injection.mockRestore();
+        }
+    });
+
+    it("served m1 replays the persisted off-wire preflight bytes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-preflight-persisted";
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const m0M1 = { projectPath: "git:preflight-persisted", projectDirectory: "/nonexistent" };
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "BASELINE",
+                content: "BASELINE",
+            },
+        ]);
+        injectM0M1({ db, sessionId, state, ...m0M1 });
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 2,
+                startMessage: 2,
+                endMessage: 2,
+                startMessageId: "next-covered",
+                endMessageId: "next-covered",
+                title: "PERSISTED_A",
+                content: "PERSISTED_A",
+            },
+        ]);
+        let persistedPreflight: string | null = null;
+        const original = compartmentInjection.injectM0M1;
+        const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
+            (options) => {
+                const result = original(options);
+                if (!options.messages)
+                    persistedPreflight =
+                        getOrCreateSessionMeta(db, sessionId).cachedM1Bytes?.toString("utf8") ??
+                        null;
+                return result;
+            },
+        );
+        const messages = [makeToolMessage("tail")];
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    sessionMeta: state,
+                    m0M1,
+                    schedulerDecision: "execute",
+                }),
+            );
+            expect(persistedPreflight).toContain("PERSISTED_A");
+            expect((messages[1].parts[0] as { text: string }).text).toBe(persistedPreflight!);
+        } finally {
+            injection.mockRestore();
+        }
+    });
+});
+
+it("off-wire m1 preflight on 2000-message execute reports p50 and p95", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-preflight-benchmark";
+    const m0M1 = { projectPath: "git:preflight-benchmark", projectDirectory: "/nonexistent" };
+    const state = getOrCreateSessionMeta(db, sessionId);
+    appendCompartments(
+        db,
+        sessionId,
+        Array.from({ length: 20 }, (_, i) => ({
+            sequence: i + 1,
+            startMessage: i + 1,
+            endMessage: i + 1,
+            startMessageId: `covered-${i}`,
+            endMessageId: `covered-${i}`,
+            title: `Baseline ${i}`,
+            content: "Historical summary ".repeat(200),
+        })),
+    );
+    injectM0M1({ db, sessionId, state, ...m0M1 });
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 21,
+            startMessage: 21,
+            endMessage: 21,
+            startMessageId: "delta",
+            endMessageId: "delta",
+            title: "Published delta",
+            content: "New published detail ".repeat(100),
+        },
+    ]);
+    const samples: number[] = [];
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) => {
+        const start = performance.now();
+        const result = original(options);
+        if (!options.messages) samples.push(performance.now() - start);
+        return result;
+    });
+    try {
+        for (let pass = 0; pass < 30; pass++) {
+            const messages: MessageLike[] = Array.from({ length: 2000 }, (_, index) => ({
+                info: { id: `message-${index}`, role: index % 2 ? "assistant" : "user" },
+                parts: [{ type: "text", text: `Message ${index}: ${"raw tail text ".repeat(40)}` }],
+            }));
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    m0M1,
+                    sessionMeta: state,
+                    schedulerDecision: "execute",
+                }),
+            );
+        }
+        expect(samples).toHaveLength(30);
+        const sorted = samples.slice(5).sort((a, b) => a - b);
+        const p50 = sorted[Math.floor(sorted.length * 0.5)]!;
+        const p95 = sorted[Math.floor(sorted.length * 0.95)]!;
+        console.log(
+            `m1-preflight 2000-message execute p50=${p50.toFixed(3)}ms p95=${p95.toFixed(3)}ms samples=${sorted.length} baselineCompartments=20 deltaCompartments=1`,
+        );
+        expect(p50).toBeGreaterThan(0);
+        expect(p95).toBeGreaterThanOrEqual(p50);
+    } finally {
+        injection.mockRestore();
+    }
+});
+
+describe("ride-only configuration table", () => {
+    async function runBands(
+        config: "historian-disabled" | "no_models" | "wrapup-only" | "compaction-off",
+    ) {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-ride-config-${config}`;
+        const messages = [1, 2, 3, 4].map((tag) => makeToolMessage(`tool-${tag}`));
+        const targets = new Map<number, TagTarget>();
+        for (let tag = 1; tag <= 4; tag++) {
+            insertTag(db, sessionId, `tool-${tag}`, "tool", 8000, tag, 0, "bash");
+            targets.set(tag, makeDropTarget(messages[tag - 1]!));
+        }
+        advanceToolReclaimWatermark(db, sessionId, 4);
+        // These are post-producer states, not invented configuration keys:
+        // disabled has no runnable historian; no_models and wrapup-only have no
+        // automatic publication to carry the waiting routine reductions.
+        const options = {
+            compactionOff: config === "compaction-off",
+            canRunCompartments: config === "no_models" || config === "wrapup-only",
+            schedulerDecision: "execute" as const,
+            targets,
+            tags: getActiveTagsBySession(db, sessionId),
+            sessionMeta: getOrCreateSessionMeta(db, sessionId),
+            emergencyCeilingTokens: 10_000,
+        };
+        const before = JSON.stringify(messages);
+        const routine = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...options,
+                contextUsage: { percentage: 75, inputTokens: 20_000 },
+            }),
+        );
+        expect(JSON.stringify(messages)).toBe(before);
+        expect(routine.droppedTokens).toBe(0);
+        expect(getTagsBySession(db, sessionId).every((tag) => tag.status === "active")).toBe(true);
+        const force = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...options,
+                contextUsage: { percentage: 90, inputTokens: 20_000 },
+            }),
+        );
+        if (config === "compaction-off") {
+            for (const percentage of [20, 85, 95]) {
+                const unchanged = await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        ...options,
+                        contextUsage: { percentage, inputTokens: 20_000 },
+                    }),
+                );
+                expect(unchanged.droppedTokens).toBe(0);
+                expect(JSON.stringify(messages)).toBe(before);
+            }
+            expect(JSON.stringify(messages)).toBe(before);
+            expect(force.droppedTokens).toBe(0);
+            expect(getTagsBySession(db, sessionId).every((tag) => tag.status === "active")).toBe(
+                true,
+            );
+        } else {
+            expect(force.emergencyReclaimedTokens).toBeGreaterThan(0);
+            expect(force.droppedTokens).toBeGreaterThan(0);
+            expect(JSON.stringify(messages)).not.toBe(before);
+        }
+    }
+    it.each(["historian-disabled", "no_models", "wrapup-only"] as const)(
+        "ride-only defers routine reclaim to force band under %s",
+        runBands,
+    );
+    it("compaction-off performs no reclaim at any band", () => runBands("compaction-off"));
 });
