@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context";
+import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import {
@@ -3236,4 +3237,5 @@ export function _resetProjectEmbeddingRegistryForTests(): void {
     projectSweepInProgress = false;
     testProviderFactory = null;
     shadowBackfillNow = () => Date.now();
+    setBootQuietPeriodForTests(null);
 }

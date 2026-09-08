@@ -58,7 +58,11 @@ import { log } from "../shared/logger";
 import type { ModelHarness } from "../shared/model-resolution";
 import type { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
-import { beginBootQuietPeriod, scheduleAfterBootQuiet } from "./boot-quiet";
+import {
+    beginBootQuietPeriod,
+    scheduleAfterBootQuiet,
+    setBootQuietPeriodForTests,
+} from "./boot-quiet";
 import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
@@ -575,6 +579,25 @@ async function sweepOrphanedInternalChildren(
     } finally {
         closeQuietly(ocDb);
     }
+}
+
+export function _resetDreamTimerForTests(): void {
+    if (activeTimer) {
+        clearInterval(activeTimer);
+        activeTimer = null;
+    }
+    if (startupTickTimer) {
+        clearTimeout(startupTickTimer);
+        startupTickTimer = null;
+    }
+    for (const timer of startupTimers.values()) {
+        clearTimeout(timer);
+    }
+    startupTimers.clear();
+    startupJitters.clear();
+    nextStartupJitterSlot = 0;
+    registeredProjects.clear();
+    setBootQuietPeriodForTests(null);
 }
 
 async function runCompiledSmartNoteSweep(reg: ProjectRegistration, db: Database): Promise<void> {
