@@ -1,6 +1,6 @@
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import type { ContextDatabase } from "../../features/magic-context/storage";
-import { loadPersistedUsage } from "../../features/magic-context/storage";
+import { loadPersistedUsage, type PersistedUsageState } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 
@@ -21,14 +21,44 @@ function loadPersistedUsageWatermark(db: ContextDatabase, sessionId: string): nu
     return typeof lastResponseTime === "number" ? lastResponseTime : null;
 }
 
+export interface ContextUsagePassSnapshot {
+    lastResponseTime: number;
+    persistedUsage: PersistedUsageState | null;
+}
+
+export function contextUsagePassSnapshot(sessionMeta: SessionMeta): ContextUsagePassSnapshot {
+    const hasPersistedUsage =
+        sessionMeta.lastContextPercentage !== 0 || sessionMeta.lastInputTokens !== 0;
+    return {
+        lastResponseTime: sessionMeta.lastResponseTime,
+        persistedUsage: hasPersistedUsage
+            ? {
+                  usage: {
+                      percentage: sessionMeta.lastContextPercentage,
+                      inputTokens: sessionMeta.lastInputTokens,
+                  },
+                  updatedAt: sessionMeta.lastResponseTime || Date.now(),
+                  lastObservedModelKey: sessionMeta.lastObservedModelKey,
+                  lastUsageContextLimit: sessionMeta.lastUsageContextLimit,
+              }
+            : null,
+    };
+}
+
 export function loadContextUsage(
     contextUsageMap: Map<string, ContextUsageCacheEntry>,
     db: ContextDatabase,
     sessionId: string,
+    passSnapshot?: ContextUsagePassSnapshot,
 ): ContextUsage {
     const contextUsageEntry = contextUsageMap.get(sessionId);
+    // message.updated owns the live map entry and replaces it whenever provider
+    // usage changes. That event is the cache's invalidation signal, so a live
+    // token-bearing entry needs no validating SELECT on each transform pass.
+    if (contextUsageEntry?.hasUsageTokens === true) return contextUsageEntry.usage;
     try {
-        const persistedLastResponseTime = loadPersistedUsageWatermark(db, sessionId);
+        const persistedLastResponseTime =
+            passSnapshot?.lastResponseTime ?? loadPersistedUsageWatermark(db, sessionId);
         const cachedLastResponseTime =
             contextUsageEntry?.lastResponseTime ?? contextUsageEntry?.updatedAt;
         if (
@@ -42,7 +72,9 @@ export function loadContextUsage(
             return contextUsageEntry.usage;
         }
 
-        const persisted = loadPersistedUsage(db, sessionId);
+        const persisted = passSnapshot
+            ? passSnapshot.persistedUsage
+            : loadPersistedUsage(db, sessionId);
         if (persisted) {
             contextUsageMap.set(sessionId, {
                 ...persisted,

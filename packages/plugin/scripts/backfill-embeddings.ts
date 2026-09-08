@@ -23,7 +23,9 @@ import {
     flushShadowEmbeddingBacklog,
     getProjectEmbeddingSnapshot,
     getShadowBackfillRemaining,
+    describeShadowBackfillWriteRefusal,
     getShadowBackfillStopReason,
+    listShadowBackfillStalls,
     registerProjectEmbedding,
     registerProjectShadowEmbedding,
 } from "../src/features/magic-context/memory/embedding";
@@ -84,7 +86,9 @@ async function runShadowBackfill(
         },
         directory,
     );
-    registerProjectShadowEmbedding(db, projectIdentity, routing.shadow, directory);
+    registerProjectShadowEmbedding(db, projectIdentity, routing.shadow, directory, {
+        manualBackfill: true,
+    });
 
     const before = getShadowBackfillRemaining(db, projectIdentity);
     console.log(
@@ -109,10 +113,16 @@ async function runShadowBackfill(
     // provider failed to serve this run, not an unembeddable class — say so, and
     // say what to do, instead of leaving a bare number that reads like a bug.
     for (const scope of ["memory", "commit", "chunk"] as const) {
-        if (after[scope] > 0 && getShadowBackfillStopReason(projectIdentity, scope) === "stalled_no_progress") {
+        if (
+            after[scope] > 0 &&
+            getShadowBackfillStopReason(projectIdentity, scope) === "stalled_no_progress"
+        ) {
+            const stall = listShadowBackfillStalls(db, projectIdentity).find(
+                (entry) => entry.scope === scope,
+            );
             console.log(
-                `  note: ${scope} stopped early after a no-progress batch (provider failure/timeout). ` +
-                    `Re-run --shadow to resume; progress is banked per item.`,
+                `  note: ${scope} stopped early after a no-progress batch: ` +
+                    `${describeShadowBackfillWriteRefusal(stall?.writeRefusalReason ?? "unknown_write_rejection")}.`,
             );
         }
     }

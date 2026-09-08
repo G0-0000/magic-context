@@ -67,11 +67,11 @@ use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, Storag
 use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
-    FacadeMutationOutcome, HistorianPhase, InsertMemoryInput, MappingUpdate, McStore, McStoreError,
-    ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow, ModuleStateSyncError,
-    ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow,
-    NoteCasOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput,
-    PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
+    FacadeMutationOutcome, HistorianPhase, InsertMemoryInput, LoadedState, MappingUpdate, McStore,
+    McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow,
+    ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
+    ModuleWorkspaceRow, NoteCasOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed,
+    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
     RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
     StoredChunkTranscript, StoredCompartment, StoredMemoryMutation, StoredNote,
     TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
@@ -3385,6 +3385,9 @@ enum PreparedHistorianAction {
 struct HistorianPrepareContext<'a> {
     now: i64,
     snapshot_generation: u64,
+    /// Final immutable tag rows validated by the transform's generation/count/max identity.
+    /// Early pass-through paths leave this absent and retain the legacy store fallback.
+    tag_snapshot: Option<Arc<Vec<McTagRow>>>,
     timings: &'a mut HistorianTriggerTimings,
 }
 
@@ -4535,7 +4538,22 @@ impl McHandler {
             .effective_for_project(project_root)
     }
 
-    fn historian_active(&self, store: &McStore, session_id: &str) -> bool {
+    fn handler_entry_state<'a>(
+        store: &McStore,
+        session_id: &str,
+        snapshot: &'a OnceLock<Option<LoadedState>>,
+    ) -> Option<&'a LoadedState> {
+        snapshot
+            .get_or_init(|| store.load(session_id).ok())
+            .as_ref()
+    }
+
+    fn historian_active(
+        &self,
+        store: &McStore,
+        session_id: &str,
+        entry_snapshot: &OnceLock<Option<LoadedState>>,
+    ) -> bool {
         if self
             .live_historian_sessions
             .lock()
@@ -4544,10 +4562,8 @@ impl McHandler {
         {
             return true;
         }
-        store
-            .load(session_id)
-            .map(|state| state.meta.historian.state != HistorianPhase::Idle)
-            .unwrap_or(false)
+        Self::handler_entry_state(store, session_id, entry_snapshot)
+            .is_some_and(|state| state.meta.historian.state != HistorianPhase::Idle)
     }
 
     fn wrapup_active(&self, session_id: &str) -> bool {
@@ -4557,7 +4573,12 @@ impl McHandler {
             .contains_key(session_id)
     }
 
-    fn observed_last_response_at_ms(&self, store: &McStore, session_id: &str) -> Option<i64> {
+    fn observed_last_response_at_ms(
+        &self,
+        store: &McStore,
+        session_id: &str,
+        entry_snapshot: &OnceLock<Option<LoadedState>>,
+    ) -> Option<i64> {
         let mut observations = self
             .scheduler_observations
             .lock()
@@ -4567,9 +4588,7 @@ impl McHandler {
                 .observed_in_process
                 .then_some(observation.last_response_at_ms);
         }
-        let anchor = store
-            .load(session_id)
-            .ok()
+        let anchor = Self::handler_entry_state(store, session_id, entry_snapshot)
             .map(|state| state.meta.last_committed_pass_at_ms)
             .unwrap_or(0);
         observations.insert(
@@ -4895,6 +4914,7 @@ impl McHandler {
         let HistorianPrepareContext {
             now,
             snapshot_generation,
+            tag_snapshot,
             timings,
         } = prepare;
         let trigger_timer = HistorianTriggerTimer {
@@ -5001,7 +5021,14 @@ impl McHandler {
             return PreparedHistorianAction::Complete(diagnostics);
         }
         let boundary_build_started_at = Instant::now();
-        if let Ok(tags) = store.load_tags_for_session(&parsed.session_id) {
+        if let Some(tags) = tag_snapshot {
+            self.boundary_tokens
+                .lock()
+                .expect("boundary token cache mutex")
+                .prime_from_persisted_tags(&parsed.session_id, tags.as_slice());
+        } else if let Ok(tags) = store.load_tags_for_session(&parsed.session_id) {
+            // Malformed-lineage and compaction-off paths return before normal tag hydration.
+            // Preserve their fail-open tokenization behavior rather than treating absence as empty.
             self.boundary_tokens
                 .lock()
                 .expect("boundary token cache mutex")
@@ -8547,6 +8574,9 @@ impl McHandler {
                 },
             );
         }
+        // Scheduler anchoring and durable historian activity read one lazy state snapshot for this
+        // handler entry. The snapshot is initialized only if neither in-memory fast path answers.
+        let handler_entry_state = OnceLock::new();
         let run_transform = || {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
@@ -8601,10 +8631,17 @@ impl McHandler {
                 cache_ttl: resolved_cache_ttl.value,
                 cache_ttl_provenance: resolved_cache_ttl.provenance,
                 model_key: binding.model_key.clone(),
-                observed_last_response_at_ms: self
-                    .observed_last_response_at_ms(&store, &parsed.session_id),
+                observed_last_response_at_ms: self.observed_last_response_at_ms(
+                    &store,
+                    &parsed.session_id,
+                    &handler_entry_state,
+                ),
                 guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, pass_now)),
-                historian_active: self.historian_active(&store, &parsed.session_id),
+                historian_active: self.historian_active(
+                    &store,
+                    &parsed.session_id,
+                    &handler_entry_state,
+                ),
                 wrapup_active: self.wrapup_active(&parsed.session_id),
                 #[cfg(test)]
                 injected_reductions: self
@@ -8662,15 +8699,10 @@ impl McHandler {
         };
         let transform_execute_ms = transform_execute_started_at.elapsed().as_secs_f64() * 1_000.0;
         let handler_followup_started_at = Instant::now();
-        let mut emergency_pre_floor =
-            if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
-                store
-                    .load(&parsed.session_id)
-                    .map(|state| state.meta.publication_floor_ordinal)
-                    .unwrap_or(None)
-            } else {
-                None
-            };
+        let mut emergency_pre_floor = (result.scheduler_pass
+            == scheduler::PassDecision::Emergency95)
+            .then_some(result.publication_floor_ordinal)
+            .flatten();
         #[cfg(test)]
         if let Some(hook) = self
             .between_transform_and_prepare
@@ -8709,6 +8741,7 @@ impl McHandler {
                 HistorianPrepareContext {
                     now: pass_now,
                     snapshot_generation,
+                    tag_snapshot: result.historian_tags.clone(),
                     timings: &mut trigger_timings,
                 },
             ) {
@@ -8729,10 +8762,7 @@ impl McHandler {
                             Ok(result) => result,
                             Err(e) => return reject_transform(e),
                         };
-                        emergency_pre_floor = store
-                            .load(&parsed.session_id)
-                            .map(|state| state.meta.publication_floor_ordinal)
-                            .unwrap_or(None);
+                        emergency_pre_floor = result.publication_floor_ordinal;
                         match self.prepare_historian_fire(
                             Arc::clone(&store),
                             &parsed,
@@ -8742,6 +8772,7 @@ impl McHandler {
                             HistorianPrepareContext {
                                 now: pass_now,
                                 snapshot_generation,
+                                tag_snapshot: result.historian_tags.clone(),
                                 timings: &mut trigger_timings,
                             },
                         ) {
@@ -8762,10 +8793,7 @@ impl McHandler {
                                             Ok(result) => result,
                                             Err(e) => return reject_transform(e),
                                         };
-                                        emergency_pre_floor = store
-                                            .load(&parsed.session_id)
-                                            .map(|state| state.meta.publication_floor_ordinal)
-                                            .unwrap_or(None);
+                                        emergency_pre_floor = result.publication_floor_ordinal;
                                         diagnostics
                                     }
                                     Err(_) => self.refresh_historian_diagnostics(
@@ -8795,10 +8823,7 @@ impl McHandler {
                                 Ok(result) => result,
                                 Err(e) => return reject_transform(e),
                             };
-                            emergency_pre_floor = store
-                                .load(&parsed.session_id)
-                                .map(|state| state.meta.publication_floor_ordinal)
-                                .unwrap_or(None);
+                            emergency_pre_floor = result.publication_floor_ordinal;
                             diagnostics
                         }
                         Err(_) => self.refresh_historian_diagnostics(
@@ -8819,6 +8844,7 @@ impl McHandler {
                 HistorianPrepareContext {
                     now: pass_now,
                     snapshot_generation,
+                    tag_snapshot: result.historian_tags.clone(),
                     timings: &mut trigger_timings,
                 },
             ) {
@@ -15674,7 +15700,7 @@ fn ctx_memory_description() -> String {
 }
 
 fn ctx_search_description() -> String {
-    "Keyword-search saved project memories, session notes, and summarized conversation history. This is literal word or phrase search, not semantic search; use it to find remembered facts or prior discussion snippets before answering.".to_string()
+    "Your long-term recall for this project — search everything that ever happened here, not just what's currently visible.\n\nRetrieval matches meaning as well as exact words and fuses them, so phrasing matters: phrase `query` as a natural-language question that still contains the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less than a question carrying the same words.\n- Good: \"where is the retry backoff for the upload client configured?\"\n- Bad: \"upload client retry backoff config\"\n\nReach for it when something feels familiar but isn't in view: \"did we solve this before?\", \"what did we decide about X?\", \"when did this break?\", \"where does Y live?\". Results only contain things you CANNOT currently see — memories already shown in <project-memory> and the live conversation tail are filtered out. A query that is just one or more memory ids (e.g. `#7234` or `12, 34`) bypasses text search and resolves those ids directly.\n\nSources (omit for a broad search across all):\n- memory: curated cross-session project knowledge — rules, constraints, conventions.\n- message: the raw conversation behind your compacted history. Hits include message ordinals — expand the surrounding exchange with ctx_expand(start=N-10, end=N+5).\n- git_commit: this repository's commit history.\n- note: parked decisions and follow-ups with their recorded text.\n\nPicking sources:\n- \"when did this change / was this working before\" → [\"git_commit\", \"message\"]\n- \"did we discuss this earlier\" → [\"message\"]\n- \"did we decide something about this / leave a follow-up\" → [\"note\"]\n- \"what's our convention / rule for X\" → [\"memory\"]".to_string()
 }
 
 fn ctx_expand_description() -> String {
@@ -15747,7 +15773,7 @@ fn ctx_search_schema() -> Value {
             "query": {
                 "type": "string",
                 "maxLength": 1024,
-                "description": "Literal keyword or phrase to find in memories and summarized history."
+                "description": "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text."
             },
             "limit": {
                 "type": "integer",
@@ -22142,6 +22168,194 @@ mod tests {
                 .collect::<Vec<_>>(),
             actual_native
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historian_preflight_reuses_transform_tag_snapshot_and_invalidates_on_generation() {
+        const MESSAGE_COUNT: usize = 2_048;
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let messages = (1..=MESSAGE_COUNT)
+            .map(|ordinal| {
+                ck(
+                    &format!("m{ordinal}"),
+                    ordinal as u64,
+                    &format!("source-{ordinal}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let tags = (1..=MESSAGE_COUNT)
+            .map(|ordinal| TagMintInput {
+                block_id: format!("m{ordinal}#0"),
+                kind: "message".to_string(),
+                token_count: 1,
+                source_bytes: format!("source-{ordinal}").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+        store.seed_tags_for_test("ses", &tags, 1).unwrap();
+        let request = request_with_usage(messages, 1_000, 200_000);
+
+        store.reset_tag_payload_query_count_for_test();
+        store.reset_state_load_query_count_for_test();
+        let cold = call_transform_request(&handler, request.clone()).await;
+        assert_eq!(cold["status"], "ok");
+        let cold_messages = serde_json::to_vec(&cold["ck_messages"]).unwrap();
+        assert_eq!(
+            store.tag_payload_query_count_for_test(),
+            1,
+            "the cold transform is the only full tag payload read"
+        );
+        assert_eq!(
+            store.state_load_query_count_for_test(),
+            2,
+            "handler entry and historian preflight each take one state snapshot"
+        );
+
+        for _ in 0..5 {
+            store.reset_tag_payload_query_count_for_test();
+            store.reset_state_load_query_count_for_test();
+            let warm = call_transform_request(&handler, request.clone()).await;
+            let warm_messages = serde_json::to_vec(&warm["ck_messages"]).unwrap();
+            assert_eq!(
+                Sha256::digest(&warm_messages),
+                Sha256::digest(&cold_messages)
+            );
+            assert!(
+                store.tag_payload_query_count_for_test() <= 1,
+                "historian preflight must not add a second payload scan even if another parallel test evicts the process cache"
+            );
+            assert_eq!(store.state_load_query_count_for_test(), 2);
+        }
+
+        transform::load_cached_tags(&store, "ses").unwrap();
+        store.reset_tag_payload_query_count_for_test();
+        store
+            .execute_tag_sql_for_test(
+                "UPDATE mc_tags SET token_count = 777 \
+                 WHERE session_id = 'ses' AND tag_number = 1;",
+            )
+            .unwrap();
+        let refreshed_tags = transform::load_cached_tags(&store, "ses").unwrap();
+        assert_eq!(
+            store.tag_payload_query_count_for_test(),
+            1,
+            "a replacement generation must force exactly one new payload read"
+        );
+        assert_eq!(
+            refreshed_tags
+                .iter()
+                .find(|tag| tag.tag_number == 1)
+                .map(|tag| tag.token_count),
+            Some(777)
+        );
+
+        store.reset_tag_payload_query_count_for_test();
+        let invalidated = call_transform_request(&handler, request).await;
+        let invalidated_messages = serde_json::to_vec(&invalidated["ck_messages"]).unwrap();
+        assert_eq!(
+            Sha256::digest(&invalidated_messages),
+            Sha256::digest(&cold_messages),
+            "cache invalidation may refresh accounting but cannot alter served message bytes"
+        );
+        assert!(store.tag_payload_query_count_for_test() <= 1);
+        // The direct payload-read count is the invalidation oracle: ignoring generation/count/max
+        // would leave it at zero and return the stale token count instead of 777.
+    }
+
+    #[test]
+    #[ignore = "manual 2k-message hot-path timing fixture"]
+    fn historian_tag_and_state_snapshot_hot_path_benchmark() {
+        const MESSAGE_COUNT: usize = 2_048;
+        const SAMPLES: usize = 7;
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let messages = (1..=MESSAGE_COUNT)
+            .map(|ordinal| {
+                ck(
+                    &format!("m{ordinal}"),
+                    ordinal as u64,
+                    &format!("source-{ordinal}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let parsed = transform_request(messages, 1_000, 200_000);
+        let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
+        let tags = (1..=MESSAGE_COUNT)
+            .map(|ordinal| TagMintInput {
+                block_id: format!("m{ordinal}#0"),
+                kind: "message".to_string(),
+                token_count: 1,
+                source_bytes: format!("source-{ordinal}").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+        store.seed_tags_for_test("ses", &tags, 1).unwrap();
+        let shared_tags = Arc::new(store.load_tags_for_session("ses").unwrap());
+        let legacy_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+        let shared_cache = Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES));
+        for cache in [&legacy_cache, &shared_cache] {
+            cache
+                .lock()
+                .unwrap()
+                .prime_from_persisted_tags("ses", shared_tags.as_slice());
+            let warmed = boundary_messages(&parsed, &projection, cache);
+            cache
+                .lock()
+                .unwrap()
+                .replace("ses", warmed.token_cache_snapshot);
+        }
+
+        for _ in 0..SAMPLES {
+            let started_at = Instant::now();
+            let legacy_tags = store.load_tags_for_session("ses").unwrap();
+            legacy_cache
+                .lock()
+                .unwrap()
+                .prime_from_persisted_tags("ses", &legacy_tags);
+            let legacy = boundary_messages(&parsed, &projection, &legacy_cache);
+            legacy_cache
+                .lock()
+                .unwrap()
+                .replace("ses", legacy.token_cache_snapshot);
+            std::hint::black_box(legacy.messages.len());
+            eprintln!(
+                "mc-pass-timing session=r12-before trigger_boundary_build={:.3}",
+                started_at.elapsed().as_secs_f64() * 1_000.0
+            );
+
+            let started_at = Instant::now();
+            shared_cache
+                .lock()
+                .unwrap()
+                .prime_from_persisted_tags("ses", shared_tags.as_slice());
+            let shared = boundary_messages(&parsed, &projection, &shared_cache);
+            shared_cache
+                .lock()
+                .unwrap()
+                .replace("ses", shared.token_cache_snapshot);
+            std::hint::black_box(shared.messages.len());
+            eprintln!(
+                "mc-pass-timing session=r12-after trigger_boundary_build={:.3}",
+                started_at.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
+
+        for _ in 0..SAMPLES {
+            let started_at = Instant::now();
+            std::hint::black_box(store.load("ses").unwrap());
+            std::hint::black_box(store.load("ses").unwrap());
+            eprintln!(
+                "mc-pass-timing session=r07-before handler_state_snapshot={:.3}",
+                started_at.elapsed().as_secs_f64() * 1_000.0
+            );
+
+            let started_at = Instant::now();
+            let snapshot = store.load("ses").unwrap();
+            std::hint::black_box((&snapshot, &snapshot));
+            eprintln!(
+                "mc-pass-timing session=r07-after handler_state_snapshot={:.3}",
+                started_at.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

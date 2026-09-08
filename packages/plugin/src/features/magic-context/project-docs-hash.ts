@@ -28,6 +28,14 @@ type ProjectDocsCacheEntry = {
 };
 
 const docsCache = new Map<string, ProjectDocsCacheEntry>();
+let canonicalReadCountForTests = 0;
+
+export const __projectDocsHashTest = {
+    readCount: (): number => canonicalReadCountForTests,
+    reset: (): void => {
+        canonicalReadCountForTests = 0;
+    },
+};
 
 function canonicalizeDocContent(raw: string): string {
     return raw
@@ -150,6 +158,7 @@ export function readProjectDocsCanonical(projectDirectory: string): {
     renderedBlock: string;
     canonicalHash: string;
 } {
+    canonicalReadCountForTests += 1;
     const canonicalDirectory = path.resolve(projectDirectory);
     const current = readCurrentFingerprints(canonicalDirectory);
     const cached = docsCache.get(canonicalDirectory);

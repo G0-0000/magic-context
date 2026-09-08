@@ -328,6 +328,22 @@ function getDefaultHistorianFailureState(): PersistedHistorianFailureState {
     };
 }
 
+function parseHistorianFailureState(result: unknown): PersistedHistorianFailureState {
+    if (!isPersistedHistorianFailureRow(result)) return getDefaultHistorianFailureState();
+    return {
+        failureCount: result.historian_failure_count,
+        lastError:
+            typeof result.historian_last_error === "string" &&
+            result.historian_last_error.length > 0
+                ? result.historian_last_error
+                : null,
+        lastFailureAt:
+            typeof result.historian_last_failure_at === "number"
+                ? result.historian_last_failure_at
+                : null,
+    };
+}
+
 export function loadPersistedUsage(db: Database, sessionId: string): PersistedUsageState | null {
     const result = db
         .prepare(
@@ -1769,6 +1785,23 @@ export function setPersistedTodoPermissionDenied(
     );
 }
 
+function parsePersistedTodoSyntheticAnchor(result: unknown): PersistedTodoSyntheticAnchor | null {
+    if (!isPersistedTodoSyntheticAnchorRow(result)) return null;
+    if (
+        result.todo_synthetic_call_id.length === 0 ||
+        result.todo_synthetic_anchor_message_id.length === 0
+    ) {
+        return null;
+    }
+    return {
+        callId: result.todo_synthetic_call_id,
+        messageId: result.todo_synthetic_anchor_message_id,
+        // Legacy anchors may not carry state bytes. Defer replay preserves the
+        // established behavior by declining an empty state snapshot.
+        stateJson: result.todo_synthetic_state_json,
+    };
+}
+
 export function getPersistedTodoSyntheticAnchor(
     db: Database,
     sessionId: string,
@@ -1778,26 +1811,7 @@ export function getPersistedTodoSyntheticAnchor(
             "SELECT todo_synthetic_call_id, todo_synthetic_anchor_message_id, todo_synthetic_state_json FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId);
-
-    if (!isPersistedTodoSyntheticAnchorRow(result)) {
-        return null;
-    }
-
-    if (
-        result.todo_synthetic_call_id.length === 0 ||
-        result.todo_synthetic_anchor_message_id.length === 0
-    ) {
-        return null;
-    }
-
-    return {
-        callId: result.todo_synthetic_call_id,
-        messageId: result.todo_synthetic_anchor_message_id,
-        // stateJson may be empty for rows persisted by the pre-Finding-#1
-        // version of this code path. Defer-pass replay falls back to skip
-        // when stateJson is empty, which is the same behavior as before.
-        stateJson: result.todo_synthetic_state_json,
-    };
+    return parsePersistedTodoSyntheticAnchor(result);
 }
 
 export function setPersistedTodoSyntheticAnchor(
@@ -1866,23 +1880,7 @@ export function getHistorianFailureState(
             "SELECT historian_failure_count, historian_last_error, historian_last_failure_at FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId);
-
-    if (!isPersistedHistorianFailureRow(result)) {
-        return getDefaultHistorianFailureState();
-    }
-
-    return {
-        failureCount: result.historian_failure_count,
-        lastError:
-            typeof result.historian_last_error === "string" &&
-            result.historian_last_error.length > 0
-                ? result.historian_last_error
-                : null,
-        lastFailureAt:
-            typeof result.historian_last_failure_at === "number"
-                ? result.historian_last_failure_at
-                : null,
-    };
+    return parseHistorianFailureState(result);
 }
 
 /** Records a failure and returns the new consecutive-failure count (callers may
@@ -1947,24 +1945,18 @@ function normalizeEmergencyRecoveryOrigin(value: unknown): EmergencyRecoveryOrig
     return value === "provider_overflow" || value === "proactive_model_shrink" ? value : null;
 }
 
-export function getOverflowState(
-    db: Database,
-    sessionId: string,
+type PersistedOverflowRow = {
+    detected_context_limit?: number;
+    detected_context_limit_model_key?: string | null;
+    detected_context_limit_provenance?: string | null;
+    needs_emergency_recovery?: number;
+    emergency_recovery_origin?: string | null;
+};
+
+function parseOverflowState(
+    result: PersistedOverflowRow | undefined,
     modelKey?: string | null,
 ): PersistedOverflowState {
-    const result = db
-        .prepare(
-            "SELECT detected_context_limit, detected_context_limit_model_key, detected_context_limit_provenance, needs_emergency_recovery, emergency_recovery_origin FROM session_meta WHERE session_id = ?",
-        )
-        .get(sessionId) as
-        | {
-              detected_context_limit?: number;
-              detected_context_limit_model_key?: string | null;
-              detected_context_limit_provenance?: string | null;
-              needs_emergency_recovery?: number;
-              emergency_recovery_origin?: string | null;
-          }
-        | undefined;
     if (!result) {
         return {
             detectedContextLimit: 0,
@@ -1999,6 +1991,71 @@ export function getOverflowState(
         detectedContextLimitProvenance: provenance,
         needsEmergencyRecovery: needs,
         emergencyRecoveryOrigin: recoveryOrigin,
+    };
+}
+
+export function getOverflowState(
+    db: Database,
+    sessionId: string,
+    modelKey?: string | null,
+): PersistedOverflowState {
+    const result = db
+        .prepare(
+            "SELECT detected_context_limit, detected_context_limit_model_key, detected_context_limit_provenance, needs_emergency_recovery, emergency_recovery_origin FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as PersistedOverflowRow | undefined;
+    return parseOverflowState(result, modelKey);
+}
+
+export interface TransformPassStateSnapshot {
+    historianFailure: PersistedHistorianFailureState;
+    overflow: PersistedOverflowState;
+    protectedTail: Pick<
+        ProtectedTailMeta,
+        "priorBoundaryOrdinal" | "protectedTailPolicyVersion" | "recoveryNoEligibleHeadCount"
+    >;
+}
+
+/** Load independent early-transform decisions from one session_meta row. */
+export function loadTransformPassStateSnapshot(
+    db: Database,
+    sessionId: string,
+): TransformPassStateSnapshot {
+    const row = db
+        .prepare(
+            `SELECT historian_failure_count, historian_last_error,
+                    historian_last_failure_at, detected_context_limit,
+                    detected_context_limit_model_key,
+                    detected_context_limit_provenance, needs_emergency_recovery,
+                    emergency_recovery_origin, prior_boundary_ordinal,
+                    protected_tail_policy_version, recovery_no_eligible_head_count
+               FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as
+        | (PersistedOverflowRow &
+              PersistedHistorianFailureRow & {
+                  prior_boundary_ordinal?: number | null;
+                  protected_tail_policy_version?: number | null;
+                  recovery_no_eligible_head_count?: number | null;
+              })
+        | undefined;
+    return {
+        historianFailure: parseHistorianFailureState(row),
+        overflow: parseOverflowState(row),
+        protectedTail: {
+            priorBoundaryOrdinal: Math.max(
+                1,
+                typeof row?.prior_boundary_ordinal === "number" ? row.prior_boundary_ordinal : 1,
+            ),
+            protectedTailPolicyVersion:
+                typeof row?.protected_tail_policy_version === "number"
+                    ? row.protected_tail_policy_version
+                    : 0,
+            recoveryNoEligibleHeadCount:
+                typeof row?.recovery_no_eligible_head_count === "number"
+                    ? row.recovery_no_eligible_head_count
+                    : 0,
+        },
     };
 }
 
@@ -2126,19 +2183,10 @@ export interface PersistedCompactionMarkerState {
     targetEndMessageId: string | null;
 }
 
-export function getPersistedCompactionMarkerState(
-    db: Database,
-    sessionId: string,
+function parsePersistedCompactionMarkerState(
+    raw: string | null | undefined,
+    storedTargetEndMessageId?: string | null,
 ): PersistedCompactionMarkerState | null {
-    const row = db
-        .prepare(
-            "SELECT compaction_marker_state, compaction_marker_target_end_message_id FROM session_meta WHERE session_id = ?",
-        )
-        .get(sessionId) as {
-        compaction_marker_state?: string;
-        compaction_marker_target_end_message_id?: string | null;
-    } | null;
-    const raw = row?.compaction_marker_state;
     if (!raw || raw.length === 0) return null;
     try {
         const parsed = JSON.parse(raw);
@@ -2152,9 +2200,8 @@ export function getPersistedCompactionMarkerState(
             typeof parsed.boundaryOrdinal === "number"
         ) {
             const targetEndMessageId =
-                typeof row?.compaction_marker_target_end_message_id === "string" &&
-                row.compaction_marker_target_end_message_id.length > 0
-                    ? row.compaction_marker_target_end_message_id
+                typeof storedTargetEndMessageId === "string" && storedTargetEndMessageId.length > 0
+                    ? storedTargetEndMessageId
                     : typeof parsed.targetEndMessageId === "string" &&
                         parsed.targetEndMessageId.length > 0
                       ? parsed.targetEndMessageId
@@ -2168,6 +2215,24 @@ export function getPersistedCompactionMarkerState(
         // Intentional: corrupt JSON → treat as empty
     }
     return null;
+}
+
+export function getPersistedCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+): PersistedCompactionMarkerState | null {
+    const row = db
+        .prepare(
+            "SELECT compaction_marker_state, compaction_marker_target_end_message_id FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as {
+        compaction_marker_state?: string;
+        compaction_marker_target_end_message_id?: string | null;
+    } | null;
+    return parsePersistedCompactionMarkerState(
+        row?.compaction_marker_state,
+        row?.compaction_marker_target_end_message_id,
+    );
 }
 
 export function setPersistedCompactionMarkerState(
@@ -2747,6 +2812,20 @@ function isPendingCompactionMarker(value: unknown): value is PendingCompactionMa
     );
 }
 
+function parsePendingCompactionMarkerState(
+    raw: string | null | undefined,
+): PendingCompactionMarker | null {
+    // Defensive: NULL is canonical absence, but legacy writers may store "".
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (isPendingCompactionMarker(parsed)) return parsed;
+    } catch {
+        // Intentional: corrupt JSON is absent until the next publish overwrites it.
+    }
+    return null;
+}
+
 export function getPendingCompactionMarkerState(
     db: Database,
     sessionId: string,
@@ -2754,20 +2833,97 @@ export function getPendingCompactionMarkerState(
     const row = db
         .prepare("SELECT pending_compaction_marker_state FROM session_meta WHERE session_id = ?")
         .get(sessionId) as { pending_compaction_marker_state?: string | null } | null;
-    const raw = row?.pending_compaction_marker_state;
-    // Defensive: NULL is the canonical absence, but legacy / cross-version
-    // writes might still put `""` here. Both treated as absent.
-    if (raw === null || raw === undefined || raw === "") return null;
-    try {
-        const parsed = JSON.parse(raw);
-        if (isPendingCompactionMarker(parsed)) {
-            return parsed;
-        }
-    } catch {
-        // Intentional: corrupt JSON → treat as absent. Next publish will
-        // overwrite cleanly; next consuming pass will read the new value.
-    }
-    return null;
+    return parsePendingCompactionMarkerState(row?.pending_compaction_marker_state);
+}
+
+/** Frozen rendering decisions consumed by one postprocess pass. */
+export interface PostprocessReplaySnapshot {
+    staleReduceStrippedIds: Set<string>;
+    processedImageStrippedIds: Set<string>;
+    strippedPlaceholderIds: Set<string>;
+    hiddenSeamPlaceholderIds: Set<string>;
+    noteNudgeAnchors: NoteNudgeAnchor[];
+    autoSearchHintDecisions: AutoSearchHintDecision[];
+    todoPermissionDenied: boolean | null;
+    todoSyntheticAnchor: PersistedTodoSyntheticAnchor | null;
+    pendingCompactionMarker: PendingCompactionMarker | null;
+    compactionMarker: PersistedCompactionMarkerState | null;
+    mergedReasoningStrippedIds: Set<string>;
+    thinkingBindingRecoveryTarget: string | null;
+    trailingBlankDecisions: Map<string, PersistedTrailingBlankDecision>;
+}
+
+/**
+ * Load replay-only fields from one coherent session_meta row. Callers keep this
+ * snapshot for the pass and re-read only after a compare-and-swap or marker write
+ * whose committed winner can differ from the values observed here.
+ */
+export function loadPostprocessReplaySnapshot(
+    db: Database,
+    sessionId: string,
+): PostprocessReplaySnapshot {
+    const row = db
+        .prepare(
+            `SELECT stale_reduce_stripped_ids, processed_image_stripped_ids,
+                    stripped_placeholder_ids, note_nudge_anchors,
+                    auto_search_hint_decisions, todo_permission_denied,
+                    todo_synthetic_call_id, todo_synthetic_anchor_message_id,
+                    todo_synthetic_state_json, pending_compaction_marker_state,
+                    compaction_marker_state, compaction_marker_target_end_message_id,
+                    merged_reasoning_stripped_ids, thinking_binding_recovery_target,
+                    trailing_blank_decisions
+               FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as
+        | {
+              stale_reduce_stripped_ids?: string | null;
+              processed_image_stripped_ids?: string | null;
+              stripped_placeholder_ids?: string | null;
+              note_nudge_anchors?: string | null;
+              auto_search_hint_decisions?: string | null;
+              todo_permission_denied?: number | null;
+              todo_synthetic_call_id?: string | null;
+              todo_synthetic_anchor_message_id?: string | null;
+              todo_synthetic_state_json?: string | null;
+              pending_compaction_marker_state?: string | null;
+              compaction_marker_state?: string | null;
+              compaction_marker_target_end_message_id?: string | null;
+              merged_reasoning_stripped_ids?: string | null;
+              thinking_binding_recovery_target?: string | null;
+              trailing_blank_decisions?: string | null;
+          }
+        | undefined;
+    const placeholders = parseStrippedPlaceholderState(row?.stripped_placeholder_ids);
+    const todoPermissionDenied =
+        row?.todo_permission_denied === 1 ? true : row?.todo_permission_denied === 0 ? false : null;
+    const thinkingBindingRecoveryTarget = row?.thinking_binding_recovery_target;
+    return {
+        staleReduceStrippedIds: new Set(parseStrippedBlob(row?.stale_reduce_stripped_ids)),
+        processedImageStrippedIds: new Set(parseStrippedBlob(row?.processed_image_stripped_ids)),
+        strippedPlaceholderIds: new Set(placeholders.ids),
+        hiddenSeamPlaceholderIds: new Set(placeholders.hiddenSeamIds),
+        noteNudgeAnchors: parseJsonArray(row?.note_nudge_anchors, isValidNoteNudgeAnchor),
+        autoSearchHintDecisions: parseJsonArray(
+            row?.auto_search_hint_decisions,
+            isValidAutoSearchHintDecision,
+        ),
+        todoPermissionDenied,
+        todoSyntheticAnchor: parsePersistedTodoSyntheticAnchor(row),
+        pendingCompactionMarker: parsePendingCompactionMarkerState(
+            row?.pending_compaction_marker_state,
+        ),
+        compactionMarker: parsePersistedCompactionMarkerState(
+            row?.compaction_marker_state,
+            row?.compaction_marker_target_end_message_id,
+        ),
+        mergedReasoningStrippedIds: new Set(parseStrippedBlob(row?.merged_reasoning_stripped_ids)),
+        thinkingBindingRecoveryTarget:
+            typeof thinkingBindingRecoveryTarget === "string" &&
+            thinkingBindingRecoveryTarget.length > 0
+                ? thinkingBindingRecoveryTarget
+                : null,
+        trailingBlankDecisions: parseTrailingBlankDecisions(row?.trailing_blank_decisions),
+    };
 }
 
 /**

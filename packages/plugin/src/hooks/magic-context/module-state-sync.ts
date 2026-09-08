@@ -204,6 +204,11 @@ export interface ModuleStateSyncOptions {
     stateSyncDeltas?: boolean;
     /** Share adoption state across every authority sync attempt in one transform pass. */
     authoritySeqAdoption?: { used: boolean };
+    /**
+     * The adapter observed no event capable of changing an acknowledged watermark.
+     * This bypasses both capability and own-store reads; force/restart seeds ignore it.
+     */
+    knownWatermarksUnchanged?: boolean;
 }
 
 export interface ModuleCompartmentMirrorRow {
@@ -580,9 +585,11 @@ export function loadModuleWatermarks(args: {
     projectPath?: string;
     /** Reuse the workspace resolved by the enclosing payload build. */
     workspace?: ModuleWorkspaceContext;
+    /** Reuse the enclosing pass's session_meta projection. */
+    sessionMeta?: ReturnType<typeof getOrCreateSessionMeta>;
 }): ModuleWatermarks {
     const workspace = args.workspace ?? resolveModuleWorkspaceContext(args.db, args.projectPath);
-    const sessionMeta = getOrCreateSessionMeta(args.db, args.sessionId);
+    const sessionMeta = args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId);
     const compartmentRow = args.db
         .prepare(
             "SELECT COALESCE(MAX(sequence), -1) AS max_sequence FROM compartments WHERE session_id = ?",
@@ -1314,6 +1321,7 @@ export async function buildModuleStateSyncPayload(args: {
     ModuleStateSyncPayload | null | "m0_mutation" | "mismatch" | "unresolved" | "seed_budget"
 > {
     const workspace = resolveModuleWorkspaceContext(args.pass.db, args.pass.projectPath);
+    const sessionMeta = getOrCreateSessionMeta(args.pass.db, args.pass.sessionId);
     // One authority pool has one writer. While MODULE owns memories, this sender only mirrors
     // module changes back to TypeScript and must not send the TypeScript view in the other direction.
     const omitAuthorityMemorySections = args.options?.authorityState === "MODULE";
@@ -1322,6 +1330,7 @@ export async function buildModuleStateSyncPayload(args: {
         sessionId: args.pass.sessionId,
         projectPath: args.pass.projectPath,
         workspace,
+        sessionMeta,
     });
     if (
         !args.force &&
@@ -1502,7 +1511,6 @@ export async function buildModuleStateSyncPayload(args: {
                   queued_at: row.queuedAt,
               }))
             : [];
-    const sessionMeta = getOrCreateSessionMeta(args.pass.db, args.pass.sessionId);
     const pendingDropSeedState = args.force
         ? buildPendingDropSeeds({ db: args.pass.db, sessionId: args.pass.sessionId, readRawById })
         : null;
@@ -1745,6 +1753,13 @@ export async function syncModuleState(args: {
     options?: ModuleStateSyncOptions;
 }): Promise<ModuleStateSyncResult> {
     let force = args.force;
+    if (
+        !force &&
+        args.options?.knownWatermarksUnchanged === true &&
+        args.state.lastAckedWatermarks !== null
+    ) {
+        return { status: "no_change" };
+    }
     const adoption = args.options?.authoritySeqAdoption ?? { used: false };
     const resolveStateSyncDeltas = async (afterGenerationChange = false): Promise<boolean> => {
         let capability = afterGenerationChange ? undefined : args.options?.stateSyncDeltas;
