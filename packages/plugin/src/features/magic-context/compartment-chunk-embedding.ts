@@ -127,6 +127,7 @@ const searchRowsStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
 const searchPoolProbeStatements = new WeakMap<Database, PreparedStatement>();
 const backfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
+const shadowBackfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
 
 const DECODED_SEARCH_POOL_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 const decodedSearchPools = new WeakMap<Database, Map<string, DecodedSearchPoolEntry>>();
@@ -248,6 +249,36 @@ function getBackfillCandidateStatement(db: Database): PreparedStatement {
              ORDER BY c.created_at DESC, c.id DESC`,
         );
         backfillCandidateStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getShadowBackfillCandidateStatement(db: Database): PreparedStatement {
+    let stmt = shadowBackfillCandidateStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT c.id AS id,
+                    c.session_id AS sessionId,
+                    c.start_message AS startMessage,
+                    c.end_message AS endMessage,
+                    c.title AS title
+             FROM compartments c
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
+             WHERE c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL
+               AND EXISTS (
+                   SELECT 1
+                   FROM compartment_chunk_embeddings primary_chunks
+                   WHERE primary_chunks.compartment_id = c.id
+                     AND primary_chunks.project_path = ?
+                     AND primary_chunks.model_id = ?
+               )
+             ORDER BY c.created_at DESC, c.id DESC`,
+        );
+        shadowBackfillCandidateStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -874,6 +905,35 @@ export function loadUnembeddedCompartmentChunkCandidates(
         mapBackfillCandidateRows(rows),
         Math.max(1, limit),
         maxInputTokens,
+    );
+}
+
+/**
+ * Select hash-incomplete rows under the shadow window contract, restricted to
+ * compartments already represented in the primary cohort. Primary and shadow
+ * providers may use different token ceilings, so primary window keys and hashes
+ * cannot be used as the shadow completeness predicate.
+ */
+export function loadUnembeddedShadowChunkCandidates(
+    db: Database,
+    projectPath: string,
+    primaryModelId: string,
+    shadowModelId: string,
+    limit: number,
+    shadowMaxInputTokens: number,
+): CompartmentChunkBackfillCandidate[] {
+    const rows = getShadowBackfillCandidateStatement(db).all(
+        projectPath,
+        projectPath,
+        primaryModelId,
+    ) as unknown[];
+    return selectHashIncompleteChunkCandidates(
+        db,
+        projectPath,
+        shadowModelId,
+        mapBackfillCandidateRows(rows),
+        Math.max(1, limit),
+        shadowMaxInputTokens,
     );
 }
 
