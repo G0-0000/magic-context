@@ -81,11 +81,11 @@ ${CTX_NOTE_GUIDANCE}
 ${memoryGuidanceBlock(memoryEnabled)}Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a summary under a \`## start-end · date · title\` heading inside \`<session-history>\` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
-- Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
-- Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
-- Need a config value, API key location, or environment detail → \`ctx_search(query="embedding provider configuration")\`
-- Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work")\`
-- Want to recall what was decided in an earlier conversation → \`ctx_search(query="dashboard release signing setup")\`
+- Can't remember where a related codebase or dependency lives → \`ctx_search(query="where is the opencode source code path?")\`
+- Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres?")\`
+- Need a config value, API key location, or environment detail → \`ctx_search(query="how is the embedding provider configured?")\`
+- Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work?")\`
+- Want to recall what was decided in an earlier conversation → \`ctx_search(query="what did we decide about the dashboard release signing setup?")\`
 \`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
@@ -103,11 +103,11 @@ const BASE_INTRO_NO_REDUCE = (memoryEnabled: boolean): string => `${CTX_NOTE_GUI
 ${memoryGuidanceBlock(memoryEnabled)}Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a summary under a \`## start-end · date · title\` heading inside \`<session-history>\` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
-- Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
-- Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
-- Need a config value, API key location, or environment detail → \`ctx_search(query="embedding provider configuration")\`
-- Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work")\`
-- Want to recall what was decided in an earlier conversation → \`ctx_search(query="dashboard release signing setup")\`
+- Can't remember where a related codebase or dependency lives → \`ctx_search(query="where is the opencode source code path?")\`
+- Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres?")\`
+- Need a config value, API key location, or environment detail → \`ctx_search(query="how is the embedding provider configured?")\`
+- Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work?")\`
+- Want to recall what was decided in an earlier conversation → \`ctx_search(query="what did we decide about the dashboard release signing setup?")\`
 \`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}`;
 

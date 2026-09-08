@@ -37,14 +37,14 @@
   ],
   "fullMeasurements": {
     "guidance": {
-      "primary-full-reduce-memory-on": { "chars": 8697, "tokens": 1996 },
-      "primary-full-reduce-memory-off": { "chars": 7662, "tokens": 1737 },
-      "primary-full-no-reduce-memory-on": { "chars": 6429, "tokens": 1477 },
-      "primary-full-no-reduce-memory-off": { "chars": 5394, "tokens": 1218 },
-      "primary-full-reduce-dreamer-off": { "chars": 8368, "tokens": 1919 },
-      "primary-full-reduce-temporal-off": { "chars": 8262, "tokens": 1889 },
-      "primary-full-reduce-caveman-on": { "chars": 9312, "tokens": 2122 },
-      "primary-full-reduce-language-on": { "chars": 8897, "tokens": 2042 },
+      "primary-full-reduce-memory-on": { "chars": 8752, "tokens": 2008 },
+      "primary-full-reduce-memory-off": { "chars": 7717, "tokens": 1749 },
+      "primary-full-no-reduce-memory-on": { "chars": 6484, "tokens": 1489 },
+      "primary-full-no-reduce-memory-off": { "chars": 5449, "tokens": 1230 },
+      "primary-full-reduce-dreamer-off": { "chars": 8423, "tokens": 1931 },
+      "primary-full-reduce-temporal-off": { "chars": 8317, "tokens": 1901 },
+      "primary-full-reduce-caveman-on": { "chars": 9367, "tokens": 2134 },
+      "primary-full-reduce-language-on": { "chars": 8952, "tokens": 2054 },
       "subagent-reduce": { "chars": 693, "tokens": 187 }
     },
     "toolDescriptions": {
@@ -52,7 +52,7 @@
       "ctx_expand": { "chars": 1586, "tokens": 395 },
       "ctx_note": { "chars": 1608, "tokens": 391 },
       "ctx_memory": { "chars": 980, "tokens": 234 },
-      "ctx_search": { "chars": 1253, "tokens": 309 }
+      "ctx_search": { "chars": 1651, "tokens": 399 }
     },
     "serializedParameterSchemas": {
       "ctx_reduce": { "chars": 91, "tokens": 31 },
@@ -62,9 +62,9 @@
       "ctx_search": { "chars": 777, "tokens": 184 },
       "totalTokens": 910
     },
-    "builtInProviderVisibleTotal": 4553
+    "builtInProviderVisibleTotal": 4655
   },
-  "mutableProseBaseline": 3643,
+  "mutableProseBaseline": 3745,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",
