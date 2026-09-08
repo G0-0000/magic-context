@@ -393,7 +393,7 @@ Example: ctx_memory(action="write", category="CONSTRAINTS", content="Pi stores s
 }
 ```
 
-### ctx_search — description ~399 tokens, params ~184 tokens (total ~583)
+### ctx_search — description ~402 tokens, params ~184 tokens (total ~586)
 
 **Description:**
 
@@ -401,8 +401,8 @@ Example: ctx_memory(action="write", category="CONSTRAINTS", content="Pi stores s
 Your long-term recall for this project — search everything that ever happened here, not just what's currently visible.
 
 Retrieval matches meaning as well as exact words and fuses them, so phrasing matters: phrase `query` as a natural-language question that still contains the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less than a question carrying the same words.
-- Good: "did we fix the tagger collision in scoring?"
-- Bad: "tagger collision fix scoring regression"
+- Good: "where is the retry backoff for the upload client configured?"
+- Bad: "upload client retry backoff config"
 
 Reach for it when something feels familiar but isn't in view: "did we solve this before?", "what did we decide about X?", "when did this break?", "where does Y live?". Results only contain things you CANNOT currently see — memories already shown in <project-memory> and the live conversation tail are filtered out. A query that is just one or more memory ids (e.g. `#7234` or `12, 34`) bypasses text search and resolves those ids directly.
 

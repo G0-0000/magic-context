@@ -52,7 +52,7 @@
       "ctx_expand": { "chars": 1586, "tokens": 395 },
       "ctx_note": { "chars": 1608, "tokens": 391 },
       "ctx_memory": { "chars": 980, "tokens": 234 },
-      "ctx_search": { "chars": 1651, "tokens": 399 }
+      "ctx_search": { "chars": 1663, "tokens": 402 }
     },
     "serializedParameterSchemas": {
       "ctx_reduce": { "chars": 91, "tokens": 31 },
@@ -62,9 +62,9 @@
       "ctx_search": { "chars": 777, "tokens": 184 },
       "totalTokens": 910
     },
-    "builtInProviderVisibleTotal": 4655
+    "builtInProviderVisibleTotal": 4658
   },
-  "mutableProseBaseline": 3745,
+  "mutableProseBaseline": 3748,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",
