@@ -2718,6 +2718,7 @@ export function registerPiContextHandler(
 				rawContextWindow: usageContextLimit,
 				model: ctx.model,
 				detectedContextLimit,
+				provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,
 			});
 			usageContextLimit = windowGeometry?.usableSoft;
 			const effectiveExecuteThresholdPercentage = resolveExecuteThreshold(
@@ -4135,6 +4136,7 @@ function maybeFireHistorian(args: {
 			rawContextWindow: usageContextLimit,
 			model: ctx.model,
 			detectedContextLimit,
+			provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,
 		});
 		if (
 			sessionMeta.lastContextPercentage > 0 &&

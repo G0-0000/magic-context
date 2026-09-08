@@ -53,6 +53,7 @@ interface PersistedUsageRow {
     last_response_time: number;
     last_observed_model_key: string | null;
     last_usage_context_limit: number | null;
+    observed_safe_input_tokens: number;
 }
 
 interface PersistedReasoningWatermarkRow {
@@ -140,6 +141,7 @@ export interface PersistedUsageState {
     updatedAt: number;
     lastObservedModelKey: string | null;
     lastUsageContextLimit: number;
+    observedSafeInputTokens?: number;
 }
 
 export interface ProtectedTailMeta {
@@ -232,7 +234,8 @@ function isPersistedUsageRow(row: unknown): row is PersistedUsageRow {
         typeof r.last_input_tokens === "number" &&
         typeof r.last_response_time === "number" &&
         (typeof r.last_observed_model_key === "string" || r.last_observed_model_key === null) &&
-        (typeof r.last_usage_context_limit === "number" || r.last_usage_context_limit === null)
+        (typeof r.last_usage_context_limit === "number" || r.last_usage_context_limit === null) &&
+        typeof r.observed_safe_input_tokens === "number"
     );
 }
 
@@ -347,7 +350,7 @@ function parseHistorianFailureState(result: unknown): PersistedHistorianFailureS
 export function loadPersistedUsage(db: Database, sessionId: string): PersistedUsageState | null {
     const result = db
         .prepare(
-            "SELECT last_context_percentage, last_input_tokens, last_response_time, last_observed_model_key, last_usage_context_limit FROM session_meta WHERE session_id = ?",
+            "SELECT last_context_percentage, last_input_tokens, last_response_time, last_observed_model_key, last_usage_context_limit, observed_safe_input_tokens FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId);
 
@@ -369,6 +372,7 @@ export function loadPersistedUsage(db: Database, sessionId: string): PersistedUs
             typeof result.last_usage_context_limit === "number"
                 ? result.last_usage_context_limit
                 : 0,
+        observedSafeInputTokens: result.observed_safe_input_tokens,
     };
 }
 
@@ -1973,10 +1977,9 @@ function parseOverflowState(
         typeof result.detected_context_limit === "number" && result.detected_context_limit > 0
             ? result.detected_context_limit
             : 0;
-    const modelMatches =
-        limit > 0 && requestedModelKey && storedModelKey
-            ? requestedModelKey === storedModelKey
-            : true;
+    const modelMatches = requestedModelKey
+        ? storedModelKey !== null && requestedModelKey === storedModelKey
+        : true;
     const needs =
         typeof result.needs_emergency_recovery === "number" && result.needs_emergency_recovery > 0;
     const persistedOrigin = normalizeEmergencyRecoveryOrigin(result.emergency_recovery_origin);

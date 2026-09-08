@@ -61,6 +61,8 @@ export interface MessageUpdatedInfo {
 export interface SessionErrorInfo {
     sessionID: string;
     error: unknown;
+    providerID?: string;
+    modelID?: string;
 }
 
 export interface MessageRemovedInfo {
@@ -159,18 +161,48 @@ export function getMessageUpdatedInfo(properties: unknown): MessageUpdatedInfo |
     };
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /**
- * Extract `session.error` event payload. The event carries `{ sessionID, error }`
- * at the top level (no `info` wrapper). We intentionally keep `error` as
- * `unknown` — the plugin does not depend on OpenCode's NamedError shape, the
- * overflow detector accepts strings, Errors, or objects with `message`.
+ * Extract `session.error` payloads without depending on a specific NamedError
+ * variant. OpenCode normally emits only `{ sessionID, error }`, while some
+ * provider errors also carry model identity at the top level or in `error.data`.
  */
 export function getSessionErrorInfo(properties: unknown): SessionErrorInfo | null {
     if (!isRecord(properties)) return null;
     const sessionID = properties.sessionID;
     if (typeof sessionID !== "string" || sessionID.length === 0) return null;
-    // Error may be absent on certain error shapes (SDK variant); treat as unknown.
-    return { sessionID, error: properties.error };
+
+    const error = isRecord(properties.error) ? properties.error : undefined;
+    const data = error && isRecord(error.data) ? error.data : undefined;
+    const model = isRecord(properties.model)
+        ? properties.model
+        : error && isRecord(error.model)
+          ? error.model
+          : data && isRecord(data.model)
+            ? data.model
+            : undefined;
+    const providerID =
+        nonEmptyString(properties.providerID) ??
+        nonEmptyString(model?.providerID) ??
+        nonEmptyString(model?.provider) ??
+        nonEmptyString(error?.providerID) ??
+        nonEmptyString(data?.providerID);
+    const modelID =
+        nonEmptyString(properties.modelID) ??
+        nonEmptyString(model?.modelID) ??
+        nonEmptyString(model?.id) ??
+        nonEmptyString(error?.modelID) ??
+        nonEmptyString(data?.modelID);
+
+    return {
+        sessionID,
+        error: properties.error,
+        ...(providerID ? { providerID } : {}),
+        ...(modelID ? { modelID } : {}),
+    };
 }
 
 export function getMessageRemovedInfo(properties: unknown): MessageRemovedInfo | null {

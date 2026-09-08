@@ -147,14 +147,18 @@ describe("Pi provider failure recovery", () => {
 			},
 		});
 		expect(event).toMatchObject({ kind: "overflow", reportedLimit: 64_000 });
-		const detectedContextLimit = getOverflowState(
+		const overflow = getOverflowState(
 			database,
 			sessionId,
-		).detectedContextLimit;
+			"anthropic/claude-fable-5-1",
+		);
+		expect(overflow.detectedContextLimitModelKey).toBe(
+			"anthropic/claude-fable-5-1",
+		);
 		expect(
 			resolvePiUsableContextLimit({
 				rawContextWindow: 200_000,
-				detectedContextLimit,
+				detectedContextLimit: overflow.detectedContextLimit,
 			}),
 		).toBe(64_000);
 	});
