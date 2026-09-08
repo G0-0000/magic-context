@@ -103,11 +103,13 @@ Then create `magic-context.jsonc` with the one setting the historian needs:
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
-  "historian": { "model": "provider/model-id" }
+  "historian": {
+    "opencode": { "model": "provider/model-id" }
+  }
 }
 ```
 
-- **Required:** `historian.model` must be a real `provider/model-id`. Without it, the plugin loads but historian runs fail, older history is not summarized, and repeated failures show a `Magic Context — history comparting needs attention` notice.
+- **Recommended:** Set `historian.opencode.model` to a real `provider/model-id` so historian quality and cost are independent of the main coding model. When omitted, historian runs fall back to the live session model; if no runnable model is available, older history is not summarized and repeated failures appear in status.
 - **Optional:** `dreamer` and `sidekick` model/disable blocks. Omit them to leave periodic memory consolidation and `/ctx-aug` off.
 - **Optional:** `embedding`. Omit it to use the local `Xenova/all-MiniLM-L6-v2`; turning embeddings off removes semantic/embedding-backed search, but keyword search and context management continue.
 
@@ -149,7 +151,7 @@ Add `--force` to automatically fix what doctor can — it clears stale plugin ca
 
 ## Model configuration
 
-The setup wizard helps you pick a model for the historian and dreamer agents — they don't need a top-tier model, and a model that bills per request (e.g. GitHub Copilot) keeps background-work cost flat. There's no hidden fallback to models you didn't configure; see the [configuration reference](/reference/configuration/) for `model` and optional `fallback_models`.
+The setup wizard helps you pick models for the historian and dreamer. Historian summary quality depends on this separate model, so use one that follows structured summarization instructions reliably. A model that bills per request can keep background-work cost flat. Magic Context uses only your explicit `fallback_models` before the live session model; see the [historian configuration reference](/reference/configuration/#historian).
 
 ## Dashboard
 

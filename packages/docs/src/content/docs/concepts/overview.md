@@ -1,63 +1,49 @@
 ---
 title: Overview
-description: The mental model for how Magic Context manages your session's context, memory, and recall across hours, days, and weeks.
+description: A short map of Magic Context's session history, context reduction, memory, and background maintenance.
 ---
 
-Magic Context runs a pipeline on every turn that keeps your session's context small, your knowledge durable, and the right information available at the right moment. This page is the one-minute tour of how the pieces fit together. If you choose compaction-off mode, the knowledge layer stays active while Magic Context leaves context-window ownership to the harness.
+Magic Context gives your coding agent structured session history, deliberate context reduction, and durable cross-session memory. Start with [How Magic Context works](/concepts/how-it-works/) for the canonical top-to-bottom explanation and worked context-percentage examples.
 
-## The pipeline at a glance
+## See the pipeline at a glance
 
 | Stage | What happens | Deep dive |
-|-------|-------------|-----------|
-| **Tagging** | Every message, file, and tool output gets a `§N§` tag so the system can track and manage it. | [Context reduction](/concepts/context-reduction/) |
-| **Agent-driven reduction** | Your agent calls `ctx_reduce` to drop spent tool outputs and stale messages. Drops are queued and applied at cache-safe moments. | [Context reduction](/concepts/context-reduction/) |
-| **Background condensation** | A historian agent compresses older conversation into tiered compartments — chronological summaries with importance scores. | [Historian](/concepts/historian/) |
-| **Durable knowledge** | The historian promotes durable facts (decisions, constraints, conventions) into project memory that persists across sessions. | [Memory](/concepts/memory/) |
-| **Recall** | Active memories and compartment history inject automatically every turn. On demand, `ctx_search` and `ctx_expand` retrieve deeper. | [Memory](/concepts/memory/) |
-| **Off-hours maintenance** | A dreamer agent runs overnight to consolidate duplicates, verify memories against code, and maintain docs. | [Dreamer](/concepts/dreamer/) |
+|---|---|---|
+| **Tagging** | Trackable messages and tool outputs receive `§N§` identifiers. | [Context reduction](/concepts/context-reduction/) |
+| **Reduction** | The agent queues spent content with `ctx_reduce`; eligible old tool output can also be reclaimed on passes already rebuilding the cache. | [Context reduction](/concepts/context-reduction/) |
+| **Session history** | A separate historian model turns settled conversation into compartments that stay in the prompt and decay to shorter tiers over time. | [Historian](/concepts/historian/) |
+| **Durable knowledge** | Durable facts become project memory that persists across sessions. | [Memory](/concepts/memory/) |
+| **Recall** | Memory and compartment history inject automatically; `ctx_search` and `ctx_expand` retrieve deeper detail. | [Memory](/concepts/memory/) |
+| **Off-hours maintenance** | A dreamer model consolidates and verifies stored knowledge on configured schedules. | [Dreamer](/concepts/dreamer/) |
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  Your session                                               │
-│                                                             │
-│  ┌──────────┐   ┌──────────────┐   ┌────────────────────┐  │
-│  │ Tagging  │──▶│ ctx_reduce   │──▶│ Historian          │  │
-│  │ (§N§)    │   │ (agent drops)│   │ (compartments)     │  │
-│  └──────────┘   └──────────────┘   └────────┬───────────┘  │
-│                                              │              │
-│                                    ┌─────────▼──────────┐   │
-│                                    │ Project memory     │   │
-│                                    │ (durable facts)    │   │
-│                                    └─────────┬──────────┘   │
-│                                              │              │
-│  ┌──────────┐   ┌──────────────┐   ┌────────▼───────────┐  │
-│  │ Dreamer  │◀──│ ctx_search   │◀──│ Recall (auto +     │  │
-│  │ (nightly)│   │ ctx_expand   │   │  on-demand)        │  │
-│  └──────────┘   └──────────────┘   └────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+## Keep the two jobs separate
 
-## Why it matters
+The historian and reduction are complementary, not interchangeable:
 
-Without Magic Context, a coding agent hits a wall: the context window fills up, the host triggers compaction (a full stop to re-read everything), and durable knowledge evaporates at session end. In its normal mode, Magic Context replaces that with a continuous background pipeline; in compaction-off mode, it keeps knowledge and recall without taking over context management.
+1. **The historian preserves meaning.** It replaces older raw conversation with budgeted compartments. Those summaries remain in the prompt.
+2. **Reduction reclaims working material.** It removes spent tagged content, especially bulky tool output, while protecting recent work.
 
-The historian keeps the live window small by compressing old history into [tiered compartments](/concepts/historian/) that render at the right fidelity for the moment. [Project memory](/concepts/memory/) captures the knowledge worth keeping forever. The [dreamer](/concepts/dreamer/) maintains quality overnight. And the whole thing is structured so [background work never invalidates your prompt cache](/concepts/cache-architecture/).
+The execute threshold tells Magic Context when to batch due work. It is not a target percentage. Read [How Magic Context works](/concepts/how-it-works/#treat-the-execute-threshold-as-a-trigger) before tuning it.
 
-## Two promises
+## Know what persists
 
-1. **Your agent does not have to stop to manage its context.** In normal mode, the historian and safety nets work continuously; compaction-off mode is available when the harness should own the window.
-2. **Your agent does not forget durable knowledge.** Memories persist across sessions and across harnesses — write one in OpenCode, retrieve it in Pi.
+The raw transcript remains in the local database even when the active prompt contains compartments or dropped placeholders. Project memory persists across sessions and harnesses. The active prompt is therefore a budgeted view of stored knowledge, not the only copy.
 
-## How the modes differ
+Magic Context also preserves provider prompt caching by keeping the early prompt byte-identical between rebuilds. Read [Cache architecture](/concepts/cache-architecture/) for the internal layout and cache terminology.
 
-Magic Context runs in [three effective modes](/concepts/session-modes/): primary sessions, subagents, and compaction-off mode. Primary sessions get the full historian, memory, and prompt surface; the visible reduce surface appears only when `ctx_reduce` is available in the agent's tool allow-list. Subagents get a lightweight pass. Compaction-off mode keeps additive knowledge and recall while native compaction, or no compaction, owns the window.
+## Choose a session mode
 
-## Where to go next
+Magic Context has [three effective modes](/concepts/session-modes/):
 
-- [Historian](/concepts/historian/) — how compartments work, when the historian fires, what you see
-- [Memory](/concepts/memory/) — the 5 categories, how memories are written and recalled
-- [Memory mural](/concepts/mural/) — opt-in image of overflow memories on vision models
-- [Dreamer](/concepts/dreamer/) — overnight maintenance tasks and scheduling
-- [Context reduction](/concepts/context-reduction/) — tagging, `ctx_reduce`, nudges, and safety nets
-- [Cache architecture](/concepts/cache-architecture/) — why the layout preserves prompt caching
-- [Session modes](/concepts/session-modes/) — the three modes and when to choose each
+- **Primary sessions** use historian compartments, reduction, memory, and the full prompt surface.
+- **Subagents** receive a lighter context-management pass suited to shorter tasks.
+- **Compaction-off mode** keeps the knowledge layer while your harness, or no compactor, owns the context window.
+
+## Continue by goal
+
+- Explain a surprising context percentage: [How Magic Context works](/concepts/how-it-works/)
+- Improve compartment summaries: [Historian](/concepts/historian/)
+- Understand tagged drops and emergency behavior: [Context reduction](/concepts/context-reduction/)
+- Keep facts across sessions: [Memory](/concepts/memory/)
+- Render overflow memory as an image: [Memory mural](/concepts/mural/)
+- Maintain stored knowledge on a schedule: [Dreamer](/concepts/dreamer/)

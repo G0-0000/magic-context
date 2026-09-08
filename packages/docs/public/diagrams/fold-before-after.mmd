@@ -1,0 +1,20 @@
+%% Static source for fold-before-after.svg. Render with Mermaid and commit the SVG.
+%% Each column is approximately 5k tokens in the 200k illustrative window.
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"system-ui, sans-serif","primaryColor":"#e9f3ff","primaryTextColor":"#172033","primaryBorderColor":"#3b82c4","lineColor":"#64748b","secondaryColor":"#eef8ef","tertiaryColor":"#fff6df","background":"transparent"}}}%%
+block-beta
+  columns 40
+  BT["Before · 140k / 200k = 70%"]:40
+  B1["Fixed<br/>12k"]:2 B2["History<br/>12k"]:2 B3["Settled conversation<br/>48k"]:10 B4["Protected recent work<br/>28k"]:6 B5["Tool output<br/>40k"]:8 BS["Headroom<br/>60k"]:12
+  AT["After · 90k / 200k = 45%"]:40
+  A1["Fixed<br/>12k"]:2 A2["History after fold<br/>19k"]:4 A3["Protected recent work<br/>28k"]:6 A4["Tool output left<br/>31k"]:6 AS["Headroom<br/>110k"]:22
+  style B1 fill:#dbeafe
+  style A1 fill:#dbeafe
+  style B2 fill:#dcfce7
+  style A2 fill:#dcfce7
+  style B3 fill:#fef3c7
+  style B4 fill:#fce7f3
+  style A3 fill:#fce7f3
+  style B5 fill:#ede9fe
+  style A4 fill:#ede9fe
+  style BS fill:#f8fafc,stroke-dasharray: 5 5
+  style AS fill:#f8fafc,stroke-dasharray: 5 5

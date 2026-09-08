@@ -1,0 +1,103 @@
+---
+title: Context reduction
+description: Learn how tags, ctx_reduce, automatic age-based reclaim, nudges, protected tokens, and emergency recovery manage working context.
+---
+
+import { TabItem, Tabs } from '@astrojs/starlight/components';
+
+Context reduction reclaims working material such as old tool output. It is separate from the [historian](/concepts/historian/), which turns settled conversation into compartments that remain in the prompt.
+
+## Track content with §N§ tags
+
+Every trackable message, file attachment, and tool output receives a `§N§` prefix, such as `§42§`. The agent uses these stable identifiers to tell `ctx_reduce` which material it has finished using.
+
+Tags are visible in the conversation when `ctx_reduce` is available to that agent. You do not need to manage them yourself.
+
+## Queue a reduction with ctx_reduce
+
+The agent queues one or more tags for removal:
+
+```text
+ctx_reduce(drop="3-5,8,12-15")
+```
+
+A queued drop is not necessarily immediate. Magic Context prefers to apply it during a pass that is already rebuilding the prompt cache. This avoids paying for repeated cache rewrites while the agent is still working.
+
+The recent protected window is measured by **token mass**, not a fixed number of tags. `protected_tokens` can set the floor explicitly. When you omit it, Magic Context derives a value from the active model's usable window; for example, 200k usable tokens derive 16k protected tokens, while 1M derives 50k. The older `protected_tags` setting is deprecated and has no behavioral effect. See the [generated configuration reference](/reference/configuration/#context-management) for the exact range and formula.
+
+When a drop lands, the original content is replaced by a small dropped or truncated marker. The raw transcript remains in the local database for later retrieval.
+
+## Reclaim old tool output automatically
+
+Magic Context also has positional, age-based reclaim. It considers tool output from before the last execute boundary, ignores small tool arcs below 250 tokens, and keeps the newest `todowrite` result plus the newest three `ctx_reduce` results.
+
+Automatic reclaim has two gates:
+
+1. context pressure has scheduled an execute pass; and
+2. that pass is already rebuilding the cache, or emergency recovery is active.
+
+It therefore **rides a cache-rebuilding pass but never opens one by itself**. This rule applies above the execute threshold as soon as an eligible pass occurs; there is no empty 65%–85% band where all tool output must wait for emergency recovery.
+
+The protected token window still wins during normal reclaim. Recent content stays available even when an older tag count would have made it eligible under the deprecated behavior.
+
+## Read the nudge bands
+
+Magic Context compares unreduced, reclaimable tokens with total live-tail tokens. It stays quiet until the live tail is at least 60k tokens and reclaimable content is at least 25k tokens. Above those floors, the ratio selects the reminder:
+
+| Reclaimable share of the live tail | Nudge |
+|---:|---|
+| Below 0.20 | Quiet |
+| 0.20–0.39 | Gentle |
+| 0.40–0.59 | Firm |
+| 0.60 and above | Urgent |
+| 0.75 and above, with at least 50k reclaimable tokens | Channel 2 ceiling nudge |
+
+Channel 1 reminders appear inline with tool results. Channel 2 is a stronger synthetic steer message. Calling `ctx_reduce` suppresses further nagging while the agent is actively managing context.
+
+<Tabs>
+  <TabItem label="OpenCode">
+    Channel 1 is appended to an eligible tool result as a `<system-reminder>`. Channel 2 is delivered through OpenCode's prompt loop as a hidden steer message.
+  </TabItem>
+  <TabItem label="Pi">
+    Channel 1 is appended to an eligible tool result. Channel 2 uses Pi's steer delivery mode and is hidden from the displayed transcript.
+  </TabItem>
+</Tabs>
+
+These bands are built-in behavior, not configuration keys.
+
+## Know what happens at each pressure band
+
+The [execute threshold](/concepts/how-it-works/#treat-the-execute-threshold-as-a-trigger) is a trigger, not a target. At the default 65% threshold, Magic Context can apply queued reductions, heuristic cleanup, age-based reclaim, and ready history updates in one cache-aware pass.
+
+The two emergency bands are not configurable:
+
+| Band | What happens | What remains protected |
+|---|---|---|
+| **Force band: the greater of 85% or execute threshold + 2 points** | Magic Context materializes immediately, bypasses normal mid-tool boundary deferral, and starts an emergency drain. At the default 65% threshold, this begins at 85%; with a 90% threshold, it begins at 92%. | The normal protected token window still applies, along with the reserved newest share of edit, search, and navigation output. |
+| **95% absolute emergency** | New work blocks while emergency recovery drains context. | Both the protected token window and that newest-tool reserve yield so the session can recover. |
+
+The emergency drain remains active until usage falls at least 10 percentage points below the execute threshold, or its 30-minute safety latch expires. These are recovery mechanisms, not normal operating targets.
+
+:::note
+A high percentage does not identify the cause. Use `/ctx-status` to separate compartment history, recent conversation, and reclaimable tool output before choosing a lever.
+:::
+
+## Enable smart drops when useful
+
+`smart_drops` is optional and off by default. When enabled, it adds content-aware selection to a pass that is already rebuilding the cache:
+
+- keeps only the newest `todowrite` result and newest three spent `ctx_reduce` results;
+- drops zero-value `bash_status`, `bash_kill`, and `ctx_note` read or dismiss results;
+- replaces older edits or writes to the same file with a small marker that preserves the file path, while keeping the newest edit full.
+
+Smart drops honor normal protection and never initiate a cache rewrite. Enable the setting in `magic-context.jsonc`, then restart the harness. See the [configuration reference](/reference/configuration/) for the source-generated description.
+
+## Hide the reduce surface
+
+Deny or omit `ctx_reduce` from a specific agent's tool allow-list to remove the agent-facing reduction surface for that session. Magic Context then omits visible `§N§` prefixes, reduction guidance, and both nudge channels for that agent.
+
+Deterministic management still runs: the historian, heuristic cleanup, age-based reclaim during eligible cache-rebuilding passes, emergency recovery, compartment injection, and memory remain available. See [Session modes](/concepts/session-modes/) for the broader feature comparison.
+
+## Diagnose a surprising percentage
+
+Use the table in [How Magic Context works](/concepts/how-it-works/#what-shrinks-what). If conversation dominates, look at historian progress and the history budget. If tool output dominates, let the agent call `ctx_reduce` and check whether an eligible cache-rebuilding pass has occurred. If recent work dominates, it is intentionally protected until it ages out.

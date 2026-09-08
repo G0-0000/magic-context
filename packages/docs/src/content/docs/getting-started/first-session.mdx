@@ -3,35 +3,24 @@ title: Your first session
 description: A guided tour of what you see and what happens during a long session with Magic Context active.
 ---
 
-Once Magic Context is installed and your harness is restarted, the session starts differently. This page walks through what you see and what is happening in the background.
+import { TabItem, Tabs } from '@astrojs/starlight/components';
+
+Once Magic Context is installed and your harness is restarted, the session starts differently. This page walks through what you see; [How Magic Context works](/concepts/how-it-works/) explains why the percentages move.
 
 ## The status display
 
-<details>
-<summary><strong>OpenCode TUI / Desktop</strong></summary>
-
-A live sidebar updates after every message. It shows:
-
-- Context usage as a percentage of the model's window
-- Active tag count and pending drop queue
-- Historian status (idle / running / last run time)
-- Compartment count and coverage
-- Project memory count
-
-You can also run `/ctx-status` at any time for a detailed debug view.
-
-</details>
-
-<details>
-<summary><strong>Pi</strong></summary>
-
-A status line in the footer shows context usage and Magic Context state. Run `/ctx-status` for the full debug view.
-
-</details>
+<Tabs>
+  <TabItem label="OpenCode">
+    A live TUI sidebar updates after each message. It shows context usage, active tags and queued drops, historian state, compartment coverage, and project-memory count. `/ctx-status` provides a detailed view.
+  </TabItem>
+  <TabItem label="Pi">
+    A footer line shows context usage and Magic Context state. Run `/ctx-status` for the detailed view of tags, queued drops, historian state, compartments, and memory.
+  </TabItem>
+</Tabs>
 
 ## §N§ tags
 
-Every message in your session is assigned a tag — a short identifier like `§1§`, `§42§` — that Magic Context uses to track and manage content. These tags appear on messages in the context.
+When `ctx_reduce` is available to the agent, trackable content receives a tag—a short identifier such as `§1§` or `§42§`. These tags appear in the model's conversation context.
 
 Tags serve two purposes:
 
@@ -63,7 +52,7 @@ You will see tag references in the `/ctx-status` output and in `ctx_reduce` nudg
              I see from earlier we used JWT with RS256 and 15-minute expiry...
 ```
 
-After the historian runs, the older messages are replaced by a compact compartment in `<session-history>`. The session keeps flowing — you see the compartment summary, not the original detail. But if the agent needs the original, it calls `ctx_expand` to pull it back.
+After the historian publishes the compartment, older settled messages are represented by compact history. The session keeps flowing, and the agent sees the compartment rather than all original detail. If it needs the source transcript, it calls `ctx_expand`.
 
 ## What the agent sees vs what you see
 
@@ -72,7 +61,7 @@ When the historian creates a compartment, two things happen:
 1. The raw messages are stored in the database (never deleted)
 2. A compact summary replaces them in the active context window
 
-**From your side:** the session continues. You may notice `/ctx-status` shows a new compartment and the token count drops.
+**From your side:** the session continues. `/ctx-status` can show a new compartment. The token count may fall, but the compartment remains in the prompt and a tool-output-heavy session may barely move.
 
 **From the agent's side:** it sees the compartment summary instead of the raw messages. If it needs more detail, it can call `ctx_expand` with the compartment range to retrieve the original transcript.
 
@@ -96,7 +85,7 @@ If you prefer a specific agent to stay out of context management, deny or omit `
 
 ## Setting expectations
 
-- **Comparting happens in the background.** The session never pauses for it. You will notice the context window shrinking and compartment count rising between your messages.
-- **First compartment takes a few turns.** The historian fires when context pressure builds or after a cluster of commits. Short sessions may not trigger it at all.
+- **Compartment creation happens in the background.** Compartment count can rise between messages without forcing the total toward a target percentage.
+- **The first compartment takes a few turns.** The historian fires when pressure builds, enough settled conversation accumulates, or commit clusters mark completed work. Short sessions may not trigger it.
 - **Memory appears next session.** Memories written by the historian during this session show up in `<project-memory>` the next time you start a session on the same project.
-- **Deeper concepts** are covered in the [Historian](/concepts/historian/) and [Memory](/concepts/memory/) concept pages.
+- **Deeper concepts** are covered in [How Magic Context works](/concepts/how-it-works/), [Historian](/concepts/historian/), and [Memory](/concepts/memory/).

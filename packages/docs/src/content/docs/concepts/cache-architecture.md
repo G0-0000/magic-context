@@ -1,9 +1,9 @@
 ---
 title: Cache architecture
-description: How Magic Context's message layout preserves prompt cache stability so background work never re-bills your cached prefix.
+description: How Magic Context's message layout preserves prompt cache stability and batches the rewrites that do incur cache cost.
 ---
 
-This page is for the curious and the cost-conscious. It explains why Magic Context's internal message layout looks the way it does, and how it avoids the prompt-cache thrashing that a naive implementation would cause.
+This page is for the curious and the cost-conscious. It explains why Magic Context's internal message layout looks the way it does, which bytes remain frozen between folds, and why the folds that rewrite them are batched.
 
 ## The problem
 
@@ -54,6 +54,12 @@ When the agent writes a memory via `ctx_memory`, it does **not** trigger an m[0]
 
 Only **dashboard** memory edits and `/ctx-session-upgrade` migrations bump the project memory epoch, forcing an immediate m[0] re-materialize. These are external editors that can't otherwise signal a running session.
 
+## Price folds, not every turn
+
+A fold is a prompt-cache rewrite. Providers may price cache writes and uncached input above cache reads, so frequent small folds can repeatedly bill overlapping prefix bytes. Magic Context batches due history, memory, and reduction work into fewer rebuilds; every ordinary turn between them replays the stable prefix byte for byte.
+
+`cache_ttl` is Magic Context's assumption about how long the provider retains that prefix. Its default is `5m`, and it can vary by model. When the assumed TTL has expired during idle time, Magic Context can rebuild on the next turn because it treats the old provider cache as gone. This setting does not change the provider's actual cache policy. See the [generated configuration reference](/reference/configuration/#context-management).
+
 ## Honest framing
 
 Occasional full re-materializations are by design. They happen when:
@@ -67,4 +73,4 @@ In a steady-state working session, m[0] stays stable for hours or days. The prom
 
 ## How it connects
 
-The cache architecture is the foundation that makes the rest of the [pipeline](/concepts/overview/) affordable. The [historian](/concepts/historian/) publishes compartments that ride the m[1] delta. [Memory](/concepts/memory/) writes surface through m[1] watermarks. [Context reduction](/concepts/context-reduction/) drops land on the conversation tail without touching m[0] or m[1]. And the [session mode](/concepts/session-modes/) determines which features participate in the cache-stable layout.
+The cache architecture is the foundation that makes [the full session lifecycle](/concepts/how-it-works/) affordable. The [historian](/concepts/historian/) publishes compartments that ride the m[1] delta. [Memory](/concepts/memory/) writes surface through m[1] watermarks. [Context reduction](/concepts/context-reduction/) drops land on the conversation tail without touching m[0] or m[1]. And the [session mode](/concepts/session-modes/) determines which features participate in the cache-stable layout.

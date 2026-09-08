@@ -1,0 +1,14 @@
+%% Static source for two-layers.svg. Render with Mermaid and commit the SVG.
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"system-ui, sans-serif","primaryColor":"#e9f3ff","primaryTextColor":"#172033","primaryBorderColor":"#3b82c4","lineColor":"#64748b","secondaryColor":"#eef8ef","tertiaryColor":"#fff6df","background":"transparent"}}}%%
+flowchart LR
+  subgraph Historian["Historian — structured history"]
+    A["Settled conversation"] --> B["Compartment summaries"]
+    B --> C["Remain in the prompt"]
+    C --> D["Lose detail in older decay tiers"]
+  end
+  subgraph Reduction["Reduction — reclaimed working material"]
+    E["Tagged tool outputs"] --> F["ctx_reduce queue"]
+    E --> G["Automatic age-based reclaim"]
+    F --> H["Dropped placeholders"]
+    G --> H
+  end

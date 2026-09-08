@@ -1,4 +1,5 @@
 // @ts-check
+import { unified } from "@astrojs/markdown-remark";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import { remarkBaseLinks } from "./remark-base-links.mjs";
@@ -11,10 +12,13 @@ export default defineConfig({
     // URL space — sibling CortexKit plugin docs will share this subdomain.
     outDir: "./dist-root/magic-context",
     markdown: {
-        remarkPlugins: [remarkBaseLinks({ base: "/magic-context" })],
+        processor: unified({
+            remarkPlugins: [remarkBaseLinks({ base: "/magic-context" })],
+        }),
     },
     integrations: [
         starlight({
+            disable404Route: true,
             customCss: ["./src/styles/reference-tables.css"],
             title: "Magic Context",
             description:
@@ -43,6 +47,7 @@ export default defineConfig({
                 {
                     label: "Concepts",
                     items: [
+                        { slug: "concepts/how-it-works" },
                         { slug: "concepts/overview" },
                         { slug: "concepts/historian" },
                         { slug: "concepts/memory" },
