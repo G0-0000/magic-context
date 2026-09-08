@@ -343,15 +343,10 @@ export function registerCtxSessionUpgradeCommand(
 						return;
 					}
 
-					// DEFERRED staging (background-safe): stage the native marker as a
-					// pending blob + signal a DEFERRED history refresh so the next
-					// transform pass (at a turn boundary) drains and applies it. The
-					// detached run must NOT apply the marker eagerly (appendCompaction
-					// mutates getBranch immediately, which from a background task could
-					// land mid-turn) nor use the eager history/materialization signals
-					// — those would force a materialization on whatever pass is
-					// running, possibly mid-turn, busting the cache. Mirrors the
-					// background historian's onPublished (signalPiDeferred*).
+					// Deferred staging lets the native marker and history refresh ride the
+					// next genuine bust. The detached run must not mutate getBranch or
+					// force materialization eagerly because either could alter an otherwise
+					// cache-stable pass. This mirrors the historian's deferred publish signals.
 					//
 					// Isolated in its own try/catch: marker staging is best-effort (the
 					// next incremental historian pass re-stages a covering marker), so a

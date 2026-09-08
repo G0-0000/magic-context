@@ -200,21 +200,26 @@ describe("Pi scheduler decision observability", () => {
 		) => Promise<{ messages: never[] } | undefined>,
 		sessionId: string,
 		messages: ReturnType<typeof userMessage>[],
+		usagePercentage = 0,
 	): Promise<void> {
-		await handler(
-			{ messages: messages as never[] },
-			fakeContext(
+		await handler({ messages: messages as never[] }, {
+			...fakeContext(
 				sessionId,
 				process.cwd(),
 				messages.map((_message, index) => `entry-${index}`),
 				messages as never,
-			) as never,
-		);
+			),
+			getContextUsage: () => ({
+				tokens: usagePercentage * 1_000,
+				percent: usagePercentage,
+				contextWindow: 100_000,
+			}),
+		} as never);
 	}
 
-	it("logs the durable queue depth and mid-turn boundary reason", async () => {
+	it("applies pending automatic reclaim on the first busting pass of a marathon turn", async () => {
 		const db = createTestDb();
-		const sessionId = "ses-decision-log-mid-turn";
+		const sessionId = "ses-first-busting-pass-reclaim";
 		const lines: string[] = [];
 		const restoreObserver =
 			contextHandlerInternals.setPendingDecisionLogObserverForTests((line) =>
@@ -225,44 +230,59 @@ describe("Pi scheduler decision observability", () => {
 			registerPiContextHandler(fake.pi as never, {
 				db,
 				heuristics: {},
+				injection: { injectionBudgetTokens: 10_000 },
+				protectedTags: 1,
 			});
 			const handler = fake.handlers.get("context") as Parameters<
 				typeof runPass
 			>[0];
-			const firstPass = [
-				userMessage("first", 1),
-				assistantMessage("answer", 2),
-			];
+			const coveredUser = userMessage("covered request", 1);
+			const coveredAssistant = assistantMessage("covered answer", 2);
+			const firstPass = [coveredUser, coveredAssistant];
 			await runPass(handler, sessionId, firstPass);
+
+			const reclaimTag = getTagsBySession(db, sessionId).find(
+				(tag) => tag.status === "active",
+			);
+			expect(reclaimTag).toBeDefined();
+			queuePendingOp(db, sessionId, reclaimTag?.id ?? -1, "drop");
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "entry-0",
+					endMessageId: "entry-1",
+					title: "Published history",
+					content: "U: covered request\nA: covered answer",
+					p1: "U: covered request\nA: covered answer",
+				},
+			]);
+			signalPiDeferredHistoryRefresh(sessionId);
+			signalPiDeferredMaterialization(sessionId);
 			lines.length = 0;
-			queuePendingOp(db, sessionId, 1, "drop");
-			updateSessionMeta(db, sessionId, {
-				lastContextPercentage: 70,
-				lastInputTokens: 70_000,
-				lastResponseTime: Date.now(),
-			});
-			const midTurnPass = [
-				userMessage("second", 3),
+
+			const marathonPass = [
+				coveredUser,
+				coveredAssistant,
+				userMessage("keep steering", 3),
 				assistantToolCall("call-1", "ctx_reduce", {}, 4),
 			];
-			await runPass(handler, sessionId, midTurnPass);
+			await runPass(handler, sessionId, marathonPass, 75);
 
 			expect(lines).toContain(
-				"pending ops WILL NOT APPLY — reason=mid_turn_boundary pendingOps=1 context=70.0%",
+				"pending ops WILL APPLY — reason=deferred_publication, pendingOps=1 context=75.0%",
 			);
 			expect(lines).toContain(
-				"heuristics WILL NOT RUN — reason=mid_turn_boundary",
+				"heuristics WILL RUN — reason=scheduler_execute (pendingOps=1, scheduler=execute), context=75.0%, turn=n/a",
 			);
-
-			lines.length = 0;
-			const boundaryPass = [
-				userMessage("third", 5),
-				assistantMessage("answer", 6),
-			];
-			await runPass(handler, sessionId, boundaryPass);
-			expect(lines).toContain(
-				"pending ops WILL APPLY — reason=scheduler_execute (scheduler=execute), pendingOps=1 context=70.0%",
-			);
+			expect(getPendingOps(db, sessionId)).toHaveLength(0);
+			expect(
+				getTagsBySession(db, sessionId).find((tag) => tag.id === reclaimTag?.id)
+					?.status,
+			).toBe("dropped");
+			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(false);
+			expect(consumeDeferredMaterialization(sessionId)).toBe(false);
 		} finally {
 			restoreObserver();
 			clearContextHandlerSession(sessionId);

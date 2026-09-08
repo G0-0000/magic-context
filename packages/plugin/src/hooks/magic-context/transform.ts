@@ -1,4 +1,3 @@
-import * as crypto from "node:crypto";
 import {
     type AuthorityModuleClient,
     checksumAuthoritySeedRows,
@@ -44,7 +43,6 @@ import {
     recordOverflowDetected,
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
-    setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import type { Tagger } from "../../features/magic-context/tagger";
@@ -63,7 +61,6 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
-import { applyMidTurnDeferral, detectMidTurnBypassReason } from "./boundary-execution";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
@@ -111,7 +108,7 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { readRawSessionMessages } from "./read-session-chunk";
-import { findLastAssistantModelFromOpenCodeDb, midTurnFromMessages } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -1370,7 +1367,7 @@ export function createTransform(deps: TransformDeps) {
         // approves an execute pass, so no pending-op drain, heuristic cleanup,
         // age sweep or smart drop can fire, and the execute-only
         // lastResponseTime watermark write below stays quiet too.
-        const schedulerDecisionEarly = compactionOff
+        const schedulerDecision = compactionOff
             ? ("defer" as const)
             : resolveSchedulerDecision(
                   deps.scheduler,
@@ -1380,38 +1377,8 @@ export function createTransform(deps: TransformDeps) {
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
-        const midTurn = midTurnFromMessages(messages);
-        const bypassReason = detectMidTurnBypassReason({
-            contextUsage: contextUsageEarly,
-            sessionMeta,
-            historyRefreshSessions: deps.historyRefreshSessions,
-            sessionId,
-            effectiveExecuteThresholdPercentage,
-        });
-
-        const {
-            midTurnAdjustedSchedulerDecision,
-            sideEffect,
-            deferReason: schedulerDeferReason,
-        } = applyMidTurnDeferral({
-            base: schedulerDecisionEarly,
-            bypassReason,
-            midTurn,
-        });
-
-        if (sideEffect === "set-flag") {
-            const flagPayload = {
-                id: crypto.randomUUID(),
-                reason: `${schedulerDecisionEarly}-${bypassReason}`,
-                recordedAt: Date.now(),
-            };
-            setDeferredExecutePendingIfAbsent(db, sessionId, flagPayload);
-        }
-
-        sessionLog(
-            sessionId,
-            `[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
-        );
+        const schedulerDeferReason =
+            schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
         // Capture explicit history refresh immediately before the first
         // prepareCompartmentInjection consumer and before any drain. This is a
         // per-pass local, not shared deps state: concurrent transforms must not
@@ -1424,7 +1391,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionMeta.compartmentInProgress) &&
             contextUsageEarly.percentage < forceMaterializationPercentage;
         const canConsumeDeferredEarly = canConsumeDeferredOnThisPass({
-            schedulerDecision: midTurnAdjustedSchedulerDecision,
+            schedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: false,
             activeRunBlocksMaterialization: earlyActiveRunBlocksMaterialization,
@@ -2096,7 +2063,6 @@ export function createTransform(deps: TransformDeps) {
 
         // Reuse the early scheduler result — inputs haven't changed.
         const contextUsage = contextUsageEarly;
-        const schedulerDecision = midTurnAdjustedSchedulerDecision;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
@@ -2135,8 +2101,7 @@ export function createTransform(deps: TransformDeps) {
             // Scheduler "execute" passes are safe for compressor (they already bust cache
             // via pending ops); snapshot-drain keeps same-pass compressor signals safe.
             safeForBackgroundCompression:
-                historianRunnable &&
-                (isCacheBusting || midTurnAdjustedSchedulerDecision === "execute"),
+                historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalUserMemories: deps.experimentalUserMemories,
@@ -2204,7 +2169,7 @@ export function createTransform(deps: TransformDeps) {
             getActiveCompartmentRun(sessionId) !== undefined &&
             contextUsageEarly.percentage < forceMaterializationPercentage;
         const canConsumeDeferredLate = canConsumeDeferredOnThisPass({
-            schedulerDecision: midTurnAdjustedSchedulerDecision,
+            schedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: compartmentPhase.justAwaitedPublication,
             activeRunBlocksMaterialization: lateActiveRunBlocksMaterialization,

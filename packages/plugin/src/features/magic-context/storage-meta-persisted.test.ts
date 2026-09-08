@@ -4,16 +4,11 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { getProtectionWindowForSession } from "./protection-window";
 import {
-    clearDeferredExecutePendingIfMatches,
-    type DeferredExecutePayload,
     getPersistedEpochFloor,
-    peekDeferredExecutePending,
     persistEpochFloorSnapshot,
     resetEpochFloorRegistryForTest,
     resolveEpochFloorForPass,
-    setDeferredExecutePendingIfAbsent,
 } from "./storage-meta-persisted";
-import { ensureSessionMetaRow } from "./storage-meta-shared";
 import { getOldestActiveUnprotectedToolTags } from "./storage-tags";
 
 function createTestDb(): Database {
@@ -41,7 +36,6 @@ function createTestDb(): Database {
             tool_call_tokens INTEGER NOT NULL DEFAULT 0,
             cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
             last_todo_state TEXT NOT NULL DEFAULT '',
-            deferred_execute_state TEXT,
             protected_tokens_effective INTEGER,
             protected_tokens_pre_snapshot TEXT
         );
@@ -70,64 +64,6 @@ function createTestDb(): Database {
     `);
     return db;
 }
-
-const payload: DeferredExecutePayload = {
-    id: "flag-1",
-    reason: "execute-none",
-    recordedAt: 1_700_000_000_000,
-};
-
-describe("deferred execute state", () => {
-    let db: Database;
-
-    beforeEach(() => {
-        db = createTestDb();
-    });
-
-    it("peeks null when no deferred execute state is present", () => {
-        ensureSessionMetaRow(db, "session-1");
-
-        expect(peekDeferredExecutePending(db, "session-1")).toBeNull();
-    });
-
-    it("peeks non-null deferred execute state", () => {
-        ensureSessionMetaRow(db, "session-1");
-        db.prepare("UPDATE session_meta SET deferred_execute_state = ? WHERE session_id = ?").run(
-            JSON.stringify(payload),
-            "session-1",
-        );
-
-        expect(peekDeferredExecutePending(db, "session-1")).toEqual(payload);
-    });
-
-    it("set-then-set fails when a deferred execute state already exists", () => {
-        expect(setDeferredExecutePendingIfAbsent(db, "session-1", payload)).toBe(true);
-
-        const second: DeferredExecutePayload = { ...payload, id: "flag-2" };
-        expect(setDeferredExecutePendingIfAbsent(db, "session-1", second)).toBe(false);
-    });
-
-    it("set-then-peek returns the recorded deferred execute payload", () => {
-        setDeferredExecutePendingIfAbsent(db, "session-1", payload);
-
-        expect(peekDeferredExecutePending(db, "session-1")).toEqual(payload);
-    });
-
-    it("clear-matches removes the deferred execute payload", () => {
-        setDeferredExecutePendingIfAbsent(db, "session-1", payload);
-
-        expect(clearDeferredExecutePendingIfMatches(db, "session-1", payload)).toBe(true);
-        expect(peekDeferredExecutePending(db, "session-1")).toBeNull();
-    });
-
-    it("clear-stale-fails leaves the deferred execute payload intact", () => {
-        setDeferredExecutePendingIfAbsent(db, "session-1", payload);
-
-        const stale: DeferredExecutePayload = { ...payload, id: "stale" };
-        expect(clearDeferredExecutePendingIfMatches(db, "session-1", stale)).toBe(false);
-        expect(peekDeferredExecutePending(db, "session-1")).toEqual(payload);
-    });
-});
 
 describe("floor snapshot write & lifecycle (protected_tokens_effective)", () => {
     let db: Database;

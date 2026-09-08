@@ -445,10 +445,23 @@ describe("Rust mode authority adapter", () => {
             geometry,
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
         expect(body.usage).toEqual({ context_limit_tokens: 128_000 });
         expect(body.geometry).toEqual(geometry);
+    });
+
+    it("omits retired host turn state from the transform wire", () => {
+        const body = __rustModeTransformTest.buildTransformBody({
+            sessionId: "no-host-turn-state",
+            input: [],
+            nativeMessages: [],
+            passInputs: {},
+            usage: {},
+            modelKey: null,
+            providerId: null,
+        });
+
+        expect(body).not.toHaveProperty("mid_turn");
     });
 
     it("omits geometry without changing the legacy transform shape", () => {
@@ -460,7 +473,6 @@ describe("Rust mode authority adapter", () => {
             usage: { context_limit_tokens: 128_000 },
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
         expect("geometry" in body).toBe(false);
     });
@@ -504,7 +516,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
 
         expect(body.tool_input_key_orders).toEqual({
@@ -522,7 +533,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
         expect(body.history_budget_tokens).toBe(42_000);
     });
@@ -543,7 +553,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
 
         expect(body.historian_model_chain).toEqual([
@@ -584,7 +593,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: "anthropic/vision-model",
             providerId: "anthropic",
-            midTurn: false,
         });
 
         expect(body.mural).toEqual(mural);
@@ -611,7 +619,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
         expect(body).toMatchObject({
             lineage_switched: true,
@@ -633,7 +640,6 @@ describe("Rust mode authority adapter", () => {
             usage: {},
             modelKey: null,
             providerId: null,
-            midTurn: false,
         });
         expect(body.caveman_enabled).toBe(true);
         expect(body.caveman_min_chars).toBe(240);

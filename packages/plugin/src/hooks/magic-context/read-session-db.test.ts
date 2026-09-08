@@ -9,12 +9,12 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     __openCodeTurnStateTest,
+    assistantAwaitingTools,
+    assistantAwaitingToolsFromMessages,
+    assistantAwaitingToolsFromOpenCodeDb,
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
     hasNewerRealUserMessage,
-    isMidTurn,
-    isMidTurnFromOpenCodeDb,
-    midTurnFromMessages,
     observeOpenCodeTurnEvent,
     shouldHoldIgnoredNotification,
     shouldHoldIgnoredNotificationFromMessages,
@@ -42,7 +42,7 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-function createMidTurnDb(): Database {
+function createTurnStateDb(): Database {
     const db = new Database(":memory:");
     db.exec(
         "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
@@ -73,9 +73,9 @@ function messagesFromDb(db: Database, sessionId: string) {
     }));
 }
 
-function expectMidTurn(db: Database, sessionId: string, expected: boolean): void {
-    const fromDb = isMidTurnFromOpenCodeDb(db, sessionId);
-    const fromMessages = midTurnFromMessages(messagesFromDb(db, sessionId));
+function expectAssistantAwaitingTools(db: Database, sessionId: string, expected: boolean): void {
+    const fromDb = assistantAwaitingToolsFromOpenCodeDb(db, sessionId);
+    const fromMessages = assistantAwaitingToolsFromMessages(messagesFromDb(db, sessionId));
     expect(fromDb).toBe(expected);
     expect(fromMessages).toBe(fromDb);
 }
@@ -123,24 +123,24 @@ function insertPart(
     ).run(id, messageId, sessionId, Date.now(), Date.now(), JSON.stringify(data));
 }
 
-describe("isMidTurnFromOpenCodeDb", () => {
-    it("is mid-turn when the latest assistant finished with tool-calls", () => {
-        const db = createMidTurnDb();
+describe("assistant tool-wait detection", () => {
+    it("reports an assistant waiting for tools when the latest assistant finished with tool-calls", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("is not mid-turn when a newer real user message ends a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("does not report an assistant waiting for tools when a newer real user message ends a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("does not release mid-turn for synthetic-part user messages after a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active for synthetic-part user messages after a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "agent nudge" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -149,22 +149,22 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("is mid-turn when the latest assistant has a non-provider-executed tool part", () => {
-        const db = createMidTurnDb();
+    it("reports an assistant waiting for tools when the latest assistant has a non-provider-executed tool part", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertPart(db, "session-1", "assistant-1", "part-1", {
             type: "tool",
             providerExecuted: false,
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("is not mid-turn when a newer real user message ends an unexecuted tool tail", () => {
-        const db = createMidTurnDb();
+    it("does not report an assistant waiting for tools when a newer real user message ends an unexecuted tool tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertPart(db, "session-1", "assistant-1", "part-1", {
             type: "tool",
@@ -172,30 +172,30 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("is not mid-turn for provider-executed tool parts", () => {
-        const db = createMidTurnDb();
+    it("does not report an assistant waiting for tools for provider-executed tool parts", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
         insertPart(db, "session-1", "assistant-1", "part-1", {
             type: "tool",
             providerExecuted: true,
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("is not mid-turn when the latest assistant has no tool parts", () => {
-        const db = createMidTurnDb();
+    it("does not report an assistant waiting for tools when the latest assistant has no tool parts", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
         insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("does not release mid-turn for marker-part user messages after a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active for marker-part user messages after a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "✉ Inbox from peer" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -210,11 +210,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("releases mid-turn for an @mention operator prompt with a synthetic agent part", () => {
-        const db = createMidTurnDb();
+    it("ends the assistant tool wait for an @mention operator prompt with a synthetic agent part", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "do the thing @research-deep" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -227,20 +227,20 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("releases mid-turn for a partless user message (vacuous-ALL fence)", () => {
-        const db = createMidTurnDb();
+    it("ends the assistant tool wait for a partless user message (vacuous-ALL fence)", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
         // No parts inserted — partless messages must count as real.
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("releases mid-turn when a user message has a marker part AND a real text part", () => {
-        const db = createMidTurnDb();
+    it("ends the assistant tool wait when a user message has a marker part AND a real text part", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "real input with marker" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -253,11 +253,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "real input with marker",
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
     it("releases for real text with a file attachment part", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "review this file" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -270,11 +270,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "file:///tmp/example.txt",
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
     it("releases for a file-only user message without machine markers", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -283,11 +283,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             url: "data:image/png;base64,AAAA",
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
     it("releases when step boundary parts accompany real text", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "continue with the fix" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", { type: "step-start" });
@@ -297,11 +297,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
         insertPart(db, "session-1", "user-1", "part-3", { type: "step-finish" });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
     it("does not release when every part is synthetic, including a patch part", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "generated update" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -316,17 +316,17 @@ describe("isMidTurnFromOpenCodeDb", () => {
             synthetic: true,
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("is not mid-turn when there is no assistant message", () => {
-        const db = createMidTurnDb();
+    it("does not report an assistant waiting for tools when there is no assistant message", () => {
+        const db = createTurnStateDb();
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("does not release mid-turn for an ignored-only user part after a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active for an ignored-only user part after a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "status notification" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -335,11 +335,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             ignored: true,
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("releases mid-turn when a user message has an ignored part AND a real text part", () => {
-        const db = createMidTurnDb();
+    it("ends the assistant tool wait when a user message has an ignored part AND a real text part", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "notification + real input" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -352,11 +352,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             text: "actually do the thing",
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
     });
 
-    it("does not release mid-turn when ignored is numeric 1 (truthy variant)", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active when ignored is numeric 1 (truthy variant)", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "status notification" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -365,11 +365,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             ignored: 1,
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("does not release mid-turn for interrupt marker parts after a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active for interrupt marker parts after a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "interrupt" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -384,11 +384,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("hasNewerRealUserMessage excludes ignored-only rows so they cannot release the mid-turn lock", () => {
-        const db = createMidTurnDb();
+    it("hasNewerRealUserMessage excludes ignored-only rows so they cannot end the assistant tool wait", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "status notification" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -398,11 +398,11 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
 
         expect(hasNewerRealUserMessage(db, "session-1", 100)).toBe(false);
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 
-    it("does not release mid-turn for message marker parts after a stale tool-calls tail", () => {
-        const db = createMidTurnDb();
+    it("keeps the assistant tool wait active for message marker parts after a stale tool-calls tail", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
         insertUser(db, "session-1", "user-1", { content: "peer message" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -417,13 +417,13 @@ describe("isMidTurnFromOpenCodeDb", () => {
             },
         });
 
-        expectMidTurn(db, "session-1", true);
+        expectAssistantAwaitingTools(db, "session-1", true);
     });
 });
 
 describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
-    it("holds when a newer real user message exists even though isMidTurn is false", () => {
-        const db = createMidTurnDb();
+    it("holds when a newer real user message exists even though assistantAwaitingTools is false", () => {
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertUser(db, "session-1", "user-1", { content: "do the thing" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -431,19 +431,19 @@ describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
             text: "do the thing",
         });
 
-        expectMidTurn(db, "session-1", false);
+        expectAssistantAwaitingTools(db, "session-1", false);
         expectNoticeHold(db, "session-1", true);
     });
 
     it("holds while the latest assistant has no finish (generation in flight)", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", {}, 100);
 
         expectNoticeHold(db, "session-1", true);
     });
 
     it("does not hold after a finished assistant with no newer real user", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
 
@@ -451,7 +451,7 @@ describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
     });
 
     it("does not treat an ignored-only notice as an unanswered real user", () => {
-        const db = createMidTurnDb();
+        const db = createTurnStateDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
         insertUser(db, "session-1", "user-1", { content: "status" }, 200);
         insertPart(db, "session-1", "user-1", "part-1", {
@@ -484,9 +484,9 @@ describe("tracked out-of-pass turn state", () => {
         const logs: string[] = [];
         __openCodeTurnStateTest.setLogObserver((message) => logs.push(message));
 
-        expect(isMidTurn(undefined, "session-live")).toBe(true);
+        expect(assistantAwaitingTools(undefined, "session-live")).toBe(true);
         expect(shouldHoldIgnoredNotification("session-live")).toBe(true);
-        expect(isMidTurn(undefined, "session-live")).toBe(true);
+        expect(assistantAwaitingTools(undefined, "session-live")).toBe(true);
         expect(logs).toEqual([
             `[magic-context] OpenCode DB probe failed: path=${dbPath} source=default cause=opencode_db_missing`,
         ]);
@@ -520,7 +520,7 @@ describe("tracked out-of-pass turn state", () => {
                 time: { created: 200 },
             },
         });
-        expect(isMidTurn(undefined, "session-live")).toBe(true);
+        expect(assistantAwaitingTools(undefined, "session-live")).toBe(true);
 
         observeOpenCodeTurnEvent("message.part.updated", {
             part: {
@@ -539,7 +539,7 @@ describe("tracked out-of-pass turn state", () => {
                 time: { created: 300 },
             },
         });
-        expect(isMidTurn(undefined, "session-live")).toBe(false);
+        expect(assistantAwaitingTools(undefined, "session-live")).toBe(false);
         expect(shouldHoldIgnoredNotification("session-live")).toBe(true);
     });
 });

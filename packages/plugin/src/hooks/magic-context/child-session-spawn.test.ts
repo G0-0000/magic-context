@@ -24,7 +24,7 @@ import {
 import { __ignoredNotificationTest } from "./send-session-notification";
 
 // Schema-warning delivery is exercised with an idle parent, not an active model loop.
-beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
+beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
 const dbs: Database[] = [];
 
 function staleDatabase(): Database {

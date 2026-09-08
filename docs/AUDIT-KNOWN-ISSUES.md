@@ -90,22 +90,16 @@ not "Deleted," so there is no misleading success semantic. The mutation-type is
 `delete` (vs `archive`) only to distinguish agent-intent in the log; both render
 as "removed" in m[1]. Do not change `delete` to a hard `DELETE`.
 
-### A6. Deferred-publication consumption is mid-turn-gated (both harnesses) — RESOLVED
+### A6. Deferred publications ride genuine bust opportunities (both harnesses) — RESOLVED
 
-Earlier this entry accepted that a background historian/recomp publish could
-re-render m[0]/m[1] even mid-turn. That is no longer the behavior: both harnesses
-now gate deferred-publication consumption on the **mid-turn-adjusted** scheduler
-decision. OpenCode computes `canConsumeDeferredOnThisPass(...)` from
-`midTurnAdjustedSchedulerDecision`; Pi now computes an equivalent
-`canConsumeDeferredLate` (mid-turn-aware) **before** `shouldRunHeuristics` and
-feeds it in — fixing a prior inversion where Pi read the raw
-`deferredMaterializationSessions.has()` (no mid-turn gate) and then derived
-`canConsumeDeferredLate` from `shouldRunHeuristics`, which let Pi run heuristics +
-drain the native compaction marker mid-turn while OpenCode stayed deferred. So a
-deferred publication that lands mid-turn now waits for the next non-mid-turn
-execute/force pass on both harnesses (force-materialization ≥85% still bypasses,
-identically). Explicit flush (`hasPendingMaterialization`) is still a separate,
-always-eligible trigger on both — matching OpenCode's `isExplicitFlush`.
+A background historian or recomp publication does not authorize its own cache
+bust. OpenCode's `canConsumeDeferredOnThisPass(...)` and Pi's
+`canConsumeDeferredLate` admit deferred state when the scheduler is already
+executing, force materialization is active, or the same pass has another explicit
+bust opportunity. This rule applies equally during long tool-using turns; the
+scheduler is no longer delayed until a turn boundary. Explicit flush
+(`hasPendingMaterialization`) remains a separate, always-eligible trigger on both
+harnesses.
 
 ---
 
@@ -234,12 +228,11 @@ helper with locked invariant tests.
 > gating ever regressed. Tracked for a focused removal.
 
 > **Coverage note (missing co-located migration tests):** migrations v14
-> (project_key_files), v15 (deferred_execute_state), v19 (compartment_state_lease),
-> v23 (compartment_events), v24 (historian_runs) lack the co-located
-> `migrations-v<N>.test.ts` that STRUCTURE.md mandates. The schema is exercised
-> indirectly (fresh-DB shape + feature tests), so this is a coverage gap, not a
-> known defect. Prioritize v14/v15 (key-files + boundary-execution) when paying
-> this down.
+> (project_key_files), v19 (compartment_state_lease), v23 (compartment_events), and
+> v24 (historian_runs) lack the co-located `migrations-v<N>.test.ts` that
+> STRUCTURE.md mandates. The schema is exercised indirectly (fresh-DB shape +
+> feature tests), so this is a coverage gap, not a known defect. Migration v15's
+> `deferred_execute_state` column is retired and remains only for schema continuity.
 
 ## Growing-data factors (bounded or slow; future cleanup)
 

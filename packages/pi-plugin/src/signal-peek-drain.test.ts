@@ -166,14 +166,11 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		expect(segment).toMatch(/if\s*\(\s*args\.isCacheBusting\s*\)/);
 	});
 
-	test("deferred publication drains only on a MID-TURN-AWARE can-consume-late gate", () => {
-		// canConsumeDeferredLate must be a mid-turn-aware gate computed
-		// INDEPENDENTLY (from the mid-turn-adjusted schedulerDecision + force
-		// threshold), NOT derived from shouldRunHeuristics. The old inverted form
-		// `baseShouldApplyPendingOps || shouldRunHeuristics` let a deferred publish
-		// drain mid-turn (shouldRunHeuristics read raw deferred-set membership),
-		// busting cache where OpenCode stayed deferred. It must mirror OpenCode's
-		// canConsumeDeferredOnThisPass.
+	test("deferred publication drains only on a bust-opportunity gate", () => {
+		// canConsumeDeferredLate must be computed independently from the scheduler
+		// decision and force threshold, not derived from shouldRunHeuristics. The
+		// old inverted form let raw deferred-set membership authorize its own bust.
+		// This must mirror OpenCode's canConsumeDeferredOnThisPass.
 		expect(code).not.toMatch(
 			/const\s+canConsumeDeferredLate\s*=\s*baseShouldApplyPendingOps\s*\|\|\s*shouldRunHeuristics/,
 		);

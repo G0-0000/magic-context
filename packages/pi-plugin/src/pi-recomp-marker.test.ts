@@ -139,7 +139,7 @@ describe("queueAndApplyPiRecompMarker (eager path coverage precondition)", () =>
 describe("recomp marker command wiring stays on the deferred path", () => {
 	// The eager bypass is only safe inside a same-pass rendered-coverage
 	// context that the background commands cannot guarantee (they run
-	// DETACHED, mid-turn). They must stage + defer so the pipeline's
+	// DETACHED, during a cache-stable pass). They must stage + defer so the pipeline's
 	// coverage-gated drain applies the marker on the next busting pass.
 	for (const name of ["ctx-recomp.ts", "ctx-session-upgrade.ts"]) {
 		it(`${name} stages the marker and never calls the eager apply path`, () => {

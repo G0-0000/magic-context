@@ -53,7 +53,7 @@ import { createEventHandler } from "./event-handler";
 import { __ignoredNotificationTest } from "./send-session-notification";
 
 // These alert-content units supply idle authorization independently of the harness event hook.
-beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
+beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
 
 type ContextUsageCacheEntry = {
     usage: ContextUsage;

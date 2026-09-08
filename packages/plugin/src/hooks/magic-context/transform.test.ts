@@ -94,7 +94,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 beforeEach(() => {
-    __ignoredNotificationTest.setMidTurnDetector(() => false);
+    __ignoredNotificationTest.setHoldDetector(() => false);
 });
 
 afterEach(() => {

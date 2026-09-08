@@ -16,7 +16,7 @@ import { join } from "node:path";
  * Because it runs in the background, the post-publish signals MUST be the
  * DEFERRED variants (staged for the next cache-busting pass at a turn boundary),
  * and the native compaction marker MUST be staged (not applied eagerly, which
- * mutates getBranch immediately and could land mid-turn).
+ * mutates getBranch immediately and could land during a cache-stable pass).
  */
 
 const PATH = join(import.meta.dir, "ctx-session-upgrade.ts");
