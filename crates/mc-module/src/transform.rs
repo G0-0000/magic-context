@@ -1747,9 +1747,15 @@ pub(crate) struct ProjectionCacheInput {
 pub struct TransformWithProjection {
     pub response: TransformResponse,
     pub projection: FlatProjection,
+    /// Historian preflight consumes the exact tag snapshot validated by this transform. The
+    /// snapshot is absent only on paths that return before normal tag hydration.
+    pub(crate) historian_tags: Option<Arc<Vec<McTagRow>>>,
     /// Native attachment uses the same validated tag baseline as the transform, avoiding a
     /// second numbers-only table scan after the response has been built.
     pub tag_numbers: BTreeMap<String, u64>,
+    /// Publication floor from the state accepted by this transform. Emergency follow-up uses it
+    /// as the pre-wait comparison point, then performs one fresh read after asynchronous work.
+    pub(crate) publication_floor_ordinal: Option<u64>,
     pub scheduler_pass: scheduler::PassDecision,
     pub scheduler_defer_reason: Option<scheduler::SchedulerDeferReason>,
     pub scheduler_drain_latch_active: bool,
@@ -2556,7 +2562,9 @@ fn lineage_protocol_passthrough(
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
+        historian_tags: None,
         tag_numbers: BTreeMap::new(),
+        publication_floor_ordinal: None,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -3141,7 +3149,9 @@ fn apply_additive_only(
         PassPlan::Defer | PassPlan::Reject(_) => None,
     };
     Ok(TransformWithProjection {
+        historian_tags: None,
         tag_numbers: BTreeMap::new(),
+        publication_floor_ordinal: meta.publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -3649,6 +3659,7 @@ fn apply_once(
                 );
             }
             return Ok(pending_passthrough_result(PendingPassthroughArgs {
+                historian_tags: Arc::clone(&tag_rows),
                 projection,
                 tag_numbers,
                 req,
@@ -3659,6 +3670,7 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
+                publication_floor_ordinal: next_meta.publication_floor_ordinal,
                 transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
@@ -3761,6 +3773,7 @@ fn apply_once(
             req.session_id, fingerprint, ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
+            historian_tags: Arc::clone(&tag_rows),
             projection,
             tag_numbers,
             req,
@@ -3771,6 +3784,7 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
+            publication_floor_ordinal: meta.publication_floor_ordinal,
             transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
@@ -5847,7 +5861,9 @@ fn apply_once(
     timings.finalize = elapsed_ms(finalize_started_at);
     timings.total = elapsed_ms(total_started_at);
     Ok(TransformWithProjection {
+        historian_tags: Some(tag_rows),
         tag_numbers,
+        publication_floor_ordinal: meta.publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -7797,6 +7813,7 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
 }
 
 struct PendingPassthroughArgs<'a> {
+    historian_tags: Arc<Vec<McTagRow>>,
     projection: FlatProjection,
     tag_numbers: BTreeMap<String, u64>,
     req: &'a TransformRequest,
@@ -7805,6 +7822,7 @@ struct PendingPassthroughArgs<'a> {
     rendered_memory_ids: Vec<i64>,
     revert_epoch: u64,
     reasoning_watermark: u64,
+    publication_floor_ordinal: Option<u64>,
     transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
@@ -7852,6 +7870,7 @@ fn pending_passthrough_messages(
 
 fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWithProjection {
     let PendingPassthroughArgs {
+        historian_tags,
         projection,
         tag_numbers,
         req,
@@ -7860,6 +7879,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         rendered_memory_ids,
         revert_epoch,
         reasoning_watermark,
+        publication_floor_ordinal,
         transition_consumed,
         committed,
         trim_mismatch,
@@ -7882,7 +7902,9 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
     TransformWithProjection {
+        historian_tags: Some(historian_tags),
         tag_numbers,
+        publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -8110,7 +8132,7 @@ fn tag_baseline_entry(
 /// Hydrate immutable tag rows from a cold baseline or an append-only tail. A post-read probe
 /// makes a concurrent mutation retry before its bytes reach the transform, and trigger-backed
 /// generations force a cold refill for replacement or deletion.
-fn load_cached_tags(
+pub(crate) fn load_cached_tags(
     store: &McStore,
     session_id: &str,
 ) -> Result<Arc<Vec<McTagRow>>, TransformError> {

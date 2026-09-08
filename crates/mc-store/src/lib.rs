@@ -6355,6 +6355,10 @@ pub struct McStore {
     #[cfg(any(test, feature = "test-support"))]
     tag_number_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
+    tag_payload_query_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    state_load_query_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
     authority_seed_transaction_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     authority_seed_resolution_pass_count: std::sync::atomic::AtomicUsize,
@@ -6621,6 +6625,10 @@ impl McStore {
             authority_project_resolution_fail_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             tag_number_query_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            tag_payload_query_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            state_load_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             authority_seed_transaction_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -7282,6 +7290,9 @@ impl McStore {
     /// Load a session's persisted state. Returns defaults (uninitialized, no row)
     /// when the session has never been seen — the classifier then bootstraps.
     pub fn load(&self, session_id: &str) -> Result<LoadedState, McStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.state_load_query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let row = self.inner.with_conn(|conn| {
             Ok(conn
                 .query_row(
@@ -8153,6 +8164,9 @@ impl McStore {
 
     /// Load all minted tags for a session in tag-number order. This is the cold baseline fill.
     pub fn load_tags_for_session(&self, session_id: &str) -> Result<Vec<McTagRow>, McStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.tag_payload_query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
@@ -8175,6 +8189,9 @@ impl McStore {
         session_id: &str,
         after_tag_number: i64,
     ) -> Result<Vec<McTagRow>, McStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.tag_payload_query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes
@@ -8263,6 +8280,31 @@ impl McStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn tag_number_query_count_for_test(&self) -> usize {
         self.tag_number_query_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Count full and append-delta payload reads. Summary-only cache validation is excluded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn tag_payload_query_count_for_test(&self) -> usize {
+        self.tag_payload_query_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reset_tag_payload_query_count_for_test(&self) {
+        self.tag_payload_query_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reset_state_load_query_count_for_test(&self) {
+        self.state_load_query_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn state_load_query_count_for_test(&self) -> usize {
+        self.state_load_query_count
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -21557,6 +21599,160 @@ mod tests {
             }),
             "compartment max must use the covering end-ordinal index: {details:?}"
         );
+    }
+
+    #[test]
+    fn retained_transform_hot_path_queries_are_index_or_rowid_lookups() {
+        fn plan_details(store: &McStore, sql: &str) -> Vec<String> {
+            store
+                .inner
+                .with_conn(|conn| {
+                    let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let rows = statement
+                        .query_map([], |row| row.get::<_, String>(3))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let queries = [
+            (
+                "handler/cache state",
+                "SELECT row_version, core_state, meta FROM mc_cache_state \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "tag generation",
+                "SELECT generation, tag_count, max_tag_number FROM mc_tag_cache_generations \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "tag baseline",
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes \
+                 FROM mc_tags WHERE session_id = 'plan-session' ORDER BY tag_number ASC",
+            ),
+            (
+                "tag append delta",
+                "SELECT tag_number, block_id, kind, token_count, created_at_ms, source_bytes \
+                 FROM mc_tags WHERE session_id = 'plan-session' AND tag_number > 7 \
+                 ORDER BY tag_number ASC",
+            ),
+            (
+                "temporal overlays",
+                "SELECT block_id, marker_text, created_at FROM mc_temporal_marks \
+                 WHERE session_id = 'plan-session' ORDER BY created_at ASC, block_id ASC",
+            ),
+            (
+                "user hints",
+                "SELECT block_id, hint_text, created_at FROM mc_user_hints \
+                 WHERE session_id = 'plan-session' ORDER BY created_at ASC, block_id ASC",
+            ),
+            (
+                "channel-1 appends",
+                "SELECT block_id, reminder_text, fired_at_ms FROM mc_channel1_appends \
+                 WHERE session_id = 'plan-session' ORDER BY fired_at_ms ASC, block_id ASC",
+            ),
+            (
+                "overlay frontier",
+                "SELECT max_seen_ordinal FROM mc_overlay_frontiers \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "pending drops",
+                "SELECT p.id, p.target_id, p.queued_at, p.command_id, l.first_applied_at_ms \
+                 FROM pending_agent_drops p LEFT JOIN mc_reduce_command_ledger l \
+                   ON l.session_id = p.session_id AND l.command_id = p.command_id \
+                 WHERE p.session_id = 'plan-session' ORDER BY p.queued_at ASC, p.id ASC",
+            ),
+            (
+                "latest compartment end",
+                "SELECT COALESCE(MAX(end_message), 0) FROM mc_compartments \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "compartment boundaries",
+                "SELECT sequence, start_message, end_message, end_message_id \
+                 FROM mc_compartments WHERE session_id = 'plan-session' ORDER BY sequence ASC",
+            ),
+            (
+                "workspace owner",
+                "SELECT w.id, w.share_categories FROM mc_workspace_members m \
+                 JOIN mc_workspaces w ON w.id = m.workspace_id \
+                 WHERE m.project_path = 'git:plan'",
+            ),
+            (
+                "workspace members",
+                "SELECT project_path, display_name FROM mc_workspace_members \
+                 WHERE workspace_id = 1 ORDER BY project_path ASC",
+            ),
+            (
+                "m1 memory watermark",
+                "SELECT COALESCE(MAX(id), 0) FROM mc_memories \
+                 WHERE project_path = 'git:plan' AND status IN ('active', 'permanent') \
+                   AND (expires_at IS NULL OR expires_at > 0)",
+            ),
+            (
+                "m1 memory-mutation watermark",
+                "SELECT COALESCE(MAX(id), 0) FROM mc_memory_mutation_log \
+                 WHERE project_path IN ('git:plan')",
+            ),
+            (
+                "m1 compartment watermark",
+                "SELECT COALESCE(MAX(sequence), 0) FROM mc_compartments \
+                 WHERE session_id = 'plan-session'",
+            ),
+            (
+                "m1 note watermark",
+                "SELECT COALESCE(MAX(status_version), 0) FROM mc_notes \
+                 WHERE project_path = 'git:plan'",
+            ),
+            (
+                "authority route",
+                "SELECT authority.project FROM mc_authority_route_bindings binding \
+                 JOIN mc_authority authority \
+                   ON authority.context_store_uuid = binding.context_store_uuid \
+                  AND authority.project = binding.project \
+                 WHERE binding.route_project_root = '/tmp/plan' \
+                   AND authority.domain = 'memories' \
+                   AND authority.state IN ('MODULE', 'DRAINING')",
+            ),
+            (
+                "project mural",
+                "SELECT data_url, content_hash FROM mc_project_mural_artifacts \
+                 WHERE project_path = 'git:plan'",
+            ),
+        ];
+
+        for (name, sql) in queries {
+            let details = plan_details(&store, sql);
+            assert!(
+                details.iter().all(|detail| {
+                    let upper = detail.to_ascii_uppercase();
+                    !upper.starts_with("SCAN ")
+                        || upper.contains("USING INDEX")
+                        || upper.contains("USING COVERING INDEX")
+                }),
+                "{name} must not perform an unindexed table scan: {details:?}"
+            );
+            assert!(
+                details.iter().any(|detail| {
+                    let upper = detail.to_ascii_uppercase();
+                    upper.starts_with("SEARCH ")
+                        || upper.contains("USING INDEX")
+                        || upper.contains("USING COVERING INDEX")
+                }),
+                "{name} must use an index or rowid lookup: {details:?}"
+            );
+            assert!(
+                !details
+                    .iter()
+                    .any(|detail| detail.contains("USE TEMP B-TREE")),
+                "{name} must not create a temporary sort index: {details:?}"
+            );
+        }
     }
 
     #[test]
