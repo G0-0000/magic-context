@@ -313,7 +313,7 @@ describe("tool-drop-target", () => {
 
         describe("#given a complete tool pair with structured input", () => {
             describe("#when truncate is called", () => {
-                it("#then it keeps small inputs intact while truncating result content", () => {
+                it("#then it replaces small inputs while truncating result content", () => {
                     const toolResultPart = {
                         type: "tool_result",
                         tool_use_id: "call-3",
@@ -359,14 +359,7 @@ describe("tool-drop-target", () => {
                         state: Record<string, unknown>;
                     };
                     expect(wireToolPart.state).toEqual({
-                        input: {
-                            query: "abcdef",
-                            short: "abc",
-                            files: ["a", "b"],
-                            metadata: { nested: true },
-                            exact: true,
-                            limit: 2,
-                        },
+                        input: { dropped: "[dropped \u00a77\u00a7]" },
                         output: "[dropped \u00a77\u00a7]",
                     });
                     const wireResultPart = messages[2]?.parts[0] as { content: string };
@@ -391,6 +384,84 @@ describe("tool-drop-target", () => {
                     expect(wireResultPart).not.toBe(toolResultPart);
                     expect(thinkingParts[0]?.thinking).toBe("[cleared]");
                     expect(thinkingParts[1]?.text).toBe("[cleared]");
+                });
+
+                it("#then replaces reporter-shaped inputs with one non-executable marker", () => {
+                    const sentinel = "[dropped §431§]";
+                    const cases = [
+                        {
+                            tool: "bash",
+                            input: { command: `which ${"x".repeat(700)}` },
+                            legacyFragment: "which...[truncated]",
+                            realKeys: ["command"],
+                        },
+                        {
+                            tool: "edit",
+                            input: {
+                                filePath: "/tmp/example.ts",
+                                oldString: `const ${"x".repeat(700)}`,
+                                newString: `const ${"y".repeat(700)}`,
+                            },
+                            legacyFragment: "const...[truncated]",
+                            realKeys: ["filePath", "oldString", "newString"],
+                        },
+                        {
+                            tool: "write",
+                            input: {
+                                filePath: `/tmp/${"x".repeat(700)}`,
+                                content: "payload",
+                            },
+                            legacyFragment: "/tmp/...[truncated]",
+                            realKeys: ["filePath", "content"],
+                        },
+                        {
+                            tool: "ctx_memory",
+                            input: {
+                                action: "write",
+                                category: "ARCHITECTURE",
+                                content: `write${"x".repeat(700)}`,
+                            },
+                            legacyFragment: "write...[truncated]",
+                            realKeys: ["action", "category", "content"],
+                        },
+                    ];
+
+                    for (const [index, testCase] of cases.entries()) {
+                        const callId = `reporter-${testCase.tool}`;
+                        const toolPart = {
+                            type: "tool",
+                            tool: testCase.tool,
+                            callID: callId,
+                            state: {
+                                status: "completed",
+                                input: testCase.input,
+                                output: "completed",
+                            },
+                        };
+                        const messages: MessageLike[] = [
+                            message(`m-${index}`, "assistant", [toolPart]),
+                        ];
+                        const target = createToolDropTarget(
+                            callId,
+                            [],
+                            buildIndex(messages),
+                            new ToolMutationBatch(messages),
+                            431,
+                        );
+
+                        expect(target.truncate()).toBe("truncated");
+                        const wire = messages[0]?.parts[0] as {
+                            state: { input: Record<string, unknown>; output: string };
+                        };
+                        expect(wire.state.input).toEqual({ dropped: sentinel });
+                        expect(Object.keys(wire.state.input)).toEqual(["dropped"]);
+                        for (const key of testCase.realKeys) {
+                            expect(wire.state.input).not.toHaveProperty(key);
+                        }
+                        const serialized = JSON.stringify(wire.state.input);
+                        expect(serialized).not.toContain("...[truncated]");
+                        expect(serialized).not.toContain(testCase.legacyFragment);
+                    }
                 });
 
                 it("#then truncates large inputs before keeping the tool structure", () => {
@@ -428,11 +499,7 @@ describe("tool-drop-target", () => {
                         state: Record<string, unknown>;
                     };
                     expect(wireToolPart.state).toEqual({
-                        input: {
-                            query: "xxxxx...[truncated]",
-                            files: "[2 items]",
-                            metadata: "[object]",
-                        },
+                        input: { dropped: "[dropped \u00a79\u00a7]" },
                         output: "[dropped \u00a79\u00a7]",
                     });
 
@@ -514,7 +581,7 @@ describe("tool-drop-target", () => {
                     };
                     expect(wire).not.toBe(taskPart);
                     expect(wire.state.output).toBe("[dropped \u00a712\u00a7]");
-                    expect(wire.state.input.prompt).toBe("Inves...[truncated]");
+                    expect(wire.state.input).toEqual({ dropped: "[dropped §12§]" });
 
                     // ...but the LIVE object OpenCode still holds is byte-identical
                     // to before the reclaim pass — the long prompt is intact, so a
@@ -557,7 +624,7 @@ describe("tool-drop-target", () => {
                     };
                     expect(wire).not.toBe(failedWrite);
                     expect(wire.state.output).toBe("[dropped \u00a713\u00a7]");
-                    expect(wire.state.input.content).toBe("zzzzz...[truncated]");
+                    expect(wire.state.input).toEqual({ dropped: "[dropped §13§]" });
 
                     // ...live object stays byte-identical: reclaimed via a clone,
                     // never by mutating the original part.

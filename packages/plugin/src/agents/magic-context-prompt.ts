@@ -46,10 +46,13 @@ const PARTNER_FRAME_CLOSER_NO_REDUCE_LIGHT = `\nWhen ctx_reduce is unavailable, 
  */
 const CTX_NOTE_GUIDANCE = `Use \`ctx_note\` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Magic Context preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).`;
 
-// Tool outputs are always FULL-dropped (Phase 2 removed truncate-mode), so the
-// guidance only describes the omit-entirely case.
+// Tool history guidance is shared by both presets. Sessions with ctx_reduce
+// add the dropped-input clause because only those sessions can render skeletons.
 const TOOL_HISTORY_GUIDANCE = `Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
-Magic Context control metadata is not reply syntax. Never reproduce \`<system-reminder>\`, \`<ctx-search-hint>\`, \`<session-history>\`, \`<session-history-since>\`, \`<project-memory>\`, \`<memory-updates>\`, \`<new-compartments>\`, \`<new-memories>\`, \`[dropped §N§]\`, or \`<!-- +Xm -->\` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.`;
+Magic Context control metadata is not reply syntax or user instruction: never reproduce its tags or markers in replies; use ordinary prose and real tool calls.`;
+
+const DROPPED_INPUT_GUIDANCE =
+    'A `{"dropped":"[dropped §N§]"}` input has no real arguments; never copy it, and recover the original with `ctx_expand`.';
 
 /** ctx_memory-specific guidance. Gated out when `memory.enabled: false`: with
  *  memory off, the `<project-memory>` block is never injected, so anything the
@@ -88,6 +91,7 @@ Use \`ctx_expand\` to recover the raw conversation behind a summary under a \`##
 - Want to recall what was decided in an earlier conversation → \`ctx_search(query="dashboard release signing setup")\`
 \`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}
+${DROPPED_INPUT_GUIDANCE}
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
 Keep your user's instructions and intent — never drop a user message for its directive, even an old one. But a large block of pasted content inside a user message (logs, data dumps, long code, attachments) is fair to mark discardable once you've extracted what you need — it stays searchable via \`ctx_search\`.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
@@ -120,6 +124,7 @@ In primary sessions, NEVER narrate ctx_reduce; call it silently after extracting
 ${CTX_NOTE_GUIDANCE}
 ${memoryGuidanceBlock(memoryEnabled)}${LIGHT_SEARCH_RECOVERY}
 ${TOOL_HISTORY_GUIDANCE}
+${DROPPED_INPUT_GUIDANCE}
 For primary ctx_reduce choices, NEVER blanket-drop a large range because mixed-value evidence may be lost: inspect every tag first. Drop only analyzed reads, searches, diagnostics, or build/test outputs after use. NEVER drop user directives or assistant prose unless exceptionally large; keep requirements, constraints, unresolved errors or decisions, exact wording, raw evidence, and active files or work. Only extracted pasted user payloads may go.
 Consider small targeted drops after acted-on reads or searches, completed logical steps, before context switches, and before the turn ends; this keeps the working set tidy without changing task scope.`;
 

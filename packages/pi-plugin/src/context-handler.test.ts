@@ -1538,13 +1538,9 @@ describe("registerPiContextHandler", () => {
 			};
 
 			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
-			expect(toolArguments(1)).toEqual({
-				__magic_context_dropped__: fullSentinel,
-			});
+			expect(toolArguments(1)).toEqual({ dropped: fullSentinel });
 			expect(textOf(output[2])).toBe(fullSentinel);
-			expect(toolArguments(3)).toEqual({
-				__magic_context_replacement__: truncatedSentinel,
-			});
+			expect(toolArguments(3)).toEqual({ dropped: truncatedSentinel });
 			expect(textOf(output[4])).toBe(truncatedSentinel);
 			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
 			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");

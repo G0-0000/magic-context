@@ -55,6 +55,7 @@ import {
     updateTagTokenCount,
 } from "../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
+import { droppedInputMarker } from "../hooks/magic-context/dropped-input-guard";
 import { applyEditMarkerToInput } from "../hooks/magic-context/edit-marker";
 import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
@@ -1066,14 +1067,14 @@ function buildAggregateTarget(
             return any ? "removed" : "absent";
         },
         truncate(): "truncated" | "absent" {
-            // Skeleton-drop: replace BOTH halves' content with the one
-            // canonical `[dropped §N§]` placeholder (byte-identical to a full
-            // drop and to OpenCode). Frozen by the dropMode column → replays
-            // the same string every pass. The tool_use call survives intact.
+            // Keep the paired call shell, but replace its arguments with one
+            // non-executable marker; result halves carry the matching sentinel.
             const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
             let any = false;
             for (const occ of occurrences) {
-                if (setToolContentOrText(occ.part, sentinel)) {
+                if (occ.kind === "tool_use" && occ.part.setToolInput) {
+                    if (occ.part.setToolInput(droppedInputMarker(tagId))) any = true;
+                } else if (setToolContentOrText(occ.part, sentinel)) {
                     any = true;
                 }
             }
@@ -1162,8 +1163,8 @@ function buildTextTarget(
  * TagTarget for a tag-eligible tool part. Tool parts get full-drop or
  * skeleton-drop treatment from `applyFlushedStatuses` based on the stored
  * `drop_mode` column. Both render the SAME canonical `[dropped §N§]`
- * placeholder — full-drop replaces the whole pair, skeleton-drop keeps the
- * tool_use call and replaces only its output. One placeholder string,
+ * placeholder — full-drop replaces the whole pair, while skeleton-drop keeps
+ * the tool_use call with only a dropped-input marker. Marker bytes are
  * byte-identical across passes and across harnesses.
  */
 function buildToolTarget(
@@ -1190,12 +1191,10 @@ function buildToolTarget(
             return replaced ? "removed" : "absent";
         },
         truncate(): "truncated" | "absent" {
-            // Skeleton-drop: replace the tool output with the one canonical
-            // `[dropped §N§]` placeholder (byte-identical to a full drop and to
-            // OpenCode). Frozen by the dropMode column, so it replays the same
-            // string every pass. The tool_use call itself survives intact.
-            const ok = setToolContentOrText(part, `[dropped \u00a7${tagId}\u00a7]`);
-            return ok ? "truncated" : "absent";
+            const changed = part.setToolInput
+                ? part.setToolInput(droppedInputMarker(tagId))
+                : setToolContentOrText(part, `[dropped \u00a7${tagId}\u00a7]`);
+            return changed ? "truncated" : "absent";
         },
         message: {
             info: { id: message.info.id, role: message.info.role },

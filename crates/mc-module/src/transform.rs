@@ -45,9 +45,9 @@ use crate::scheduler::{
     SchedulerConfig, SchedulerInputs, SessionMeta, TailState,
 };
 use crate::selection::{
-    filter_reasoning_ineligible_decisions, is_reclaim_hint_excluded_tool, resolve_tool_tier,
-    select_reductions_with_outcome, PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig,
-    SelectionContext, SelectionOutcome, AGE_RECLAIM_MIN_TOKENS,
+    dropped_input_payload, filter_reasoning_ineligible_decisions, is_reclaim_hint_excluded_tool,
+    resolve_tool_tier, select_reductions_with_outcome, PassClass, SelItem, SelKind, SelMessageRole,
+    SelectionConfig, SelectionContext, SelectionOutcome, AGE_RECLAIM_MIN_TOKENS,
 };
 use crate::tail_hygiene::{
     channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
@@ -13366,14 +13366,27 @@ fn build_output_with_tags_inner(
                     rebuilt.mark_modified();
                     for block in blocks {
                         if let Some(unit) = reduced.get(&block.block_index) {
-                            let display_payload = (unit.frozen_payload == "[dropped]"
-                                && unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
-                                .then(|| {
-                                    tag_overlay
-                                        .and_then(|overlay| overlay.tag_by_block_id.get(&block.id))
-                                        .map(|tag_number| format!("[dropped §{tag_number}§]"))
-                                })
-                                .flatten();
+                            let display_payload = if unit.kind == "skeleton" {
+                                let tag_number = (unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
+                                    .then(|| {
+                                        tag_overlay.and_then(|overlay| {
+                                            overlay.tag_by_block_id.get(&block.id).copied()
+                                        })
+                                    })
+                                    .flatten();
+                                Some(dropped_input_payload(tag_number))
+                            } else {
+                                (unit.frozen_payload == "[dropped]"
+                                    && unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
+                                    .then(|| {
+                                        tag_overlay
+                                            .and_then(|overlay| {
+                                                overlay.tag_by_block_id.get(&block.id)
+                                            })
+                                            .map(|tag_number| format!("[dropped §{tag_number}§]"))
+                                    })
+                                    .flatten()
+                            };
                             rebuilt.content[block.block_index] = reduced_block(
                                 &block.wire,
                                 display_payload
@@ -23707,10 +23720,10 @@ pub(crate) mod tests {
                 .map(|part| part["state"]["input"].clone())
                 .collect::<Vec<_>>(),
             vec![
-                json!({ "detail": "xxxxx...[truncated]", "path": "a.txt" }),
-                json!({ "detail": "yyyyy...[truncated]", "path": "b.txt" }),
+                json!({ "dropped": "[dropped]" }),
+                json!({ "dropped": "[dropped]" }),
             ],
-            "model-visible native calls must retain only real argument keys"
+            "model-visible native calls must expose only the dropped-input marker"
         );
         assert!(parts.iter().all(|part| {
             part["state"]["status"] == "completed"

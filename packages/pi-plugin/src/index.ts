@@ -159,6 +159,7 @@ import {
 	unregisterPiDreamerProject,
 } from "./dreamer";
 import { loadDefaultPiSessionApi } from "./dreamer/pi-session-api";
+import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
@@ -1313,6 +1314,7 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
+	registerPiDroppedInputGuard(pi);
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled !== false;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay !== false;
