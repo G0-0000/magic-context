@@ -15,6 +15,10 @@ import {
     type EmbeddingProbeOutcome,
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
+import {
+    formatShadowBackfillStall,
+    listShadowBackfillStalls,
+} from "@magic-context/core/features/magic-context/shadow-backfill-state";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/magic-context/storage-db";
 import {
@@ -700,6 +704,9 @@ async function runHealthChecks(options: {
                     (table) => `${table}=${countTable(db as ContextDatabase, table) ?? "n/a"}`,
                 ).join(", ");
                 add(results, "info", `Shared DB row counts: ${counts}`);
+                for (const stall of listShadowBackfillStalls(db)) {
+                    add(results, "warn", formatShadowBackfillStall(stall));
+                }
             }
         } catch (error) {
             if (error instanceof UnsupportedSchemaVersionError) {

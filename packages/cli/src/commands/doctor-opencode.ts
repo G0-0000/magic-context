@@ -12,6 +12,10 @@ import {
     type EmbeddingProbeOutcome,
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
+import {
+    formatShadowBackfillStall,
+    listShadowBackfillStalls,
+} from "@magic-context/core/features/magic-context/shadow-backfill-state";
 import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/magic-context/storage-db";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
@@ -1405,6 +1409,9 @@ export async function runDoctor(
                     log.info(`Shared DB row counts: ${summary}`);
                 } catch {
                     // Don't fail the doctor on row-count introspection issues
+                }
+                for (const stall of listShadowBackfillStalls(db)) {
+                    warn(formatShadowBackfillStall(stall));
                 }
             } finally {
                 db.close();
