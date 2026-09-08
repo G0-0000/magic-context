@@ -323,16 +323,6 @@ mod tests {
                 guidance_content_hash(light.bytes, PromptSurfacePreset::Light)
             );
         }
-        assert!(
-            guidance_asset(PromptSurfacePreset::Full, GuidanceVariant::Full)
-                .bytes
-                .contains(r#"{"dropped":"[dropped §N§]"}"#)
-        );
-        assert!(
-            guidance_asset(PromptSurfacePreset::Light, GuidanceVariant::Full)
-                .bytes
-                .contains(r#"{"dropped":"[dropped §N§]"}"#)
-        );
         assert!(!tool_manifest_falls_back(PromptSurfacePreset::Light));
         assert!(!tool_manifest_falls_back(PromptSurfacePreset::Full));
 

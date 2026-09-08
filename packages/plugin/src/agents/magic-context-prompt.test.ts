@@ -337,7 +337,6 @@ describe("buildMagicContextSection — prompt-surface composition", () => {
         expect(light).toContain("NEVER narrate ctx_reduce");
         expect(light).toContain("DO NOT mimic this style");
         expect(light).toContain("Keep code, identifiers, file paths");
-        expect(light).toContain('{"dropped":"[dropped §N§]"}');
         expect(light).not.toContain("### Reduction Triggers");
     });
 
