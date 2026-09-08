@@ -19,6 +19,10 @@ import { recordCurateSafetyRefusal } from "./curate-memory-safety";
 import { acquireLease, acquireLeaseWithAcquisition, releaseLease } from "./lease";
 import { MAP_BATCH_FLOOR_MS } from "./map-memories";
 import { applyRetrospectiveLearnings } from "./retrospective-learnings";
+import {
+    PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
+    sweepOrphanedRetrospectiveChildren,
+} from "./retrospective-orphan-sweep";
 import { getDreamRuns } from "./storage-dream-runs";
 import {
     getTaskScheduleState,
@@ -74,6 +78,109 @@ arguments:
 {"action":"archive","reason":"与全局用户画像重复","ids":[6]}`;
 
 describe("createDreamTaskExecutor — curate", () => {
+    test("keeps the child through a detached final-part write, then the age gate sweeps it", async () => {
+        db = freshDb();
+        const project = "/repo/detached-writer";
+        insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "Keep internal child sessions until detached writers have drained.",
+        });
+
+        const opencodeDb = new Database(":memory:");
+        opencodeDb.exec(`
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                directory TEXT,
+                time_created INTEGER
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES session(id)
+            );
+        `);
+        let resolveWriter: (() => void) | undefined;
+        const writerSettled = new Promise<void>((resolve) => {
+            resolveWriter = resolve;
+        });
+        let writerError: unknown;
+        const deleted: string[] = [];
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => {
+                    opencodeDb
+                        .prepare(
+                            "INSERT INTO session (id, title, directory, time_created) VALUES (?, ?, ?, ?)",
+                        )
+                        .run("delayed-child", "magic-context-dream-curate", project, 1);
+                    return { data: { id: "delayed-child" } };
+                }),
+                prompt: mock(async () => {
+                    setTimeout(() => {
+                        try {
+                            opencodeDb
+                                .prepare("INSERT INTO part (id, session_id) VALUES (?, ?)")
+                                .run("final-part", "delayed-child");
+                        } catch (error) {
+                            writerError = error;
+                        } finally {
+                            resolveWriter?.();
+                        }
+                    }, 200);
+                    return {};
+                }),
+                messages: mock(async () => ({ data: assistantMessages("curation complete") })),
+                delete: mock(async ({ path }: { path: { id: string } }) => {
+                    deleted.push(path.id);
+                    opencodeDb.prepare("DELETE FROM part WHERE session_id = ?").run(path.id);
+                    opencodeDb.prepare("DELETE FROM session WHERE id = ?").run(path.id);
+                    return {};
+                }),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => opencodeDb,
+        });
+
+        try {
+            const result = await executor(
+                { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+                {
+                    db,
+                    projectIdentity: project,
+                    holderId: "holder-delayed-writer",
+                    leaseKey: leaseKeyFor("curate", project),
+                },
+            );
+            await writerSettled;
+
+            expect(result).toEqual({ status: "completed", schedulePatch: undefined });
+            expect(writerError).toBeUndefined();
+            expect(
+                opencodeDb.prepare("SELECT id FROM part WHERE id = ?").get("final-part"),
+            ).toEqual({ id: "final-part" });
+            expect(deleted).toEqual([]);
+
+            const swept = await sweepOrphanedRetrospectiveChildren({
+                opencodeDb,
+                client: client as never,
+                sessionDirectory: project,
+                staleMs: 60_000,
+                titleMatches: PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
+                now: 60_002,
+            });
+            expect(swept).toBe(1);
+            expect(deleted).toEqual(["delayed-child"]);
+        } finally {
+            closeQuietly(opencodeDb);
+        }
+    });
+
     test("runs whole-pool curation without verification gate or watermark patch", async () => {
         db = freshDb();
         const project = "/repo/project";
@@ -1405,7 +1512,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
         expect(getProjectState(db, project)?.projectMemoryEpoch).toBe(epochBefore);
     });
 
-    test("gate returns 'n' → one gate turn, child created+deleted, watermark advances, no deepen", async () => {
+    test("gate returns 'n' → one gate turn, child retained for age-gated cleanup, watermark advances, no deepen", async () => {
         db = freshDb();
         const project = "/repo/project";
         const provider = {
@@ -1463,7 +1570,8 @@ describe("createDreamTaskExecutor — retrospective", () => {
         });
         expect(client.session.create).toHaveBeenCalled();
         expect(prompts).toBe(1); // gate only — no deepen turn
-        expect(client.session.delete).toHaveBeenCalled(); // child always cleaned up
+        const { delete: deleteSession } = client.session;
+        expect(deleteSession).not.toHaveBeenCalled(); // age-gated sweep owns cleanup
         expect(getMemoriesByProject(db, project)).toHaveLength(0);
     });
 

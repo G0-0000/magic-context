@@ -282,16 +282,18 @@ describe("dream-timer message-history maintenance (static)", () => {
     });
 });
 
-describe("dream-timer historian child maintenance (static)", () => {
+describe("dream-timer internal child maintenance (static)", () => {
     const source = readFileSync(join(import.meta.dir, "dream-timer.ts"), "utf8");
 
-    test("runs the historian sweep before the dreamer-enabled guard", () => {
-        const historianSweep = source.indexOf("sweepOrphanedHistorianChildren(reg)");
+    test("runs the shared historian/privacy sweep before the dreamer-enabled guard", () => {
+        const internalSweep = source.indexOf("await sweepOrphanedInternalChildren(");
         const dreamerGuard = source.indexOf("if (!dreamingEnabled || !dreamerConfig)");
 
-        expect(historianSweep).toBeGreaterThan(0);
-        expect(dreamerGuard).toBeGreaterThan(historianSweep);
+        expect(internalSweep).toBeGreaterThan(0);
+        expect(dreamerGuard).toBeGreaterThan(internalSweep);
         expect(source).toContain("reg.historianChildSweep !== undefined");
+        expect(source).toContain("privacy: retrospectiveOrphanStaleMs(privacyTimeoutMinutes)");
+        expect(source).toContain("historian: historianOrphanStaleMs");
     });
 });
 

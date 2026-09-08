@@ -468,6 +468,8 @@ async function confirmReadOnly(
         });
     };
     try {
+        // Cleanup is deferred to the age-gated privacy sweep so detached OpenCode
+        // writers can persist final parts before the session is retired.
         const createResponse = await createChildSessionWithFence({
             client: args.client,
             db: args.db,
@@ -549,11 +551,5 @@ Output exactly JSON: {"met": false}`;
         recordInvocation({ status: "failed", error });
         log(`[dreamer] smart note #${noteId}: read-only confirmation failed — ${error}`);
         return false;
-    } finally {
-        // Confirmation prompts include note content and conditions, so they are
-        // deleted regardless of debug-retention settings.
-        if (childSessionId) {
-            await args.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
-        }
     }
 }

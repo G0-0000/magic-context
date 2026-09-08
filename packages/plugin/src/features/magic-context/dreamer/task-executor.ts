@@ -1170,13 +1170,6 @@ async function runRetrospectiveTask(
         return finish(deepenRun, scan.maxScannedTs);
     } finally {
         heartbeat.stop();
-        // PRIVACY: a retrospective child's prompt embeds raw cross-session user
-        // text from the friction window. Always delete the child — even on
-        // failure, and even when keep_subagents is set. The debug-retention flag
-        // must never persist another session's raw user text on disk.
-        if (childSessionId) {
-            await deps.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
-        }
     }
 }
 
@@ -1360,10 +1353,5 @@ async function runAgenticTask(
     } finally {
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);
-        // These children contain full memory-pool snapshots or generated project
-        // docs context, so debug-retention must not keep them on disk after a run.
-        if (childSessionId) {
-            await deps.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
-        }
     }
 }

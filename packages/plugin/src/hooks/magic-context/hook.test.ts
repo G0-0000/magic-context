@@ -748,7 +748,7 @@ describe("magic-context hook", () => {
 
         expect(promptMocks.prompt).toHaveBeenCalledTimes(3);
         expect(promptMocks.createSession).toHaveBeenCalledTimes(1);
-        expect(promptMocks.deleteSession).toHaveBeenCalledTimes(1);
+        expect(promptMocks.deleteSession).toHaveBeenCalledTimes(0); // age-gated sweep owns cleanup
         const firstCallArg = promptMocks.prompt?.mock.calls[0]?.[0] as Record<string, unknown>;
         const secondCallArg = promptMocks.prompt?.mock.calls[1]?.[0] as Record<string, unknown>;
         const thirdCallArg = promptMocks.prompt?.mock.calls[2]?.[0] as Record<string, unknown>;
@@ -1060,7 +1060,7 @@ describe("magic-context hook", () => {
             await new Promise((resolve) => setTimeout(resolve, 0));
 
             expect(promptMocks.createSession).toHaveBeenCalledTimes(1);
-            expect(promptMocks.deleteSession).toHaveBeenCalledTimes(1);
+            expect(promptMocks.deleteSession).toHaveBeenCalledTimes(0); // age-gated sweep owns cleanup
         } finally {
             Date.now = originalDateNow;
         }
