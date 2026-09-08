@@ -54,7 +54,7 @@ A normal pass works like this:
 ![Timeline: turns append while the cache prefix stays identical, crossing the threshold triggers one execute pass, queued and eligible automatic reclaim plus ready compartment history produce a new stable prompt at a variable size.](/diagrams/execute-pass.svg)
 
 1. Turns append without rewriting the stable prefix.
-2. Usage reaches the effective execute threshold. If a tool call is still waiting for its result, the normal pass waits for the next complete step boundary.
+2. Usage reaches the effective execute threshold. A tool call that is still waiting for its result is never reclaimed, but the pass itself does not wait for the turn to end.
 3. One execute pass applies due work together: queued `ctx_reduce` drops, heuristic cleanup, eligible age-based tool-output reclaim, and ready history updates.
 4. The prompt becomes stable again at whatever size the retained material requires.
 
