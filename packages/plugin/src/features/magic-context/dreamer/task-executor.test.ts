@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createDreamTimerModuleClient } from "../../../plugin/dream-timer-module-client";
+import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { applyMirrorPage, ensureContextStoreUuid } from "../context-authority";
@@ -78,7 +79,7 @@ arguments:
 {"action":"archive","reason":"与全局用户画像重复","ids":[6]}`;
 
 describe("createDreamTaskExecutor — curate", () => {
-    test("keeps the child through a detached final-part write, then the age gate sweeps it", async () => {
+    test("archives an unsettled child through a detached final-part write, then the age gate sweeps it", async () => {
         db = freshDb();
         const project = "/repo/detached-writer";
         insertMemory(db, {
@@ -107,6 +108,8 @@ describe("createDreamTaskExecutor — curate", () => {
         });
         let writerError: unknown;
         const deleted: string[] = [];
+        const archived: unknown[] = [];
+        const logSpy = spyOn(logger, "log").mockImplementation(() => {});
         const client = {
             session: {
                 list: mock(async () => ({ data: [] })),
@@ -130,6 +133,11 @@ describe("createDreamTaskExecutor — curate", () => {
                             resolveWriter?.();
                         }
                     }, 200);
+                    throw new Error("prompt timed out after 1200000ms");
+                }),
+                abort: mock(async () => ({})),
+                update: mock(async (input: unknown) => {
+                    archived.push(input);
                     return {};
                 }),
                 messages: mock(async () => ({ data: assistantMessages("curation complete") })),
@@ -159,12 +167,26 @@ describe("createDreamTaskExecutor — curate", () => {
             );
             await writerSettled;
 
-            expect(result).toEqual({ status: "completed", schedulePatch: undefined });
+            expect(result).toMatchObject({ status: "failed" });
             expect(writerError).toBeUndefined();
             expect(
                 opencodeDb.prepare("SELECT id FROM part WHERE id = ?").get("final-part"),
             ).toEqual({ id: "final-part" });
             expect(deleted).toEqual([]);
+            expect(archived).toEqual([
+                {
+                    path: { id: "delayed-child" },
+                    query: { directory: project },
+                    body: { time: { archived: expect.any(Number) } },
+                },
+            ]);
+            expect(
+                logSpy.mock.calls.some(
+                    ([message]) =>
+                        message ===
+                        "[dreamer] curate: prompt unsettled — session delayed-child left to the age-gated sweep",
+                ),
+            ).toBe(true);
 
             const swept = await sweepOrphanedRetrospectiveChildren({
                 opencodeDb,
@@ -1512,7 +1534,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
         expect(getProjectState(db, project)?.projectMemoryEpoch).toBe(epochBefore);
     });
 
-    test("gate returns 'n' → one gate turn, child retained for age-gated cleanup, watermark advances, no deepen", async () => {
+    test("gate returns 'n' → one settled gate turn deletes inline, advances the watermark, and does not deepen", async () => {
         db = freshDb();
         const project = "/repo/project";
         const provider = {
@@ -1571,7 +1593,10 @@ describe("createDreamTaskExecutor — retrospective", () => {
         expect(client.session.create).toHaveBeenCalled();
         expect(prompts).toBe(1); // gate only — no deepen turn
         const { delete: deleteSession } = client.session;
-        expect(deleteSession).not.toHaveBeenCalled(); // age-gated sweep owns cleanup
+        expect(deleteSession).toHaveBeenCalledWith({
+            path: { id: "retro-child" },
+            query: { directory: project },
+        });
         expect(getMemoriesByProject(db, project)).toHaveLength(0);
     });
 

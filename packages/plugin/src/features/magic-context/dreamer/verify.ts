@@ -9,8 +9,8 @@ import {
     extractLatestAssistantText,
     hasLengthCappedOutput,
 } from "../../../shared/assistant-message-extractor";
-import { describeError, getErrorMessage } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
+import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -259,6 +259,7 @@ async function verifyOneBatch(
     signal: AbortSignal,
 ): Promise<VerifyBatchResult> {
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     try {
         const createResponse = await createChildSessionWithFence({
@@ -323,6 +324,7 @@ async function verifyOneBatch(
                 },
             },
         );
+        promptSettled = true;
 
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
         return await applyParsedVerifyManifest(args, batch, run.validated);
@@ -353,22 +355,15 @@ async function verifyOneBatch(
             providerFailure,
         };
     } finally {
-        // Delete the child regardless of success/failure (a FAILED child still
-        // holds the memory-pool snapshot fed into the prompt — leaving it only on
-        // the failure path leaked them on disk). Still honor keep_subagents: this
-        // child carries curated project memories (already in context.db), not raw
-        // user text, so the user's explicit data-collection opt-in wins — unlike
-        // the retrospective child, which is purged unconditionally.
-        if (agentSessionId && !shouldKeepSubagents()) {
-            await args.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory },
-                })
-                .catch((e: unknown) => {
-                    log(`[dreamer] verify session cleanup failed: ${getErrorMessage(e)}`);
-                });
-        }
+        await teardownChildSession({
+            client: args.client,
+            sessionId: agentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] verify",
+            log,
+        });
     }
 }
 

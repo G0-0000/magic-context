@@ -5,7 +5,7 @@ import { createChildSessionWithFence } from "../../../hooks/magic-context/child-
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
 import { openDatabase } from "../storage";
@@ -28,6 +28,7 @@ export async function runSidekick(deps: {
 }): Promise<string | null> {
     const fallbackModels = resolveFallbackChain(deps.config.fallback_models);
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -120,6 +121,7 @@ export async function runSidekick(deps: {
                 },
             },
         );
+        promptSettled = true;
 
         recordInvocation({ status: "completed", messages: sidekickRun.output });
         return sidekickRun.validated;
@@ -132,14 +134,14 @@ export async function runSidekick(deps: {
         }
         return null;
     } finally {
-        if (agentSessionId && !shouldKeepSubagents()) {
-            await deps.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                })
-                .catch((error: unknown) => {
-                    log("[magic-context] failed to delete sidekick child session:", error);
-                });
-        }
+        await teardownChildSession({
+            client: deps.client,
+            sessionId: agentSessionId,
+            sessionDirectory: deps.sessionDirectory ?? deps.projectPath,
+            promptSettled,
+            privacySensitive: false,
+            context: "[magic-context] sidekick",
+            log,
+        });
     }
 }

@@ -13,6 +13,7 @@ import type { RawMessageProvider } from "../../../hooks/magic-context/read-sessi
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
@@ -958,6 +959,7 @@ async function runRetrospectiveTask(
     );
 
     let childSessionId: string | null = null;
+    let promptSettled = false;
     try {
         const createResponse = await createChildSessionWithFence({
             client: deps.client,
@@ -982,7 +984,8 @@ async function runRetrospectiveTask(
         // token usage without double counting.
         const runChildTurn = async (system: string, userText: string) => {
             const remainingMs = Math.max(0, deadline - Date.now());
-            return shared.promptSyncWithValidatedOutputRetry(
+            promptSettled = false;
+            const run = await shared.promptSyncWithValidatedOutputRetry(
                 deps.client,
                 {
                     path: { id: sessionId },
@@ -1015,6 +1018,8 @@ async function runRetrospectiveTask(
                     },
                 },
             );
+            promptSettled = true;
+            return run;
         };
 
         const finish = (
@@ -1170,6 +1175,15 @@ async function runRetrospectiveTask(
         return finish(deepenRun, scan.maxScannedTs);
     } finally {
         heartbeat.stop();
+        await teardownChildSession({
+            client: deps.client,
+            sessionId: childSessionId,
+            sessionDirectory: deps.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] retrospective",
+            log,
+        });
     }
 }
 
@@ -1250,6 +1264,7 @@ async function runAgenticTask(
     );
 
     let childSessionId: string | null = null;
+    let promptSettled = false;
     try {
         const createResponse = await createChildSessionWithFence({
             client: deps.client,
@@ -1314,6 +1329,7 @@ async function runAgenticTask(
                 },
             },
         );
+        promptSettled = true;
 
         if (leaseLost) throw new Error("Dream lease lost during task");
 
@@ -1353,5 +1369,14 @@ async function runAgenticTask(
     } finally {
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);
+        await teardownChildSession({
+            client: deps.client,
+            sessionId: childSessionId,
+            sessionDirectory: docsDir,
+            promptSettled,
+            privacySensitive: true,
+            context: `[dreamer] ${task}`,
+            log,
+        });
     }
 }

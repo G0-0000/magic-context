@@ -1,6 +1,8 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 
 import { DREAMER_REVIEWER_AGENT } from "../../../agents/dreamer";
+import { _resetKeepSubagentsForTesting, setKeepSubagents } from "../../../shared/keep-subagents";
+import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -14,13 +16,20 @@ function freshDb(): Database {
     return db;
 }
 
+afterEach(() => {
+    _resetKeepSubagentsForTesting();
+    mock.restore();
+});
+
 describe("reviewUserMemories", () => {
-    test("deletes its child session when the review run fails", async () => {
+    test("archives but does not delete an unsettled child and logs its sweep handoff", async () => {
         const db = freshDb();
         insertUserMemoryCandidates(db, [
             { content: "User prefers concise updates", sessionId: "s1" },
         ]);
         const deleted: string[] = [];
+        const archived: unknown[] = [];
+        const logSpy = spyOn(logger, "log").mockImplementation(() => {});
         const prompt = mock(async () => {
             throw new Error("model unavailable");
         });
@@ -28,6 +37,10 @@ describe("reviewUserMemories", () => {
             session: {
                 create: mock(async () => ({ id: "child-user-memories" })),
                 prompt,
+                update: mock(async (input: unknown) => {
+                    archived.push(input);
+                    return {};
+                }),
                 delete: mock(async ({ path }: { path: { id: string } }) => {
                     deleted.push(path.id);
                     return {};
@@ -54,7 +67,69 @@ describe("reviewUserMemories", () => {
                 return body?.agent === DREAMER_REVIEWER_AGENT;
             }),
         ).toBe(true);
-        expect(deleted).toEqual(["child-user-memories"]);
+        expect(deleted).toEqual([]);
+        expect(archived).toEqual([
+            {
+                path: { id: "child-user-memories" },
+                query: { directory: "/repo/project" },
+                body: { time: { archived: expect.any(Number) } },
+            },
+        ]);
+        expect(
+            logSpy.mock.calls.some(
+                ([message]) =>
+                    message ===
+                    "[dreamer] user-memories: prompt unsettled — session child-user-memories left to the age-gated sweep",
+            ),
+        ).toBe(true);
+        db.close();
+    });
+
+    test("deletes a settled privacy child even when keep_subagents is enabled", async () => {
+        setKeepSubagents(true);
+        const db = freshDb();
+        insertUserMemoryCandidates(db, [
+            { content: "User prefers concise updates", sessionId: "s1" },
+        ]);
+        const deleted: string[] = [];
+        const client = {
+            session: {
+                create: mock(async () => ({ id: "settled-user-memories" })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: Date.now() } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: '{"promote":[],"update_existing":[],"dismiss_existing":[],"consume_candidate_ids":[1]}',
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                update: mock(async () => ({})),
+                delete: mock(async ({ path }: { path: { id: string } }) => {
+                    deleted.push(path.id);
+                    return {};
+                }),
+            },
+        };
+
+        await reviewUserMemories({
+            db,
+            client: client as never,
+            parentSessionId: undefined,
+            sessionDirectory: "/repo/project",
+            holderId: "holder",
+            leaseKey: "review-user-memories-settled",
+            deadline: Date.now() + 60_000,
+            promotionThreshold: 1,
+        });
+
+        expect(deleted).toEqual(["settled-user-memories"]);
+        expect(client.session.update).not.toHaveBeenCalled();
         db.close();
     });
 });

@@ -108,7 +108,7 @@ function makeHostDb(dataHome: string, parentSessionId: string, projectDir: strin
 }
 
 describe("historian child session cleanup", () => {
-    test("a late step-start part can persist after historian publish", async () => {
+    test("deletes the historian child after its prompt resolves and the compartment publishes", async () => {
         const dataHome = useTempDirectory("magic-context-child-cleanup-data-");
         const projectDir = useTempDirectory("magic-context-child-cleanup-project-");
         process.env.XDG_DATA_HOME = dataHome;
@@ -219,28 +219,14 @@ describe("historian child session cleanup", () => {
             }
             expect(getCompartments(contextDb!, parentSessionId)).toHaveLength(1);
 
-            let lateWriteError: unknown = null;
-            try {
-                const now = Date.now();
-                hostDb
-                    .prepare(
-                        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
-                    )
-                    .run(
-                        "part-late-step-start",
-                        childMessageId,
-                        childSessionId,
-                        now,
-                        now,
-                        JSON.stringify({ type: "step-start" }),
-                    );
-            } catch (error) {
-                lateWriteError = error;
-            }
-
-            expect(lateWriteError).toBeNull();
             expect(sessionStatus).not.toHaveBeenCalled();
-            expect(deleteSession).not.toHaveBeenCalled();
+            expect(deleteSession).toHaveBeenCalledWith({
+                path: { id: childSessionId },
+                query: { directory: projectDir },
+            });
+            expect(
+                hostDb.prepare("SELECT id FROM session WHERE id = ?").get(childSessionId),
+            ).toBeNull();
         } finally {
             promptSpy.mockRestore();
             closeQuietly(hostDb);

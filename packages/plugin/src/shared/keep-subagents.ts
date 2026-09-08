@@ -1,19 +1,14 @@
 /**
- * Debug / data-collection switch: when enabled, Magic Context does NOT delete
- * the child sessions it spawns for its own subagents (historian, dreamer,
- * sidekick, memory-migration, key-files, user-memory review, recomp).
+ * Debug / data-collection switch for settled ordinary child sessions
+ * (historian, sidekick, and memory migration). Privacy-sensitive dreamer and
+ * smart-note children are still deleted after their prompts settle.
  *
- * By default these child sessions are deleted on success (only FAILED ones are
- * kept for debugging). With `keep_subagents: true` ALL of them are retained, so
- * their full transcript — prompt, tool calls, token usage, model output — stays
- * inspectable in OpenCode's session store / the dashboard. Intended for
- * short-term data collection (e.g. profiling what the dreamer actually does)
- * before the dreamer v2 overhaul, NOT for steady-state use — kept sessions
- * accumulate in the host's session DB until manually cleared.
+ * Unsettled children are never deleted inline because OpenCode's server loop may
+ * still be writing after a client timeout or abort. They remain for the
+ * age-gated sweep; privacy-sensitive rows are swept even when this switch is on.
  *
- * Process-global, set once at boot from config (mirrors `harness.ts`). A
- * config change requires a restart to take effect. NEVER thread this through
- * per-call args — it's a coarse, boot-time debug toggle.
+ * Process-global, set once at boot from config (mirrors `harness.ts`). A config
+ * change requires a restart to take effect.
  */
 let keepSubagents = false;
 
@@ -22,7 +17,7 @@ export function setKeepSubagents(value: boolean): void {
     keepSubagents = value === true;
 }
 
-/** True when subagent child sessions should be retained (not deleted). */
+/** True when settled ordinary child sessions should be retained. */
 export function shouldKeepSubagents(): boolean {
     return keepSubagents;
 }

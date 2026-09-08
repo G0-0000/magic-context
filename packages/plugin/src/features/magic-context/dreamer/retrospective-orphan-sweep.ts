@@ -8,9 +8,8 @@ type OpencodeClient = PluginContext["client"];
 /**
  * Age-gated backstop for internal children that carry raw user or project text.
  *
- * Internal children deliberately remain after prompt completion because OpenCode
- * can still have detached writers persisting their final parts. This sweep is the
- * only retirement path for historian and privacy-sensitive Dreamer children.
+ * A settled prompt deletes its child inline. A timeout, abort, or client error can
+ * leave OpenCode's server loop writing, so unsettled rows remain for this sweep.
  *
  * CONCURRENCY: `session.delete` has no cross-process "active session" lease (OC
  * peer confirmed), so the ONLY safe filter is AGE — a child older than any
@@ -24,6 +23,12 @@ export const USER_MEMORIES_CHILD_TITLE = "magic-context-dream-user-memories";
 export const CURATE_CHILD_TITLE = "magic-context-dream-curate";
 export const MAINTAIN_DOCS_CHILD_TITLE = "magic-context-dream-maintain-docs";
 export const REFRESH_PRIMERS_CHILD_TITLE = "magic-context-dream-refresh-primers";
+export const MAP_MEMORIES_CHILD_TITLE = "magic-context-dream-map-memories";
+export const VERIFY_CHILD_TITLE = "magic-context-dream-verify";
+export const CLASSIFY_CHILD_TITLE = "magic-context-dream-classify";
+export const COMPRESS_CUES_CHILD_TITLE = "magic-context-dream-compress-cues";
+export const MEMORY_MIGRATION_CHILD_TITLE = "magic-context-memory-migration";
+export const SIDEKICK_CHILD_TITLE = "magic-context-sidekick";
 export const SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX = "magic-context-smart-note-compile-";
 export const SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX = "magic-context-smart-note-confirm-";
 
@@ -34,6 +39,11 @@ export const PRIVACY_SENSITIVE_CHILD_TASKS = [
     "maintain-docs",
     "refresh-primers",
     "evaluate-smart-notes",
+    "map-memories",
+    "verify",
+    "verify-broad",
+    "classify-memories",
+    "compress-cues",
 ] as const satisfies readonly DreamTaskName[];
 
 export interface PrivacySensitiveChildTitleMatches {
@@ -48,17 +58,24 @@ export const PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMa
         CURATE_CHILD_TITLE,
         MAINTAIN_DOCS_CHILD_TITLE,
         REFRESH_PRIMERS_CHILD_TITLE,
+        MAP_MEMORIES_CHILD_TITLE,
+        VERIFY_CHILD_TITLE,
+        CLASSIFY_CHILD_TITLE,
+        COMPRESS_CUES_CHILD_TITLE,
     ],
     prefixes: [SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX, SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX],
 };
 
-export const HISTORIAN_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMatches = {
-    exact: [HISTORIAN_CHILD_TITLE],
+export const RETAINABLE_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMatches = {
+    exact: [HISTORIAN_CHILD_TITLE, MEMORY_MIGRATION_CHILD_TITLE, SIDEKICK_CHILD_TITLE],
     prefixes: [],
 };
 
 export const INTERNAL_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMatches = {
-    exact: [HISTORIAN_CHILD_TITLE, ...PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES.exact],
+    exact: [
+        ...RETAINABLE_CHILD_TITLE_MATCHES.exact,
+        ...PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES.exact,
+    ],
     prefixes: PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES.prefixes,
 };
 
@@ -181,9 +198,12 @@ export async function sweepOrphanedRetrospectiveChildren(args: {
             predicateParams.push(now - args.staleMs.privacy);
         }
         if (args.keepSubagents !== true) {
-            const historianTitles = titlePredicate(HISTORIAN_CHILD_TITLE_MATCHES, predicateParams);
-            if (historianTitles) {
-                agePredicates.push(`(${historianTitles} AND time_created < ?)`);
+            const retainableTitles = titlePredicate(
+                RETAINABLE_CHILD_TITLE_MATCHES,
+                predicateParams,
+            );
+            if (retainableTitles) {
+                agePredicates.push(`(${retainableTitles} AND time_created < ?)`);
                 predicateParams.push(now - args.staleMs.historian);
             }
         }

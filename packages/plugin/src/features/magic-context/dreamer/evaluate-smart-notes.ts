@@ -3,6 +3,7 @@ import { createChildSessionWithFence } from "../../../hooks/magic-context/child-
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -443,6 +444,7 @@ async function confirmReadOnly(
     leaseSignal: AbortSignal,
 ): Promise<boolean> {
     let childSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -468,8 +470,6 @@ async function confirmReadOnly(
         });
     };
     try {
-        // Cleanup is deferred to the age-gated privacy sweep so detached OpenCode
-        // writers can persist final parts before the session is retired.
         const createResponse = await createChildSessionWithFence({
             client: args.client,
             db: args.db,
@@ -542,6 +542,7 @@ Output exactly JSON: {"met": false}`;
                     },
                 },
             );
+            promptSettled = true;
         } finally {
             promptSignal.cleanup();
         }
@@ -551,5 +552,15 @@ Output exactly JSON: {"met": false}`;
         recordInvocation({ status: "failed", error });
         log(`[dreamer] smart note #${noteId}: read-only confirmation failed — ${error}`);
         return false;
+    } finally {
+        await teardownChildSession({
+            client: args.client,
+            sessionId: childSessionId,
+            sessionDirectory: args.sessionDirectory ?? args.projectIdentity,
+            promptSettled,
+            privacySensitive: true,
+            context: `[dreamer] smart note #${noteId} confirmation`,
+            log,
+        });
     }
 }

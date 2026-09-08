@@ -10,7 +10,8 @@ import { extractToolCallSummaries } from "../../../hooks/magic-context/read-sess
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { describeError, getErrorMessage } from "../../../shared/error-message";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
+import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -201,9 +202,8 @@ export async function refreshPrimers(args: RefreshPrimersArgs): Promise<RefreshP
 
 /**
  * Investigate + refresh ONE primer in its OWN child session. Per-primer
- * try/finally guarantees the child is deleted even if a mid-loop deadline throw
- * fires (the old single outer-finally leaked the in-flight child). Returns true
- * if the answer was committed.
+ * try/finally retires a settled child inline and preserves an unsettled child for
+ * age-gated cleanup. Returns true if the answer was committed.
  */
 async function refreshOnePrimer(
     args: RefreshPrimersArgs,
@@ -234,6 +234,7 @@ async function refreshOnePrimer(
     });
 
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     try {
         const createResponse = await createChildSessionWithFence({
@@ -286,6 +287,7 @@ async function refreshOnePrimer(
                 validateOutput: (messages) => parseAnswer(messages, primer.answer),
             },
         );
+        promptSettled = true;
 
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
 
@@ -314,18 +316,15 @@ async function refreshOnePrimer(
         recordInvocation(args, startedAt, { status: "failed", error });
         throw error;
     } finally {
-        // Primer seeds include raw historical user lines, so the child must not
-        // remain on disk after failures or debug-retention runs.
-        if (agentSessionId) {
-            await args.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory },
-                })
-                .catch((e: unknown) => {
-                    log(`[dreamer] refresh-primers session cleanup failed: ${getErrorMessage(e)}`);
-                });
-        }
+        await teardownChildSession({
+            client: args.client,
+            sessionId: agentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] refresh-primers",
+            log,
+        });
     }
 }
 

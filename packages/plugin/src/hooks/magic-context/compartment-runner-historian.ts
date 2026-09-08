@@ -14,12 +14,12 @@ import {
     extractLatestAssistantText,
     hasLengthCappedOutput,
 } from "../../shared/assistant-message-extractor";
+import { teardownChildSession } from "../../shared/child-session-teardown";
 import {
     ensureCortexKitArtifactGitignore,
     getProjectMagicContextHistorianDir,
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
-import { shouldKeepSubagents } from "../../shared/keep-subagents";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
 import { isRecord } from "../../shared/record-type-guard";
 import { modelBodyField, toModelEntry } from "../../shared/resolve-fallbacks";
@@ -326,9 +326,10 @@ async function runHistorianPrompt(args: {
         parentInvocationId,
     } = args;
     let agentSessionId: string | null = null;
+    let promptSettled = false;
+    let hadUnsettledPrompt = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
-    let outcomeOk = false;
 
     const recordInvocation = (params: {
         status: "completed" | "failed" | "aborted";
@@ -414,12 +415,15 @@ async function runHistorianPrompt(args: {
                             agentId === HISTORIAN_EDITOR_AGENT ? "historian:editor" : "historian",
                     },
                 );
+                promptSettled = !hadUnsettledPrompt;
                 shared.sessionLog(
                     parentSessionId,
                     `historian: prompt completed (attempt ${retryIndex + 1}/${MAX_HISTORIAN_RETRIES + 1})`,
                 );
                 break;
             } catch (error: unknown) {
+                hadUnsettledPrompt = true;
+                promptSettled = false;
                 const errorMsg = getErrorMessage(error);
                 shared.sessionLog(
                     parentSessionId,
@@ -475,7 +479,6 @@ async function runHistorianPrompt(args: {
             dumpLabel ?? "historian-response",
             result,
         );
-        outcomeOk = true;
         return { ok: true, result, dumpPath, invocationId: invocationId ?? undefined };
     } catch (modelError: unknown) {
         const desc = describeError(modelError);
@@ -489,17 +492,15 @@ async function runHistorianPrompt(args: {
             error: `Historian failed while processing this session: ${desc.brief}`,
         };
     } finally {
-        if (agentSessionId) {
-            const retentionReason = shouldKeepSubagents()
-                ? "keep_subagents"
-                : outcomeOk
-                  ? "prompt completed; cleanup deferred to the age-gated sweep"
-                  : "failed; cleanup deferred to the age-gated sweep";
-            shared.sessionLog(
-                parentSessionId,
-                `historian: KEEPING child session ${agentSessionId} (${retentionReason}) — not deleted inline`,
-            );
-        }
+        await teardownChildSession({
+            client,
+            sessionId: agentSessionId,
+            sessionDirectory,
+            promptSettled,
+            privacySensitive: false,
+            context: "historian",
+            log: (message) => shared.sessionLog(parentSessionId, message),
+        });
     }
 }
 

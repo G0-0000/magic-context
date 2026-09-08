@@ -21,6 +21,7 @@ function createSidekickClient(
                     : { data: { id: args.createSessionId ?? "sidekick-child" } },
             ),
             prompt: mock(async () => undefined),
+            update: mock(async () => ({ data: undefined })),
             messages: mock(async () => ({
                 data: args.messages ?? [
                     {
@@ -83,6 +84,7 @@ describe("runSidekick", () => {
         });
         expect(client.session.delete).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },
+            query: { directory: "/repo/project" },
         });
     });
 
@@ -120,7 +122,7 @@ describe("runSidekick", () => {
         expect(client.session.delete).not.toHaveBeenCalled();
     });
 
-    it("returns null when prompting fails and still deletes the child session", async () => {
+    it("returns null when prompting is unsettled and archives without deleting the child", async () => {
         const client = createSidekickClient();
         (client.session.prompt as ReturnType<typeof mock>).mockRejectedValue(
             new Error("prompt timed out after 5000ms"),
@@ -134,7 +136,12 @@ describe("runSidekick", () => {
         });
 
         expect(result).toBeNull();
-        expect(client.session.delete).toHaveBeenCalledTimes(1);
+        expect(client.session.delete).not.toHaveBeenCalled();
+        expect(client.session.update).toHaveBeenCalledWith({
+            path: { id: "sidekick-child" },
+            query: { directory: "/repo/project" },
+            body: { time: { archived: expect.any(Number) } },
+        });
     });
 
     it("uses config system_prompt when provided", async () => {

@@ -3,7 +3,7 @@ import { withMigrationLanguageDirective } from "../../../agents/language-directi
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { sessionLog } from "../../../shared/logger";
 import { parseProviderModel } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -338,17 +338,16 @@ export async function runMemoryMigration(
     }
 
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const cleanupChildSession = async (sid: string | null): Promise<void> => {
-        if (!sid) return;
-        if (shouldKeepSubagents()) {
-            sessionLog(
-                parentSessionId,
-                `memory-migration: KEEPING child session ${sid} (keep_subagents)`,
-            );
-            return;
-        }
-        await client.session.delete({ path: { id: sid } }).catch((e: unknown) => {
-            sessionLog(parentSessionId, `memory-migration: child cleanup failed: ${String(e)}`);
+        await teardownChildSession({
+            client,
+            sessionId: sid,
+            sessionDirectory: directory,
+            promptSettled,
+            privacySensitive: false,
+            context: "memory-migration",
+            log: (message) => sessionLog(parentSessionId, message),
         });
     };
 
@@ -363,6 +362,7 @@ export async function runMemoryMigration(
             // hold a failed/empty turn). Clean up the previous one first.
             await cleanupChildSession(agentSessionId);
             agentSessionId = null;
+            promptSettled = false;
 
             const createResponse = await createChildSessionWithFence({
                 client,
@@ -413,6 +413,7 @@ export async function runMemoryMigration(
                         callContext: `memory-migration:${parentSessionId.slice(0, 12)}`,
                     },
                 );
+                promptSettled = true;
             } catch (error) {
                 sessionLog(
                     parentSessionId,

@@ -8,8 +8,8 @@ import {
     extractLatestAssistantText,
     hasLengthCappedOutput,
 } from "../../../shared/assistant-message-extractor";
-import { describeError, getErrorMessage } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
+import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -312,10 +312,10 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
 }
 
 /**
- * Map ONE batch in its OWN child session. Per-batch try/finally guarantees the
- * child is deleted even on a mid-loop deadline throw. An unclosed manifest records
- * nothing, while a closed manifest can safely bank its valid subset before a
- * targeted retry handles any omissions.
+ * Map ONE batch in its OWN child session. Per-batch try/finally retires a settled
+ * child inline and leaves an unsettled child to the age-gated sweep. An unclosed
+ * manifest records nothing, while a closed manifest can safely bank its valid
+ * subset before a targeted retry handles any omissions.
  */
 async function mapOneBatch(
     args: MapMemoriesArgs,
@@ -324,6 +324,7 @@ async function mapOneBatch(
     signal: AbortSignal,
 ): Promise<MapBatchOutcome> {
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     try {
         const createResponse = await createChildSessionWithFence({
@@ -383,6 +384,7 @@ async function mapOneBatch(
                 },
             },
         );
+        promptSettled = true;
 
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
         const outcome = await applyParsedBatchMappings(args, batch, run.validated);
@@ -415,19 +417,15 @@ async function mapOneBatch(
             },
         };
     } finally {
-        // Delete on success AND failure (the failed child still holds the
-        // memory-pool snapshot from the prompt). keep_subagents still honored —
-        // memory-pool text, not raw user transcripts.
-        if (agentSessionId && !shouldKeepSubagents()) {
-            await args.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory },
-                })
-                .catch((e: unknown) => {
-                    log(`[dreamer] map-memories session cleanup failed: ${getErrorMessage(e)}`);
-                });
-        }
+        await teardownChildSession({
+            client: args.client,
+            sessionId: agentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] map-memories",
+            log,
+        });
     }
 }
 

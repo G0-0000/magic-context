@@ -8,8 +8,8 @@ import {
     extractLatestAssistantText,
     hasLengthCappedOutput,
 } from "../../../shared/assistant-message-extractor";
-import { describeError, getErrorMessage } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
+import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -345,6 +345,7 @@ async function compressOneChunk(
     signal: AbortSignal,
 ): Promise<ChunkOutcome> {
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     try {
         const prompt = buildCompressCuesPrompt({
@@ -417,6 +418,7 @@ async function compressOneChunk(
                 },
             },
         );
+        promptSettled = true;
 
         return args.moduleRoute
             ? await applyCuesThroughModule(args, chunk, run.validated, signal)
@@ -444,16 +446,15 @@ async function compressOneChunk(
             },
         };
     } finally {
-        if (agentSessionId && !shouldKeepSubagents()) {
-            await args.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory },
-                })
-                .catch((e: unknown) => {
-                    log(`[dreamer] compress-cues session cleanup failed: ${getErrorMessage(e)}`);
-                });
-        }
+        await teardownChildSession({
+            client: args.client,
+            sessionId: agentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] compress-cues",
+            log,
+        });
     }
 }
 

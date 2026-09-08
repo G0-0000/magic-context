@@ -4,7 +4,8 @@ import { createChildSessionWithFence } from "../../../hooks/magic-context/child-
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { describeError, getErrorMessage } from "../../../shared/error-message";
+import { teardownChildSession } from "../../../shared/child-session-teardown";
+import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
@@ -133,6 +134,7 @@ Return valid JSON (no markdown fencing):
 If no promotions are warranted, return empty arrays. Always consume reviewed candidates so they don't accumulate indefinitely.`;
 
     let agentSessionId: string | null = null;
+    let promptSettled = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -262,6 +264,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 },
             },
         );
+        promptSettled = true;
 
         recordInvocation({ status: "completed", messages: reviewRun.output });
         const parsed = reviewRun.validated;
@@ -342,18 +345,14 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         throw error;
     } finally {
         heartbeat.stop();
-        // PRIVACY: this child prompt embeds cross-session user behavior. Always
-        // delete it, even on failure and even when debug subagent retention is
-        // enabled, so personal data is not left in the OpenCode session store.
-        if (agentSessionId) {
-            await args.client.session
-                .delete({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory },
-                })
-                .catch((e: unknown) => {
-                    log(`[dreamer] user-memories: session cleanup failed: ${getErrorMessage(e)}`);
-                });
-        }
+        await teardownChildSession({
+            client: args.client,
+            sessionId: agentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            promptSettled,
+            privacySensitive: true,
+            context: "[dreamer] user-memories",
+            log,
+        });
     }
 }
