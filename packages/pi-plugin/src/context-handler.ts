@@ -88,7 +88,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
-	clearDeferredExecutePendingIfMatches,
 	clearDetectedContextLimit,
 	clearEmergencyDropSample,
 	clearEmergencyRecovery,
@@ -101,10 +100,8 @@ import {
 	getOverflowState,
 	isProviderOverflowFailClosedProven,
 	type PendingPiCompactionMarker,
-	peekDeferredExecutePending,
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
-	setDeferredExecutePendingIfAbsent,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
@@ -123,11 +120,6 @@ import {
 	applyPendingOperations,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
-import {
-	applyMidTurnDeferral,
-	detectMidTurnBypassReason,
-	type SchedulerDeferReason,
-} from "@magic-context/core/hooks/magic-context/boundary-execution";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -245,7 +237,6 @@ import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import {
 	convertEntriesToRawMessages,
 	findLastModelKeyFromBranch,
-	isMidTurnPi,
 	readPiSessionMessages,
 	resolvePiStableId,
 } from "./read-session-pi";
@@ -2781,58 +2772,8 @@ export function registerPiContextHandler(
 			}
 
 			const tBoundaryChecks = performance.now();
-			const schedulerDecisionEarly = schedulerDecision;
-			const midTurn = isMidTurnPi(event, sessionId, branchEntries);
-			const bypassReason = detectMidTurnBypassReason({
-				contextUsage: { percentage: usagePercentage },
-				sessionMeta,
-				historyRefreshSessions,
-				sessionId,
-				effectiveExecuteThresholdPercentage,
-			});
-
-			const {
-				midTurnAdjustedSchedulerDecision,
-				sideEffect,
-				deferReason: schedulerDeferReason,
-			} = options.compactionOff
-				? {
-						midTurnAdjustedSchedulerDecision: "defer" as const,
-						sideEffect: "none" as const,
-						deferReason: "scheduler_defer" as const,
-					}
-				: applyMidTurnDeferral({
-						base: schedulerDecisionEarly,
-						bypassReason,
-						midTurn,
-					});
-
-			if (sideEffect === "set-flag" && !options.compactionOff) {
-				const flagPayload = {
-					id: crypto.randomUUID(),
-					reason: `${schedulerDecisionEarly}-${bypassReason}`,
-					recordedAt: Date.now(),
-				};
-				setDeferredExecutePendingIfAbsent(options.db, sessionId, flagPayload);
-			}
-
-			schedulerDecision = midTurnAdjustedSchedulerDecision;
-			// NOTE: do NOT promote defer→execute when a deferred-execute flag
-			// exists. OpenCode treats the flag as drain-on-success ONLY (it never
-			// re-raises execute) — see transform-postprocess-phase.ts boundary-exec
-			// drain + boundary-execution-integration.test.ts case 4 ("boundary defer
-			// with prior flag preserves the flag"). The scheduler is idempotent:
-			// shouldExecute re-returns "execute" on the next non-mid-turn pass while
-			// pressure still holds, so the deferred execute fires naturally without a
-			// Pi-only override. Promoting here diverged from OpenCode in exactly the
-			// case where pressure dropped below threshold after the mid-turn defer:
-			// OpenCode correctly defers (byte-stable) while Pi force-executed a
-			// spurious cache-busting pass. The flag is drained on the next pass that
-			// genuinely executes (peek+clear at the end of runPipeline).
-			sessionLog(
-				sessionId,
-				`[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
-			);
+			const schedulerDeferReason =
+				schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
 
 			// At the derived force band, evaluate tiered target-headroom reclaim.
 			const forceMaterialization =
@@ -4436,11 +4377,11 @@ interface RunPipelineArgs {
 	 * Pre-resolved scheduler decision for THIS pass. When `"execute"`,
 	 * heuristic cleanup runs (cache-busting). When `"defer"`, only the
 	 * cache-stable stages run (tagging + applyFlushedStatuses + replay
-	 * cached injection). Mirrors OpenCode's `schedulerDecisionEarly`.
+	 * cached injection). Mirrors OpenCode's pre-resolved scheduler decision.
 	 */
 	schedulerDecision: "execute" | "defer";
 	/** The defer reason is computed once when the scheduler decision is made; preserve it so refusal logs report the actual reason instead of recomputing it. */
-	schedulerDeferReason: SchedulerDeferReason | null;
+	schedulerDeferReason: "scheduler_defer" | null;
 	/**
 	 * Enables tiered emergency selection when usage reaches the derived force band.
 	 * The pressure-episode latch still prevents repeated originating batches.
@@ -4739,19 +4680,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// as subagent here, suppress visible tags and nudges so the prompt never points
 	// at a missing session-scoped tool.
 	const ctxReduceCallable = !args.sessionMeta.isSubagent;
-	// Mid-turn-aware gate for consuming DEFERRED publication signals — mirrors
-	// OpenCode's canConsumeDeferredOnThisPass. `args.schedulerDecision` is ALREADY
-	// the mid-turn-adjusted decision (applyMidTurnDeferral downgrades execute→defer
-	// mid-turn), so a deferred-publication signal that lands mid-turn is NOT
-	// consumed here — it waits for the next non-mid-turn execute/force pass. This
-	// breaks the previous inverted dependency where shouldRunHeuristics read the
-	// RAW deferredMaterializationSessions.has() (no mid-turn gate) and then
-	// canConsumeDeferredLate was derived FROM shouldRunHeuristics — so Pi ran
-	// heuristics + drained the native compaction marker mid-turn where OpenCode
-	// stays deferred (busting the Anthropic prompt cache while a multi-step turn
-	// was still accumulating tool calls). (OpenCode also consumes on
-	// justAwaitedPublication, but Pi's historian is detached and signals via the
-	// deferred sets post-publish, so there's no inline await to special-case.)
+	// Deferred publication signals may be consumed only on a pass that already
+	// has a genuine bust opportunity. Pi's historian is detached and signals via
+	// the deferred sets post-publish, so there is no inline await to special-case.
 	const canConsumeDeferredLate =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization === true ||
@@ -5069,27 +5000,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					RECENT_TOOL_SKELETON_WINDOW,
 				)
 			: [];
-	// The deferred-execute flag is drain-on-success ONLY — it must NOT appear
-	// here. OpenCode never gates work on the flag (peekDeferredExecutePending is
-	// read solely by the drain in transform-postprocess-phase.ts); the idempotent
-	// scheduler re-returns "execute" on the next non-mid-turn pass (pressure ≥
-	// threshold or TTL elapsed) and THAT drives the deferred execute. Including
-	// the flag here made Pi apply pending ops on a defer pass purely because the
-	// flag existed — a cache-busting half-execute (ops without heuristics) on a
-	// pass OpenCode keeps byte-stable. The flag is drained below on the next pass
-	// that genuinely executes.
 	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal ||
 		foldExecutedThisPass;
-	// `canConsumeDeferredLate` is computed ONCE, earlier (above shouldRunHeuristics),
-	// as a mid-turn-aware gate independent of shouldRunHeuristics — mirroring
-	// OpenCode's canConsumeDeferredOnThisPass. It must NOT be re-derived from
-	// shouldRunHeuristics here (the old inverted dependency that let deferred
-	// publication drain mid-turn). Explicit flush (hasPendingMaterializeSignal)
-	// still forces application via baseShouldApplyPendingOps, exactly as OpenCode
-	// keeps isExplicitFlush separate from the deferred-consumption gate.
+	// `canConsumeDeferredLate` is computed once, above shouldRunHeuristics, as a
+	// bust-opportunity gate independent of shouldRunHeuristics. Explicit flush
+	// (hasPendingMaterializeSignal) still forces application through
+	// baseShouldApplyPendingOps, matching OpenCode's separate flush gate.
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
 	const deferredHistoryRefresh =
@@ -5980,23 +5899,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		signalPiDeferredMaterialization(args.sessionId);
 	}
 
-	if (executedWorkThisPass) {
-		try {
-			const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
-			if (currentFlag !== null) {
-				clearDeferredExecutePendingIfMatches(
-					args.db,
-					args.sessionId,
-					currentFlag,
-				);
-			}
-		} catch (err) {
-			sessionLog(
-				args.sessionId,
-				`[boundary-exec] drain failed (continuing): ${err}`,
-			);
-		}
-	}
 	logTransformTiming(
 		args.sessionId,
 		"batchFinalize:heuristics",

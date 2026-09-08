@@ -11,7 +11,7 @@ import { join } from "node:path";
  * be the DEFERRED variants (`signalPiDeferredHistoryRefresh` /
  * `signalPiDeferredMaterialization`), exactly like the background historian's
  * `onPublished`. The eager variants would force a materialization on whatever
- * transform pass happens to be running — possibly mid-turn — busting the cache.
+ * cache-stable transform pass happens to be running, causing an avoidable bust.
  * The deferred signals stage the work so the next cache-busting pass at a turn
  * boundary drains it.
  *
@@ -40,7 +40,7 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		expect(codeOnly).toContain("signalPiDeferredMaterialization(sessionId)");
 	});
 
-	test("does NOT use the eager signals (would materialize mid-turn from background)", () => {
+	test("does NOT use eager signals that would materialize from background", () => {
 		expect(codeOnly).not.toContain("signalPiHistoryRefresh(sessionId)");
 		expect(codeOnly).not.toContain("signalPiPendingMaterialization(sessionId)");
 	});

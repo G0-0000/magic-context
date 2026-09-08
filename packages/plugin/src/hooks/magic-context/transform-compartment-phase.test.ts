@@ -80,7 +80,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mc-compartment-phase-"));
     process.env.XDG_DATA_HOME = tempDir;
-    __ignoredNotificationTest.setMidTurnDetector(() => false);
+    __ignoredNotificationTest.setHoldDetector(() => false);
 });
 
 afterEach(() => {

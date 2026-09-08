@@ -55,7 +55,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 beforeEach(() => {
     // These fixtures end on real user rows, so the notice hold would queue.
     // This file tests recomp behavior, not that gate.
-    __ignoredNotificationTest.setMidTurnDetector(() => false);
+    __ignoredNotificationTest.setHoldDetector(() => false);
 });
 
 async function runCompartmentAgentWithLease(

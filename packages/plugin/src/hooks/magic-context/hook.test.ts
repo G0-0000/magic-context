@@ -45,7 +45,7 @@ import { closeReadOnlySessionDb } from "./read-session-db";
 import { __ignoredNotificationTest } from "./send-session-notification";
 
 // Command-routing units model an already idle host; lifecycle ordering has its own timeline regression.
-beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
+beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
 
 type PromptMocks = {
     prompt?: ReturnType<typeof mock>;

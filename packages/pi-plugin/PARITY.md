@@ -436,8 +436,8 @@ post-publish signals are the DEFERRED variants (`signalPiDeferredHistoryRefresh`
 / `signalPiDeferredMaterialization`) and the compaction marker is STAGED (pending
 blob + deferred drain), never applied eagerly — exactly like the background
 historian's `onPublished`. Eager signals / eager marker apply would force a
-materialization (or mutate `getBranch()`) on whatever transform pass is running,
-possibly mid-turn, busting the cache.
+materialization (or mutate `getBranch()`) on a cache-stable transform pass,
+causing an otherwise avoidable cache bust.
 
 ## 11. Work-metrics: Pi folds the in-memory wire array; OpenCode computes lazily in RPC
 

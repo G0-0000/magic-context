@@ -105,7 +105,7 @@ import {
 } from "./module-wire";
 import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
-import { findLastAssistantModelFromOpenCodeDb, midTurnFromMessages } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
@@ -1404,7 +1404,6 @@ function buildTransformBody(args: {
     variant?: string;
     systemPromptHash: string;
     upgradeState: string;
-    midTurn: boolean;
     prevResponseCompletedAtMs?: number;
     requestObservedAtMs?: number;
     channel2NudgeState: string;
@@ -1454,7 +1453,6 @@ function buildTransformBody(args: {
         usage: args.usage,
         ...(args.geometry ? { geometry: args.geometry } : {}),
         provider_error: args.passInputs.provider_error,
-        mid_turn: args.midTurn,
         prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
         request_observed_at_ms: args.requestObservedAtMs,
         channel2_nudge_state: args.channel2NudgeState,
@@ -2166,7 +2164,6 @@ export function createRustModeTransform(
                 deps.executeThresholdTokens,
                 resolvedContextLimit,
             );
-            const midTurn = midTurnFromMessages(messages);
             const requestObservedAtMs = Date.now();
             const recoveryNoHeadEscape =
                 overflowState.needsEmergencyRecovery &&
@@ -2230,7 +2227,6 @@ export function createRustModeTransform(
                     !sessionMeta.isSubagent && deps.cavemanTextCompression?.enabled === true,
                 caveman_min_chars: deps.cavemanTextCompression?.minChars ?? 500,
                 cache_ttl: sessionMeta.cacheTtl,
-                mid_turn: midTurn,
                 is_subagent: sessionMeta.isSubagent,
                 system_prompt_hash: sessionMeta.systemPromptHash ?? "",
                 upgrade_state: readUpgradeState(deps.db, sessionId),
@@ -2563,7 +2559,6 @@ export function createRustModeTransform(
                 variant: deps.variantBySession?.get(sessionId),
                 systemPromptHash: sessionMeta.systemPromptHash ?? "",
                 upgradeState: String(passInputs.upgrade_state ?? ""),
-                midTurn,
                 prevResponseCompletedAtMs:
                     sessionMeta.lastResponseTime > 0 ? sessionMeta.lastResponseTime : undefined,
                 requestObservedAtMs,
@@ -2854,7 +2849,6 @@ export function createRustModeTransform(
                         providerId: model?.providerID ?? null,
                         systemPromptHash: sessionMeta.systemPromptHash ?? "",
                         upgradeState: String(passInputs.upgrade_state ?? ""),
-                        midTurn,
                         prevResponseCompletedAtMs:
                             sessionMeta.lastResponseTime > 0
                                 ? sessionMeta.lastResponseTime

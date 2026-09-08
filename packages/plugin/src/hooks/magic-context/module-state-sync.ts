@@ -27,7 +27,6 @@ import {
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
     getPersistedTodoSyntheticAnchor,
-    peekDeferredExecutePending,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getPendingOps } from "../../features/magic-context/storage-ops";
 import {
@@ -123,12 +122,6 @@ export interface ModulePendingCompactionMarkerSeed {
     published_at: number;
 }
 
-export interface ModuleDeferredExecuteSeed {
-    id: string;
-    reason: string;
-    recorded_at: number;
-}
-
 export type ModuleStripKind =
     | "placeholder"
     | "system_injected"
@@ -172,7 +165,6 @@ export interface ModuleStateSyncPayload {
         todo_synthetic_anchor?: ModuleTodoSyntheticAnchorSeed | null;
         emergency_latches?: ModuleEmergencyLatchSeed;
         pending_compaction_marker?: ModulePendingCompactionMarkerSeed | null;
-        deferred_execute_state?: ModuleDeferredExecuteSeed | null;
         channel2_nudge_state?: string;
         strip_seeds?: ModuleStripSeed[];
         strip_seed_skipped?: number;
@@ -1083,7 +1075,6 @@ export function buildPagedModuleStateSyncPayloads(
         todoSyntheticAnchor?: ModuleTodoSyntheticAnchorSeed | null;
         emergencyLatches?: ModuleEmergencyLatchSeed;
         pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
-        deferredExecuteState?: ModuleDeferredExecuteSeed | null;
         channel2NudgeState?: string;
         stripSeeds?: ModuleStripSeed[];
         stripSeedSkipped?: number;
@@ -1172,7 +1163,6 @@ export function buildPagedModuleStateSyncPayloads(
         stripSeeds?: ModuleStripSeed[];
         stripSeedSkipped?: number;
         pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
-        deferredExecuteState?: ModuleDeferredExecuteSeed | null;
         channel2NudgeState?: string;
     }): ModuleStateSyncPayload => ({
         method: "state_sync",
@@ -1229,9 +1219,6 @@ export function buildPagedModuleStateSyncPayloads(
                       ...(args.pendingCompactionMarker !== undefined
                           ? { pending_compaction_marker: args.pendingCompactionMarker }
                           : {}),
-                      ...(args.deferredExecuteState !== undefined
-                          ? { deferred_execute_state: args.deferredExecuteState }
-                          : {}),
                       ...(args.channel2NudgeState !== undefined
                           ? { channel2_nudge_state: args.channel2NudgeState }
                           : {}),
@@ -1261,7 +1248,6 @@ export function buildPagedModuleStateSyncPayloads(
         pendingDropSkipped: args.pendingDropSkipped,
         autoSearchHintSkipped: args.autoSearchHintSkipped,
         pendingCompactionMarker: args.pendingCompactionMarker,
-        deferredExecuteState: args.deferredExecuteState,
         channel2NudgeState: args.channel2NudgeState,
     });
     const envelopeMarginBytes = moduleWireBodyBytes({
@@ -1304,7 +1290,6 @@ export function buildPagedModuleStateSyncPayloads(
             pendingDropSkipped: args.pendingDropSkipped,
             autoSearchHintSkipped: args.autoSearchHintSkipped,
             pendingCompactionMarker: args.pendingCompactionMarker,
-            deferredExecuteState: args.deferredExecuteState,
             channel2NudgeState: args.channel2NudgeState,
             ...batch,
         });
@@ -1576,19 +1561,6 @@ export async function buildModuleStateSyncPayload(args: {
                     end_message_id: pendingMarker.endMessageId,
                     published_at: pendingMarker.publishedAt,
                 };
-    const deferredPending = args.force
-        ? peekDeferredExecutePending(args.pass.db, args.pass.sessionId)
-        : undefined;
-    const deferredExecuteState =
-        deferredPending === undefined
-            ? undefined
-            : deferredPending === null
-              ? null
-              : {
-                    id: deferredPending.id,
-                    reason: deferredPending.reason,
-                    recorded_at: deferredPending.recordedAt,
-                };
     const channel2NudgeState = args.force
         ? getChannel2NudgeState(args.pass.db, args.pass.sessionId)
         : undefined;
@@ -1631,7 +1603,6 @@ export async function buildModuleStateSyncPayload(args: {
         todoSyntheticAnchor,
         emergencyLatches,
         pendingCompactionMarker,
-        deferredExecuteState,
         channel2NudgeState,
         stripSeeds: stripSeeds && stripSeeds.length > 0 ? stripSeeds : undefined,
         stripSeedSkipped: undefined,
@@ -1661,9 +1632,6 @@ export async function buildModuleStateSyncPayload(args: {
             acked_watermarks: currentWatermarks,
             ...(pendingCompactionMarker !== undefined
                 ? { pending_compaction_marker: pendingCompactionMarker }
-                : {}),
-            ...(deferredExecuteState !== undefined
-                ? { deferred_execute_state: deferredExecuteState }
                 : {}),
             ...(channel2NudgeState !== undefined
                 ? { channel2_nudge_state: channel2NudgeState }

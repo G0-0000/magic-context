@@ -222,7 +222,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `output_reserve` | `number` or `object` | automatic | User-config-only output-token reservation override. `0` disables reservation; supports per-model maps. See below. |
 | `protected_tags` | `number` (1–100) | `20` | Last N active tags immune from immediate dropping. |
 | `toast_duration_ms` | `number` (0–60000) | `5000` | TUI toast lifetime for Magic Context notifications in milliseconds. Increase this if toasts disappear too quickly, or set to `0` to disable Magic Context toasts entirely. |
-| `execute_threshold_percentage` | `number` (20–90) or `object` | `65` | Context usage that forces queued ops to execute. Capped at 90% of the output-reserved safe window, leaving about 10% for mid-turn input growth. Supports per-model maps. |
+| `execute_threshold_percentage` | `number` (20–90) or `object` | `65` | Context usage that forces queued ops to execute. Capped at 90% of the output-reserved safe window, leaving about 10% for in-turn input growth. Supports per-model maps. |
 | `execute_threshold_tokens` | `object` (per-model map) | — | **Optional absolute-tokens variant of `execute_threshold_percentage`.** Per-model map (e.g. `{ "default": 150000, "github-copilot/gpt-5.2-codex": 40000 }`). When set for a model, overrides the percentage-based threshold for that model. Clamped to `90% × context_limit` with a warn log. Requires a resolvable context limit — falls through to percentage if unavailable. See below. |
 | `clear_reasoning_age` | `number` | `50` | Clear thinking/reasoning blocks older than N tags. |
 | `historian_timeout_ms` | `number` | `600000` | Timeout per historian call (ms). |

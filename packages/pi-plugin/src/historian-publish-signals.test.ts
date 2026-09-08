@@ -98,7 +98,7 @@ describe("historian onPublished signals", () => {
 	});
 	test("Pi historian publish path does not eagerly clear the injection cache", () => {
 		// Background historian publication should only set deferred refresh
-		// signals via context-handler onPublished. Defer/mid-turn passes then
+		// signals via context-handler onPublished. Cache-stable passes then
 		// replay cached <session-history> bytes until a materializing pass
 		// consumes those deferred signals.
 		expect(RUNNER_SRC).not.toContain("clearInjectionCache");

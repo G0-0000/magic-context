@@ -4,7 +4,6 @@ import {
     applyStrippedPlaceholderDelta,
     type ContextDatabase,
     captureChannel1PostReduceGraceBaseline,
-    clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
     getActiveTagsBySession,
@@ -22,7 +21,6 @@ import {
     getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
     type PendingCompactionMarker,
-    peekDeferredExecutePending,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     setPendingCompactionMarkerState,
@@ -60,7 +58,6 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { runAutoSearchHint } from "./auto-search-runner";
-import type { SchedulerDeferReason } from "./boundary-execution";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
     rearmChannel2AfterMeasuredCollapse,
@@ -827,7 +824,7 @@ interface RunPostTransformPhaseArgs {
     usableWindow: number;
     schedulerDecision: "execute" | "defer";
     /** Use the defer reason resolved with the scheduler decision at the boundary; do not recompute it from this phase's inputs, which may no longer reflect that decision. */
-    schedulerDeferReason?: SchedulerDeferReason | null;
+    schedulerDeferReason?: "scheduler_defer" | null;
     fullFeatureMode: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved. Every mutating gate in
@@ -1465,8 +1462,6 @@ export async function runPostTransformPhase(
     }
     let explicitMaterializedSuccessfully = false;
     let deferredMaterializedSuccessfully = false;
-    let heuristicsRanSuccessfully = false;
-    let pendingOpsRanSuccessfully = false;
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
     let droppedCount = 0;
@@ -1842,10 +1837,6 @@ export async function runPostTransformPhase(
         if (shouldRunHeuristics) {
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
-            heuristicsRanSuccessfully = true;
-        }
-        if (shouldApplyPendingOps) {
-            pendingOpsRanSuccessfully = true;
         }
     } catch (error) {
         args.passOutcome?.record("pending-operation-failure");
@@ -2362,38 +2353,12 @@ export async function runPostTransformPhase(
         });
     }
 
-    const workExecutedSuccessfully =
-        explicitMaterializedSuccessfully ||
-        deferredMaterializedSuccessfully ||
-        heuristicsRanSuccessfully ||
-        pendingOpsRanSuccessfully;
-
     // Work-metrics (TUI sidebar Stats) are NOT computed here. They are a
     // display-only value read solely by the RPC sidebar handler, and the
     // computation is O(session age) — it was the dominant transform cost on
     // long sessions when run every pass. It now runs lazily and incrementally
     // in buildSidebarSnapshot (rpc-handlers.ts) when the TUI actually polls,
     // keeping the prompt path free of it.
-
-    if (workExecutedSuccessfully) {
-        try {
-            const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
-            if (currentFlag !== null) {
-                const cleared = clearDeferredExecutePendingIfMatches(
-                    args.db,
-                    args.sessionId,
-                    currentFlag,
-                );
-                sessionLog(
-                    args.sessionId,
-                    `[boundary-exec] deferred-execute drain: ${cleared ? "cleared" : "stale-noop"} reason=${currentFlag.reason}`,
-                );
-            }
-        } catch (err) {
-            args.passOutcome?.record("deferred-execute-drain-failure");
-            sessionLog(args.sessionId, `[boundary-exec] drain failed (continuing): ${err}`);
-        }
-    }
 
     if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {
         // Resolve memory ids currently rendered in the <session-history>

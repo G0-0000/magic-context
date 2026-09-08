@@ -1556,10 +1556,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       pending_pi_compaction_marker_state TEXT,
       new_work_tokens INTEGER NOT NULL DEFAULT 0,
       total_input_tokens INTEGER NOT NULL DEFAULT 0,
-      -- deferred_execute_state: intentionally NULLABLE without a default.
-      -- Absence is SQL NULL; presence is a JSON blob written via
-      -- setDeferredExecutePendingIfAbsent. Excluded from the
-      -- healAllNullColumns fallback list.
+      -- Retired columns remain in place so existing databases keep the same schema:
+      -- deferred_execute_state was used by the removed turn-boundary execute hold.
       deferred_execute_state TEXT,
       cached_m0_bytes BLOB,
       cached_m0_project_memory_epoch INTEGER,

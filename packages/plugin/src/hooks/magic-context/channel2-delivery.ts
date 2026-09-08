@@ -55,7 +55,7 @@ import {
     reclaimableToolOutputCount,
     type ToolReclaimHint,
 } from "./ctx-reduce-nudge";
-import { isMidTurn } from "./read-session-db";
+import { assistantAwaitingTools } from "./read-session-db";
 
 export interface Channel2DeliveryDeps {
     db: Database;
@@ -86,7 +86,7 @@ function subagentRunIsActive(deps: Channel2DeliveryDeps, sessionId: string): boo
     try {
         const meta = getOrCreateSessionMeta(deps.db, sessionId);
         if (!meta.isSubagent) return true;
-        return isMidTurn(deps, sessionId);
+        return assistantAwaitingTools(deps, sessionId);
     } catch (error) {
         sessionLog(
             sessionId,

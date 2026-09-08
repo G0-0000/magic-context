@@ -10,7 +10,7 @@ const DEFAULT_TITLE = "New session - 2026-06-11T12:00:00.000Z";
 
 describe("sendIgnoredMessage", () => {
     // Delivery-unit tests supply an idle harness; the lifecycle timeline is tested separately.
-    beforeEach(() => __ignoredNotificationTest.setMidTurnDetector(() => false));
+    beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
     afterEach(() => {
         __ignoredNotificationTest.reset();
     });
@@ -74,7 +74,7 @@ describe("sendIgnoredMessage", () => {
     it("queues without creating a user row while the session is active", async () => {
         const session = titledClientWithLastTurn();
         const diagnostics: string[] = [];
-        __ignoredNotificationTest.setMidTurnDetector(() => true);
+        __ignoredNotificationTest.setHoldDetector(() => true);
         __ignoredNotificationTest.setDiagnosticObserver((message) => diagnostics.push(message));
 
         const result = await sendIgnoredMessage({ session }, "ses-active", "background status", {});
@@ -91,7 +91,7 @@ describe("sendIgnoredMessage", () => {
         const session = titledClientWithLastTurn();
         let active = true;
         const onDelivered = mock(() => {});
-        __ignoredNotificationTest.setMidTurnDetector(() => active);
+        __ignoredNotificationTest.setHoldDetector(() => active);
 
         const result = await sendIgnoredMessage({ session }, "ses-callback", "callback status", {
             onDelivered,
@@ -109,7 +109,7 @@ describe("sendIgnoredMessage", () => {
     it("flushes queued notices in order after the session becomes idle", async () => {
         const session = titledClientWithLastTurn();
         let active = true;
-        __ignoredNotificationTest.setMidTurnDetector(() => active);
+        __ignoredNotificationTest.setHoldDetector(() => active);
 
         await sendIgnoredMessage({ session }, "ses-idle-flush", "first status", {});
         await sendIgnoredMessage({ session }, "ses-idle-flush", "second status", {});
@@ -129,7 +129,7 @@ describe("sendIgnoredMessage", () => {
 
     it("keeps only the newest notices when the active queue is full", async () => {
         const session = titledClientWithLastTurn();
-        __ignoredNotificationTest.setMidTurnDetector(() => true);
+        __ignoredNotificationTest.setHoldDetector(() => true);
 
         for (let index = 0; index < MAX_QUEUED_IGNORED_NOTIFICATIONS + 3; index += 1) {
             await sendIgnoredMessage({ session }, "ses-bounded", `status ${index}`, {});
@@ -200,7 +200,7 @@ describe("sendIgnoredMessage", () => {
         const observedRows = new Set(["msg_notice"]);
         const diagnostics: string[] = [];
         let hold = false;
-        __ignoredNotificationTest.setMidTurnDetector(() => hold);
+        __ignoredNotificationTest.setHoldDetector(() => hold);
         __ignoredNotificationTest.setDiagnosticObserver((message) => diagnostics.push(message));
         const deleter = mock(async (_sessionId: string, messageId: string) =>
             observedRows.delete(messageId),
