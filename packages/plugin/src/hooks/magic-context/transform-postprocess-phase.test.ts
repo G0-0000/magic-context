@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -257,6 +258,75 @@ function basePostTransformArgs(
 function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
+
+describe("postprocess replay snapshot", () => {
+    it("serves byte-identical passes from one row read and reloads on the next pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-replay-snapshot";
+        getOrCreateSessionMeta(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET note_nudge_anchors = ?, trailing_blank_decisions = ? WHERE session_id = ?",
+        ).run(
+            JSON.stringify([{ messageId: "snapshot-user", text: "\nreplay-v1" }]),
+            JSON.stringify({ "snapshot-assistant": "strip" }),
+            sessionId,
+        );
+
+        const preparedSql: string[] = [];
+        const spiedDb = new Proxy(db, {
+            get(target, prop, receiver) {
+                if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+                return (sql: string) => {
+                    preparedSql.push(sql);
+                    return target.prepare.call(target, sql);
+                };
+            },
+        }) as Database;
+        const input = [
+            {
+                info: { id: "snapshot-user", role: "user" },
+                parts: [{ type: "text", text: "same input" }],
+            },
+            {
+                info: { id: "snapshot-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "same output" }],
+            },
+        ] as MessageLike[];
+        const run = async (): Promise<MessageLike[]> => {
+            const messages = cloneMessages(input);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    db: spiedDb,
+                    resolvedProviderID: "anthropic",
+                }),
+            );
+            return messages;
+        };
+        const digest = (messages: MessageLike[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+
+        const first = await run();
+        const second = await run();
+        expect(digest(second)).toBe(digest(first));
+        expect(
+            preparedSql.filter((sql) => sql.includes("SELECT stale_reduce_stripped_ids")).length,
+        ).toBe(2);
+        expect(
+            preparedSql.some((sql) =>
+                /SELECT (?:note_nudge_anchors|trailing_blank_decisions) FROM/.test(sql),
+            ),
+        ).toBe(false);
+
+        db.prepare("UPDATE session_meta SET note_nudge_anchors = ? WHERE session_id = ?").run(
+            JSON.stringify([{ messageId: "snapshot-user", text: "\nreplay-v2" }]),
+            sessionId,
+        );
+        const afterPassInvalidation = await run();
+        expect(digest(afterPassInvalidation)).not.toBe(digest(second));
+        expect(JSON.stringify(afterPassInvalidation)).toContain("replay-v2");
+    });
+});
 
 describe("tail hygiene last-writer guard", () => {
     it("logs a production structural mismatch after a post-walk mutation without throwing", async () => {
