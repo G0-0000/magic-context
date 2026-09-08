@@ -30,6 +30,13 @@ describe("dropped input execution guard", () => {
                 content: "The log used ...[truncated] before the final retry.",
             }),
         ).toBe(false);
+        // A real value that ends with the sentinel text is longer than any copied
+        // placeholder (five characters plus the sentinel) and must stay executable.
+        expect(
+            containsDroppedInputPlaceholder({
+                content: "expected output line 1\nexpected output line 2\n...[truncated]",
+            }),
+        ).toBe(false);
     });
 
     it("rejects through the OpenCode tool.execute.before hook with recovery guidance", async () => {

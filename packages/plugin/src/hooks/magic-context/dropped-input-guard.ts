@@ -1,11 +1,15 @@
-const LEGACY_TRUNCATION_SENTINEL = "...[truncated]";
+// The pre-fix truncated render kept at most five characters of the original
+// value before the sentinel, so a copied placeholder always has that exact
+// shape. Matching only that shape keeps a legitimate value that merely ends
+// with the sentinel text (a log line, a fixture) executable.
+const LEGACY_TRUNCATED_VALUE = /^[\s\S]{0,5}\.\.\.\[truncated\]$/;
 const DROPPED_INPUT_MESSAGE =
     "A tool argument was a dropped placeholder and was not executed. Recover the original arguments with ctx_expand, then issue a fresh tool call.";
 
 function isDroppedPlaceholderString(value: string): boolean {
     return (
         (value.startsWith("[dropped §") && value.endsWith("§]")) ||
-        value.endsWith(LEGACY_TRUNCATION_SENTINEL) ||
+        LEGACY_TRUNCATED_VALUE.test(value) ||
         value === "[object]" ||
         /^\[\d+ items\]$/.test(value)
     );
