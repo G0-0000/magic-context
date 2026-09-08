@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { droppedInputMarker } from "./dropped-input-guard";
 import { applyEditMarkerToInput } from "./edit-marker";
 import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -107,11 +108,9 @@ function clampCloneInPlace(occurrence: IndexedOccurrence, clamp: (part: unknown)
 function truncateToolPart(part: unknown, tagId: number): void {
     if (!isRecord(part)) return;
 
-    // The skeleton keeps the tool_use call but replaces its OUTPUT with the
-    // one canonical drop placeholder `[dropped §N§]` (byte-identical to a
-    // full message/tool drop). Long input ARG values are separately clamped
-    // with `...[truncated]` — that's value-shortening, not a drop, so it keeps
-    // its own marker. Frozen by the dropMode column, so it replays identically.
+    // Keep the call/result structure for provider pairing, but remove every
+    // executable argument key. The marker is derived only from the durable tag,
+    // so a frozen truncated drop replays byte-identically.
     const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
 
     // OpenCode format: { type: "tool", state: { input: {...}, output: "..." } }
@@ -119,12 +118,7 @@ function truncateToolPart(part: unknown, tagId: number): void {
         const state = part.state;
         state.output = sentinel;
 
-        if (isRecord(state.input)) {
-            const inputSize = estimateInputSize(state.input);
-            if (inputSize > 500) {
-                truncateInputValues(state.input);
-            }
-        }
+        state.input = droppedInputMarker(tagId);
 
         return;
     }
@@ -136,35 +130,21 @@ function truncateToolPart(part: unknown, tagId: number): void {
     }
 
     // OpenCode invocation format: { type: "tool-invocation", args: {...} }
-    if (part.type === "tool-invocation" && isRecord(part.args)) {
-        const inputSize = estimateInputSize(part.args as Record<string, unknown>);
-        if (inputSize > 500) {
-            truncateInputValues(part.args as Record<string, unknown>);
-        }
+    if (part.type === "tool-invocation") {
+        part.args = droppedInputMarker(tagId);
         return;
     }
 
     // Anthropic invocation format: { type: "tool_use", input: {...} }
-    if (part.type === "tool_use" && isRecord(part.input)) {
-        const inputSize = estimateInputSize(part.input as Record<string, unknown>);
-        if (inputSize > 500) {
-            truncateInputValues(part.input as Record<string, unknown>);
-        }
-    }
-}
-
-function estimateInputSize(input: Record<string, unknown>): number {
-    try {
-        return JSON.stringify(input).length;
-    } catch {
-        return 0;
+    if (part.type === "tool_use") {
+        part.input = droppedInputMarker(tagId);
     }
 }
 
 /**
  * Edit-marker variant of `truncateToolPart` for a superseded edit/write: keep
  * the tool_use call, output → `[dropped §N§]`, but preserve `filePath` verbatim
- * and clamp the diff to a region hint (instead of the 5-char generic clamp).
+ * and clamp the diff to a region hint (instead of replacing every argument).
  * A SEPARATE path from `truncateToolPart`: it must never alter the existing
  * skeleton bytes. Deterministic + idempotent (see edit-marker.ts).
  */
@@ -204,44 +184,6 @@ function readToolPartInput(part: unknown): Record<string, unknown> | null {
     if (part.type === "tool-invocation" && isRecord(part.args)) return part.args;
     if (part.type === "tool_use" && isRecord(part.input)) return part.input;
     return null;
-}
-
-const TRUNCATION_SENTINEL = "...[truncated]";
-
-/**
- * Slice a string without splitting a surrogate pair.
- * If the character at `maxLen - 1` is a high surrogate, back off by one
- * to avoid producing an orphaned surrogate that breaks JSON serialization.
- */
-function safeSlice(str: string, maxLen: number): string {
-    if (str.length <= maxLen) return str;
-    // Check if we'd split a surrogate pair
-    const lastCharCode = str.charCodeAt(maxLen - 1);
-    // High surrogate range: 0xD800–0xDBFF
-    if (lastCharCode >= 0xd800 && lastCharCode <= 0xdbff) {
-        return str.slice(0, maxLen - 1);
-    }
-    return str.slice(0, maxLen);
-}
-
-function truncateInputValues(input: Record<string, unknown>): void {
-    for (const key of Object.keys(input)) {
-        const value = input[key];
-        if (typeof value === "string") {
-            // Already truncated — skip to preserve idempotency
-            if (
-                value.endsWith(TRUNCATION_SENTINEL) ||
-                value === "[object]" ||
-                /^\[\d+ items\]$/.test(value)
-            )
-                continue;
-            input[key] = value.length > 5 ? `${safeSlice(value, 5)}${TRUNCATION_SENTINEL}` : value;
-        } else if (Array.isArray(value)) {
-            input[key] = `[${value.length} items]`;
-        } else if (value !== null && typeof value === "object") {
-            input[key] = "[object]";
-        }
-    }
 }
 
 export function hasMeaningfulPart(part: unknown): boolean {
@@ -407,9 +349,9 @@ export function createToolDropTarget(
         if (!entry.hasResult) return "incomplete";
 
         for (const occurrence of entry.occurrences) {
-            // Truncate both result parts (output) and invocation parts
-            // (args/input). Clamp a CLONE and swap it into the wire so the live
-            // part object OpenCode may still execute from stays byte-identical.
+            // Drop result bytes and replace invocation arguments with a
+            // non-executable marker. Rewrite a CLONE so the live part object
+            // OpenCode may still execute from stays byte-identical.
             clampCloneInPlace(occurrence, (part) => truncateToolPart(part, tagId));
         }
         clearThinkingParts(thinkingParts);

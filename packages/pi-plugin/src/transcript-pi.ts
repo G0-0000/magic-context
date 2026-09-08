@@ -768,7 +768,7 @@ function createPiAssistantPart(
 				// bulk `arguments` payload is reduced to the marker.
 				newContent[partIndex] = {
 					...existing,
-					arguments: { __magic_context_dropped__: sentinelText },
+					arguments: { dropped: sentinelText },
 				};
 			} else {
 				newContent[partIndex] = { type: "text", text: sentinelText };

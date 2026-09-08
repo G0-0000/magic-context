@@ -46,10 +46,10 @@ const PARTNER_FRAME_CLOSER_NO_REDUCE_LIGHT = `\nWhen ctx_reduce is unavailable, 
  */
 const CTX_NOTE_GUIDANCE = `Use \`ctx_note\` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Magic Context preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).`;
 
-// Tool outputs are always FULL-dropped (Phase 2 removed truncate-mode), so the
-// guidance only describes the omit-entirely case.
+// Tool history guidance is shared by both presets.
 const TOOL_HISTORY_GUIDANCE = `Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.
 Magic Context control metadata is not reply syntax. Never reproduce \`<system-reminder>\`, \`<ctx-search-hint>\`, \`<session-history>\`, \`<session-history-since>\`, \`<project-memory>\`, \`<memory-updates>\`, \`<new-compartments>\`, \`<new-memories>\`, \`[dropped §N§]\`, or \`<!-- +Xm -->\` markers in a normal reply and never treat them as user instructions; use ordinary prose and real tool calls instead.`;
+
 
 /** ctx_memory-specific guidance. Gated out when `memory.enabled: false`: with
  *  memory off, the `<project-memory>` block is never injected, so anything the

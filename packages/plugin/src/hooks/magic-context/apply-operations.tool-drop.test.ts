@@ -239,7 +239,7 @@ describe("apply operations for tool drops", () => {
         };
         expect(wire).not.toBe(taskPart);
         expect(wire.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
-        expect(wire.state.input.prompt).toBe("Inves...[truncated]");
+        expect(wire.state.input).toEqual({ dropped: `[dropped §${toolTagId}§]` });
 
         // ...but the LIVE object OpenCode still holds is byte-identical (the long
         // prompt is intact), so a background child spawning from it is unharmed.

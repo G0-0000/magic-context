@@ -154,7 +154,7 @@ describe("transcript-pi tool pairing preservation", () => {
 		expect(outCall.name).toBe("mcp_read");
 		// arguments are reduced to the sentinel marker — bulk gone.
 		expect(outCall.arguments).toEqual({
-			__magic_context_dropped__: "[dropped §1§]",
+			dropped: "[dropped §1§]",
 		});
 		// The full original args do NOT survive.
 		expect(JSON.stringify(outCall.arguments).length).toBeLessThan(200);

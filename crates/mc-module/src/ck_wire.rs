@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn reduced_tool_call_inputs_keep_real_argument_keys() {
+    fn legacy_reduced_tool_call_inputs_keep_real_argument_keys() {
         let original = CkWireBlock::bare(CkKind::ToolCall {
             id: "edit-call".to_string(),
             name: "edit".to_string(),

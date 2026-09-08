@@ -350,7 +350,7 @@ describe("createPiTranscript", () => {
 			}>;
 			expect(output[0]?.content?.[0]).toMatchObject({
 				type: "toolCall",
-				arguments: { __magic_context_dropped__: "[dropped §1§]" },
+				arguments: { dropped: "[dropped §1§]" },
 			});
 			expect(output[1]?.content).toEqual([
 				{ type: "text", text: "[dropped §1§]" },
