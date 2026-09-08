@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -334,7 +335,105 @@ describe("resolveOrdinalsForModule provisional tails", () => {
         }
     });
 
-    it("reconciles provisional ordinals when the appended rows persist", async () => {
+    it("serves a warm memo byte-identically without ordinal I/O and re-probes named invalidations", async () => {
+        const sessionId = "module-wire-hot-memo";
+        const rows = [
+            { id: "m1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true },
+        ];
+        let pageReads = 0;
+        let countReads = 0;
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => rows,
+            readMessageOrdinalPage: (after, limit) => {
+                pageReads += 1;
+                return rows
+                    .filter(
+                        (row) =>
+                            !after ||
+                            row.timeCreated > after.timeCreated ||
+                            (row.timeCreated === after.timeCreated && row.id > after.id),
+                    )
+                    .slice(0, limit);
+            },
+            getStoredMessageCount: () => {
+                countReads += 1;
+                return rows.length;
+            },
+        });
+        const wire = (ids: string[]) =>
+            ids.map((id) => ({
+                info: { id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: id }],
+            })) as MessageLike[];
+        const digest = (messages: unknown[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+        const memo = new Map<string, number>();
+        try {
+            const first = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(["m1", "m2", "m3"]),
+                generation: 1,
+                memoGeneration: 1,
+                memo,
+            });
+            expect(first.ok).toBe(true);
+            if (!first.ok) throw new Error(first.reason);
+            const readsAfterPrime = { pageReads, countReads };
+            const second = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(["m1", "m2", "m3"]),
+                generation: 1,
+                memoGeneration: first.memoGeneration,
+                memo,
+                memoAnchor: first.memoAnchor,
+                memoStoredCount: first.memoStoredCount,
+                memoCanonicalCount: first.memoCanonicalCount,
+            });
+            expect(second.ok).toBe(true);
+            if (!second.ok) throw new Error(second.reason);
+            expect({ pageReads, countReads }).toEqual(readsAfterPrime);
+            expect(digest(second.annotatedInput)).toBe(digest(first.annotatedInput));
+
+            const unseen = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(["m1", "m2", "m3", "m4"]),
+                generation: 1,
+                memoGeneration: second.memoGeneration,
+                memo,
+                memoAnchor: second.memoAnchor,
+                memoStoredCount: second.memoStoredCount,
+                memoCanonicalCount: second.memoCanonicalCount,
+            });
+            expect(unseen.ok).toBe(true);
+            expect(pageReads).toBeGreaterThan(readsAfterPrime.pageReads);
+            expect(countReads).toBeGreaterThan(readsAfterPrime.countReads);
+
+            rows.splice(1, 1);
+            const reset = await resolveOrdinalsForModule({
+                sessionId,
+                messages: wire(["m1", "m3"]),
+                generation: 2,
+                memoGeneration: 1,
+                memo,
+                memoAnchor: second.memoAnchor,
+                memoStoredCount: second.memoStoredCount,
+                memoCanonicalCount: second.memoCanonicalCount,
+            });
+            expect(reset.ok).toBe(true);
+            if (!reset.ok) throw new Error(reset.reason);
+            expect(
+                (reset.annotatedInput as Array<{ absolute_ordinal: number }>).map(
+                    (message) => message.absolute_ordinal,
+                ),
+            ).toEqual([1, 2]);
+        } finally {
+            unregister();
+        }
+    });
+
+    it("reconciles provisional ordinals when an unseen wire id triggers a probe", async () => {
         const result = await resolveTail(2);
         try {
             result.persistedTail.push(
@@ -343,7 +442,17 @@ describe("resolveOrdinalsForModule provisional tails", () => {
             );
             const reconciled = await resolveOrdinalsForModule({
                 sessionId: result.sessionId,
-                messages: result.messages,
+                messages: [
+                    ...result.messages,
+                    {
+                        info: {
+                            id: "m-503",
+                            role: "user",
+                            sessionID: result.sessionId,
+                        },
+                        parts: [{ type: "text", text: "unpersisted 3" }],
+                    } as MessageLike,
+                ],
                 generation: 1,
                 memoGeneration: result.first.memoGeneration,
                 memo: result.memo,

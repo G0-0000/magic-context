@@ -85,6 +85,8 @@ export async function resolveOrdinalsForModule(args: {
     memoCanonicalCount?: number;
     /** Absolute ordinal immediately before a sliced unresolved tail. */
     provisionalBase?: number;
+    /** Test-only seam that bypasses the memo to force an ordinal-page probe on every request. */
+    forceProbeForTests?: boolean;
 }): Promise<
     | {
           ok: true;
@@ -110,48 +112,6 @@ export async function resolveOrdinalsForModule(args: {
     let anchor = generationChanged ? null : (args.memoAnchor ?? null);
     let storedCount = generationChanged ? null : (args.memoStoredCount ?? null);
     let canonicalCount = generationChanged ? 0 : (args.memoCanonicalCount ?? 0);
-    const priming = storedCount === null;
-    if (priming) {
-        memo.clear();
-        anchor = null;
-        canonicalCount = 0;
-    }
-
-    const newEntries: Array<ReturnType<typeof readRawSessionMessageOrdinalPage>[number]> = [];
-    let pageAnchor = anchor;
-    while (true) {
-        const page = readRawSessionMessageOrdinalPage(
-            args.sessionId,
-            pageAnchor,
-            MODULE_ORDINAL_PAGE_SIZE,
-        );
-        if (page.length === 0) break;
-        newEntries.push(...page);
-        const last = page[page.length - 1];
-        pageAnchor = { timeCreated: last.timeCreated, id: last.id };
-        if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
-        await yieldToEventLoop();
-    }
-
-    const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
-    const expectedStoredCount = (storedCount ?? 0) + newEntries.length;
-    if (currentStoredCount !== expectedStoredCount) {
-        memo.clear();
-        return { ok: false, reason: "mismatch" };
-    }
-
-    for (const entry of newEntries) {
-        if (!entry.contributesOrdinal) continue;
-        canonicalCount += 1;
-        const prior = memo.get(entry.id);
-        if (prior !== undefined && prior !== canonicalCount) {
-            memo.clear();
-            return { ok: false, reason: "mismatch", messageId: entry.id };
-        }
-        memo.set(entry.id, canonicalCount);
-    }
-    anchor = pageAnchor;
-    storedCount = currentStoredCount;
 
     const normalizations: ModuleNormalizationRecord[] = [];
     const visibleIndexes: number[] = [];
@@ -169,6 +129,60 @@ export async function resolveOrdinalsForModule(args: {
         });
         return false;
     });
+
+    // A warm memo is authoritative until a lifecycle invalidation or an unseen wire id.
+    // Stable requests therefore avoid both the OpenCode ordinal-page probe and COUNT.
+    const memoCoversWire =
+        args.forceProbeForTests !== true &&
+        storedCount !== null &&
+        visibleMessages.every((message) => {
+            const messageId = getMessageId(message);
+            return messageId !== null && memo.has(messageId);
+        });
+    if (!memoCoversWire) {
+        const priming = storedCount === null;
+        if (priming) {
+            memo.clear();
+            anchor = null;
+            canonicalCount = 0;
+        }
+
+        const newEntries: Array<ReturnType<typeof readRawSessionMessageOrdinalPage>[number]> = [];
+        let pageAnchor = anchor;
+        while (true) {
+            const page = readRawSessionMessageOrdinalPage(
+                args.sessionId,
+                pageAnchor,
+                MODULE_ORDINAL_PAGE_SIZE,
+            );
+            if (page.length === 0) break;
+            newEntries.push(...page);
+            const last = page[page.length - 1];
+            pageAnchor = { timeCreated: last.timeCreated, id: last.id };
+            if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
+            await yieldToEventLoop();
+        }
+
+        const currentStoredCount = getRawSessionStoredMessageCount(args.sessionId);
+        const expectedStoredCount = (storedCount ?? 0) + newEntries.length;
+        if (currentStoredCount !== expectedStoredCount) {
+            memo.clear();
+            return { ok: false, reason: "mismatch" };
+        }
+
+        for (const entry of newEntries) {
+            if (!entry.contributesOrdinal) continue;
+            canonicalCount += 1;
+            const prior = memo.get(entry.id);
+            if (prior !== undefined && prior !== canonicalCount) {
+                memo.clear();
+                return { ok: false, reason: "mismatch", messageId: entry.id };
+            }
+            memo.set(entry.id, canonicalCount);
+        }
+        anchor = pageAnchor;
+        storedCount = currentStoredCount;
+    }
 
     // Keep the caller-owned OpenCode objects untouched. A shallow root projection is
     // sufficient because the encoder only reads nested fields; unlike the old JSON clone,
@@ -263,7 +277,7 @@ export async function resolveOrdinalsForModule(args: {
         annotatedInput: annotated,
         memoGeneration: args.generation,
         memoAnchor: anchor,
-        memoStoredCount: storedCount,
+        memoStoredCount: storedCount ?? 0,
         memoCanonicalCount: canonicalCount,
         normalizations,
     };

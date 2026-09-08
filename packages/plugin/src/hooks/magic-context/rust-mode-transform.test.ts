@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -15,6 +15,11 @@ import {
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { runMigrations } from "../../features/magic-context/migrations";
+import { ensureMuralRendered } from "../../features/magic-context/mural/render-trigger";
+import {
+    computeCueContentHash,
+    setMuralCue,
+} from "../../features/magic-context/mural/storage-mural-cues";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getChannel2NudgeState, setChannel2NudgeState } from "../../features/magic-context/storage";
 import {
@@ -22,7 +27,10 @@ import {
     initializeDatabase,
     openDatabase,
 } from "../../features/magic-context/storage-db";
-import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
+import {
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta";
 import {
     addTrailingBlankDecisions,
     armThinkingBindingRecovery,
@@ -44,6 +52,7 @@ import { createMessagesTransformHandler } from "../../plugin/messages-transform"
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import * as logger from "../../shared/logger";
 import { promptSurfaceConfigIdentity } from "../../shared/prompt-surface";
+import { createPromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
@@ -1095,7 +1104,7 @@ describe("Rust mode authority adapter", () => {
                 moduleElapsedMs: 8.765,
             }),
         ).toBe(
-            "rust pass: decision=HARD reason=first_render served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3",
+            "rust pass: decision=HARD reason=first_render served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=identity_resolve:0.0 prompt_surface:0.0 mural_resolve:0.0 prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3",
         );
     });
 
@@ -1728,6 +1737,122 @@ describe("Rust mode authority adapter", () => {
         expect(transformRequest?.render_config).toContain("variant:xhigh");
     });
 
+    it("memoizes stable session and memory project identities", async () => {
+        const sessionId = `rust-project-identity-cache-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let sessionIdentityReads = 0;
+        let memoryIdentityReads = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 1,
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.memoryConfig = { enabled: true, injectionBudgetTokens: 1_000, autoPromote: false };
+        deps.sessionDirectoryBySession?.set(sessionId, "/stable/session-root");
+        const transform = createRustModeTransform(deps, {
+            moduleClient,
+            sessionProjectIdentityResolverForTests: () => {
+                sessionIdentityReads += 1;
+                return "git:stable-project";
+            },
+            memoryProjectIdentityResolverForTests: () => {
+                memoryIdentityReads += 1;
+                return "git:stable-project";
+            },
+        });
+        const digests: string[] = [];
+        for (let pass = 0; pass < 2; pass += 1) {
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            digests.push(
+                createHash("sha256").update(JSON.stringify(output.messages)).digest("hex"),
+            );
+        }
+
+        expect(sessionIdentityReads).toBe(1);
+        expect(memoryIdentityReads).toBe(1);
+        expect(digests[1]).toBe(digests[0]);
+
+        deps.sessionDirectoryBySession?.set(sessionId, "/moved/session-root");
+        const movedMessages = makeMessages(sessionId);
+        const movedOutput = { messages: [...movedMessages] as unknown[] };
+        await transform.run(sessionId, movedMessages, movedOutput, makeMeta(db, sessionId));
+        expect(sessionIdentityReads).toBe(2);
+        expect(memoryIdentityReads).toBe(2);
+        expect(
+            createHash("sha256").update(JSON.stringify(movedOutput.messages)).digest("hex"),
+        ).toBe(digests[0]);
+    });
+
+    it("skips acknowledged state watermark reads until an observed input changes", async () => {
+        const sessionId = `rust-state-sync-hot-cache-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let stateSyncCalls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method === "state_sync") {
+                    stateSyncCalls += 1;
+                    return { ok: true };
+                }
+                return method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 1,
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        const memorySyncRequestedSessions = new Set<string>();
+        const originalPrepare = db.prepare.bind(db);
+        let watermarkReads = 0;
+        db.prepare = ((sql: string) => {
+            if (/MAX\(sequence\)|m0_mutation_log|project_state|workspace_members/i.test(sql)) {
+                watermarkReads += 1;
+            }
+            return originalPrepare(sql);
+        }) as typeof db.prepare;
+        const transform = createRustModeTransform(deps, {
+            moduleClient,
+            memorySyncRequestedSessions,
+        });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            return createHash("sha256").update(JSON.stringify(output.messages)).digest("hex");
+        };
+
+        const firstSha = await run();
+        const readsAfterPrime = watermarkReads;
+        const syncsAfterPrime = stateSyncCalls;
+        expect(await run()).toBe(firstSha);
+        expect(watermarkReads).toBe(readsAfterPrime);
+        expect(stateSyncCalls).toBe(syncsAfterPrime);
+
+        updateSessionMeta(db, sessionId, { lastTodoState: '[{"content":"changed"}]' });
+        expect(await run()).toBe(firstSha);
+        expect(watermarkReads).toBeGreaterThan(readsAfterPrime);
+        expect(stateSyncCalls).toBeGreaterThan(syncsAfterPrime);
+        const readsAfterMeta = watermarkReads;
+
+        memorySyncRequestedSessions.add(sessionId);
+        expect(await run()).toBe(firstSha);
+        expect(watermarkReads).toBeGreaterThan(readsAfterMeta);
+    });
+
     it("forwards the model-routed prompt preset and description overrides", async () => {
         const sessionId = `rust-prompt-surface-${Date.now()}`;
         sessions.push(sessionId);
@@ -1735,6 +1860,7 @@ describe("Rust mode authority adapter", () => {
         installAvailabilityDb(sessionId, {});
         installRawProvider(sessionId);
         let transformRequest: Record<string, unknown> | undefined;
+        let guidanceResolves = 0;
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") transformRequest = body as Record<string, unknown>;
@@ -1755,22 +1881,32 @@ describe("Rust mode authority adapter", () => {
                 preset: "full",
                 descriptionFor: (_toolId, fullDescription) => fullDescription,
             }),
-            resolveGuidance: () => ({
-                preset: "light",
-                primaryOverride: "## Magic Context\n\nTrusted user guidance.",
-            }),
+            resolveGuidance: () => {
+                guidanceResolves += 1;
+                return {
+                    preset: "light",
+                    primaryOverride: "## Magic Context\n\nTrusted user guidance.",
+                };
+            },
         };
         const transform = createRustModeTransform(deps, { moduleClient });
         const messages = makeMessages(sessionId);
         messages[0].info.model = { providerID: "anthropic", modelID: "opus" };
 
-        await transform.run(
-            sessionId,
-            messages,
-            { messages: messages as unknown[] },
-            makeMeta(db, sessionId),
-        );
+        const firstOutput = { messages: messages as unknown[] };
+        await transform.run(sessionId, messages, firstOutput, makeMeta(db, sessionId));
+        const firstSha = createHash("sha256")
+            .update(JSON.stringify(firstOutput.messages))
+            .digest("hex");
+        const repeatedMessages = makeMessages(sessionId);
+        repeatedMessages[0].info.model = { providerID: "anthropic", modelID: "opus" };
+        const repeatedOutput = { messages: repeatedMessages as unknown[] };
+        await transform.run(sessionId, repeatedMessages, repeatedOutput, makeMeta(db, sessionId));
 
+        expect(guidanceResolves).toBe(1);
+        expect(
+            createHash("sha256").update(JSON.stringify(repeatedOutput.messages)).digest("hex"),
+        ).toBe(firstSha);
         expect(transformRequest?.prompt_surface_preset).toBe("light");
         expect(transformRequest?.prompt_surface_model_key).toBe("anthropic/opus");
         expect(transformRequest?.prompt_surface_config_identity).toBe(
@@ -1943,6 +2079,99 @@ describe("Rust mode authority adapter", () => {
         await run;
         await Bun.sleep(20);
         expect(mirrorCompleted).toBe(true);
+    });
+
+    it("caches mural bytes and pulls mirrors only when the module projection moves", async () => {
+        const sessionId = `rust-mural-mirror-generation-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let rowVersion = 1;
+        let muralResolves = 0;
+        let memoryPulls = 0;
+        let compartmentPulls = 0;
+        let memoryCursor = 0;
+        const transformMuralHashes: string[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                const mural = (body as { mural?: { content_hash?: string } }).mural;
+                transformMuralHashes.push(mural?.content_hash ?? "none");
+                return {
+                    decision: "SOFT+",
+                    row_version: rowVersion,
+                    rendered_memory_ids: [],
+                    native_messages: makeMessages(sessionId),
+                };
+            },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                const nextCursor = memoryPulls >= 2 ? 1 : memoryCursor;
+                memoryCursor = nextCursor;
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: nextCursor,
+                        has_more: false,
+                        rows: [],
+                    },
+                };
+            },
+            getCompartmentsAfter: async () => {
+                compartmentPulls += 1;
+                return { max_sequence: -1, compartment_count: 0, compartments: [] };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.muralEnabled = true;
+        const transform = createRustModeTransform(deps, {
+            moduleClient,
+            muralResolverForTests: () => {
+                muralResolves += 1;
+                return {
+                    enabled: true,
+                    supportsVision: true,
+                    dataUrl: `data:image/png;base64,mural-${muralResolves}`,
+                    contentHash: `mural-${muralResolves}`,
+                };
+            },
+        });
+        const servedDigests: string[] = [];
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            servedDigests.push(
+                createHash("sha256").update(JSON.stringify(output.messages)).digest("hex"),
+            );
+            await Bun.sleep(20);
+        };
+
+        await run();
+        await run();
+        expect(muralResolves).toBe(1);
+        expect(memoryPulls).toBe(1);
+        expect(compartmentPulls).toBe(1);
+
+        rowVersion = 2;
+        await run();
+        expect(memoryPulls).toBe(2);
+        expect(compartmentPulls).toBe(2);
+        await run();
+        await run();
+
+        expect(muralResolves).toBe(2);
+        expect(memoryPulls).toBe(2);
+        expect(compartmentPulls).toBe(2);
+        expect(transformMuralHashes).toEqual([
+            "mural-1",
+            "mural-1",
+            "mural-1",
+            "mural-2",
+            "mural-2",
+        ]);
+        expect(new Set(servedDigests)).toEqual(new Set([servedDigests[0]]));
     });
 
     it("sends fail-closed tool verdicts while availability remains provisional", async () => {
@@ -2505,6 +2734,7 @@ describe("Rust mode authority adapter", () => {
         );
 
         rows.splice(1, 1);
+        transform.invalidateWireState(sessionId);
         const afterRemoval = messages();
         await transform.run(
             sessionId,
@@ -2669,6 +2899,211 @@ describe("Rust mode authority adapter", () => {
             "/tmp/rust-clear-session-failure-project",
         );
         expect(closeSession).toHaveBeenCalledWith(sessionId);
+    });
+
+    it("measures the 2,000-message hot-path cache differential with stage logs", async () => {
+        const stageNames = [
+            "identity_resolve",
+            "prompt_surface",
+            "mural_resolve",
+            "ordinal_resolve",
+            "state_sync",
+            "mirror_pull",
+            "compartment_mirror",
+        ] as const;
+        type StageName = (typeof stageNames)[number];
+        const median = (values: number[]): number => {
+            const ordered = [...values].sort((left, right) => left - right);
+            return ordered[Math.floor(ordered.length / 2)] ?? 0;
+        };
+        const logSpy = spyOn(logger, "log").mockImplementation(() => {});
+
+        const measure = async (label: string, disableHotPathIoCachesForTests: boolean) => {
+            const sessionId = "rust-hotpath-measure-session";
+            sessions.push(sessionId);
+            const db = makeDb();
+            const projectRoot = mkdtempSync(join(tmpdir(), `rust-hotpath-${label}-`));
+            availabilityDataHomes.push(projectRoot);
+            mkdirSync(join(projectRoot, ".git"), { recursive: true });
+            const guidance = `## Magic Context\n\n${"Measured guidance. ".repeat(2_000)}`;
+            writeFileSync(join(projectRoot, "guidance.md"), guidance);
+
+            for (let index = 0; index < 20; index += 1) {
+                const content = `Memory ${index}: ${"architecture constraint ".repeat(20)}`;
+                const memory = insertMemory(db, {
+                    projectPath: projectRoot,
+                    category: "ARCHITECTURE_DECISIONS",
+                    content,
+                    importance: 100 - index,
+                });
+                setMuralCue(
+                    db,
+                    projectRoot,
+                    memory.id,
+                    `cue ${index}: stable architectural relationship`,
+                    computeCueContentHash(content),
+                );
+            }
+
+            const rows = Array.from({ length: 2_000 }, (_, index) => ({
+                id: `m-${index + 1}`,
+                timeCreated: index + 1,
+                contributesOrdinal: true,
+                hasValidInfo: true,
+            }));
+            unregisters.push(
+                setRawMessageProvider(sessionId, {
+                    readMessages: () => rows,
+                    readMessageOrdinalPage: (after, limit) =>
+                        rows
+                            .filter(
+                                (row) =>
+                                    !after ||
+                                    row.timeCreated > after.timeCreated ||
+                                    (row.timeCreated === after.timeCreated && row.id > after.id),
+                            )
+                            .slice(0, limit),
+                    getStoredMessageCount: () => rows.length,
+                }),
+            );
+            const messages = rows.map((row, index) => ({
+                info: {
+                    id: row.id,
+                    role: index % 2 === 0 ? "user" : "assistant",
+                    sessionID: sessionId,
+                    ...(index % 2 === 0
+                        ? {}
+                        : { providerID: "anthropic", modelID: "claude-sonnet" }),
+                },
+                parts:
+                    index % 10 === 9
+                        ? [
+                              {
+                                  type: "tool",
+                                  callID: `call-${index}`,
+                                  tool: "read",
+                                  state: {
+                                      status: "completed",
+                                      input: { filePath: `/repo/src/file-${index}.ts` },
+                                      output: `fixture output ${index}`,
+                                  },
+                              },
+                          ]
+                        : [
+                              {
+                                  type: "text",
+                                  text: `${index % 2 === 0 ? "request" : "response"} ${index}: ${"ASTRO ENGRAM fixture ".repeat(8)}`,
+                              },
+                          ],
+            })) as MessageLike[];
+            let memoryPulls = 0;
+            let compartmentPulls = 0;
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method }) =>
+                    method === "transform"
+                        ? {
+                              decision: "SOFT+",
+                              row_version: 1,
+                              rendered_memory_ids: [],
+                              native_messages: messages,
+                          }
+                        : { ok: true },
+                mirrorPull: async (args) => {
+                    memoryPulls += 1;
+                    return {
+                        page: {
+                            domain: args.domain,
+                            cursor: args.cursor,
+                            next_cursor: args.cursor,
+                            has_more: false,
+                            rows: [],
+                        },
+                    };
+                },
+                getCompartmentsAfter: async () => {
+                    compartmentPulls += 1;
+                    return { max_sequence: -1, compartment_count: 0, compartments: [] };
+                },
+            };
+            const deps = makeDeps(db, moduleClient);
+            deps.directory = projectRoot;
+            deps.projectPath = projectRoot;
+            deps.sessionDirectoryBySession?.set(sessionId, projectRoot);
+            deps.memoryConfig = {
+                enabled: false,
+                injectionBudgetTokens: 1,
+                autoPromote: false,
+            };
+            deps.muralEnabled = true;
+            deps.promptSurface = {
+                default: "full",
+                guidance_override_path: "guidance.md",
+            };
+            deps.promptSurfaceRuntime = createPromptSurfaceRuntime({
+                userConfigDirectory: projectRoot,
+                warn: () => undefined,
+            });
+            const transform = createRustModeTransform(deps, {
+                moduleClient,
+                disableHotPathIoCachesForTests,
+                muralResolverForTests: (muralDb, projectIdentity, _modelKey, _enabled, budget) => {
+                    if (!projectIdentity) return { enabled: true, supportsVision: true };
+                    const resolved = ensureMuralRendered(muralDb, projectIdentity, budget);
+                    return {
+                        enabled: true,
+                        supportsVision: true,
+                        dataUrl: resolved.dataUrl,
+                        contentHash: resolved.contentHash,
+                    };
+                },
+            });
+
+            const runOnce = async () => {
+                const output = { messages: [...messages] as unknown[] };
+                await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+                await Bun.sleep(10);
+                return createHash("sha256").update(JSON.stringify(output.messages)).digest("hex");
+            };
+            await runOnce();
+            const logStart = logSpy.mock.calls.length;
+            const digests: string[] = [];
+            for (let pass = 0; pass < 5; pass += 1) digests.push(await runOnce());
+
+            const samples = Object.fromEntries(
+                stageNames.map((stage) => [stage, [] as number[]]),
+            ) as Record<StageName, number[]>;
+            for (const [rawMessage] of logSpy.mock.calls.slice(logStart)) {
+                const message = String(rawMessage);
+                if (!message.includes(`[${sessionId}]`)) continue;
+                const match = message.match(
+                    /transform stage: stage=rust\.([a-z_]+) elapsed=([\d.]+)ms/,
+                );
+                if (!match || !stageNames.includes(match[1] as StageName)) continue;
+                samples[match[1] as StageName].push(Number(match[2]));
+            }
+            expect(new Set(digests).size).toBe(1);
+            return {
+                hash: digests[0],
+                memoryPulls,
+                compartmentPulls,
+                medians: Object.fromEntries(
+                    stageNames.map((stage) => [stage, median(samples[stage])]),
+                ) as Record<StageName, number>,
+            };
+        };
+
+        try {
+            const before = await measure("before", true);
+            const after = await measure("after", false);
+            expect(after.hash).toBe(before.hash);
+            expect(after.memoryPulls).toBeLessThan(before.memoryPulls);
+            expect(after.compartmentPulls).toBeLessThan(before.compartmentPulls);
+            if (process.env.MAGIC_CONTEXT_HOTPATH_MEASURE === "1") {
+                console.log(`HOTPATH_MEASUREMENT ${JSON.stringify({ before, after })}`);
+            }
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 
     it("keeps a 1,000-message steady-state pass under the adapter budget", async () => {

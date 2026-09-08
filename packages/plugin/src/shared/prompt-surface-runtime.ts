@@ -230,18 +230,33 @@ interface GuidanceEpoch {
     selection: PromptSurfaceGuidanceSelection;
 }
 
-/** Freeze preset selection and materialized override bytes for one model-key epoch. */
-export function createPromptSurfaceGuidanceEpochCache(runtime: PromptSurfaceRuntime): {
+export interface PromptSurfaceGuidanceEpochCache {
     resolve: (
         sessionId: string,
         config: PromptSurfaceConfig | undefined,
         modelKey: string | undefined,
     ) => PromptSurfaceGuidanceSelection;
     clear: (sessionId: string) => void;
-} {
-    const epochs = new Map<string, GuidanceEpoch>();
+}
 
-    return {
+const guidanceEpochCacheByRuntime = new WeakMap<
+    PromptSurfaceRuntime,
+    PromptSurfaceGuidanceEpochCache
+>();
+
+/**
+ * Freeze preset selection and materialized override bytes for one model-key epoch.
+ * Every hook using the same runtime also shares this cache, so a file edit cannot
+ * make the system hook and Rust adapter observe different bytes within one epoch.
+ */
+export function createPromptSurfaceGuidanceEpochCache(
+    runtime: PromptSurfaceRuntime,
+): PromptSurfaceGuidanceEpochCache {
+    const shared = guidanceEpochCacheByRuntime.get(runtime);
+    if (shared) return shared;
+
+    const epochs = new Map<string, GuidanceEpoch>();
+    const cache: PromptSurfaceGuidanceEpochCache = {
         resolve(sessionId, config, modelKey) {
             const canonicalModelKey = modelKey ? piModelRefToCanonical(modelKey) : undefined;
             const cached = epochs.get(sessionId);
@@ -257,4 +272,6 @@ export function createPromptSurfaceGuidanceEpochCache(runtime: PromptSurfaceRunt
             epochs.delete(sessionId);
         },
     };
+    guidanceEpochCacheByRuntime.set(runtime, cache);
+    return cache;
 }

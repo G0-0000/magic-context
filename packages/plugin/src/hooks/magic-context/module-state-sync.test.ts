@@ -863,14 +863,16 @@ describe("module compartment ordinal serialization", () => {
         const state = syncState(3);
         state.idOrdinalMemo.set("m2", 3);
 
+        state.idOrdinalMemo.set("m1", 1);
         const result = await resolveOrdinalsForModule({
             sessionId,
-            messages: [wireMessage(sessionId, "m2")],
+            messages: [wireMessage(sessionId, "m2"), wireMessage(sessionId, "unseen")],
             generation: state.moduleGeneration,
             memoGeneration: state.idOrdinalMemoGeneration,
             memo: state.idOrdinalMemo,
-            memoStoredCount: 3,
-            memoCanonicalCount: 0,
+            memoAnchor: { timeCreated: 1, id: "m1" },
+            memoStoredCount: 1,
+            memoCanonicalCount: 1,
         });
 
         expect(result).toEqual(expect.objectContaining({ ok: false, reason: "mismatch" }));
