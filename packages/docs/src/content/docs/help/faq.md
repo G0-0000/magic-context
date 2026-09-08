@@ -17,7 +17,7 @@ Magic Context is prompt-cache-aware. Ordinary turns replay the stable prefix byt
 
 The historian and dreamer agents make their own model calls using whichever models you configure. They have no per-token cost when idle — the historian only runs on a compression event, not every turn. For background work that bills per request rather than per token (e.g. a GitHub Copilot subscription), pointing these agents at such a model keeps their cost flat.
 
-The historian processes a batch of messages once per compartment event, not on every turn. Your cost depends on the historian model, explicit fallbacks, and provider pricing. See [How Magic Context works → Understand the cost model](/concepts/how-it-works/#understand-the-cost-model).
+The historian processes a batch of messages once per compartment event, not on every turn. Your cost depends on the historian model, explicit fallbacks, and provider pricing. See [Cache architecture](/concepts/cache-architecture/) and [Historian](/concepts/historian/).
 
 ## Can I turn things off?
 
@@ -56,13 +56,13 @@ Memories are scoped to a project (identified by git root commit hash). Deleting 
 
 The execute threshold is a trigger, not a target. A pass replaces eligible settled conversation with budgeted compartment history, applies queued `ctx_reduce` drops, and can reclaim eligible old tool output. The result is the sum of what remains: history, memory text, an optional memory mural, protected recent work, and unreclaimed tool output.
 
-A conversation-heavy session can therefore cross the default 65% trigger and land at 45%. Another session can land at 62% or 78%. Magic Context does not pad or remove useful context to hold the graph near the threshold. See the [worked 200k and 1M examples](/concepts/how-it-works/#work-through-the-numbers).
+A conversation-heavy session can therefore cross the default 65% trigger and land at 45%. Another session can land at 62% or 78%. Magic Context does not pad or remove useful context to hold the graph near the threshold. See the [worked example](/concepts/context-reduction/#where-a-pass-lands).
 
 ## Why does the number not go down after the historian ran?
 
 Historian output is not discarded context. It becomes a compartment that remains in the session-history block, and the history block has its own budget. The total may barely move when recent protected work or tool output dominates, or when the new compartment itself needs much of the eligible history budget.
 
-Old tool output also follows a separate path. The agent can queue it with `ctx_reduce`, and automatic age-based reclaim can remove eligible output during a pass already rebuilding the cache. Check `/ctx-status` to identify which region is large before changing settings. [What shrinks what](/concepts/how-it-works/#what-shrinks-what) shows the full split.
+Old tool output also follows a separate path. The agent can queue it with `ctx_reduce`, and automatic age-based reclaim can remove eligible output during a pass already rebuilding the cache. Check `/ctx-status` to identify which region is large before changing settings. [Overview](/concepts/overview/#keep-the-two-jobs-separate) and [Context reduction](/concepts/context-reduction/#where-a-pass-lands) explain the split.
 
 ## Can I set a target size?
 

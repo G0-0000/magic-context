@@ -109,7 +109,7 @@ If you need to downgrade intentionally, run `doctor --force` afterward — it wi
 
 5. **Check the relevant budget.** `history_budget_percentage` controls retained compartment history, while `protected_tokens` controls recent token mass protected from normal reclaim. Use the [generated configuration reference](/reference/configuration/#context-management) for exact defaults and ranges.
 
-The [worked percentage examples](/concepts/how-it-works/#work-through-the-numbers) explain why crossing a threshold does not imply a target landing size.
+The [worked percentage example](/concepts/context-reduction/#where-a-pass-lands) explains why crossing a threshold does not imply a target landing size.
 
 ---
 

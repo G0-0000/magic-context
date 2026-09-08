@@ -5,7 +5,7 @@ description: A guided tour of what you see and what happens during a long sessio
 
 import { TabItem, Tabs } from '@astrojs/starlight/components';
 
-Once Magic Context is installed and your harness is restarted, the session starts differently. This page walks through what you see; [How Magic Context works](/concepts/how-it-works/) explains why the percentages move.
+Once Magic Context is installed and your harness is restarted, the session starts differently. This page walks through what you see; [Context reduction](/concepts/context-reduction/) explains why the percentages move.
 
 ## The status display
 
@@ -88,4 +88,4 @@ If you prefer a specific agent to stay out of context management, deny or omit `
 - **Compartment creation happens in the background.** Compartment count can rise between messages without forcing the total toward a target percentage.
 - **The first compartment takes a few turns.** The historian fires when pressure builds, enough settled conversation accumulates, or commit clusters mark completed work. Short sessions may not trigger it.
 - **Memory appears next session.** Memories written by the historian during this session show up in `<project-memory>` the next time you start a session on the same project.
-- **Deeper concepts** are covered in [How Magic Context works](/concepts/how-it-works/), [Historian](/concepts/historian/), and [Memory](/concepts/memory/).
+- **Deeper concepts** are covered in [Overview](/concepts/overview/), [Historian](/concepts/historian/), and [Memory](/concepts/memory/).

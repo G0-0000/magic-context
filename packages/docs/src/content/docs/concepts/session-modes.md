@@ -61,4 +61,4 @@ Magic Context's `compaction.enabled` in `magic-context.jsonc` is separate from O
 
 ## How it connects
 
-Session modes are a lens on [how Magic Context works](/concepts/how-it-works/). Primary sessions get the [context reduction](/concepts/context-reduction/) surface when `ctx_reduce` is available, plus the [historian](/concepts/historian/) and deterministic cleanup. Active context management uses cache-safe tagging and the [cache architecture](/concepts/cache-architecture/).
+Session modes are a lens on the [overall architecture](/concepts/overview/). Primary sessions get the [context reduction](/concepts/context-reduction/) surface when `ctx_reduce` is available, plus the [historian](/concepts/historian/) and deterministic cleanup. Active context management uses cache-safe tagging and the [cache architecture](/concepts/cache-architecture/).

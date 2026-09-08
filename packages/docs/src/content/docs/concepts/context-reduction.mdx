@@ -67,7 +67,7 @@ These bands are built-in behavior, not configuration keys.
 
 ## Know what happens at each pressure band
 
-The [execute threshold](/concepts/how-it-works/#treat-the-execute-threshold-as-a-trigger) is a trigger, not a target. At the default 65% threshold, Magic Context can apply queued reductions, heuristic cleanup, age-based reclaim, and ready history updates in one cache-aware pass.
+The [execute threshold](#where-a-pass-lands) is a trigger, not a target. At the default 65% threshold, Magic Context can apply queued reductions, heuristic cleanup, age-based reclaim, and ready history updates in one cache-aware pass.
 
 The two emergency bands are not configurable:
 
@@ -80,6 +80,46 @@ The emergency drain remains active until usage falls at least 10 percentage poin
 
 :::note
 A high percentage does not identify the cause. Use `/ctx-status` to separate compartment history, recent conversation, and reclaimable tool output before choosing a lever.
+:::
+
+## Where a pass lands
+
+The execute threshold answers when to run queued context work, not where the context percentage should land. The default is 65% of the model's usable, output-reserved window. A pass does not wait for the turn to end; open tool calls waiting for results are never reclaimed, but the pass itself runs as soon as the threshold is crossed.
+
+When an execute pass runs, it applies due work together: queued `ctx_reduce` drops, heuristic cleanup, eligible age-based tool-output reclaim, and ready history updates. The prompt then becomes stable again at whatever size the retained material requires.
+
+Several independent budgets and boundaries decide where the pass lands:
+
+- **The history budget:** settled conversation becomes compartments that remain in the prompt under this budget.
+- **Injected memory text and optional mural:** project memory and the memory mural have their own budgets and selection rules.
+- **The protected recent token window:** recent turns stay untouched until they age past the token floor.
+- **Unsettled live work:** in-flight reasoning and messages that have not settled yet remain in the prompt.
+- **Conversation-vs-tool-output mix:** settled conversation condenses into compact history, while tool output can only be dropped or reclaimed.
+- **Reclaimable tool output:** how much tool output was queued with `ctx_reduce` or was old enough for age-based reclaim.
+
+A session dominated by settled conversation can drop sharply when that conversation condenses into compartments. A session dominated by recent work or unreclaimed tool output may move only a little.
+
+### Worked example: a 200k window
+
+Consider a model with a 200k usable context window at the default 65% execute threshold (130k tokens), 15% history budget (19,500 tokens), and derived 16k protected token floor.
+
+Suppose a pass triggers at 140k tokens (70%):
+
+| Component | Before pass | After pass | Notes |
+|---|---:|---:|---|
+| Fixed prompt and memory | 12k | 12k | System instructions and injected memory stay stable |
+| Compartment history | 12k | 19k | Settled conversation condenses into the history budget |
+| Settled conversation | 48k | 0k | Replaced by new compartment summaries |
+| Protected recent work | 28k | 28k | Protected by the recent token window |
+| Tool output | 40k | 31k | 9k queued or eligible output reclaimed |
+| **Total** | **140k (70%)** | **90k (45%)** | **Remaining context** |
+
+The next prompt is 90k tokens, or 45%: 12k fixed prompt and memory + 19k history + 28k recent work + 31k tool output. It landed at 45% because those retained inputs totaled 90k—not because 45% was a target.
+
+![Before-and-after prompt composition for a 200k window: 140k before the pass and 90k after, with settled conversation replaced by compartment history and eligible tool output reclaimed.](/diagrams/fold-before-after.svg)
+
+:::note[There is no target-size setting]
+You can change when a pass triggers with the per-model execute threshold, improve agent-driven cleanup with `ctx_reduce`, choose a stronger historian model, and align cache assumptions with `cache_ttl`. None of these configures a post-pass landing percentage. See the [generated configuration reference](/reference/configuration/#context-management) for exact keys and ranges.
 :::
 
 ## Enable smart drops when useful
@@ -100,4 +140,4 @@ Deterministic management still runs: the historian, heuristic cleanup, age-based
 
 ## Diagnose a surprising percentage
 
-Use the table in [How Magic Context works](/concepts/how-it-works/#what-shrinks-what). If conversation dominates, look at historian progress and the history budget. If tool output dominates, let the agent call `ctx_reduce` and check whether an eligible cache-rebuilding pass has occurred. If recent work dominates, it is intentionally protected until it ages out.
+Use the contrast in [Overview](/concepts/overview/#keep-the-two-jobs-separate) and the breakdown in [Where a pass lands](#where-a-pass-lands) to inspect what is using space. If conversation dominates, look at historian progress and the history budget. If tool output dominates, let the agent call `ctx_reduce` and check whether an eligible cache-rebuilding pass has occurred. If recent work dominates, it is intentionally protected until it ages out.

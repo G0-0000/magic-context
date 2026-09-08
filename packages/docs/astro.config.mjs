@@ -8,6 +8,9 @@ import { remarkBaseLinks } from "./remark-base-links.mjs";
 export default defineConfig({
     site: "https://docs.cortexkit.io",
     base: "/magic-context",
+    redirects: {
+        "/concepts/how-it-works/": "/magic-context/concepts/context-reduction/#where-a-pass-lands",
+    },
     // Nest output under /magic-context so the deployed asset tree matches the
     // URL space — sibling CortexKit plugin docs will share this subdomain.
     outDir: "./dist-root/magic-context",
@@ -47,7 +50,6 @@ export default defineConfig({
                 {
                     label: "Concepts",
                     items: [
-                        { slug: "concepts/how-it-works" },
                         { slug: "concepts/overview" },
                         { slug: "concepts/historian" },
                         { slug: "concepts/memory" },

@@ -3,7 +3,7 @@ title: Overview
 description: A short map of Magic Context's session history, context reduction, memory, and background maintenance.
 ---
 
-Magic Context gives your coding agent structured session history, deliberate context reduction, and durable cross-session memory. Start with [How Magic Context works](/concepts/how-it-works/) for the canonical top-to-bottom explanation and worked context-percentage examples.
+Magic Context gives your coding agent structured session history, deliberate context reduction, and durable cross-session memory. This overview shows how those systems work together to keep long sessions fast and affordable.
 
 ## See the pipeline at a glance
 
@@ -18,12 +18,14 @@ Magic Context gives your coding agent structured session history, deliberate con
 
 ## Keep the two jobs separate
 
-The historian and reduction are complementary, not interchangeable:
+The historian and context reduction both keep the active prompt manageable, but they act on different material and leave different results:
 
-1. **The historian preserves meaning.** It replaces older raw conversation with budgeted compartments. Those summaries remain in the prompt.
-2. **Reduction reclaims working material.** It removes spent tagged content, especially bulky tool output, while protecting recent work.
+| Layer | What it takes in | What remains in the prompt |
+|---|---|---|
+| **Historian** | Settled user and agent conversation | Compartment summaries that remain in the prompt |
+| **Reduction** | Spent tagged messages and tool outputs | Compact dropped or truncated placeholders |
 
-The execute threshold tells Magic Context when to batch due work. It is not a target percentage. Read [How Magic Context works](/concepts/how-it-works/#treat-the-execute-threshold-as-a-trigger) before tuning it.
+The execute threshold tells Magic Context when to batch due work. It is not a target percentage. See [Where a pass lands](/concepts/context-reduction/#where-a-pass-lands) before tuning it.
 
 ## Know what persists
 
@@ -41,9 +43,20 @@ Magic Context has [three effective modes](/concepts/session-modes/):
 
 ## Continue by goal
 
-- Explain a surprising context percentage: [How Magic Context works](/concepts/how-it-works/)
+- Explain a surprising context percentage: [Context reduction](/concepts/context-reduction/#where-a-pass-lands)
 - Improve compartment summaries: [Historian](/concepts/historian/)
 - Understand tagged drops and emergency behavior: [Context reduction](/concepts/context-reduction/)
 - Keep facts across sessions: [Memory](/concepts/memory/)
 - Render overflow memory as an image: [Memory mural](/concepts/mural/)
 - Maintain stored knowledge on a schedule: [Dreamer](/concepts/dreamer/)
+
+:::note[DCP-style compactor versus Magic Context]
+| | DCP-style compactor | Magic Context |
+|---|---|---|
+| **Mental model** | Compacts the active prompt toward a recurring working size | Preserves a cache-stable prefix, then batches structured history and reduction work |
+| **Older conversation** | Replaced by a general compacted summary | Becomes typed compartments that remain in a budgeted history block and decay over time |
+| **Tool output** | Often folded into the same compaction decision | Managed separately through `ctx_reduce`, age-based reclaim, and emergency recovery |
+| **Graph shape** | Often hovers near a steady size | Grows between passes, then lands wherever retained history, memory, recent work, and tool output total |
+
+Neither model is universally better; they optimize for different behavior. Inspect the composition shown by `/ctx-status` rather than focusing only on the total percentage: compartment history is retained knowledge, while unreduced tool output is reclaimable working material.
+:::

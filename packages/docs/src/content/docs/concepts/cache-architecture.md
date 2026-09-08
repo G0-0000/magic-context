@@ -73,4 +73,4 @@ In a steady-state working session, m[0] stays stable for hours or days. The prom
 
 ## How it connects
 
-The cache architecture is the foundation that makes [the full session lifecycle](/concepts/how-it-works/) affordable. The [historian](/concepts/historian/) publishes compartments that ride the m[1] delta. [Memory](/concepts/memory/) writes surface through m[1] watermarks. [Context reduction](/concepts/context-reduction/) drops land on the conversation tail without touching m[0] or m[1]. And the [session mode](/concepts/session-modes/) determines which features participate in the cache-stable layout.
+The cache architecture is the foundation that makes [the session lifecycle](/concepts/overview/) affordable. The [historian](/concepts/historian/) publishes compartments that ride the m[1] delta. [Memory](/concepts/memory/) writes surface through m[1] watermarks. [Context reduction](/concepts/context-reduction/) drops land on the conversation tail without touching m[0] or m[1]. And the [session mode](/concepts/session-modes/) determines which features participate in the cache-stable layout.
