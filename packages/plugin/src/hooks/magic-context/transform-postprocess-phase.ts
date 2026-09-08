@@ -56,6 +56,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { runAutoSearchHint } from "./auto-search-runner";
+import { hasReclaimRide } from "./cache-busting-signals";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
     rearmChannel2AfterMeasuredCollapse,
@@ -80,12 +81,15 @@ import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     clearInjectionCache,
     getVisibleMemoryIds,
+    hasCompleteCachedM0M1,
+    type InjectM0M1Result,
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
     type MaterializeDecision,
     mustMaterialize,
     type PreparedCompartmentInjection,
+    prepareCachedM0M1Replay,
     renderCompartmentInjection,
 } from "./inject-compartments";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
@@ -1178,12 +1182,9 @@ export async function runPostTransformPhase(
         activeCompartmentRun !== undefined;
     const deferredMaterialize = args.canConsumeDeferredLate && deferredMaterializationWasPending;
     const materializationRequested = isExplicitFlush || deferredMaterialize;
-    // A HARD decision alone is not a cache bust. Execute it off-wire first, then
-    // let pending drops and heuristics ride the bust only when persistence reports
-    // that m[0] actually materialized. A contention fallback or failed attempt
-    // leaves the mutation gates closed, preserving byte-identical defer replay.
-    // injectM0M1 still rechecks later, so a cross-process marker bump after this
-    // pre-execution can fold safely without retroactively authorizing mutations.
+    // Persist eligible prefix work off-wire before authorizing automatic cleanup.
+    // Execute may refresh m[1] without changing it: only changed bytes supply a ride.
+    // A failed or contended advisory alone must never open the reduction lanes.
     // Re-gated for compaction-off mode (issue #266): injection runs when the
     // memory/docs identity is present AND (fullFeatureMode || compactionOff),
     // so the mode cannot swallow m[0]/m[1] delivery — and a compaction-off
@@ -1209,7 +1210,24 @@ export async function runPostTransformPhase(
                   hardSignals: args.m0M1.hardSignals,
               })
             : { value: false, reason: null };
+    let preparedPrefix: InjectM0M1Result | undefined;
+    const shouldCaptureCachedPrefix =
+        (foldDueDecision.value || args.schedulerDecision === "execute") &&
+        m0M1EnabledForFold &&
+        !emergencyDropEligible;
+    const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
+        ? prepareCachedM0M1Replay(args.db, args.sessionId)
+        : undefined;
+    const completeCachedPrefixAvailable =
+        (args.sessionMeta.cachedM0Bytes != null && args.sessionMeta.cachedM1Bytes != null) ||
+        cachedPrefixBeforePreflight !== undefined ||
+        (m0M1EnabledForFold &&
+            !shouldCaptureCachedPrefix &&
+            hasCompleteCachedM0M1(args.db, args.sessionId));
+    const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
+    let publishedM1RefreshedThisPass = false;
+    const softRefreshOpportunity = args.schedulerDecision === "execute";
     let m0RematerializedThisPass = false;
     const m0CoverageBeforeFold =
         args.sessionMeta.cachedM0Bytes === null ? -1 : args.sessionMeta.cachedM0MaxCompartmentSeq;
@@ -1218,11 +1236,11 @@ export async function runPostTransformPhase(
     // Keep its observational tool-set operands even when it correctly declines
     // to materialize, so a separate cache-busting pass can be attributed later.
     let m0ComparisonDecision: MaterializeDecision | null = foldDueDecision;
-    if (foldDueDecision.value && args.m0M1) {
+    if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
         try {
-            // Persist the fold before opening mutation gates. Omitting messages
-            // keeps this pre-execution off the outgoing wire; the injection phase
-            // below replays the persisted pair into the real message array.
+            const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
+            // Omitting messages keeps prefix preparation off-wire. The final
+            // injection replays the persisted pair after reductions finish.
             const foldResult = injectM0M1({
                 db: args.db,
                 sessionId: args.sessionId,
@@ -1235,14 +1253,20 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass: true,
+                contentionFallbackPrefix: cachedPrefixBeforePreflight,
+                allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
             });
+            preparedPrefix = foldResult;
             foldExecutedThisPass = foldExecutesThisPass(
-                foldDueDecision.value,
+                foldDueDecision.value || softRefreshOpportunity,
                 foldResult.m0RematerializedThisPass,
             );
+            publishedM1RefreshedThisPass =
+                !foldResult.materializationContentionRetryExhausted &&
+                previousM1 !== args.sessionMeta.cachedM1Bytes?.toString("utf8");
             m0RematerializedThisPass = foldResult.m0RematerializedThisPass;
             m0MaterializeReason = foldResult.decision.reason;
             if (foldResult.m0RematerializedThisPass) {
@@ -1261,6 +1285,7 @@ export async function runPostTransformPhase(
                 sessionLog(args.sessionId, "channel2 fold-cycle reset failed (ignored):", error);
             }
         } catch (error) {
+            preparedPrefix = cachedPrefixBeforePreflight;
             args.passOutcome?.record("m0-m1-fold-preexecution-degradation");
             sessionLog(
                 args.sessionId,
@@ -1273,31 +1298,26 @@ export async function runPostTransformPhase(
             `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass}`,
         );
     }
-    // Bypass the compartment-running veto when this pass is busting the Anthropic
-    // prefix REGARDLESS — so the pending-op drain + heuristics ride that one bust
-    // instead of being deferred into a SECOND bust ~a turn later. Two cases:
-    //   - forceMaterialization (the derived force band): overflow prevention trumps cache stability.
-    //   - foldExecutedThisPass: a HARD m[0] fold (model/system-hash/epoch/etc.) is
-    //     re-caching m[0] this pass; the prefix is already gone, so draining into
-    //     it is free. Without this, a hard fold landing while the historian runs
-    //     leaves the drop vetoed -> it spills to a later soft bust (observed: a
-    //     system-prompt change folded m[0], then the 1807-op backlog drained ~30s
-    //     later as a second bust). Pi already gates this way (context-handler.ts).
-    // Safe in both cases because the historian and the drain touch DISJOINT DBs:
-    //   - Historian reads RAW OpenCode messages from opencode.db (read-only); its
-    //     in-flight snapshot is validated by computeRawRangeFingerprint, which
-    //     hashes raw content only (ids/part-types/lengths), NOT tag/drop state.
-    //   - Drops mutate context.db (tags + pending_ops) + the in-memory wire only.
-    //   - The historian's post-publish queueDropsForCompartmentalizedMessages is
-    //     idempotent against already-dropped tags (status !== "active"), so any
-    //     drain/publish ordering is benign.
-    const bypassCompartmentGate = forceMaterialization || foldExecutedThisPass;
+    // A historian reads raw harness data, while reductions and rendered summaries
+    // write context.db and the outgoing request. Published rows can therefore
+    // drain on the same bust without changing the in-flight chunk's input.
+    // All published work shares one permission. Historian chunk publication keeps
+    // its own lease; rendering and drop writes cannot alter its raw input.
+    const publishedWorkDrainAllowed =
+        args.schedulerDecision === "execute" ||
+        materializationRequested ||
+        forceMaterialization ||
+        emergencyDropEligible ||
+        foldExecutedThisPass ||
+        firstRenderBust;
+
     const shouldReadPendingOps =
         !compactionOff &&
         (materializationRequested ||
             args.schedulerDecision === "execute" ||
             forceMaterialization ||
             foldExecutedThisPass ||
+            firstRenderBust ||
             compartmentRunning);
     const pendingOps = shouldReadPendingOps ? getPendingOps(args.db, args.sessionId) : [];
     const hasPendingUserOps = pendingOps.length > 0;
@@ -1313,68 +1333,48 @@ export async function runPostTransformPhase(
         (args.schedulerDecision === "execute" ||
             materializationRequested ||
             forceMaterialization ||
-            foldExecutedThisPass) &&
-        (!compartmentRunning || bypassCompartmentGate);
-    // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
-    // previously skipped heuristics entirely (via fullFeatureMode gate), which
-    // meant their context grew unchecked until overflow. With this change,
-    // subagents run tool drops and reasoning clearing at execute threshold just
-    // like primary sessions, giving them a cache-safe reduction path without
-    // needing historian/compartments.
-    //
-    // `forceMaterialization` remains gated by `fullFeatureMode` above (line ~125)
-    // so subagents do NOT get force-band drop-all-tools or the 95% block. Subagents
-    // rely on normal overflow detection + clean failure if they exhaust context.
-    //
-    // Subagent once-per-turn bypass: a subagent's entire lifecycle is one user
-    // turn from the parent's POV. Heavy subagents (Oracle, Athena council, etc.)
-    // perform 100s of tool calls within that single turn. With the once-per-turn
-    // guard enforced, only ONE cleanup pass fires (typically when context first
-    // crosses the execute threshold ~50%), and subsequent tool calls accumulate
-    // unchecked until overflow. The guard exists for primary-session cache
-    // stability (mid-turn rewrites would bust Anthropic prompt cache across the
-    // user's tool-call sequence). Subagents have no provider-cache reuse to
-    // protect — they're short-lived, one-shot, and their tool-call bursts
-    // already invalidate cache constantly. So we let subagents re-run heuristics
-    // on every execute pass. The `schedulerDecision === "execute"` gate still
-    // prevents per-defer-pass thrash; only passes the scheduler explicitly
-    // approves for execution can fire heuristics.
-    const shouldRunHeuristics =
+            foldExecutedThisPass ||
+            firstRenderBust) &&
+        publishedWorkDrainAllowed;
+    // Automatic cleanup waits for a separately priced prefix refresh or drop.
+    // Subagents retain the force-band escape even without a historian.
+    // A prepared legacy block is delivery evidence only when no m0/m1 renderer
+    // owns the prefix. With m0/m1 enabled, require its persisted preflight result;
+    // first render and force are separate known-bust exceptions to cached replay.
+    const rideSignals = {
+        hardFold: foldExecutedThisPass || firstRenderBust,
+        force: forceMaterialization || emergencyDropEligible,
+        explicitFlush: isExplicitFlush,
+        publishedHistory:
+            publishedM1RefreshedThisPass ||
+            (!m0M1EnabledForFold &&
+                (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
+                (args.historyRebuiltThisPass ||
+                    args.rebuiltHistoryFromInitialPrepare ||
+                    (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
+        agentDrop: false,
+    };
+    let shouldRunHeuristics =
         !compactionOff &&
-        (!compartmentRunning || bypassCompartmentGate) &&
-        (materializationRequested ||
+        hasReclaimRide(rideSignals) &&
+        (rideSignals.publishedHistory ||
+            materializationRequested ||
             forceMaterialization ||
             // The off-wire fold landed, so the prefix already busted. Heuristics
             // may ride it and bypass the once-per-turn guard without creating an
-            // independent mid-turn rewrite.
+            // independent prefix rewrite.
             foldExecutedThisPass ||
+            firstRenderBust ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
-            // fires the tiered drop, even if the scheduler deferred mid-turn.
+            // fires the tiered drop even when the ordinary scheduler defers.
             emergencyDropEligible ||
             (args.schedulerDecision === "execute" &&
                 (!alreadyRanThisTurn || !args.fullFeatureMode)));
-    // Central cache-busting gate used by all mutation paths below.
-    //
-    // Definition: TRUE only when this pass actually mutates message state —
-    // either by applying pending ops or by running heuristic cleanup. This
-    // is the Oracle 2026-04-26 fix: the previous `isExplicitFlush ||
-    // shouldApplyPendingOps` definition was unsafe because `isExplicitFlush`
-    // could be true even on a defer pass where compartmentRunning blocked
-    // both materialization and heuristics, causing cache-busting-only
-    // cleanup (placeholder detection, sticky reminder retirement, nudge
-    // anchor retirement) to fire on a pass that produced no real mutations.
-    //
-    // Both `shouldApplyPendingOps` and `shouldRunHeuristics` already gate on
-    // `(!compartmentRunning || bypassCompartmentGate)` so they're
-    // genuine "will-actually-mutate" booleans. ORing them is the precise
-    // "did we mutate this pass" signal.
-    //
-    // Symmetry note: `system-prompt-hash.ts` and `inject-compartments.ts`
-    // remain narrow (each reads its own dedicated set) so adjunct refresh
-    // and history rebuild are decoupled from materialization timing.
-    const isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics;
+    // Every first-application lane and m[1] refresh uses this same permission.
+    // It authorizes mutation; individual lanes may still find no eligible work.
+    let isCacheBustingPass = !compactionOff && hasReclaimRide(rideSignals);
     // ctx_reduce stays frozen for prompt-hash stability, but observe the live
     // permission signal on the same busts so an operator knows guidance may be
     // stale until the session restarts. This log never changes the wire.
@@ -1452,7 +1452,7 @@ export async function runPostTransformPhase(
         );
     }
     if (compartmentRunning && hasPendingUserOps) {
-        if (bypassCompartmentGate) {
+        if (publishedWorkDrainAllowed) {
             const bypassReason = forceMaterialization
                 ? `emergency >=${args.forceMaterializationPercentage}%`
                 : "m0 hard fold";
@@ -1472,10 +1472,17 @@ export async function runPostTransformPhase(
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
     let droppedCount = 0;
-    const droppedTokens = 0;
+    let droppedTokens = 0;
+    // Measure reduction deltas before history injection adds new prefix bytes.
+    // This is a local estimate, not a provider-reported billing token count.
+    const tokensBeforeReductions =
+        isCacheBustingPass || shouldApplyPendingOps
+            ? estimateTokens(JSON.stringify(args.messages))
+            : 0;
     let emergencyReclaimedTokens = 0;
     let emergency = false;
     let m0M1InjectedThisPass = false;
+    let deliveredPrefix: InjectM0M1Result | undefined;
     let prependedMessageCount = 0;
     const reasoningMutatedMessages = new Set<MessageLike>();
     let reasoningMutationTargetUnknown = false;
@@ -1520,6 +1527,9 @@ export async function runPostTransformPhase(
                 pendingOps,
             );
             if (pendingOpsDidMutate) {
+                rideSignals.agentDrop = true;
+                isCacheBustingPass = hasReclaimRide(rideSignals);
+                shouldRunHeuristics = isCacheBustingPass;
                 droppedCount += pendingOps.length;
                 for (const pendingOp of pendingOps) {
                     const message = args.targets.get(pendingOp.tagId)?.message;
@@ -1732,16 +1742,7 @@ export async function runPostTransformPhase(
             updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
         }
 
-        const toolReclaimExecutePass = !compactionOff && args.schedulerDecision === "execute";
-        const alreadyMutatingThisPass =
-            pendingOpsDidMutate ||
-            heuristicOrReasoningDidMutate ||
-            args.didMutateFromFlushedStatuses ||
-            foldExecutedThisPass ||
-            args.historyRebuiltThisPass ||
-            args.compartmentInjectionRebuiltFromDb ||
-            args.rebuiltHistoryFromInitialPrepare;
-        const toolReclaimApplicationOpportunity = toolReclaimExecutePass && alreadyMutatingThisPass;
+        const toolReclaimApplicationOpportunity = isCacheBustingPass;
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
         if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
@@ -1851,6 +1852,13 @@ export async function runPostTransformPhase(
         updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
     }
 
+    if (isCacheBustingPass) {
+        droppedTokens = Math.max(
+            0,
+            tokensBeforeReductions - estimateTokens(JSON.stringify(args.messages)),
+        );
+    }
+
     // All replay-only fields below come from one coherent session_meta row.
     // Writes that use compare-and-swap still perform their own winner re-read;
     // this snapshot only coalesces independent reads between those mutations.
@@ -1941,6 +1949,8 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass,
+                preparedPrefix,
+                allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 // Compaction-off materializes through the zero-compartment
@@ -1948,6 +1958,7 @@ export async function runPostTransformPhase(
                 // compartment rows never reach <session-history>.
                 compactionOff,
             });
+            deliveredPrefix = result;
             if (result.injected) {
                 m0M1InjectedThisPass = true;
                 prependedMessageCount += result.prependedMessageCount;
@@ -2189,6 +2200,9 @@ export async function runPostTransformPhase(
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
     const historyWasConsumedThisPass =
+        (!m0M1Enabled ||
+            (deliveredPrefix?.injected === true &&
+                !deliveredPrefix.materializationContentionRetryExhausted)) &&
         args.historyRebuiltThisPass &&
         (args.canConsumeDeferredLate ||
             args.phaseJustAwaitedPublication ||
@@ -2435,7 +2449,7 @@ export async function runPostTransformPhase(
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
     let bustedThisPass =
-        args.didMutateFromFlushedStatuses ||
+        firstRenderBust ||
         pendingOpsDidMutate ||
         heuristicOrReasoningDidMutate ||
         autoReclaimDidMutateThisPass ||

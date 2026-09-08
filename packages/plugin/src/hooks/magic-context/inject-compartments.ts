@@ -505,22 +505,15 @@ export function prepareCompartmentInjection(
     const lastEnd = lastCompartment.endMessage;
     const lastEndMessageId = lastCompartment.endMessageId;
 
-    // Trim boundary selection. On a CACHE-BUSTING pass, trim to the latest
-    // compartment — m[1] will re-render to cover it. On a NON-cache-busting
-    // (defer) pass that reaches this REBUILD path, the in-memory injection cache
-    // was cold (a fresh process after a restart): the persisted m[0]/m[1] summary
-    // is replayed stale, so a compartment published after the last
-    // materialize/soft-refresh is summarized in NEITHER m[1] NOR m[0]. Trimming
-    // to the latest boundary would also drop its raw messages → silent history
-    // loss until the next exec pass. Instead trim only to the boundary the cached
-    // summary actually covers (cached_m0_last_baseline_end_message_id), keeping
-    // the newer compartment's raw messages in the live tail. That column is
-    // written ONLY by the m0/m1 materialize/soft-refresh path, so its presence
-    // self-gates this to v2 sessions; absent (legacy / never materialized) →
-    // fall back to the latest boundary.
+    // Modern m0/m1 preparation keeps the persisted baseline boundary. Only final
+    // delivery may advance it after prefix preflight, so contention cannot remove
+    // raw history that the replayed summary does not cover. Legacy sessions with
+    // no m0 baseline retain their existing latest-compartment trim behavior.
     let trimEndMessageId = lastEndMessageId;
-    if (!isCacheBusting) {
-        const baseline = readCachedBaselineState(db, sessionId);
+    const baseline = readCachedBaselineState(db, sessionId);
+    if (!isCacheBusting || baseline.hasCachedM0) {
+        // A modern prefix is only a candidate for refresh here. Keep its raw
+        // boundary frozen until the off-wire renderer has actually chosen bytes.
         if (baseline.hasCachedM0) {
             // v2 cold defer rebuild (in-memory cache lost post-restart). Trim ONLY
             // to what the replayed cached m[1] actually covers.
@@ -849,6 +842,13 @@ export interface M0M1RenderOptions {
      * deterministic mural on demand and folds its image into the m[0] baseline. */
     muralEnabled?: boolean;
     isCacheBustingPass?: boolean;
+    /** Force/emergency may serve a fresh recovery prefix even if persistence loses contention. */
+    allowFreshContentionFallback?: boolean;
+    /** Exact off-wire prefix chosen before reduction gates; do not decide again at delivery. */
+    preparedPrefix?: InjectM0M1Result;
+    /** Persisted pair captured before a fallible preflight. Contention may recover
+     * from it, but must not adopt a newer row written while the preflight ran. */
+    contentionFallbackPrefix?: InjectM0M1Result;
     /**
      * Compaction-off mode (issue #266): materialize through the
      * zero-compartment path — memory/docs/user-profile render into m[0], but
@@ -900,6 +900,8 @@ export interface InjectM0M1Result {
     decision: MaterializeDecision;
     m0Bytes: Buffer | null;
     m1Text: string | null;
+    preparedMessages?: MessageLike[];
+    preparedTrimBoundaryId?: string | null;
 }
 
 export class MaterializeContentionError extends Error {
@@ -2757,6 +2759,7 @@ interface CachedM0M1Row {
     cached_m0_tool_set_hash: string | null;
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
+    cached_m0_last_baseline_end_message_id: string | null;
     memory_block_ids: string | null;
 }
 
@@ -2804,8 +2807,9 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                      cached_m0_system_hash,
                      cached_m0_tool_set_hash,
                      cached_m0_model_key,
-                    cached_m0_project_identity,
-                    memory_block_ids
+                     cached_m0_project_identity,
+                     cached_m0_last_baseline_end_message_id,
+                     memory_block_ids
                FROM session_meta
               WHERE session_id = ?`,
         )
@@ -3166,7 +3170,77 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     };
 }
 
+function trimToPreparedPrefix(
+    options: M0M1RenderOptions,
+    prepared: Pick<
+        InjectM0M1Result,
+        | "preparedTrimBoundaryId"
+        | "m0RematerializedThisPass"
+        | "materializationContentionRetryExhausted"
+    >,
+): void {
+    if (options.compactionOff || !options.messages) return;
+    const boundary = prepared.preparedTrimBoundaryId;
+    const index = boundary
+        ? options.messages.findIndex((message) => message.info.id === boundary)
+        : -1;
+    if (index >= 0) options.messages.splice(0, index + 1);
+    if (
+        prepared.m0RematerializedThisPass ||
+        (options.isCacheBustingPass && !prepared.materializationContentionRetryExhausted)
+    )
+        clearInjectionCache(options.sessionId);
+}
+
+/** Capture a complete persisted pair and its boundary before a fallible preflight. */
+export function prepareCachedM0M1Replay(
+    db: Database,
+    sessionId: string,
+): InjectM0M1Result | undefined {
+    const row = readCachedM0M1Row(db, sessionId);
+    if (!row?.cached_m0_bytes || !row.cached_m1_bytes) return undefined;
+    const m0Bytes = toBuffer(row.cached_m0_bytes);
+    const m1Text = toBuffer(row.cached_m1_bytes).toString("utf8");
+    const mural = row.cached_m0_mural_data_url
+        ? { enabled: true, supportsVision: true, dataUrl: row.cached_m0_mural_data_url }
+        : undefined;
+    const m0Text = mural
+        ? m0Bytes.toString("utf8")
+        : stripMemoryMuralBlock(m0Bytes.toString("utf8"));
+    const preparedMessages: MessageLike[] = [];
+    prependM0M1Messages(sessionId, preparedMessages, m0Text, m1Text, mural);
+    return {
+        injected: true,
+        prependedMessageCount: 0,
+        m0RematerializedThisPass: false,
+        materializationContentionRetryExhausted: true,
+        decision: { value: false, reason: "cache_hit" },
+        m0Bytes,
+        m1Text,
+        preparedMessages,
+        preparedTrimBoundaryId: row.cached_m0_last_baseline_end_message_id,
+    };
+}
+
+export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean {
+    const row = db
+        .prepare(
+            "SELECT length(cached_m0_bytes) > 0 AND length(cached_m1_bytes) > 0 AS complete FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as { complete: number | null } | null;
+    return row?.complete === 1;
+}
+
 export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
+    const prepared = options.preparedPrefix;
+    if (prepared?.preparedMessages) {
+        const head = prepared.preparedMessages;
+        if (options.messages) {
+            trimToPreparedPrefix(options, prepared);
+            options.messages.unshift(...structuredClone(head));
+        }
+        return { ...prepared, prependedMessageCount: options.messages ? head.length : 0 };
+    }
     // Callers normally pass getOrCreateSessionMeta(), which already contains the
     // persisted mural payload. Keep compatibility with lean process-local states
     // by hydrating only from the exact cached row whose m0 bytes they hold.
@@ -3193,6 +3267,10 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text: null,
     };
     if (options.state.isSubagent && !options.compactionOff) return skipped;
+
+    const completePairAtEntry =
+        options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
+    let contentionReplayBoundary = options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null;
 
     const decision = mustMaterialize({
         db: options.db,
@@ -3230,7 +3308,29 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
-            if (options.state.cachedM0Bytes && options.state.cachedM1Bytes) {
+            // A complete process-local pair is the prefix this pass previously
+            // served. Never replace it with a sibling row written during preflight.
+            // Partial state may recover from the preflight's immutable snapshot; only
+            // direct callers without one need a single live row read, whose boundary
+            // is retained with the same bytes.
+            if (!options.allowFreshContentionFallback && !completePairAtEntry) {
+                const captured = options.contentionFallbackPrefix;
+                if (captured?.m0Bytes && captured.m1Text !== null) {
+                    options.state.cachedM0Bytes = Buffer.from(captured.m0Bytes);
+                    options.state.cachedM1Bytes = Buffer.from(captured.m1Text, "utf8");
+                } else {
+                    const persisted = readCachedM0M1Row(options.db, options.sessionId);
+                    if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes) {
+                        applyCachedRowToState(options.state, persisted);
+                        contentionReplayBoundary = persisted.cached_m0_last_baseline_end_message_id;
+                    }
+                }
+            }
+            if (
+                options.state.cachedM0Bytes &&
+                options.state.cachedM1Bytes &&
+                !options.allowFreshContentionFallback
+            ) {
                 // Preferred fallback: reuse the cached baseline. A sibling process
                 // mutated state mid-materialization; serving the slightly stale
                 // cached m[0]/m[1] pair this pass is correct and the next pass retries.
@@ -3249,12 +3349,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                     `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached m[0]/m[1]`,
                 );
             } else {
-                // No cached baseline to reuse — happens when the cache was cleared
-                // THIS pass (history refresh) and then hit contention. Dropping
-                // injection would send the model ZERO session history, so render a
-                // fresh non-persisted m[0]/m[1] pair as a last resort (mirrors Pi
-                // injectM0M1Pi). Not cached because we couldn't win the lock; the
-                // next pass re-materializes and persists.
+                // No complete cached pair exists, or force/emergency explicitly
+                // permits fresh recovery bytes. Both are known busts before the
+                // reduction gates; the chosen pair is frozen for final delivery.
                 const fresh = renderFreshM0NonPersisted(options);
                 options.state.cachedM0Bytes = fresh.m0Bytes;
                 options.state.snapshotMarkers = fresh.snapshotMarkers;
@@ -3295,11 +3392,30 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     } else if (contentionExhausted) {
         m1Text = replayCachedM1(options.state);
     } else if (options.isCacheBustingPass) {
-        const refreshed = softRefreshCachedM1(options);
-        m1Text = refreshed.text;
-        memoryUpdateCount = refreshed.memoryUpdateCount;
-        m1Recomputed = true;
-        m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
+        try {
+            const refreshed = softRefreshCachedM1(options);
+            m1Text = refreshed.text;
+            memoryUpdateCount = refreshed.memoryUpdateCount;
+            m1Recomputed = true;
+            m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
+        } catch (error) {
+            if (!options.allowFreshContentionFallback) throw error;
+            // Force recovery cannot depend on winning the soft-refresh write lock.
+            const fresh = renderFreshM0NonPersisted(options);
+            options.state.cachedM0Bytes = fresh.m0Bytes;
+            options.state.snapshotMarkers = fresh.snapshotMarkers;
+            freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
+            const delta = renderM1WithMetadata(
+                options,
+                fresh.snapshotMarkers,
+                fresh.renderedMemoryIds,
+            );
+            m0Text = fresh.m0Bytes.toString("utf8");
+            m1Text = delta.text;
+            memoryUpdateCount = delta.memoryUpdateCount;
+            m1Recomputed = true;
+            contentionExhausted = true;
+        }
     } else {
         m1Text = replayCachedM1(options.state);
     }
@@ -3371,8 +3487,24 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m0Text = stripMemoryMuralBlock(m0Text);
     }
 
+    const preparedTrimBoundaryId = options.compactionOff
+        ? null
+        : contentionExhausted && freshFallbackRenderedMemoryIds !== null
+          ? ((
+                options.db
+                    .prepare(
+                        "SELECT end_message_id FROM compartments WHERE session_id = ? AND sequence <= ? ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .get(options.sessionId, options.state.snapshotMarkers.maxCompartmentSeq) as {
+                    end_message_id: string;
+                } | null
+            )?.end_message_id ?? null)
+          : contentionExhausted
+            ? contentionReplayBoundary
+            : readCachedBaselineState(options.db, options.sessionId).boundary;
+    const preparedMessages: MessageLike[] = [];
     let prependedMessageCount = 0;
-    if (options.messages) {
+    {
         const muralForWire = options.state.cachedM0MuralDataUrl
             ? {
                   enabled: true,
@@ -3383,11 +3515,19 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             : undefined;
         prependedMessageCount = prependM0M1Messages(
             options.sessionId,
-            options.messages,
+            preparedMessages,
             m0Text,
             m1Text,
             muralForWire,
         );
+        if (options.messages) {
+            trimToPreparedPrefix(options, {
+                m0RematerializedThisPass: rematerialized,
+                materializationContentionRetryExhausted: contentionExhausted,
+                preparedTrimBoundaryId,
+            });
+            options.messages.unshift(...structuredClone(preparedMessages));
+        } else prependedMessageCount = 0;
     }
 
     return {
@@ -3398,5 +3538,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         decision,
         m0Bytes: options.state.cachedM0Bytes,
         m1Text,
+        preparedMessages,
+        preparedTrimBoundaryId,
     };
 }

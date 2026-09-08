@@ -2826,6 +2826,7 @@ fn apply_additive_only(
         || external_revision_changed
         || project_memory_epoch_hard_due;
     let ordinary_historian_veto = ctx.historian_active
+        && m1_signal.revision == loaded.meta.m1_revision
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
         && !loaded.meta.soft_refresh_pending
@@ -4134,16 +4135,16 @@ fn apply_once(
         || system_absorb_hard_due
         || external_revision_changed
         || project_memory_epoch_hard_due;
-    // Bust-opportunity table (the deferred-work invariant): bootstrap/legacy/reconcile/shape
-    // repair, render-config or epoch HARD, requested HARD, TTL/system HARD, refresh/flush,
-    // Force/Emergency drives, first reduction application, and every ordinary Execute are
-    // opportunities. An active historian vetoes only the ordinary-pass arms so publication
-    // can be coalesced into the next materializing pass.
+    // Prefix work, explicit refresh, and force/emergency drives supply opportunities.
+    // Historian activity only vetoes ordinary executes without published work or
+    // pending agent drops; unpublished in-flight work remains pending.
     let emergency_arm_engaged = matches!(
         scheduler_outcome.pass,
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
     ) || scheduler_outcome.drain_latch.is_active();
     let ordinary_historian_veto = ctx.historian_active
+        && current_m1_digest == loaded.meta.m1_revision
+        && pending_drop_target_ids.is_empty()
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
         && !emergency_arm_engaged
@@ -4151,17 +4152,22 @@ fn apply_once(
         && !render_config_changed
         && !reconcile_hard_due
         && loaded.meta.initialized;
-    let supersession_ride_available = !loaded.meta.initialized
-        || render_config_changed
-        || hard_fold_requested
-        || reconcile_hard_due
+    // Subagents execute a reductions-only branch, not the prefix plan. Inherited
+    // HARD/reconcile advisories cannot price automatic reductions without a fold.
+    let prefix_materialization_enabled = !req.is_subagent;
+    let supersession_ride_available = (prefix_materialization_enabled
+        && (!loaded.meta.initialized
+            || render_config_changed
+            || hard_fold_requested
+            || reconcile_hard_due
+            || (scheduler_outcome.pass == scheduler::PassDecision::Execute
+                && current_m1_digest != loaded.meta.m1_revision)))
         || matches!(
             scheduler_outcome.pass,
             scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
         )
         || loaded.meta.soft_refresh_pending;
-    let pass_already_busting =
-        supersession_ride_available || scheduler_outcome.drain_latch.is_active();
+    let pass_already_busting = supersession_ride_available;
     // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
     // full-array consumer (healing::tail_reclaim is true for all of them), so the request
     // array round-trips both prefix and tail mutations on every pass. The U1-era layering
@@ -4179,8 +4185,9 @@ fn apply_once(
                 || hard_fold_requested
                 || cached_m1_missing_due,
         );
-    // Hard advisory requests use the normal Execute path so queued work can be processed
-    // during the fold, but only context pressure reported by the scheduler enables age reclaim.
+    // Keep selection deferred when the producer gate or historian veto blocks it.
+    // An execute selection class still needs the separate ride permission above
+    // before it can choose automatic reductions.
     let selection_class = if producer_gate && !ordinary_historian_veto {
         selection_pass_class(scheduler_outcome.pass)
     } else {
@@ -4345,10 +4352,7 @@ fn apply_once(
     // The drain latch can remain active after pressure falls below the force threshold.
     // It does not mean this request is already rewriting the cached prefix: pending m1
     // publications still need Execute or an independently authorized repair/force/flush.
-    let independent_bust_opportunity =
-        (matches!(scheduler_outcome.pass, scheduler::PassDecision::Execute)
-            && !ordinary_historian_veto)
-            || supersession_ride_available;
+    let independent_bust_opportunity = supersession_ride_available;
     let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
     let mut plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
@@ -4363,9 +4367,8 @@ fn apply_once(
             || loaded.meta.soft_refresh_pending
             || todo_injection_pending,
         reductions_pending: reductions_pending_now,
-        // Scheduler Execute is a genuine deferred-work consumption opportunity even when
-        // no reduction was selected. An active historian is the one ordinary-pass veto;
-        // hard/force/emergency arms bypass it.
+        // Todo state is deferred work, not an independent bust. It may join
+        // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
     });
     // A todo-only delta does not need a coverage anchor: it inserts a frozen pair between the
@@ -4374,7 +4377,7 @@ fn apply_once(
     // defer result when an independent bust opportunity already exists. Reconcile defers remain
     // untouched because they must clear or rebuild the boundary state first.
     if todo_injection_pending
-        && independent_bust_opportunity
+        && bust_opportunity
         && !loaded.core.reconcile_pending
         && matches!(plan, PassPlan::Defer)
     {
@@ -17672,6 +17675,71 @@ pub(crate) mod tests {
         assert_eq!(observed.action, "HARD");
     }
 
+    fn assert_advisory_without_prefix_materialization(reconcile: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.last_execute_ordinal = 99;
+        if reconcile {
+            loaded.core.boundary_id = "missing#0".into();
+            loaded.core.reconcile_pending = true;
+        }
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let before = loaded.core.frozen_units.clone();
+        let mut owner = assistant_tool_call("owner", 2, "old");
+        owner
+            .ck
+            .content
+            .extend(assistant_tool_call("unused", 2, "new").ck.content);
+        for block in &mut owner.ck.content {
+            if let ck_wire::CkKind::ToolCall { name, .. } = &mut block.kind {
+                *name = "mcp_read".into();
+            }
+        }
+        let mut results = tool_result("results", 3, "old", &"old output ".repeat(400));
+        results.ck.content.extend(
+            tool_result("unused-result", 3, "new", "new output")
+                .ck
+                .content,
+        );
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    owner,
+                    results,
+                    item("tail", 5, "continue"),
+                ],
+            ),
+            75,
+            100,
+        );
+        // The reductions-only subagent branch never executes a prefix plan,
+        // even if it receives inherited HARD or reconcile state.
+        request.is_subagent = true;
+        let mut context = pctx("git:proj", "/nonexistent-docs", 300_002);
+        context.observed_last_response_at_ms = Some(1);
+        let response = transform(&s, &request, &context).unwrap();
+        assert_ne!(response.action, "HARD");
+        let after = s.load("ses").unwrap();
+        assert_eq!(after.core.frozen_units, before, "reconcile={reconcile}");
+        assert_eq!(after.meta.last_execute_ordinal, 99);
+    }
+
+    #[test]
+    fn hard_advisory_without_prefix_materialization_cannot_price_reductions() {
+        assert_advisory_without_prefix_materialization(false);
+    }
+
+    #[test]
+    fn reconcile_advisory_without_prefix_materialization_cannot_price_reductions() {
+        assert_advisory_without_prefix_materialization(true);
+    }
+
     #[test]
     fn reconcile_pending_disables_two_pass_selector() {
         let dir = tempfile::tempdir().unwrap();
@@ -17754,11 +17822,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cc_publish_on_execute_applies_immediately_and_latch_bypasses_historian_veto() {
+    fn cc_publish_on_execute_drains_even_during_historian_without_latch() {
         for (latched, historian_active, applies) in [
             (false, false, true),
             (true, true, true),
-            (false, true, false),
+            (false, true, true),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let s = store(dir.path());
@@ -17795,6 +17863,46 @@ pub(crate) mod tests {
             assert_eq!(m1_bytes(&published).contains("PUBLISHED"), applies);
             assert_eq!(s.load("ses").unwrap().meta.emergency_drain_active, latched);
         }
+    }
+
+    #[test]
+    fn published_history_and_age_reclaim_share_one_bust_during_historian() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ride", &[comp(1, 1, 1, "anchor", "BASELINE")])
+            .unwrap();
+        let raw = cc_req(
+            "ride",
+            "cfg0",
+            vec![
+                item("anchor", 1, "baseline"),
+                item("end", 2, "published history"),
+                item("second", 3, "next publication"),
+                assistant_tool_call("old-call", 4, "old-tool"),
+                tool_result("old-result", 5, "old-tool", &"old output ".repeat(200)),
+                item("tail", 6, "continue"),
+            ],
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 2000);
+        ctx.cache_ttl = "never".into();
+        let boot = transform(&s, &with_usage(raw.clone(), 10, 100), &ctx).unwrap();
+        let only_age = transform(&s, &with_usage(raw.clone(), 75, 100), &ctx).unwrap();
+        assert_eq!(only_age.action, "SOFT+");
+        assert_eq!(only_age.messages(), boot.messages());
+        s.append_compartments("ride", &[comp(2, 2, 2, "end", "PUBLISHED_A")])
+            .unwrap();
+        ctx.historian_active = true;
+        let pass_n = transform(&s, &with_usage(raw.clone(), 75, 100), &ctx).unwrap();
+        assert!(m1_bytes(&pass_n).contains("PUBLISHED_A"));
+        assert!(frozen_red_payload(&s.load("ride").unwrap().core, "old-result#0").is_some());
+        ctx.historian_active = false;
+        s.append_compartments("ride", &[comp(3, 3, 3, "second", "PUBLISHED_B")])
+            .unwrap();
+        let replay = transform(&s, &with_usage(raw.clone(), 10, 100), &ctx).unwrap();
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(replay.messages(), pass_n.messages());
+        let next = transform(&s, &with_usage(raw, 75, 100), &ctx).unwrap();
+        assert!(m1_bytes(&next).contains("PUBLISHED_B"));
     }
 
     #[test]
@@ -18435,6 +18543,7 @@ pub(crate) mod tests {
         assert!(s.load("ses").unwrap().meta.last_todo_state.is_none());
         let before = serde_json::to_vec(&boot.ck_messages).unwrap();
         let before_native = opencode_native_bytes(&boot, "ses");
+        let watermark_before = s.load("ses").unwrap().meta.last_execute_ordinal;
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.observed_last_response_at_ms = Some(0);
         let execute = transform(&s, &execute_req, &ctx).unwrap();
@@ -18445,7 +18554,7 @@ pub(crate) mod tests {
         assert_eq!(opencode_native_bytes(&execute, "ses"), before_native);
         let meta = s.load("ses").unwrap().meta;
         assert_eq!(
-            meta.last_execute_ordinal, 0,
+            meta.last_execute_ordinal, watermark_before,
             "zero-drop execute must keep the two-pass watermark frozen"
         );
         // And the pass after it, with an unchanged tail, is a true no-write defer.
@@ -18455,12 +18564,81 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn state_sync_todo_pending_rides_execute_to_native_wire_and_defers_identically() {
+    fn synthetic_todo_ride_only_differential_golden_matches_typescript() {
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/todo-ride-only.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = req(
+            "todo-golden",
+            "cfg0",
+            vec![item("u1", 1, "please help"), item("a1", 2, "on it")],
+        );
+        request.todo_tool_present = Some(true);
+        let mut context = pctx("git:proj", "/nonexistent-docs", 0);
+        context.cache_ttl = "never".into();
+        let mut previous = Vec::new();
+        for step in golden["steps"].as_array().unwrap() {
+            if !step["state"].is_null() {
+                let mut loaded = s.load("todo-golden").unwrap();
+                loaded.meta.last_todo_state = Some(serde_json::to_string(&step["state"]).unwrap());
+                s.commit(
+                    "todo-golden",
+                    loaded.row_version,
+                    &loaded.core,
+                    &loaded.meta,
+                )
+                .unwrap();
+            }
+            if step["flush"] == true {
+                s.arm_soft_refresh("todo-golden").unwrap();
+            }
+            let response = transform(
+                &s,
+                &with_usage(
+                    request.clone(),
+                    if step["execute"] == true { 75 } else { 10 },
+                    100,
+                ),
+                &context,
+            )
+            .unwrap();
+            let todos = response
+                .messages()
+                .iter()
+                .flat_map(|m| &m.content)
+                .find_map(|block| {
+                    if let ck_wire::CkKind::ToolCall {
+                        id, name, input, ..
+                    } = &block.kind
+                    {
+                        if name == "todowrite" && id.starts_with("mc_synthetic_todo_") {
+                            return Some(input["todos"].clone());
+                        }
+                    }
+                    None
+                })
+                .unwrap_or(serde_json::Value::Null);
+            assert_eq!(todos, step["expectedTodo"], "{}", step["name"]);
+            let wire = serde_json::to_vec(response.messages()).unwrap();
+            if step["replay"] == true {
+                assert_eq!(response.action, "SOFT+", "{}", step["name"]);
+                assert_eq!(wire, previous, "{}", step["name"]);
+            } else {
+                assert_ne!(wire, previous);
+            }
+            previous = wire;
+        }
+    }
+
+    #[test]
+    fn state_sync_todo_waits_for_priced_execute_and_defers_identically() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut request = req("todo-sync", "cfg0", vec![item("a", 1, "raw")]);
         request.todo_tool_present = Some(true);
-        assert_eq!(run(&s, &request, &spine()).action, "HARD");
+        let bootstrap = run(&s, &request, &spine());
+        assert_eq!(bootstrap.action, "HARD");
 
         let state_json =
             r#"[{"content":"State sync todo","status":"in_progress","priority":"high"}]"#;
@@ -18501,6 +18679,10 @@ pub(crate) mod tests {
         })
         .unwrap();
 
+        let pending = run(&s, &with_usage(request.clone(), 70, 100), &spine());
+        assert_eq!(pending.action, "SOFT+");
+        assert_eq!(pending.messages(), bootstrap.messages());
+        s.arm_soft_refresh("todo-sync").unwrap();
         let bust = run(&s, &with_usage(request.clone(), 70, 100), &spine());
         assert_eq!(bust.action, "SOFT");
         let expected_call_id = "mc_synthetic_todo_c4a22134ee90be17";
@@ -18590,6 +18772,10 @@ pub(crate) mod tests {
             Some("todo-before")
         );
 
+        let pressure_only = run(&s, &with_usage(disabled.clone(), 70, 100), &spine());
+        assert_eq!(pressure_only.action, "SOFT+");
+        assert_eq!(synthetic_todo_pair_bytes(&pressure_only), frozen_pair);
+        s.arm_soft_refresh("todo-disabled").unwrap();
         let bust = run(&s, &with_usage(disabled, 70, 100), &spine());
         assert!(bust.committed);
         assert!(bust.messages().iter().all(|message| {
@@ -18609,7 +18795,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn low_usage_ttl_fold_neither_age_reclaims_nor_advances_the_watermark() {
+    fn low_usage_ttl_fold_carries_age_reclaim_without_pressure() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
@@ -18640,8 +18826,8 @@ pub(crate) mod tests {
                 .core
                 .frozen_units
                 .iter()
-                .all(|unit| !unit.key.starts_with("red:m1#") && !unit.key.starts_with("red:m2#")),
-            "an idle-TTL fold must not run the pressure-only age sweep"
+                .any(|unit| unit.key.starts_with("red:m1#") || unit.key.starts_with("red:m2#")),
+            "an idle-TTL fold carries the waiting age sweep on the same bust"
         );
     }
 
@@ -19135,17 +19321,6 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(boot.action, "HARD");
 
-        // Stamp the watermark over the aged arc with an empty riding opportunity.
-        s.arm_soft_refresh(SESSION).unwrap();
-        let stamp = transform(
-            &s,
-            &with_usage(req(SESSION, "cfg0", messages.clone()), 70, 100),
-            &context,
-        )
-        .unwrap();
-        assert_eq!(stamp.action, "SOFT");
-        assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 3);
-
         // Mint a fresh arc above the watermark; a low-usage defer cannot move it.
         messages.push(assistant_edit_call("fresh-call", 4, "fresh-edit", "a.txt"));
         messages.push(edit_result("fresh-result", 5, "fresh-edit", "fresh output"));
@@ -19158,23 +19333,11 @@ pub(crate) mod tests {
         assert_eq!(minted.action, "SOFT+");
         assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 3);
 
-        // Queue a pending memory change: it reaches the rendered m1 memory block only
-        // when a bust materializes it, and an engaged veto defers that. The queued change
-        // therefore makes the veto itself observable on the ordinary pass below.
-        s.insert_memory(memory_input(
-            "git:proj",
-            "ARCHITECTURE",
-            "veto probe rule",
-            0,
-        ))
-        .unwrap();
-
         let mut veto_ctx = pctx("git:proj", "/nonexistent-docs", 0);
         veto_ctx.cache_ttl = "never".to_string();
         veto_ctx.historian_active = true;
 
-        // Ordinary execute under the historian veto: the veto engages (the m1 delta stays
-        // queued), the age batch is not admitted and the watermark stays frozen.
+        // With no published delta, ordinary pressure cannot originate an age bust.
         let ordinary = transform(
             &s,
             &with_usage(req(SESSION, "cfg0", messages.clone()), 70, 100),
@@ -19184,10 +19347,6 @@ pub(crate) mod tests {
         assert_eq!(
             ordinary.action, "SOFT+",
             "the vetoed ordinary execute must stay defer-shaped"
-        );
-        assert!(
-            !m1_bytes(&ordinary).contains("veto probe rule"),
-            "the engaged historian veto must defer the queued m1 delta"
         );
         let loaded = s.load(SESSION).unwrap();
         assert_eq!(
@@ -19205,10 +19364,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(force.action, "SOFT");
-        assert!(
-            m1_bytes(&force).contains("veto probe rule"),
-            "the force pass busts and consumes the queued m1 delta"
-        );
         let loaded = s.load(SESSION).unwrap();
         assert!(
             frozen_red_payload(&loaded.core, "aged-call#0").is_some(),
@@ -19258,9 +19413,14 @@ pub(crate) mod tests {
         assert_eq!(boot.action, "HARD");
         assert_eq!(
             s.load(SESSION).unwrap().meta.last_execute_ordinal,
-            0,
-            "a no-pressure boot must not stamp the watermark"
+            4,
+            "bootstrap is an independently priced fold"
         );
+        // Seed the legacy zero-watermark state to exercise an empty native batch.
+        let mut loaded = s.load(SESSION).unwrap();
+        loaded.meta.last_execute_ordinal = 0;
+        s.commit(SESSION, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
 
         // Riding pass under injection: the native batch (empty at a zero watermark) is
         // replaced by the injected decision, yet the opportunity predicate still advances
@@ -34886,6 +35046,18 @@ pub(crate) mod tests {
             ck: collapsed,
         });
         let replay_request = active_cc_req("duplicate-tool-use", "cfg0", replay_messages);
+        // Keep the arc unaged so the later explicit-selection fixture, not the
+        // renderer-repair fold's automatic sweep, owns its first reduction.
+        let mut loaded = store.load("duplicate-tool-use").unwrap();
+        loaded.meta.last_execute_ordinal = 0;
+        store
+            .commit(
+                "duplicate-tool-use",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
 
         let warm =
             apply_once_with_estimator(&store, &replay_request, &context, estimate, Some(&cache))

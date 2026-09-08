@@ -366,6 +366,14 @@ function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
 }
 
 export interface PiM0M1State {
+	/** These delivery fields are scoped to one context pass, never persisted. */
+	freezePrefixForPass?: boolean;
+	allowFreshContentionFallback?: boolean;
+	preparedPrefix?: {
+		result: PiM0M1InjectionResult;
+		messages: PiAgentMessage[];
+		trimBoundaryId: string | null;
+	};
 	sessionId: string;
 	projectIdentity: string;
 	projectDirectory: string;
@@ -2454,8 +2462,9 @@ function prependM0M1Messages(
 	m0: string,
 	m1: string,
 	mural?: { enabled: boolean; supportsVision: boolean; dataUrl?: string },
+	timestampHint?: number,
 ): void {
-	const firstTimestamp = piMessages[0]?.timestamp;
+	const firstTimestamp = timestampHint ?? piMessages[0]?.timestamp;
 	const baseTimestamp =
 		typeof firstTimestamp === "number" ? firstTimestamp : Date.now();
 	// Pi's native image part is `{ type: "image", data: base64, mimeType }` —
@@ -2483,6 +2492,76 @@ function prependM0M1Messages(
 	);
 }
 
+// Cached bytes and their boundary come from one row. Replaying them must not
+// depend on live marker validation or fresh rendering succeeding.
+function replayCompletePiPrefix(
+	state: PiM0M1State,
+	row: CachedPiM0M1Row,
+	compartments: PiCompartment[],
+	messages: PiAgentMessage[],
+	entryIds: readonly (string | undefined)[] | undefined,
+	reason: string | null,
+): PiM0M1InjectionResult {
+	let m0 = decodeCachedM0(row.cached_m0_bytes) ?? "";
+	const m1 = decodeCachedM1(row, state.sessionId);
+	rememberPiMuralPayload(
+		state.sessionId,
+		row.cached_m0_mural_data_url,
+		row.cached_m0_mural_hash,
+	);
+	const mural = m0.includes("<memory-mural>")
+		? muralForWire(state.sessionId)
+		: undefined;
+	if (!mural) m0 = stripMemoryMuralBlock(m0);
+	const trimBoundaryId = row.cached_m0_last_baseline_end_message_id;
+	const skippedVisibleMessages = trimBoundaryId
+		? trimPiMessagesToBoundary(messages, entryIds, trimBoundaryId)
+		: 0;
+	const head: PiAgentMessage[] = [];
+	prependM0M1Messages(head, m0, m1, mural, messages[0]?.timestamp);
+	messages.unshift(...structuredClone(head));
+	const result: PiM0M1InjectionResult = {
+		injected: true,
+		compartmentCount: compartments.length,
+		factCount: 0,
+		memoryCount: parseMemoryBlockIds(row.memory_block_ids).length,
+		skippedVisibleMessages,
+		m0Materialized: false,
+		m0Reason: reason,
+		m0Bytes: m0.length,
+		m1Bytes: m1.length,
+		contentionExhausted: true,
+		renderedBoundary: resolveRenderedCompartmentBoundary(
+			compartments,
+			trimBoundaryId,
+		),
+		m1RenderedCoverage: null,
+		syntheticLeadingCount: 2,
+	};
+	if (state.freezePrefixForPass)
+		state.preparedPrefix = { result, messages: head, trimBoundaryId };
+	return result;
+}
+
+export function prepareCachedM0M1PiReplay(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	rowOverride?: CachedPiM0M1Row | null,
+): PiM0M1State["preparedPrefix"] {
+	const cached =
+		rowOverride === undefined
+			? readCachedPiM0M1Row(db, state.sessionId)
+			: rowOverride;
+	if (!cached?.cached_m0_bytes || !cached.cached_m1_bytes) return undefined;
+	const snapshot: PiM0M1State = {
+		...state,
+		freezePrefixForPass: true,
+		preparedPrefix: undefined,
+	};
+	replayCompletePiPrefix(snapshot, cached, [], [], undefined, "cache_hit");
+	return snapshot.preparedPrefix;
+}
+
 export function injectM0M1Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
@@ -2491,6 +2570,22 @@ export function injectM0M1Pi(
 	recomputeM1ThisPass = false,
 	passSnapshot?: PiM0M1PassSnapshot,
 ): PiM0M1InjectionResult {
+	if (state.preparedPrefix) {
+		const prepared = state.preparedPrefix;
+		const skippedVisibleMessages = prepared.trimBoundaryId
+			? trimPiMessagesToBoundary(piMessages, entryIds, prepared.trimBoundaryId)
+			: 0;
+		const head = structuredClone(prepared.messages);
+		// Timestamps are Pi envelope metadata, not cached provider content. Keep
+		// their existing position relative to the first retained raw message.
+		const timestamp = piMessages[0]?.timestamp;
+		if (typeof timestamp === "number") {
+			head[0].timestamp = timestamp - 2;
+			head[1].timestamp = timestamp - 1;
+		}
+		piMessages.unshift(...head);
+		return { ...prepared.result, skippedVisibleMessages };
+	}
 	// One snapshot for the WHOLE decision: the materialize decision and every
 	// cache replay normalize against this same publish sequence. The snapshot is
 	// refreshed only when the lock-time CAS proves that a publisher advanced it.
@@ -2536,33 +2631,28 @@ export function injectM0M1Pi(
 			m1Recomputed = true;
 		} catch (error) {
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
-			try {
-				const cached = replayCachedM1Pi(db, state, currentCompartments);
-				contentionExhausted = true;
-				m0 = cached.m0;
-				m1 = cached.m1;
-				markers = cached.markers;
-				logSession(
-					state.sessionId,
-					"pi m[0] materialization contention exhausted; reusing cached m[0]/m[1]",
-				);
-			} catch {
-				// No cached baseline to fall back to — this happens when the cache was
-				// deliberately cleared THIS pass (cache-bust) and then hit contention.
-				// Dropping injection would lose the entire history block, so render a
-				// fresh (non-persisted) m[0]/m[1] pair as a last resort. It is not cached
-				// because we couldn't win the materialize lock; the next pass
-				// re-materializes and persists.
-				const fresh = renderFreshM0PiNonPersisted(state, db);
-				m0 = fresh.m0;
-				markers = fresh.snapshotMarkers;
-				freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
-				contentionExhausted = true;
-				logSession(
-					state.sessionId,
-					"pi m[0] materialization contention exhausted with no cached fallback; rendered fresh non-persisted m[0]/m[1]",
+
+			// Replay the pair captured when this pass began. A sibling may publish a
+			// newer pair while materialization retries, but adopting it here would make
+			// this request's prefix change without an authorized bust.
+			const cached = state.allowFreshContentionFallback
+				? null
+				: snapshot.cachedRow;
+			if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+				return replayCompletePiPrefix(
+					state,
+					cached,
+					currentCompartments,
+					piMessages,
+					entryIds,
+					decision.reason,
 				);
 			}
+			const fresh = renderFreshM0PiNonPersisted(state, db);
+			m0 = fresh.m0;
+			markers = fresh.snapshotMarkers;
+			freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
+			contentionExhausted = true;
 		}
 	} else {
 		const meta = snapshot.sessionMeta;
@@ -2590,6 +2680,19 @@ export function injectM0M1Pi(
 				m1Recomputed = true;
 			} catch (error) {
 				if (!(error instanceof PiMaterializeContentionError)) throw error;
+				const cached = state.allowFreshContentionFallback
+					? null
+					: snapshot.cachedRow;
+				if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+					return replayCompletePiPrefix(
+						state,
+						cached,
+						currentCompartments,
+						piMessages,
+						entryIds,
+						decision.reason,
+					);
+				}
 				// Cache was already invalid (no usable cached m[0]/markers to reuse) AND
 				// we lost the materialize lock to a sibling process. Dropping injection
 				// would lose the whole history block, so render a fresh non-persisted
@@ -2632,18 +2735,37 @@ export function injectM0M1Pi(
 	} else if (contentionExhausted) {
 		// m[1] was replayed with the cached m[0] pair above.
 	} else if (recomputeM1ThisPass) {
-		const refreshed = softRefreshCachedM1Pi({
-			state,
-			db,
-			m0Bytes: Buffer.from(m0, "utf8"),
-			markers,
-			compartmentsForNormalization: currentCompartments,
-		});
-		m0 = refreshed.m0;
-		m1 = refreshed.m1;
-		markers = refreshed.markers;
-		memoryUpdateCount = refreshed.memoryUpdateCount;
-		m1Recomputed = refreshed.recomputed;
+		try {
+			const refreshed = softRefreshCachedM1Pi({
+				state,
+				db,
+				m0Bytes: Buffer.from(m0, "utf8"),
+				markers,
+				compartmentsForNormalization: currentCompartments,
+			});
+			m0 = refreshed.m0;
+			m1 = refreshed.m1;
+			markers = refreshed.markers;
+			memoryUpdateCount = refreshed.memoryUpdateCount;
+			m1Recomputed = refreshed.recomputed;
+		} catch (error) {
+			if (!state.allowFreshContentionFallback) throw error;
+			// Force recovery cannot depend on winning the soft-refresh write lock.
+			const fresh = renderFreshM0PiNonPersisted(state, db);
+			m0 = fresh.m0;
+			markers = fresh.snapshotMarkers;
+			freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
+			const delta = renderM1PiWithMetadata(
+				state,
+				db,
+				markers,
+				fresh.renderedMemoryIds,
+			);
+			m1 = delta.text;
+			memoryUpdateCount = delta.memoryUpdateCount;
+			m1Recomputed = true;
+			contentionExhausted = true;
+		}
 	} else {
 		const replayed = replayCachedM1Pi(
 			db,
@@ -2794,7 +2916,7 @@ export function injectM0M1Pi(
 				).length
 			: getMemoriesByProject(db, memPath, ["active", "permanent"]).length
 		: 0;
-	return {
+	const result: PiM0M1InjectionResult = {
 		injected: true,
 		compartmentCount: currentCompartments.length,
 		factCount: 0, // v2: facts retired as a render source (facts = promoted memories)
@@ -2814,6 +2936,13 @@ export function injectM0M1Pi(
 		// prependM0M1Messages always unshifts exactly the m[0] + m[1] pair.
 		syntheticLeadingCount: 2,
 	};
+	if (state.freezePrefixForPass)
+		state.preparedPrefix = {
+			result,
+			messages: structuredClone(piMessages.slice(0, 2)),
+			trimBoundaryId,
+		};
+	return result;
 }
 
 export function clearM0M1PiCache(

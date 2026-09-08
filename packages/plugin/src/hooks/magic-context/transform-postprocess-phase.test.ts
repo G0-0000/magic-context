@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
@@ -17,6 +18,7 @@ import {
     getChannel2NudgeState,
     getOrCreateSessionMeta,
     getPendingCompactionMarkerState,
+    getPendingOps,
     getProcessedImageStrippedIds,
     getStrippedPlaceholderIds,
     getTagsBySession,
@@ -56,6 +58,7 @@ import { registerActiveCompartmentRun } from "./compartment-runner";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
+import * as compartmentInjection from "./inject-compartments";
 import { injectM0M1, type M0HardSignals } from "./inject-compartments";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
@@ -407,7 +410,7 @@ describe("Channel-2 measured-collapse cycle reset", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [], {
                 channel1StateBySession,
-                didMutateFromFlushedStatuses: true,
+                m0M1: { projectPath: "git:measured-collapse", projectDirectory: "/nonexistent" },
             }),
         );
 
@@ -657,6 +660,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, foldMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 schedulerDeferReason: null,
                 resolvedProviderID: "anthropic",
                 hiddenMessagesAtCompactionSeam: hiddenAssistants,
@@ -1022,6 +1026,7 @@ describe("deferred compaction marker representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, firstMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 tagger: firstTagger,
                 targets: firstTagged.targets,
                 reasoningByMessage: firstTagged.reasoningByMessage,
@@ -1915,6 +1920,7 @@ describe("postprocess emergency drop accounting", () => {
             }),
         );
 
+        expect(result.droppedTokens).toBeGreaterThan(0);
         expect(result.emergencyReclaimedTokens).toBeGreaterThan(0);
         expect(result.emergency).toBe(true);
     });
@@ -2134,7 +2140,7 @@ describe("two-pass tool reclaim", () => {
         expect(tagStatuses(sessionId).get(1)).toBe("active");
     });
 
-    it("does not advance the watermark on a non-execute force-materialization pass", async () => {
+    it("advances the watermark on a force-materialization bust even without execute", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-reclaim-force-defer";
@@ -2151,7 +2157,7 @@ describe("two-pass tool reclaim", () => {
             }),
         );
 
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(1);
     });
 });
 
@@ -2879,7 +2885,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains pending ops but not two-pass reclaim or its watermark on a low-usage TTL fold", async () => {
+    it("drains pending ops and age reclaim on the same low-usage TTL fold", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-reclaim-drain";
@@ -2924,9 +2930,9 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
         expect(statuses.get(1)).toBe("dropped");
-        expect(statuses.get(2)).toBe("active");
+        expect(statuses.get(2)).toBe("dropped");
         expect(statuses.get(3)).toBe("active");
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
 
         const deferReplayBytes = JSON.stringify(messages);
         await runPostTransformPhase(
@@ -3093,6 +3099,7 @@ describe("postprocess empty-sentinel provider gate", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write-anthropic",
                 resolvedProviderID: "anthropic",
@@ -3174,6 +3181,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 messageTagNumbers: new Map([[userMessage, 1]]),
                 resolvedProviderID: "anthropic",
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-img",
             }),
@@ -3919,6 +3927,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
             }),
         );
@@ -3985,6 +3994,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions,
             }),
@@ -4058,6 +4068,7 @@ describe("final message representation", () => {
             const result = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, bust.messages, {
                     schedulerDecision: "execute",
+                    pendingMaterializationSessions: new Set([sessionId]),
                     resolvedProviderID: "anthropic",
                     trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
                 }),
@@ -4131,6 +4142,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, markerAbsent.messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions: markerAbsent.trailingBlankSourceDecisions,
             }),
@@ -4156,6 +4168,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, visibleBust.messages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
                 trailingBlankSourceDecisions: visibleBust.trailingBlankSourceDecisions,
             }),
@@ -4450,6 +4463,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
                 resolvedProviderID: "anthropic",
             }),
         );
@@ -5050,6 +5064,9 @@ async function runTodoGatePass(args: {
     await runPostTransformPhase(
         basePostTransformArgs(db, args.sessionId, args.messages, {
             schedulerDecision: args.schedulerDecision,
+            // These are todo rendering tests: execute represents an explicit bust.
+            pendingMaterializationSessions:
+                args.schedulerDecision === "execute" ? new Set([args.sessionId]) : new Set(),
             tagger,
             targets: tagged.targets,
             reasoningByMessage: tagged.reasoningByMessage,
@@ -5449,4 +5466,666 @@ describe("marker-drain reasoning representation", () => {
         );
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(frozenBeforeServe);
     });
+});
+
+it("age and heuristic candidates alone at 75 percent cannot originate a bust", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-age-ride-only";
+    const messages = [makeToolMessage("old-a"), makeToolMessage("old-b")];
+    const targets = new Map<number, TagTarget>();
+    for (let index = 0; index < messages.length; index++) {
+        insertTag(
+            db,
+            sessionId,
+            `old-${index}`,
+            "tool",
+            4000,
+            index + 1,
+            0,
+            "bash",
+            0,
+            `old-owner-${index}`,
+            null,
+            { tokenCount: 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+        );
+        targets.set(index + 1, makeDropTarget(messages[index]!));
+    }
+    padRecentToolSkeletonWindow(sessionId, 2);
+    advanceToolReclaimWatermark(db, sessionId, 2);
+    const before = JSON.stringify(messages);
+    const result = await runPostTransformPhase(
+        basePostTransformArgs(db, sessionId, messages, {
+            schedulerDecision: "execute",
+            contextUsage: { percentage: 75.02, inputTokens: 654172 },
+            // Replaying a previously frozen drop is not an independent new bust.
+            didMutateFromFlushedStatuses: true,
+            tags: getActiveTagsBySession(db, sessionId),
+            targets,
+            sessionMeta: getOrCreateSessionMeta(db, sessionId),
+        }),
+    );
+    expect(JSON.stringify(messages)).toBe(before);
+    expect(result.bustedThisPass).toBe(false);
+    expect(result.droppedTokens).toBe(0);
+    expect(
+        getTagsBySession(db, sessionId)
+            .filter((t) => t.tagNumber <= 2)
+            .every((t) => t.status === "active"),
+    ).toBe(true);
+});
+
+describe("prefix preflight persistence pins", () => {
+    it.each([
+        "cached",
+        "fresh",
+        "partial",
+        "force",
+    ])("%s contention fallback follows cached replay or unavoidable bust", async (cacheShape) => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-preflight-${cacheShape}`;
+        const projectPath = "git:preflight-pin";
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "Published",
+                content: "Published history",
+            },
+        ]);
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const m0M1 = { projectPath, projectDirectory: "/nonexistent" };
+        if (cacheShape === "cached" || cacheShape === "force")
+            injectM0M1({ db, sessionId, state, ...m0M1 });
+        if (cacheShape === "force")
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 2,
+                    startMessage: 2,
+                    endMessage: 2,
+                    startMessageId: "new-covered",
+                    endMessageId: "new-covered",
+                    title: "FORCE_FRESH",
+                    content: "FORCE_FRESH",
+                },
+            ]);
+        if (cacheShape === "partial")
+            state.cachedM0Bytes = Buffer.from("<session-history>partial</session-history>");
+        queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+        const message = makeToolMessage("old-tool");
+        insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+            tokenCount: 1000,
+            inputTokenCount: 0,
+            reasoningTokenCount: 0,
+        });
+        padRecentToolSkeletonWindow(sessionId, 1);
+        advanceToolReclaimWatermark(db, sessionId, 1);
+        state.toolReclaimWatermark = 1;
+        if (cacheShape === "cached" || cacheShape === "force")
+            queuePendingOp(db, sessionId, 1, "drop");
+        const served: compartmentInjection.InjectM0M1Result[] = [];
+        const original = compartmentInjection.injectM0M1;
+        const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
+            (options) => {
+                const result = original({
+                    ...options,
+                    beforePhase3ForTest: () => {
+                        queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+                    },
+                });
+                served.push(result);
+                return result;
+            },
+        );
+        try {
+            const messages = [message];
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    contextUsage: {
+                        percentage: cacheShape === "force" ? 90 : 20,
+                        inputTokens: 1000,
+                    },
+                    sessionMeta: state,
+                    m0M1,
+                    targets: new Map([[1, makeDropTarget(message)]]),
+                    tags: getActiveTagsBySession(db, sessionId),
+                    pendingCompartmentInjection:
+                        cacheShape === "cached"
+                            ? null
+                            : {
+                                  block: "published",
+                                  compartmentEndMessage: 1,
+                                  compartmentEndMessageId: "covered",
+                                  compartmentCount: 1,
+                                  skippedVisibleMessages: 0,
+                                  factCount: 0,
+                                  memoryCount: 0,
+                                  rebuiltFromDb: true,
+                              },
+                    rebuiltHistoryFromInitialPrepare: cacheShape !== "cached",
+                }),
+            );
+            expect(served).toHaveLength(2);
+            expect(
+                served.every(
+                    (call) =>
+                        call.decision.value &&
+                        !call.m0RematerializedThisPass &&
+                        call.materializationContentionRetryExhausted,
+                ),
+            ).toBe(true);
+            expect(result.materialized).toBe(false);
+            if (cacheShape === "cached") {
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
+                ).toBe("active");
+                expect(result.droppedTokens).toBe(0);
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            } else {
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
+                ).toBe("dropped");
+                expect(result.droppedTokens).toBeGreaterThan(0);
+                expect(result.bustedThisPass).toBe(true);
+                if (cacheShape === "force")
+                    expect(JSON.stringify(messages.slice(0, 2))).toContain("FORCE_FRESH");
+                else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+            }
+        } finally {
+            injection.mockRestore();
+        }
+    });
+
+    it("served m1 replays the persisted off-wire preflight bytes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-preflight-persisted";
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const m0M1 = { projectPath: "git:preflight-persisted", projectDirectory: "/nonexistent" };
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "BASELINE",
+                content: "BASELINE",
+            },
+        ]);
+        injectM0M1({ db, sessionId, state, ...m0M1 });
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 2,
+                startMessage: 2,
+                endMessage: 2,
+                startMessageId: "next-covered",
+                endMessageId: "next-covered",
+                title: "PERSISTED_A",
+                content: "PERSISTED_A",
+            },
+        ]);
+        let persistedPreflight: string | null = null;
+        const original = compartmentInjection.injectM0M1;
+        const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
+            (options) => {
+                const result = original(options);
+                if (!options.messages)
+                    persistedPreflight =
+                        getOrCreateSessionMeta(db, sessionId).cachedM1Bytes?.toString("utf8") ??
+                        null;
+                return result;
+            },
+        );
+        const messages = [makeToolMessage("tail")];
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    sessionMeta: state,
+                    m0M1,
+                    schedulerDecision: "execute",
+                }),
+            );
+            expect(persistedPreflight).toContain("PERSISTED_A");
+            expect((messages[1].parts[0] as { text: string }).text).toBe(persistedPreflight!);
+        } finally {
+            injection.mockRestore();
+        }
+    });
+});
+
+it("off-wire m1 preflight on 2000-message execute reports p50 and p95", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-preflight-benchmark";
+    const m0M1 = { projectPath: "git:preflight-benchmark", projectDirectory: "/nonexistent" };
+    const state = getOrCreateSessionMeta(db, sessionId);
+    appendCompartments(
+        db,
+        sessionId,
+        Array.from({ length: 20 }, (_, i) => ({
+            sequence: i + 1,
+            startMessage: i + 1,
+            endMessage: i + 1,
+            startMessageId: `covered-${i}`,
+            endMessageId: `covered-${i}`,
+            title: `Baseline ${i}`,
+            content: "Historical summary ".repeat(200),
+        })),
+    );
+    injectM0M1({ db, sessionId, state, ...m0M1 });
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 21,
+            startMessage: 21,
+            endMessage: 21,
+            startMessageId: "delta",
+            endMessageId: "delta",
+            title: "Published delta",
+            content: "New published detail ".repeat(100),
+        },
+    ]);
+    const samples: number[] = [];
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) => {
+        const start = performance.now();
+        const result = original(options);
+        if (!options.messages) samples.push(performance.now() - start);
+        return result;
+    });
+    try {
+        for (let pass = 0; pass < 30; pass++) {
+            const messages: MessageLike[] = Array.from({ length: 2000 }, (_, index) => ({
+                info: { id: `message-${index}`, role: index % 2 ? "assistant" : "user" },
+                parts: [{ type: "text", text: `Message ${index}: ${"raw tail text ".repeat(40)}` }],
+            }));
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    m0M1,
+                    sessionMeta: state,
+                    schedulerDecision: "execute",
+                }),
+            );
+        }
+        expect(samples).toHaveLength(30);
+        const sorted = samples.slice(5).sort((a, b) => a - b);
+        const p50 = sorted[Math.floor(sorted.length * 0.5)]!;
+        const p95 = sorted[Math.floor(sorted.length * 0.95)]!;
+        console.log(
+            `m1-preflight 2000-message execute p50=${p50.toFixed(3)}ms p95=${p95.toFixed(3)}ms samples=${sorted.length} baselineCompartments=20 deltaCompartments=1`,
+        );
+        expect(p50).toBeGreaterThan(0);
+        expect(p95).toBeGreaterThanOrEqual(p50);
+    } finally {
+        injection.mockRestore();
+    }
+});
+
+describe("ride-only configuration table", () => {
+    async function runBands(
+        config: "historian-disabled" | "no_models" | "wrapup-only" | "compaction-off",
+    ) {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-ride-config-${config}`;
+        const messages = [1, 2, 3, 4].map((tag) => makeToolMessage(`tool-${tag}`));
+        const targets = new Map<number, TagTarget>();
+        for (let tag = 1; tag <= 4; tag++) {
+            insertTag(db, sessionId, `tool-${tag}`, "tool", 8000, tag, 0, "bash");
+            targets.set(tag, makeDropTarget(messages[tag - 1]!));
+        }
+        advanceToolReclaimWatermark(db, sessionId, 4);
+        // These are post-producer states, not invented configuration keys:
+        // disabled has no runnable historian; no_models and wrapup-only have no
+        // automatic publication to carry the waiting routine reductions.
+        const options = {
+            compactionOff: config === "compaction-off",
+            canRunCompartments: config === "no_models" || config === "wrapup-only",
+            schedulerDecision: "execute" as const,
+            targets,
+            tags: getActiveTagsBySession(db, sessionId),
+            sessionMeta: getOrCreateSessionMeta(db, sessionId),
+            emergencyCeilingTokens: 10_000,
+        };
+        const before = JSON.stringify(messages);
+        const routine = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...options,
+                contextUsage: { percentage: 75, inputTokens: 20_000 },
+            }),
+        );
+        expect(JSON.stringify(messages)).toBe(before);
+        expect(routine.droppedTokens).toBe(0);
+        expect(getTagsBySession(db, sessionId).every((tag) => tag.status === "active")).toBe(true);
+        const force = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...options,
+                contextUsage: { percentage: 90, inputTokens: 20_000 },
+            }),
+        );
+        if (config === "compaction-off") {
+            for (const percentage of [20, 85, 95]) {
+                const unchanged = await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        ...options,
+                        contextUsage: { percentage, inputTokens: 20_000 },
+                    }),
+                );
+                expect(unchanged.droppedTokens).toBe(0);
+                expect(JSON.stringify(messages)).toBe(before);
+            }
+            expect(JSON.stringify(messages)).toBe(before);
+            expect(force.droppedTokens).toBe(0);
+            expect(getTagsBySession(db, sessionId).every((tag) => tag.status === "active")).toBe(
+                true,
+            );
+        } else {
+            expect(force.emergencyReclaimedTokens).toBeGreaterThan(0);
+            expect(force.droppedTokens).toBeGreaterThan(0);
+            expect(JSON.stringify(messages)).not.toBe(before);
+        }
+    }
+    it.each(["historian-disabled", "no_models", "wrapup-only"] as const)(
+        "ride-only defers routine reclaim to force band under %s",
+        runBands,
+    );
+    it("compaction-off performs no reclaim at any band", () => runBands("compaction-off"));
+});
+
+it("synthetic todo ride-only differential golden matches Rust", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-todo-ride-golden";
+    let previous = "";
+    for (const step of todoRideGolden.steps) {
+        if (step.state)
+            updateSessionMeta(db, sessionId, { lastTodoState: JSON.stringify(step.state) });
+        const messages = buildTodoGateMessages(sessionId);
+        const tagger = createTagger();
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: step.execute ? "execute" : "defer",
+                pendingMaterializationSessions: step.flush ? new Set([sessionId]) : new Set(),
+                m0M1: { projectPath: "git:todo-golden", projectDirectory: "/nonexistent" },
+                tagger,
+                targets: tagged.targets,
+                reasoningByMessage: tagged.reasoningByMessage,
+                messageTagNumbers: tagged.messageTagNumbers,
+                batch: tagged.batch,
+            }),
+        );
+        const todo = findTodoPart(messages) as { state: { input: { todos: unknown } } } | null;
+        expect(todo?.state.input.todos ?? null).toEqual(step.expectedTodo);
+        const wire = JSON.stringify(messages);
+        if (step.replay) expect(wire).toBe(previous);
+        else expect(wire).not.toBe(previous);
+        previous = wire;
+    }
+});
+
+it("competing persisted pair cannot replace the previously served TypeScript prefix", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-competing-prefix-snapshot";
+    const m0M1 = { projectPath: "git:competing-prefix", projectDirectory: "/nonexistent" };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "covered-a",
+            endMessageId: "covered-a",
+            title: "PAIR_A",
+            content: "PAIR_A",
+        },
+    ]);
+    const initialState = getOrCreateSessionMeta(db, sessionId);
+    injectM0M1({ db, sessionId, state: initialState, ...m0M1 });
+    const pairA = compartmentInjection.prepareCachedM0M1Replay(db, sessionId);
+    expect(pairA).toBeDefined();
+
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "covered-b",
+            endMessageId: "covered-b",
+            title: "PUBLISHED_AFTER_A",
+            content: "PUBLISHED_AFTER_A",
+        },
+    ]);
+    insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+        tokenCount: 1000,
+        inputTokenCount: 0,
+        reasoningTokenCount: 0,
+    });
+    padRecentToolSkeletonWindow(sessionId, 1);
+    advanceToolReclaimWatermark(db, sessionId, 1);
+    queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+
+    const rawMessages = (): MessageLike[] => [
+        {
+            info: { id: "covered-a", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "covered by pair A" }],
+        } as MessageLike,
+        {
+            info: { id: "covered-b", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "must remain raw with pair A" }],
+        } as MessageLike,
+        makeToolMessage("old-tool"),
+    ];
+    const expected = rawMessages();
+    injectM0M1({
+        db,
+        sessionId,
+        state: getOrCreateSessionMeta(db, sessionId),
+        messages: expected,
+        preparedPrefix: pairA,
+        ...m0M1,
+    });
+
+    let competingWrites = 0;
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
+        original({
+            ...options,
+            beforePhase3ForTest: !options.messages
+                ? () => {
+                      competingWrites += 1;
+                      db.prepare(
+                          `UPDATE session_meta
+                              SET cached_m0_bytes = ?, cached_m1_bytes = ?,
+                                  cached_m0_max_compartment_seq = 2,
+                                  cached_m0_last_baseline_end_message_id = ?
+                            WHERE session_id = ?`,
+                      ).run(
+                          Buffer.from("<session-history>PAIR_B</session-history>", "utf8"),
+                          Buffer.from(pairA!.m1Text!, "utf8"),
+                          "covered-b",
+                          sessionId,
+                      );
+                      queueM0Mutation(db, {
+                          sessionId,
+                          mutationType: "compartment_merge",
+                      });
+                  }
+                : undefined,
+        }),
+    );
+    try {
+        const messages = rawMessages();
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const toolMessage = messages[2];
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                m0M1,
+                sessionMeta: state,
+                schedulerDecision: "execute",
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([[1, makeDropTarget(toolMessage)]]),
+            }),
+        );
+
+        expect(competingWrites).toBe(3);
+        expect(JSON.stringify(messages)).toBe(JSON.stringify(expected));
+        expect(messages.some((message) => message.info.id === "covered-b")).toBe(true);
+        expect(result.droppedTokens).toBe(0);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+            "active",
+        );
+    } finally {
+        injection.mockRestore();
+    }
+});
+
+it("contended partial cache replays persisted prefix until one uncontended drain", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-persist-before-serve";
+    const m0M1 = { projectPath: "git:persist-before-serve", projectDirectory: "/nonexistent" };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "covered",
+            endMessageId: "covered",
+            title: "OLD_BASELINE",
+            content: "OLD_BASELINE",
+        },
+    ]);
+    const cached: MessageLike[] = [];
+    injectM0M1({
+        db,
+        sessionId,
+        state: getOrCreateSessionMeta(db, sessionId),
+        messages: cached,
+        ...m0M1,
+    });
+    const cachedBytes = JSON.stringify(cached);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "new-covered",
+            endMessageId: "new-covered",
+            title: "PUBLISHED_A",
+            content: "PUBLISHED_A",
+        },
+    ]);
+    insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+        tokenCount: 1000,
+        inputTokenCount: 0,
+        reasoningTokenCount: 0,
+    });
+    padRecentToolSkeletonWindow(sessionId, 1);
+    advanceToolReclaimWatermark(db, sessionId, 1);
+    let contend = true;
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
+        original({
+            ...options,
+            beforePhase3ForTest:
+                contend && !options.messages
+                    ? () => {
+                          queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+                      }
+                    : undefined,
+        }),
+    );
+    try {
+        for (let pass = 0; pass < 3; pass++) {
+            contend = pass < 2;
+            const state = getOrCreateSessionMeta(db, sessionId);
+            if (contend) state.cachedM1Bytes = null;
+            const message = makeToolMessage("old-tool");
+            const messages = [message];
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    m0M1,
+                    sessionMeta: state,
+                    schedulerDecision: "execute",
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: new Map([[1, makeDropTarget(message)]]),
+                }),
+            );
+            if (contend) {
+                expect(JSON.stringify(messages.slice(0, 2))).toBe(cachedBytes);
+                expect(result.droppedTokens).toBe(0);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "active",
+                );
+            } else {
+                expect(JSON.stringify(messages.slice(0, 2))).toContain("PUBLISHED_A");
+                expect(result.droppedTokens).toBeGreaterThan(0);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "dropped",
+                );
+            }
+        }
+    } finally {
+        injection.mockRestore();
+    }
+});
+
+it("force soft-refresh contention serves fresh recovery bytes", () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-force-soft-contention";
+    const state = getOrCreateSessionMeta(db, sessionId);
+    const options = {
+        db,
+        sessionId,
+        state,
+        projectPath: "git:force-soft",
+        projectDirectory: "/nonexistent",
+    };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "old",
+            endMessageId: "old",
+            title: "BASELINE",
+            content: "BASELINE",
+        },
+    ]);
+    injectM0M1(options);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "new",
+            endMessageId: "new",
+            title: "FORCE_SOFT_FRESH",
+            content: "FORCE_SOFT_FRESH",
+        },
+    ]);
+    expect(compartmentInjection.mustMaterialize(options).value).toBe(false);
+    const exec = db.exec.bind(db);
+    const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+        if (sql === "BEGIN IMMEDIATE")
+            throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        return exec(sql);
+    });
+    try {
+        const result = injectM0M1({
+            ...options,
+            isCacheBustingPass: true,
+            allowFreshContentionFallback: true,
+        });
+        expect(result.materializationContentionRetryExhausted).toBe(true);
+        expect(JSON.stringify(result.preparedMessages)).toContain("FORCE_SOFT_FRESH");
+    } finally {
+        blocker.mockRestore();
+    }
 });

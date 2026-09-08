@@ -486,6 +486,8 @@ If `transform_mode: "rust"` is also configured, compaction-off mode resolves to 
 
 ## `historian`
 
+Automatic tool drops ride folds and flushes; below the force band they wait for the next fold rather than creating a pressure-only cache bust.
+
 Historian retains agent metadata at `historian`, while each harness receives its own strict model-resolution block:
 
 ```jsonc

@@ -124,6 +124,7 @@ import {
 	applyPendingOperations,
 	RECENT_TOOL_SKELETON_WINDOW,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
+import { hasReclaimRide } from "@magic-context/core/hooks/magic-context/cache-busting-signals";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -218,6 +219,8 @@ import {
 	mustMaterializePi,
 	type PiM0M1InjectionResult as PiInjectionResult,
 	type PiM0M1PassSnapshot,
+	type PiM0M1State,
+	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
@@ -4820,11 +4823,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredMaterializeEligible =
 		canConsumeDeferredLate &&
 		deferredMaterializationSessions.has(args.sessionId);
-	// A HARD decision alone is not a cache bust. Execute it against a shadow
-	// message array first, then let pending drops, heuristics, and reasoning cleanup
-	// ride the bust only when m[0] actually materialized. Contention or any other
-	// suppressed attempt keeps defer replay immutable; the wire injection below
-	// still performs its own late decision for races after this preflight.
+	// Prepare prefix work on a shadow array. An execute with unchanged m[1] is
+	// not a ride; changed published bytes or an executed fold price the reductions.
 	const piHardSignals = args.injection
 		? (() => {
 				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
@@ -4852,10 +4852,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				};
 			})()
 		: undefined;
+	const emergencyDropEligible =
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= forceMaterializationPercentage;
 	// Build the fold state once and reuse it for both the preflight and the wire
 	// injection. Omitting a render-affecting field from only one of those calls can
 	// manufacture a HARD signal that the real injection immediately disproves.
-	const piM0State =
+	const piM0State: PiM0M1State | undefined =
 		args.injection && piHardSignals
 			? {
 					sessionId: args.sessionId,
@@ -4867,6 +4870,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					historyBudgetTokens: args.injection.historyBudgetTokens,
 					hardSignals: piHardSignals,
 					muralEnabled: args.injection.muralEnabled === true,
+					freezePrefixForPass: true,
+					allowFreshContentionFallback:
+						args.forceMaterialization === true || emergencyDropEligible,
 				}
 			: undefined;
 	const foldDueDecision = piM0State
@@ -4877,7 +4883,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				injectionPassSnapshot,
 			)
 		: { value: false, reason: null };
+	const firstRenderBust =
+		piM0State !== undefined &&
+		!(
+			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
+			injectionPassSnapshot.cachedRow.cached_m1_bytes
+		);
 	let foldExecutedThisPass = false;
+	let publishedM1RefreshedThisPass = false;
+	let prefixPreflightContended = false;
+	const softRefreshOpportunity = args.schedulerDecision === "execute";
+	const cachedPrefixBeforePreflight =
+		piM0State &&
+		(foldDueDecision.value || softRefreshOpportunity) &&
+		!emergencyDropEligible
+			? prepareCachedM0M1PiReplay(
+					piM0State,
+					args.db,
+					injectionPassSnapshot?.cachedRow,
+				)
+			: undefined;
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold =
 		injectionPassSnapshot?.sessionMeta ?? args.sessionMeta;
@@ -4885,7 +4910,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		persistedM0BeforeFold.cachedM0Bytes === null
 			? -1
 			: persistedM0BeforeFold.cachedM0MaxCompartmentSeq;
-	if (foldDueDecision.value && piM0State) {
+	if ((foldDueDecision.value || softRefreshOpportunity) && piM0State) {
 		try {
 			// Persist the fold before opening mutation gates. The shadow array keeps
 			// this pre-execution off the outgoing wire; the normal injection below
@@ -4895,11 +4920,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				[],
 				undefined,
-				false,
+				softRefreshOpportunity,
 				injectionPassSnapshot,
 			);
+			prefixPreflightContended =
+				preFoldInjectionResult.contentionExhausted === true;
+			publishedM1RefreshedThisPass =
+				!prefixPreflightContended &&
+				persistedM0BeforeFold.cachedM1Bytes?.toString("utf8") !==
+					getOrCreateSessionMeta(
+						args.db,
+						args.sessionId,
+					).cachedM1Bytes?.toString("utf8");
 			foldExecutedThisPass = foldExecutesThisPass(
-				foldDueDecision.value,
+				foldDueDecision.value || softRefreshOpportunity,
 				preFoldInjectionResult.m0Materialized === true,
 			);
 			if (preFoldInjectionResult.m0Materialized) {
@@ -4929,6 +4963,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				);
 			}
 		} catch (error) {
+			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
+			prefixPreflightContended = true;
 			sessionLog(
 				args.sessionId,
 				`pi m[0] HARD fold pre-execution failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4945,9 +4981,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Primary sessions run routine age-sensitive cleanup only once during an
 	// unbroken stretch of execute/emergency pressure. Later passes still evaluate
 	// emergency drops, but another batch requires pressure to clear and rise again.
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
 	const executePressureEligible =
 		args.schedulerDecision === "execute" || emergencyDropEligible;
 	if (!executePressureEligible) {
@@ -4960,24 +4993,41 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
 	const historianRunning = inFlightHistorian.has(args.sessionId);
-	// A normal execute/deferred drain waits while the historian reads its raw
-	// snapshot. Only a fold that was persisted successfully may bypass the veto;
-	// an advisory mismatch or contention fallback cannot authorize mutations.
-	const bypassHistorianGate =
-		args.forceMaterialization === true || foldExecutedThisPass;
+	// Published summaries and reductions cannot change the historian's raw input.
+	// Share one permission across refresh and reduction lanes, including overlap.
+	const publishedWorkDrainAllowed =
+		args.schedulerDecision === "execute" ||
+		args.forceMaterialization === true ||
+		foldExecutedThisPass ||
+		firstRenderBust ||
+		hasPendingMaterialization(args.sessionId) ||
+		deferredMaterializeEligible;
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
-	const shouldRunHeuristics =
+	const rideSignals = {
+		hardFold: foldExecutedThisPass || firstRenderBust,
+		force: args.forceMaterialization === true || emergencyDropEligible,
+		explicitFlush: hasPendingMaterializeSignal || args.isCacheBusting,
+		publishedHistory:
+			!prefixPreflightContended &&
+			(publishedM1RefreshedThisPass ||
+				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
+		agentDrop: false,
+	};
+	let isCacheBustingPass = hasReclaimRide(rideSignals);
+	let shouldRunHeuristics =
 		args.heuristics !== undefined &&
-		(!historianRunning || bypassHistorianGate) &&
-		(args.forceMaterialization === true ||
+		isCacheBustingPass &&
+		(rideSignals.publishedHistory ||
+			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
 			deferredMaterializeEligible ||
 			// A fold persisted earlier in this pass already busted the prefix, so
 			// reductions may ride it without causing an independent bust.
 			foldExecutedThisPass ||
+			firstRenderBust ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes when ctx_reduce
@@ -5126,6 +5176,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.forceMaterialization ||
 			hasPendingMaterializeSignal ||
 			foldExecutedThisPass ||
+			firstRenderBust ||
 			historianRunning);
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
@@ -5144,7 +5195,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal ||
-		foldExecutedThisPass;
+		foldExecutedThisPass ||
+		firstRenderBust;
 	// `canConsumeDeferredLate` is computed once, above shouldRunHeuristics, as a
 	// bust-opportunity gate independent of shouldRunHeuristics. Explicit flush
 	// (hasPendingMaterializeSignal) still forces application through
@@ -5155,7 +5207,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
 	const shouldApplyPendingOps =
 		(baseShouldApplyPendingOps || deferredMaterialize) &&
-		(!historianRunning || bypassHistorianGate);
+		publishedWorkDrainAllowed;
 	mutationGateObserverForTests?.({
 		foldDue: foldDueDecision.value,
 		foldExecuted: foldExecutedThisPass,
@@ -5196,7 +5248,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				"applyPendingOperations",
 				tApplyPending,
 			);
-			executedWorkThisPass = true;
+			rideSignals.agentDrop = pendingOpsDidMutate;
+			isCacheBustingPass = hasReclaimRide(rideSignals);
+			if (pendingOpsDidMutate)
+				shouldRunHeuristics = args.heuristics !== undefined;
+			executedWorkThisPass ||= isCacheBustingPass;
 			// materializationSatisfiedThisPass enables the deferred-HISTORY drain
 			// below. OpenCode drains deferred-history on history-consumption alone
 			// (not heuristics success), so setting this right after pending-ops
@@ -5642,13 +5698,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	const toolReclaimExecutePass = args.schedulerDecision === "execute";
-	const alreadyMutatingThisPass =
-		pendingOpsDidMutate ||
-		heuristicOrReasoningDidMutate ||
-		foldExecutedThisPass;
-	const toolReclaimApplicationOpportunity =
-		toolReclaimExecutePass && alreadyMutatingThisPass;
+	const toolReclaimApplicationOpportunity = isCacheBustingPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
 	if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
@@ -5735,8 +5785,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
-				detect:
-					args.isCacheBusting || shouldApplyPendingOps || shouldRunHeuristics,
+				detect: isCacheBustingPass,
 				watermark: getMaxDroppedTagNumber(args.db, args.sessionId),
 				messageIdToMaxTag,
 				stableId: stableIdResolver,
@@ -5854,7 +5903,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				// re-render m[1] so the new compartment surfaces; gating on work alone
 				// (the prior behavior, masked by the now-removed cache clear) would
 				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
-				args.isCacheBusting || deferredHistoryRefresh || executedWorkThisPass,
+				isCacheBustingPass,
 				injectionPassSnapshot,
 			);
 			injectionResult = preFoldInjectionResult?.m0Materialized
@@ -6112,6 +6161,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	};
 
 	const bustedThisPass =
+		firstRenderBust ||
 		didMutateFromFlushedStatuses ||
 		pendingOpsDidMutate ||
 		heuristicOrReasoningDidMutate ||

@@ -923,9 +923,14 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
         .collect()
 }
 
+fn reclaim_ride_available(ctx: &SelectionContext) -> bool {
+    ctx.pass_already_busting
+        || ctx.supersession_ride_available
+        || ctx.pass_class == PassClass::EmergencyForce
+}
+
 fn two_pass_batch_can_apply(ctx: &SelectionContext) -> bool {
-    ctx.scheduler_pressure_execute
-        && (ctx.pass_already_busting || ctx.pass_class == PassClass::EmergencyForce)
+    reclaim_ride_available(ctx)
 }
 
 /// 1.4 Age-based two-pass: tool arcs whose age (ToolCall ordinal) is at/under the
@@ -1195,7 +1200,6 @@ pub(crate) fn select_reductions_with_outcome(
         return SelectionOutcome::default();
     }
 
-    let two_pass_batch_can_apply = two_pass_batch_can_apply(ctx);
     let live_ids: HashSet<String> = items
         .iter()
         .filter(|item| {
@@ -1218,6 +1222,25 @@ pub(crate) fn select_reductions_with_outcome(
         .map(|arc| arc.arc_id.as_str())
         .collect::<HashSet<_>>();
     let reasoning_ineligible_arcs = reasoning_ineligible_arc_ids(items);
+    let arc_by_block_id: HashMap<&str, &str> = items
+        .iter()
+        .filter_map(|item| Some((item.id.as_str(), item.arc_id.as_deref()?)))
+        .collect();
+    let arc_allows_reduction = |id: &str| {
+        arc_by_block_id.get(id).is_none_or(|arc_id| {
+            !incomplete_arc_ids.contains(*arc_id) && !reasoning_ineligible_arcs.contains(*arc_id)
+        })
+    };
+    // Only agent drops that survive the same arc guards as final emission price
+    // automatic cleanup. An open or reasoning-exempt arc cannot supply a ride.
+    let mut agent_decisions = Vec::new();
+    select_agent_drops(ctx, &live_ids, frozen_keys, &mut agent_decisions);
+    agent_decisions.retain(|decision| arc_allows_reduction(&decision.target_id));
+    let mut ride_context = ctx.clone();
+    ride_context.supersession_ride_available |= !agent_decisions.is_empty();
+    ride_context.pass_already_busting |= !agent_decisions.is_empty();
+    let ctx = &ride_context;
+    let two_pass_batch_can_apply = two_pass_batch_can_apply(ctx);
     let reasoning_adjacency_collapse_arcs = reasoning_adjacency_collapse_arc_ids(items);
     // A running call has no completed/errored result and is never reclaimable. This
     // matches the TypeScript targets' completion guard and prevents a selector from
@@ -1240,7 +1263,11 @@ pub(crate) fn select_reductions_with_outcome(
     let mut arc_shapes: HashMap<String, ArcShape> = HashMap::new();
     // Dedup precedes age selection, as in the TS heuristic pass. An older duplicate
     // removed here must not also enter the two-pass age batch.
-    let dedup_arc_ids = select_tool_dedup(&active_arcs, ctx);
+    let dedup_arc_ids = if reclaim_ride_available(ctx) {
+        select_tool_dedup(&active_arcs, ctx)
+    } else {
+        HashSet::new()
+    };
     let arcs_after_dedup: Vec<&ToolArc> = active_arcs
         .iter()
         .copied()
@@ -1311,8 +1338,7 @@ pub(crate) fn select_reductions_with_outcome(
             // Supersession is deferred work: ordinary execute-band pressure and a held
             // emergency latch cannot authorize a rewrite. Concrete scheduled work or an
             // admitted two-pass batch lets the whole pending set ride the same bust.
-            if cfg.smart_drops && (ctx.supersession_ride_available || !two_pass_arc_ids.is_empty())
-            {
+            if cfg.smart_drops && reclaim_ride_available(ctx) {
                 // Count the exact selector output before overlap precedence removes members.
                 let intents = select_supersession(&active_arcs, &supersession_recent_message_ids);
                 eligible_supersession_arc_ids =
@@ -1420,18 +1446,7 @@ pub(crate) fn select_reductions_with_outcome(
 
     // Agent-directed ids can name either half of a tool arc, so apply the same whole-message
     // guard after their block-granular decisions have been added.
-    let arc_by_block_id: HashMap<&str, &str> = items
-        .iter()
-        .filter_map(|item| Some((item.id.as_str(), item.arc_id.as_deref()?)))
-        .collect();
-    out.retain(|decision| {
-        arc_by_block_id
-            .get(decision.target_id.as_str())
-            .is_none_or(|arc_id| {
-                !incomplete_arc_ids.contains(*arc_id)
-                    && !reasoning_ineligible_arcs.contains(*arc_id)
-            })
-    });
+    out.retain(|decision| arc_allows_reduction(&decision.target_id));
 
     // Protection is block-specific, not an ordinal cutoff: remove protected targets from
     // both automatic arc decisions and agent-directed decisions before the stable merge.
@@ -2018,7 +2033,27 @@ mod tests {
     }
 
     #[test]
-    fn age_reclaim_requires_both_scheduler_pressure_and_a_ride() {
+    fn rejected_agent_drop_on_open_arc_cannot_price_automatic_age_reclaim() {
+        let items = vec![
+            tool_call("old", 1, "bash", serde_json::json!({}), 100),
+            tool_result("old", 1, "bash", 4000),
+            tool_call("open", 3, "bash", serde_json::json!({}), 100),
+        ];
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.last_execute_ordinal = 1;
+        ctx.agent_drop_ids = vec![call_block_id("open")];
+        let result = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig::default(),
+        );
+        assert!(result.decisions.is_empty());
+        assert!(!result.two_pass_batch_can_apply);
+    }
+
+    #[test]
+    fn age_reclaim_requires_a_ride_not_scheduler_pressure() {
         let mut result = tool_result("c1", 1, "bash", 2_000);
         result.token_count = Some(300);
         let items = vec![
@@ -2045,8 +2080,8 @@ mod tests {
             &ctx,
             &SelectionConfig::default(),
         );
-        assert!(ride_only.decisions.is_empty());
-        assert!(!ride_only.two_pass_batch_can_apply);
+        assert_eq!(ride_only.decisions.len(), 2);
+        assert!(ride_only.two_pass_batch_can_apply);
 
         ctx.scheduler_pressure_execute = true;
         let admitted = select_reductions_with_outcome(
@@ -3487,7 +3522,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_safe_tools_run_on_execute_but_not_defer_passes() {
+    fn duplicate_safe_tools_require_an_independent_bust() {
         let items = vec![
             tool_call_with_ids(
                 "owner#0",
@@ -3508,7 +3543,15 @@ mod tests {
             ),
             tool_result_with_ids("newer-result#0", "owner#1", 3, "mcp_read", 300),
         ];
-        let execute = base_ctx(PassClass::Execute);
+        let mut execute = base_ctx(PassClass::Execute);
+        assert!(select_reductions(
+            &items,
+            &HashSet::new(),
+            &execute,
+            &SelectionConfig::default()
+        )
+        .is_empty());
+        execute.pass_already_busting = true;
         let selected = select_reductions(
             &items,
             &HashSet::new(),

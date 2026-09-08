@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	appendCompartments,
+	getCompartments,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	__resetProjectIdentityForTests,
 	__setProjectIdentityTestHooks,
@@ -81,6 +84,7 @@ import {
 	getPiChannel1Baseline,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
+import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -162,10 +166,10 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"const alreadyMutatingThisPass = pendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
+				"let isCacheBustingPass = hasReclaimRide(rideSignals)",
 			);
 			expect(src).toContain(
-				"const toolReclaimApplicationOpportunity = toolReclaimExecutePass && alreadyMutatingThisPass",
+				"const toolReclaimApplicationOpportunity = isCacheBustingPass",
 			);
 			expect(src).toContain(
 				"if (toolReclaimApplicationOpportunity && !emergencyDropEligible)",
@@ -2533,11 +2537,12 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("vetoes pending-op drain and heuristics while a historian is in flight except during force materialization", async () => {
+	it("drains pending ops and heuristics on one bust even while a historian is in flight", async () => {
 		async function runScenario(args: {
 			sessionId: string;
 			inFlightHistorian: boolean;
 			inputTokens: number;
+			queueDrop?: boolean;
 		}) {
 			const db = createTestDb();
 			let restoreInFlight: (() => void) | undefined;
@@ -2616,7 +2621,8 @@ describe("registerPiContextHandler", () => {
 							tag.messageId.startsWith("entry-drop:")),
 				);
 				if (!dropTag) throw new Error("expected queued-drop target tag");
-				queuePendingOp(db, args.sessionId, dropTag.tagNumber, "drop", 1);
+				if (args.queueDrop !== false)
+					queuePendingOp(db, args.sessionId, dropTag.tagNumber, "drop", 1);
 				updateSessionMeta(db, args.sessionId, {
 					lastResponseTime: Date.now(),
 					cacheTtl: "59m",
@@ -2650,14 +2656,22 @@ describe("registerPiContextHandler", () => {
 
 		expect(
 			await runScenario({
+				sessionId: "ses-age-only-execute",
+				inFlightHistorian: false,
+				inputTokens: 75_020,
+				queueDrop: false,
+			}),
+		).toEqual({ dropStatus: "active", readAStatus: "active", pendingOps: 0 });
+		expect(
+			await runScenario({
 				sessionId: "ses-historian-veto-execute",
 				inFlightHistorian: true,
 				inputTokens: 70_000,
 			}),
 		).toEqual({
-			dropStatus: "active",
-			readAStatus: "active",
-			pendingOps: 1,
+			dropStatus: "dropped",
+			readAStatus: "dropped",
+			pendingOps: 0,
 		});
 		expect(
 			await runScenario({
@@ -2786,6 +2800,7 @@ describe("registerPiContextHandler", () => {
 				});
 
 				messages = buildMessages();
+				signalPiPendingMaterialization(sessionId);
 				await handler({ messages }, contextFor(messages, 70_000));
 				const reduceStatus = getTagsBySession(db, sessionId).find(
 					(tag) => tag.type === "tool" && tag.messageId === "reduce-1",
@@ -4156,6 +4171,277 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
+		it("Pi competing persisted pair cannot replace the pass-start prefix snapshot", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-competing-prefix";
+			let restoreInjection = () => {};
+			let restoreObserver = () => {};
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				const baselineMessages = buildMessages();
+				const baseline = await handler(
+					{ messages: baselineMessages },
+					contextFor(sessionId, baselineMessages),
+				);
+				const pairA = JSON.stringify(baseline.messages);
+				const gateSnapshots: Array<{
+					foldDue: boolean;
+					foldExecuted: boolean;
+					shouldApplyPendingOps: boolean;
+					shouldRunHeuristics: boolean;
+					shouldRunReasoningCleanup: boolean;
+				}> = [];
+				restoreObserver =
+					contextHandlerInternals.setMutationGateObserverForTests(
+						(snapshot) => {
+							gateSnapshots.push(snapshot);
+						},
+					);
+				recordPiLiveModel(sessionId, HARD_MODEL);
+
+				let competingWrites = 0;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (args[2].length > 0) return injectM0M1Pi(...args);
+						if (competingWrites === 0) {
+							competingWrites += 1;
+							db.prepare(
+								`UPDATE session_meta
+								    SET cached_m0_bytes = ?,
+								        cached_m0_last_baseline_end_message_id = ?
+								  WHERE session_id = ?`,
+							).run(
+								Buffer.from(
+									"<session-history>PAIR_B</session-history>",
+									"utf8",
+								),
+								"entry-user",
+								sessionId,
+							);
+						}
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							return injectM0M1Pi(...args);
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+
+				const messages = buildMessages();
+				const result = await handler(
+					{ messages },
+					contextFor(sessionId, messages),
+				);
+
+				expect(competingWrites).toBe(1);
+				expect(JSON.stringify(result.messages)).toBe(pairA);
+				expect(gateSnapshots).toEqual([
+					{
+						foldDue: true,
+						foldExecuted: false,
+						shouldApplyPendingOps: false,
+						shouldRunHeuristics: false,
+						shouldRunReasoningCleanup: false,
+					},
+				]);
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("active");
+			} finally {
+				restoreObserver();
+				restoreInjection();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it("Pi contended prefix replays cached bytes then drains on the next persisted fold", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-persist-before-serve";
+			let restoreInjection = () => {};
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				const raw = buildMessages();
+				const baseline = await handler(
+					{ messages: raw },
+					contextFor(sessionId, raw),
+				);
+				const cachedBytes = JSON.stringify(baseline.messages.slice(0, 2));
+				appendCompartments(db, sessionId, [
+					{
+						sequence: 1,
+						startMessage: 1,
+						endMessage: 1,
+						startMessageId: "entry-user",
+						endMessageId: "entry-user",
+						title: "PUBLISHED_A",
+						content: "PUBLISHED_A",
+					},
+				]);
+				db.prepare(
+					"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
+				).run(sessionId);
+				let contend = true;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (!contend || args[2].length > 0) return injectM0M1Pi(...args);
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							return injectM0M1Pi(...args);
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+				for (let pass = 0; pass < 3; pass++) {
+					contend = pass < 2;
+					const messages = buildMessages();
+					const result = await handler(
+						{ messages },
+						contextFor(sessionId, messages),
+					);
+					if (contend) {
+						expect(JSON.stringify(result.messages.slice(0, 2))).toBe(
+							cachedBytes,
+						);
+						expect(getPendingOps(db, sessionId)).toHaveLength(1);
+						expect(
+							getTagsBySession(db, sessionId).find(
+								(t) => t.tagNumber === toolTagNumber,
+							)?.status,
+						).toBe("active");
+					} else {
+						expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
+							"PUBLISHED_A",
+						);
+						expect(getPendingOps(db, sessionId)).toHaveLength(0);
+						expect(
+							getTagsBySession(db, sessionId).find(
+								(t) => t.tagNumber === toolTagNumber,
+							)?.status,
+						).toBe("dropped");
+					}
+				}
+			} finally {
+				restoreInjection();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it.each([
+			"first",
+			"force",
+			"force-soft",
+		])("Pi %s-render recovery admits drops when contention requires fresh bytes", async (mode) => {
+			const db = createTestDb();
+			const sessionId = `ses-pi-fresh-${mode}`;
+			let restoreInjection = () => {};
+			try {
+				if (mode === "force-soft")
+					appendCompartments(db, sessionId, [
+						{
+							sequence: 1,
+							startMessage: 1,
+							endMessage: 1,
+							startMessageId: "entry-user",
+							endMessageId: "entry-user",
+							title: "BASELINE",
+							content: "BASELINE",
+						},
+					]);
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				appendCompartments(db, sessionId, [
+					{
+						sequence: mode === "force-soft" ? 2 : 1,
+						startMessage: mode === "force-soft" ? 2 : 1,
+						endMessage: mode === "force-soft" ? 2 : 1,
+						startMessageId:
+							mode === "force-soft" ? "new-covered" : "entry-user",
+						endMessageId: mode === "force-soft" ? "new-covered" : "entry-user",
+						title: "FRESH_RECOVERY",
+						content: "FRESH_RECOVERY",
+					},
+				]);
+				if (mode !== "force-soft")
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
+					).run(sessionId);
+				if (mode === "first")
+					db.prepare(
+						"UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL WHERE session_id = ?",
+					).run(sessionId);
+				let sawFallback = false;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (mode === "force-soft" && args[2].length === 0)
+							expect(
+								mustMaterializePi(args[0], db, getCompartments(db, sessionId))
+									.value,
+							).toBe(false);
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							const result = injectM0M1Pi(...args);
+							sawFallback ||=
+								result.contentionExhausted && !result.m0Materialized;
+							return result;
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+				const messages = buildMessages();
+				const ctx = {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages),
+					getContextUsage: () => ({
+						tokens: mode.startsWith("force") ? 90000 : 4000,
+						percent: mode.startsWith("force") ? 90 : 4,
+						contextWindow: 100000,
+					}),
+				} as never;
+				const result = await handler({ messages }, ctx);
+				expect(sawFallback).toBe(true);
+				expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
+					"FRESH_RECOVERY",
+				);
+				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(t) => t.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("dropped");
+			} finally {
+				restoreInjection();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("keeps every mutation gate closed when a due fold is suppressed", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-hardfold-suppressed";
@@ -4186,7 +4472,7 @@ describe("registerPiContextHandler", () => {
 						m0Reason: "model_change",
 						m0Bytes: 1,
 						m1Bytes: 1,
-						contentionExhausted: false,
+						contentionExhausted: true,
 						renderedBoundary: { endMessageId: null, ordinal: null },
 						m1RenderedCoverage: null,
 						syntheticLeadingCount: 0,
