@@ -3,7 +3,7 @@ title: Overview
 description: A short map of Magic Context's session history, context reduction, memory, and background maintenance.
 ---
 
-Magic Context gives your coding agent structured session history, deliberate context reduction, and durable cross-session memory. This overview shows how those systems work together to keep long sessions fast and affordable.
+Magic Context gives your coding agent structured session history, deliberate context reduction, and durable cross-session memory. This overview shows how those three systems fit together.
 
 ## See the pipeline at a glance
 
