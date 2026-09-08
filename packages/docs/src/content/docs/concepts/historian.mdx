@@ -1,0 +1,102 @@
+---
+title: Historian
+description: Learn how a separate historian model turns settled conversation into prompt-resident compartments with budgeted decay tiers.
+---
+
+import { TabItem, Tabs } from '@astrojs/starlight/components';
+
+The historian is a background agent with its own model selection. It turns settled conversation into chronological compartments so your agent keeps the session's story without carrying every raw message in the active prompt.
+
+## Understand a compartment
+
+A **compartment** is a condensed episode of session history. It records the covered message range, a title and episode type, an importance score, and four paraphrases from detailed to anchor-only.
+
+The compartment **stays in the active prompt** inside the session-history block. It is not the same as a dropped tool result: a drop becomes a small placeholder, while a compartment remains readable history. The original messages also stay in the local database, where `ctx_expand` can retrieve them.
+
+The historian promotes durable facts from the episode into [project memory](/concepts/memory/). Those facts appear in the project-memory block rather than being duplicated inside the compartment.
+
+## Follow the decay tiers
+
+New compartments enter at full detail. During a later history rebuild, Magic Context chooses a render tier deterministically from three inputs:
+
+1. **Age:** newer compartments keep more detail.
+2. **Importance:** higher-scored compartments decay more slowly.
+3. **Budget pressure:** a tighter history budget moves more compartments to shorter tiers.
+
+The tiers move from full paraphrase, to compressed paraphrase, to concise summary, to an anchor-only title. The oldest low-priority compartments can be omitted from the prompt. Their stored source transcript remains available.
+
+The render choice uses an importance-adjusted half-life. At neutral importance and normal pressure, the half-life is about 24 compartments; 25 importance points double or halve it. Rendering is deterministic and makes no extra model call. A larger active model window gives the history renderer more room without asking the historian to rewrite old compartments.
+
+## Fit history into its budget
+
+`history_budget_percentage` reserves a fraction of the usable context at the execute threshold for the session-history block. The default is 0.15, with an allowed range of 0.05–0.5. On a 200k usable window at the default 65% execute threshold, that is 19,500 tokens; on a 1M usable window, it is 97,500 tokens.
+
+This is a **budget for history that remains in the prompt**, not an amount Magic Context tries to remove. If compartment content exceeds the budget, deterministic decay uses shorter tiers or omits old compartments. Link to the [generated configuration reference](/reference/configuration/#context-management) rather than copying configuration blocks between pages.
+
+## Know when it runs
+
+Automatic historian work considers settled conversation before the recent protected window. It can run when:
+
+- context pressure approaches the execute threshold and queued drops are not enough;
+- enough distinct git commit clusters mark completed work phases; or
+- the raw conversation tail has grown large enough to form a useful compartment.
+
+The pressure trigger uses about 5% of the active model's usable working range, clamped from 5k to 50k tokens. The amount sent in one historian job also respects the historian model's own context window.
+
+A historian run publishes a new compartment without immediately rebuilding all older history. New compartments use the additive history block at full detail. Older decay tiers are recalculated when a later cache-safe history rebuild is already warranted, such as a model change, relevant configuration change, expired assumed cache, project-memory edit, or an oversized additive history block. This keeps ordinary turns byte-identical for prompt caching.
+
+## Choose the historian model
+
+Summary quality comes from the **historian model**, not the main model answering your coding request. A smaller or less instruction-following historian can produce vague titles, miss decisions, or write confusing paraphrases even when the main model is strong.
+
+Configure the historian independently for each harness. There is no built-in provider-agnostic fallback list: Magic Context tries your explicit `fallback_models`, then can fall back to the live session model. Named user profiles can switch historian model selections as a group; a project may select a profile but cannot define one. See the [generated historian reference](/reference/configuration/#historian) and [model profiles](/reference/configuration/#model-profiles) for the exact schema.
+
+<Tabs>
+  <TabItem label="OpenCode">
+    Set the primary model at `historian.opencode.model`. Put ordered alternatives in `historian.opencode.fallback_models`. OpenCode entries can set a reasoning `variant`; they do not accept Pi's `thinking_level` field.
+  </TabItem>
+  <TabItem label="Pi">
+    Set the primary model at `historian.pi.model`. Put ordered alternatives in `historian.pi.fallback_models`. Pi entries can set `thinking_level`; they do not accept OpenCode's `variant` field.
+  </TabItem>
+</Tabs>
+
+If your compartments read badly, first choose a stronger historian model or reasoning setting. `historian.two_pass` can add a second cleanup call for models that need help removing low-signal lines and duplicates, at additional cost.
+
+## Compare automatic folds with /ctx-wrapup
+
+Automatic runs react to pressure and settled work. `/ctx-wrapup [messages_to_keep]` is the on-demand version: it advances the historian over older live history now while leaving the newest messages raw. The default keep count is 20.
+
+Use `/ctx-wrapup` before switching to a smaller-window model, ending a long work phase, or handing a session to another model. It is available only in primary sessions and refuses to run when Magic Context's context management is disabled.
+
+<Tabs>
+  <TabItem label="OpenCode">
+    `/ctx-wrapup` reports progress through OpenCode notifications. If no natural cache rebuild is pending, it can suggest `/ctx-flush` to apply the refreshed prompt on the next message.
+  </TabItem>
+  <TabItem label="Pi">
+    `/ctx-wrapup` streams progress in Pi's status line, then schedules the history refresh for a safe prompt update. It does not print the OpenCode-specific `/ctx-flush` suggestion.
+  </TabItem>
+</Tabs>
+
+`/ctx-recomp` serves a different purpose: it rebuilds stored compartments from raw history when compartment state is wrong. `/ctx-session-upgrade` migrates an older session to the current history format. See the [commands reference](/reference/commands/) for syntax.
+
+## Read what the agent sees
+
+The prompt contains a compact session-history block similar to:
+
+```xml
+<session-history>
+<compartment start="1" end="42" title="Initial project setup">
+  Set up the TypeScript project and established lint and format commands.
+</compartment>
+<compartment start="43" end="98" title="Authentication implementation">
+  Added JWT authentication and recorded the token-lifetime decision.
+</compartment>
+<compartment start="99" end="115" />
+</session-history>
+```
+
+The self-closing compartment is an anchor whose detailed content no longer fits the active history budget. The agent can use the message range with `ctx_expand` when it needs the original detail.
+
+Use `/ctx-status` to inspect historian progress, compartment coverage, and the history budget. In OpenCode, the TUI sidebar also shows compartment state; Pi shows a compact status line in its footer.
+
+Continue with [How Magic Context works](/concepts/how-it-works/) to see how compartments interact with tool-output reduction and execute thresholds.

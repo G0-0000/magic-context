@@ -82,21 +82,14 @@ If you need to downgrade intentionally, run `doctor --force` afterward — it wi
 
 **Symptom:** You see a recurring warning about the historian failing, or the historian progress in `/ctx-status` shows repeated retries.
 
-**Why it happens:** Historian runs as a background subagent using your configured model. Transient failures (rate limits, timeouts, brief network issues) are expected and the historian retries automatically. A warning only appears in `/ctx-status` after multiple consecutive failures.
+**Why it happens:** The historian runs as a background agent with model selection separate from the main coding model. Transient provider failures can retry, but an unavailable primary model and unavailable configured fallbacks prevent new compartments.
 
 **Fix:**
 
-1. Check the model you've configured for the historian in `magic-context.jsonc`. If it is not available (wrong model ID, exhausted credits), historian will keep failing.
-2. Run `doctor` — it checks the historian model is reachable and reports specific error causes.
-3. Consider adding a fallback model:
-   ```jsonc
-   {
-     "historian": {
-       "model": "github-copilot/claude-sonnet-4-6",
-       "fallback_models": ["anthropic/claude-sonnet-4-6"]
-     }
-   }
-   ```
+1. Check the harness-specific model in `magic-context.jsonc`: `historian.opencode.model` for OpenCode or `historian.pi.model` for Pi.
+2. Run `doctor` to inspect the active configuration and reported provider errors.
+3. Add ordered alternatives under the matching harness block's `fallback_models`. Magic Context does not add a hidden provider-agnostic fallback list; after your explicit list, the live session model is the last resort.
+4. If runs succeed but compartments are confusing, choose a stronger historian model. Summary quality comes from the historian model, not the main model. See [Historian → Choose the historian model](/concepts/historian/#choose-the-historian-model).
 
 ---
 
@@ -106,13 +99,17 @@ If you need to downgrade intentionally, run `doctor --force` afterward — it wi
 
 **Fix — try in order:**
 
-1. **Check `/ctx-status`.** It shows pending drop queue size, compartment count, and history budget status. If there are many queued drops waiting for the cache TTL, they will execute on the next cache-safe pass.
+1. **Check `/ctx-status`.** Separate compartment history, protected recent work, queued drops, and reclaimable tool output. A historian run only shrinks settled conversation; its compartments remain in the prompt.
 
-2. **Force a flush.** Run `/ctx-flush` to execute all queued operations immediately, bypassing the cache TTL. This is safe to do but will invalidate the current cache prefix.
+2. **Let eligible reclaim land.** Queued `ctx_reduce` work and automatic age-based reclaim apply on a pass that is already rebuilding the cache. Automatic reclaim never starts that rewrite by itself.
 
-3. **Rebuild compartments.** If the stored compartment state seems wrong or compartment count is unexpectedly low, run `/ctx-recomp`. This rebuilds all compartments from raw history. It can take several historian calls to complete on long sessions.
+3. **Force a flush only when needed.** `/ctx-flush` explicitly applies queued operations. It invalidates the current cached prefix, so use it when immediate space matters more than preserving that cache.
 
-4. **Check history budget.** The config key `history_budget_percentage` (default `0.15`) controls what fraction of usable context is reserved for history. If your session has very long compartment summaries, you may need to reduce this value or increase the execution threshold.
+4. **Rebuild compartments only if state is wrong.** `/ctx-recomp` rebuilds compartments from raw history. A long session can require several historian calls.
+
+5. **Check the relevant budget.** `history_budget_percentage` controls retained compartment history, while `protected_tokens` controls recent token mass protected from normal reclaim. Use the [generated configuration reference](/reference/configuration/#context-management) for exact defaults and ranges.
+
+The [worked percentage examples](/concepts/how-it-works/#work-through-the-numbers) explain why crossing a threshold does not imply a target landing size.
 
 ---
 

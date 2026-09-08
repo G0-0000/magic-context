@@ -1,0 +1,43 @@
+---
+const docsHome = import.meta.env.BASE_URL;
+---
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width" />
+        <meta name="robots" content="noindex" />
+        <title>Page not found | Magic Context</title>
+        <style>
+            :root {
+                color-scheme: light dark;
+                font-family: system-ui, sans-serif;
+            }
+            body {
+                display: grid;
+                min-height: 100vh;
+                margin: 0;
+                place-items: center;
+                background: Canvas;
+                color: CanvasText;
+            }
+            main {
+                max-width: 36rem;
+                padding: 2rem;
+                text-align: center;
+            }
+            a {
+                color: LinkText;
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <p>404</p>
+            <h1>Page not found</h1>
+            <p>The requested Magic Context documentation page does not exist or has moved.</p>
+            <p><a href={docsHome}>Return to the documentation home</a></p>
+        </main>
+    </body>
+</html>
