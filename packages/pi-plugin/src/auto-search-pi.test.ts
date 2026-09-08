@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import {
@@ -10,7 +11,12 @@ import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
-import { createTestDb, textOf, userMessage } from "./test-utils.test";
+import {
+	assistantMessage,
+	createTestDb,
+	textOf,
+	userMessage,
+} from "./test-utils.test";
 
 const baseOptions = {
 	enabled: true,
@@ -360,6 +366,49 @@ describe("runAutoSearchHintForPi", () => {
 			});
 
 			expect(capturedPrompt).toBe("actual project prompt survives");
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("does not append a recovered hint to a buried user message", async () => {
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "unifiedSearch")
+			.mockImplementationOnce(async () => {
+				throw new Error("temporary search failure");
+			})
+			.mockImplementationOnce(async () => [memoryResult()]);
+		try {
+			const firstPass = [userMessage("explain the historian cache wiring", 1)];
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: firstPass,
+				entryIds: ["entry-user"],
+				options: baseOptions,
+			});
+
+			const secondPass = [
+				userMessage("explain the historian cache wiring", 1),
+				assistantMessage("already served answer", 2),
+			];
+			const beforeHash = createHash("sha256")
+				.update(JSON.stringify(secondPass))
+				.digest("hex");
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: secondPass,
+				entryIds: ["entry-user", "entry-assistant"],
+				options: baseOptions,
+			});
+
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(
+				createHash("sha256").update(JSON.stringify(secondPass)).digest("hex"),
+			).toBe(beforeHash);
+			expect(getAutoSearchHintDecisions(db, "ses-auto")).toHaveLength(0);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

@@ -45,9 +45,15 @@ const dubiousOwnershipFallbackDirectories = new Set<string>();
 const dubiousOwnershipLoggedDirectories = new Set<string>();
 const dubiousOwnershipWarnedDirectories = new Set<string>();
 const transientGitIdentityReuseLoggedDirectories = new Set<string>();
+interface SessionIdentityCacheEntry {
+    identity: string | undefined;
+    revalidateAt: number | null;
+}
+const sessionIdentityCache = new Map<string, SessionIdentityCacheEntry>();
 let execFileSyncForIdentity: typeof execFileSync = execFileSync;
 let userHomeDirectoryForIdentity = (): string => homedir();
 let nowMs = (): number => Date.now();
+let filesystemProbeObserverForTests: (() => void) | undefined;
 
 /**
  * Type-checked project identity failure classes (Finding #16).
@@ -556,23 +562,43 @@ export function resolveProjectIdentityForSession(
     directory: string,
     allowHomeProject = false,
 ): string | undefined {
+    const resolvedDirectory = path.resolve(directory);
+    const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
+    const cached = sessionIdentityCache.get(cacheKey);
+    if (cached && (cached.revalidateAt === null || nowMs() < cached.revalidateAt)) {
+        return cached.identity;
+    }
+    sessionIdentityCache.delete(cacheKey);
+
+    filesystemProbeObserverForTests?.();
     const canonicalHome = canonicalUserHomeDirectory();
     const canonicalDirectory = (() => {
         try {
-            return realpathSync.native(path.resolve(directory));
+            filesystemProbeObserverForTests?.();
+            return realpathSync.native(resolvedDirectory);
         } catch {
-            return path.resolve(directory);
+            return resolvedDirectory;
         }
     })();
+    filesystemProbeObserverForTests?.();
     const inheritsHomeRepository = gitRootDirectory(canonicalDirectory) === canonicalHome;
+    let identity: string | undefined;
     if (canonicalDirectory === canonicalHome || inheritsHomeRepository) {
-        if (!allowHomeProject) return undefined;
-        // A session whose effective git root is $HOME belongs to the same protected
-        // home identity as an exact-home session. This prevents a child directory
-        // from bypassing the opt-in by inheriting $HOME/.git.
-        return directoryFallback(canonicalHome);
+        identity = allowHomeProject ? directoryFallback(canonicalHome) : undefined;
+    } else {
+        identity = resolveProjectIdentityOrFallback(directory);
     }
-    return resolveProjectIdentityOrFallback(directory);
+
+    // Successful git identities are immutable. Directory/home fallbacks are
+    // revalidated after the same cooldown used for recoverable git failures so a
+    // newly initialized repository or recovered checkout is observed without
+    // probing the filesystem on every context pass. A cwd change uses a new key.
+    sessionIdentityCache.set(cacheKey, {
+        identity,
+        revalidateAt:
+            identity?.startsWith("git:") === true ? null : nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS,
+    });
+    return identity;
 }
 
 /**
@@ -654,26 +680,38 @@ export function __setProjectIdentityTestHooks(hooks: {
     execFileSync?: typeof execFileSync;
     homeDirectory?: () => string;
     nowMs?: () => number;
+    onFilesystemProbe?: () => void;
 }): void {
     execFileSyncForIdentity = hooks.execFileSync ?? execFileSync;
     userHomeDirectoryForIdentity = hooks.homeDirectory ?? (() => homedir());
     nowMs = hooks.nowMs ?? (() => Date.now());
+    filesystemProbeObserverForTests = hooks.onFilesystemProbe;
 }
 
 export function __clearProjectIdentityTransientCooldownForTests(directory?: string): void {
     if (directory === undefined) {
         transientFailureCooldown.clear();
+        sessionIdentityCache.clear();
         return;
     }
-    transientFailureCooldown.delete(path.resolve(directory));
+    const resolvedDirectory = path.resolve(directory);
+    transientFailureCooldown.delete(resolvedDirectory);
+    for (const allowHome of ["0", "1"]) {
+        sessionIdentityCache.delete(`${allowHome}\0${resolvedDirectory}`);
+    }
 }
 
 export function __clearProjectIdentityResolutionCacheForTests(directory?: string): void {
     if (directory === undefined) {
         identityCache.clear();
+        sessionIdentityCache.clear();
         return;
     }
-    identityCache.delete(path.resolve(directory));
+    const resolvedDirectory = path.resolve(directory);
+    identityCache.delete(resolvedDirectory);
+    for (const allowHome of ["0", "1"]) {
+        sessionIdentityCache.delete(`${allowHome}\0${resolvedDirectory}`);
+    }
 }
 
 export function __resetProjectIdentityForTests(): void {
@@ -686,7 +724,9 @@ export function __resetProjectIdentityForTests(): void {
     dubiousOwnershipLoggedDirectories.clear();
     dubiousOwnershipWarnedDirectories.clear();
     transientGitIdentityReuseLoggedDirectories.clear();
+    sessionIdentityCache.clear();
     execFileSyncForIdentity = execFileSync;
     userHomeDirectoryForIdentity = (): string => homedir();
     nowMs = (): number => Date.now();
+    filesystemProbeObserverForTests = undefined;
 }

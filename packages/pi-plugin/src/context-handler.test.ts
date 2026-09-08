@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	__resetProjectIdentityForTests,
+	__setProjectIdentityTestHooks,
+} from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
@@ -86,6 +91,54 @@ import {
 	userMessage,
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
+
+describe("Pi context project identity cache", () => {
+	it("serves byte-identical output with cached identity and one host-usage read per context", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-project-identity-cache";
+		const project = mkdtempSync(join(tmpdir(), "mc-pi-project-"));
+		const fake = createFakePi();
+		let probes = 0;
+		let usageReads = 0;
+		__setProjectIdentityTestHooks({
+			onFilesystemProbe: () => {
+				probes += 1;
+			},
+		});
+		try {
+			registerPiContextHandler(fake.pi as never, { db });
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] } | undefined>;
+			const pass = async (): Promise<string> => {
+				const messages = [userMessage("stable project request", 1)];
+				const result = await handler({ messages: messages as never[] }, {
+					...fakeContext(sessionId, project, ["entry-user"], messages as never),
+					getContextUsage: () => {
+						usageReads += 1;
+						return { tokens: 100, percent: 1, contextWindow: 10_000 };
+					},
+				} as never);
+				return createHash("sha256")
+					.update(JSON.stringify(result?.messages ?? messages))
+					.digest("hex");
+			};
+
+			const firstHash = await pass();
+			expect(probes).toBeGreaterThan(0);
+			probes = 0;
+			expect(await pass()).toBe(firstHash);
+			expect(probes).toBe(0);
+			expect(usageReads).toBe(2);
+		} finally {
+			__resetProjectIdentityForTests();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("Pi pressure guards", () => {
 	it("keeps the emergency recovery bump as a floor instead of a cap", () => {
