@@ -5,7 +5,7 @@ import {
     builtInLightMappingAssets,
     validateChecklist,
 } from "./check-prompt-surface";
-import { validateBudgetFixture } from "./prompt-surface-fixture";
+import { RATIFIED_FULL_MUTABLE_PROSE_CEILING, validateBudgetFixture } from "./prompt-surface-fixture";
 import { builtInLightSurface } from "./prompt-surface-measurement";
 import { renderChecklist } from "./render-prompt-surface-checklist";
 
@@ -67,7 +67,7 @@ describe("prompt-surface CI gates", () => {
                 result.errors.some(
                     (error) =>
                         error.includes("light guidance + full descriptions") &&
-                        error.includes("exceeds ceiling 3650"),
+                        error.includes(`exceeds ceiling ${RATIFIED_FULL_MUTABLE_PROSE_CEILING}`),
                 ),
             ).toBe(true);
             expect(
