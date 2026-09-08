@@ -26755,7 +26755,7 @@ pub(crate) mod tests {
         let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
         assert_eq!(transition.action, "HARD");
         assert_ne!(transitioned_config, before_config);
-        assert!(transitioned_config.contains("tfe:4:tfe3"));
+        assert!(transitioned_config.contains("tfe:4:tfe4"));
         assert!(!serde_json::to_string(transition.messages())
             .unwrap()
             .contains("§1§"));
@@ -26797,7 +26797,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe:4:tfe3"));
+            .contains("tfe:4:tfe4"));
 
         let after_commit = run(&s, &request, &spine());
         assert_eq!(after_commit.action, "SOFT+");
@@ -26819,7 +26819,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe3"));
+            .contains("tfe4"));
 
         let replay = run(&s, &request, &spine());
         assert_eq!(replay.action, "SOFT+");
@@ -29317,7 +29317,7 @@ pub(crate) mod tests {
         let on_config = store.load("surface-flip").unwrap().meta.last_render_config;
         assert!(on_config.contains("tf1"));
         assert!(on_config.contains("gfull"));
-        assert!(on_config.contains("tfe:4:tfe3"));
+        assert!(on_config.contains("tfe:4:tfe4"));
         let on_steady = run(&store, &active, &spine());
         assert_ne!(on_steady.action, "HARD");
         assert_eq!(on_steady.surface_state, SurfaceState::Active);
@@ -32857,7 +32857,7 @@ pub(crate) mod tests {
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
             "mpe2".to_string(),
-            "tfe3".to_string(),
+            "tfe4".to_string(),
         );
         s.commit("staged-tfe", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
@@ -32873,7 +32873,7 @@ pub(crate) mod tests {
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
             "mpe3".to_string(),
-            "tfe3".to_string(),
+            "tfe4".to_string(),
         );
         assert_eq!(
             s.load("staged-tfe").unwrap().meta.last_render_config,
@@ -32896,19 +32896,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opencode_identity_refuses_collateral_cc_profile_epoch_hard() {
+    fn opencode_identity_prices_global_skeleton_epoch_change_once() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let request = active_opencode_req(
-            "opencode-profile-epoch",
+            "opencode-skeleton-epoch",
             "rust-mode/tf1/gfull",
-            vec![wire_item("user", "m1", 1, &["stable bytes"])],
+            vec![unstamped_opencode_tool_pair(
+                "legacy-pair",
+                1,
+                "legacy-call",
+            )],
         );
         run(&s, &request, &spine());
         let mut loaded = s.load(&request.session_id).unwrap();
-        // Pin the previous format epochs to verify compatibility independently of this binary:
-        // memory 2, compartments 2, no OpenCode profile epoch, shared tagger 3.
-        let master_identity = effective_render_config_with_epochs(
+        let baseline_identity = loaded.meta.last_render_config.clone();
+        let old_identity = effective_render_config_with_epochs(
             &s,
             &request.render_config,
             "mre2".to_string(),
@@ -32916,12 +32919,40 @@ pub(crate) mod tests {
             String::new(),
             "tfe3".to_string(),
         );
-        assert_eq!(
-            loaded.meta.last_render_config.as_bytes(),
-            master_identity.as_bytes(),
-            "a Claude Code-only byte change must not alter OpenCode's render identity"
+        let new_identity = effective_render_config_with_epochs(
+            &s,
+            &request.render_config,
+            "mre2".to_string(),
+            "cre2".to_string(),
+            String::new(),
+            "tfe4".to_string(),
         );
-        loaded.meta.last_render_config = master_identity;
+        assert_ne!(old_identity, new_identity);
+
+        // Model a persisted epoch-3 session whose newest-window skeleton still
+        // contains legacy clamped arguments. Replacing those bytes must first
+        // advance render identity through a priced HARD, never a defer render.
+        loaded.core.frozen_units.extend([
+            red_unit(
+                "legacy-pair#0",
+                "skeleton",
+                r#"{"detail":"xxxxx...[truncated]","path":"pair.txt"}"#,
+            ),
+            red_unit("legacy-pair#1", "drop", "[dropped]"),
+            transition_consumed_unit(
+                &[
+                    RendererTransitionClass::PoisonedReasoning,
+                    RendererTransitionClass::UnmatchedPair,
+                    RendererTransitionClass::SplitCoverage,
+                    RendererTransitionClass::SyntheticAnchorSplit,
+                    RendererTransitionClass::ReductionEnvelope,
+                    RendererTransitionClass::TemporalParity,
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ]);
+        loaded.meta.last_render_config = old_identity;
         s.commit(
             &request.session_id,
             loaded.row_version,
@@ -32929,10 +32960,40 @@ pub(crate) mod tests {
             &loaded.meta,
         )
         .unwrap();
-        let replay = run(&s, &request, &spine());
+
+        let first = run(&s, &request, &spine());
+        assert_eq!(first.action, "HARD", "epoch 4 must price the byte change");
+        assert_eq!(first.materialize_reason.as_deref(), Some("epoch_change"));
+        assert_eq!(baseline_identity, new_identity);
         assert_eq!(
-            replay.action, "SOFT+",
-            "OpenCode must not pay a collateral HARD"
+            s.load(&request.session_id).unwrap().meta.last_render_config,
+            new_identity
+        );
+        let marker_input = first
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match &block.kind {
+                ck_wire::CkKind::ToolCall { input, .. } => Some(input),
+                _ => None,
+            })
+            .expect("served skeleton tool input");
+        assert_eq!(
+            marker_input
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["dropped"]
+        );
+
+        let replay = run(&s, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(first.messages()).unwrap(),
+            serde_json::to_vec(replay.messages()).unwrap(),
+            "post-HARD defer replay must remain byte-identical"
         );
     }
 

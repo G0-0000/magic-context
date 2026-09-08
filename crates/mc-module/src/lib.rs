@@ -620,9 +620,10 @@ pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 3;
 /// Bumps for tagger-wide provider-visible byte changes across active tagging surfaces.
 /// Profile-local changes belong in that profile's render epoch instead, so unchanged
 /// profiles do not pay a collateral HARD. Epoch 3 freezes temporal-marker decisions in
-/// durable rows. Every bump requires a cache-breaking fold; inactive requests omit this
-/// component and retain their identity.
-pub const TAGGER_FEATURE_EPOCH: u32 = 3;
+/// durable rows. Epoch 4 is global on purpose: every profile's skeleton input bytes change
+/// from clamped real arguments to the inert dropped marker. Every bump requires a
+/// cache-breaking fold; inactive requests omit this component and retain their identity.
+pub const TAGGER_FEATURE_EPOCH: u32 = 4;
 
 /// The module-owned rendered-prefix format epoch for a serializer profile.
 ///
