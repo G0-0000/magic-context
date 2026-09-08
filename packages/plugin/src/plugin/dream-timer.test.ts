@@ -1,10 +1,10 @@
-import { describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordSessionProjectIdentity } from "../features/magic-context/session-project-storage";
 import { markSessionCleanupPending, openDatabase } from "../features/magic-context/storage";
-import { startDreamScheduleTimer } from "./dream-timer";
+import { _resetDreamTimerForTests, startDreamScheduleTimer } from "./dream-timer";
 
 /**
  * Regression coverage for the schema-fence / null-DB crash:
@@ -46,6 +46,9 @@ describe("schema-fence null-DB contract", () => {
 });
 
 describe("dream-timer registration cleanup", () => {
+    afterEach(() => {
+        _resetDreamTimerForTests();
+    });
     test("stale same-directory cleanup preserves the replacement registration", async () => {
         const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-cleanup-"));
         const timerHandle = {

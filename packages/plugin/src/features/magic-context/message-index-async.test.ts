@@ -118,6 +118,7 @@ describe("message-index-async", () => {
     let db: Database;
 
     beforeEach(() => {
+        setBootQuietPeriodForTests(null);
         __resetMessageIndexAsyncForTests();
         db = createTestDb();
     });
