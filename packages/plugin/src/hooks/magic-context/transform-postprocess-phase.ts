@@ -1253,6 +1253,7 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
                 isCacheBustingPass: true,
+                contentionFallbackPrefix: cachedPrefixBeforePreflight,
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,

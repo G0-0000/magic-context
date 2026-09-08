@@ -5868,6 +5868,122 @@ it("synthetic todo ride-only differential golden matches Rust", async () => {
     }
 });
 
+it("competing persisted pair cannot replace the previously served TypeScript prefix", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-competing-prefix-snapshot";
+    const m0M1 = { projectPath: "git:competing-prefix", projectDirectory: "/nonexistent" };
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 1,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "covered-a",
+            endMessageId: "covered-a",
+            title: "PAIR_A",
+            content: "PAIR_A",
+        },
+    ]);
+    const initialState = getOrCreateSessionMeta(db, sessionId);
+    injectM0M1({ db, sessionId, state: initialState, ...m0M1 });
+    const pairA = compartmentInjection.prepareCachedM0M1Replay(db, sessionId);
+    expect(pairA).toBeDefined();
+
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 2,
+            startMessage: 2,
+            endMessage: 2,
+            startMessageId: "covered-b",
+            endMessageId: "covered-b",
+            title: "PUBLISHED_AFTER_A",
+            content: "PUBLISHED_AFTER_A",
+        },
+    ]);
+    insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
+        tokenCount: 1000,
+        inputTokenCount: 0,
+        reasoningTokenCount: 0,
+    });
+    padRecentToolSkeletonWindow(sessionId, 1);
+    advanceToolReclaimWatermark(db, sessionId, 1);
+    queueM0Mutation(db, { sessionId, mutationType: "compartment_merge" });
+
+    const rawMessages = (): MessageLike[] => [
+        {
+            info: { id: "covered-a", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "covered by pair A" }],
+        } as MessageLike,
+        {
+            info: { id: "covered-b", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "must remain raw with pair A" }],
+        } as MessageLike,
+        makeToolMessage("old-tool"),
+    ];
+    const expected = rawMessages();
+    injectM0M1({
+        db,
+        sessionId,
+        state: getOrCreateSessionMeta(db, sessionId),
+        messages: expected,
+        preparedPrefix: pairA,
+        ...m0M1,
+    });
+
+    let competingWrites = 0;
+    const original = compartmentInjection.injectM0M1;
+    const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
+        original({
+            ...options,
+            beforePhase3ForTest: !options.messages
+                ? () => {
+                      competingWrites += 1;
+                      db.prepare(
+                          `UPDATE session_meta
+                              SET cached_m0_bytes = ?, cached_m1_bytes = ?,
+                                  cached_m0_max_compartment_seq = 2,
+                                  cached_m0_last_baseline_end_message_id = ?
+                            WHERE session_id = ?`,
+                      ).run(
+                          Buffer.from("<session-history>PAIR_B</session-history>", "utf8"),
+                          Buffer.from(pairA!.m1Text!, "utf8"),
+                          "covered-b",
+                          sessionId,
+                      );
+                      queueM0Mutation(db, {
+                          sessionId,
+                          mutationType: "compartment_merge",
+                      });
+                  }
+                : undefined,
+        }),
+    );
+    try {
+        const messages = rawMessages();
+        const state = getOrCreateSessionMeta(db, sessionId);
+        const toolMessage = messages[2];
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                m0M1,
+                sessionMeta: state,
+                schedulerDecision: "execute",
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([[1, makeDropTarget(toolMessage)]]),
+            }),
+        );
+
+        expect(competingWrites).toBe(3);
+        expect(JSON.stringify(messages)).toBe(JSON.stringify(expected));
+        expect(messages.some((message) => message.info.id === "covered-b")).toBe(true);
+        expect(result.droppedTokens).toBe(0);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+            "active",
+        );
+    } finally {
+        injection.mockRestore();
+    }
+});
+
 it("contended partial cache replays persisted prefix until one uncontended drain", async () => {
     db = new Database(":memory:");
     initializeDatabase(db);

@@ -846,6 +846,9 @@ export interface M0M1RenderOptions {
     allowFreshContentionFallback?: boolean;
     /** Exact off-wire prefix chosen before reduction gates; do not decide again at delivery. */
     preparedPrefix?: InjectM0M1Result;
+    /** Persisted pair captured before a fallible preflight. Contention may recover
+     * from it, but must not adopt a newer row written while the preflight ran. */
+    contentionFallbackPrefix?: InjectM0M1Result;
     /**
      * Compaction-off mode (issue #266): materialize through the
      * zero-compartment path — memory/docs/user-profile render into m[0], but
@@ -3265,6 +3268,10 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     };
     if (options.state.isSubagent && !options.compactionOff) return skipped;
 
+    const completePairAtEntry =
+        options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
+    let contentionReplayBoundary = options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null;
+
     const decision = mustMaterialize({
         db: options.db,
         sessionId: options.sessionId,
@@ -3301,12 +3308,23 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
-            // A partial process-local cache is not a license to replace a complete
-            // persisted pair with fresh bytes. Recover that pair before falling back.
-            if (!options.allowFreshContentionFallback) {
-                const persisted = readCachedM0M1Row(options.db, options.sessionId);
-                if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes)
-                    applyCachedRowToState(options.state, persisted);
+            // A complete process-local pair is the prefix this pass previously
+            // served. Never replace it with a sibling row written during preflight.
+            // Partial state may recover from the preflight's immutable snapshot; only
+            // direct callers without one need a single live row read, whose boundary
+            // is retained with the same bytes.
+            if (!options.allowFreshContentionFallback && !completePairAtEntry) {
+                const captured = options.contentionFallbackPrefix;
+                if (captured?.m0Bytes && captured.m1Text !== null) {
+                    options.state.cachedM0Bytes = Buffer.from(captured.m0Bytes);
+                    options.state.cachedM1Bytes = Buffer.from(captured.m1Text, "utf8");
+                } else {
+                    const persisted = readCachedM0M1Row(options.db, options.sessionId);
+                    if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes) {
+                        applyCachedRowToState(options.state, persisted);
+                        contentionReplayBoundary = persisted.cached_m0_last_baseline_end_message_id;
+                    }
+                }
             }
             if (
                 options.state.cachedM0Bytes &&
@@ -3481,7 +3499,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                     end_message_id: string;
                 } | null
             )?.end_message_id ?? null)
-          : readCachedBaselineState(options.db, options.sessionId).boundary;
+          : contentionExhausted
+            ? contentionReplayBoundary
+            : readCachedBaselineState(options.db, options.sessionId).boundary;
     const preparedMessages: MessageLike[] = [];
     let prependedMessageCount = 0;
     {

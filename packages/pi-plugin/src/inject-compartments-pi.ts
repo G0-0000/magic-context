@@ -2632,11 +2632,12 @@ export function injectM0M1Pi(
 		} catch (error) {
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
 
-			// Replay a complete persisted pair even when marker normalization or
-			// process-local state is partial. Only first-render/force may use fresh bytes.
+			// Replay the pair captured when this pass began. A sibling may publish a
+			// newer pair while materialization retries, but adopting it here would make
+			// this request's prefix change without an authorized bust.
 			const cached = state.allowFreshContentionFallback
 				? null
-				: readCachedPiM0M1Row(db, state.sessionId);
+				: snapshot.cachedRow;
 			if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
 				return replayCompletePiPrefix(
 					state,
@@ -2681,7 +2682,7 @@ export function injectM0M1Pi(
 				if (!(error instanceof PiMaterializeContentionError)) throw error;
 				const cached = state.allowFreshContentionFallback
 					? null
-					: readCachedPiM0M1Row(db, state.sessionId);
+					: snapshot.cachedRow;
 				if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
 					return replayCompletePiPrefix(
 						state,

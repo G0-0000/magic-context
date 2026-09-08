@@ -4171,6 +4171,101 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
+		it("Pi competing persisted pair cannot replace the pass-start prefix snapshot", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-competing-prefix";
+			let restoreInjection = () => {};
+			let restoreObserver = () => {};
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				const baselineMessages = buildMessages();
+				const baseline = await handler(
+					{ messages: baselineMessages },
+					contextFor(sessionId, baselineMessages),
+				);
+				const pairA = JSON.stringify(baseline.messages);
+				const gateSnapshots: Array<{
+					foldDue: boolean;
+					foldExecuted: boolean;
+					shouldApplyPendingOps: boolean;
+					shouldRunHeuristics: boolean;
+					shouldRunReasoningCleanup: boolean;
+				}> = [];
+				restoreObserver =
+					contextHandlerInternals.setMutationGateObserverForTests(
+						(snapshot) => {
+							gateSnapshots.push(snapshot);
+						},
+					);
+				recordPiLiveModel(sessionId, HARD_MODEL);
+
+				let competingWrites = 0;
+				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
+					(...args) => {
+						if (args[2].length > 0) return injectM0M1Pi(...args);
+						if (competingWrites === 0) {
+							competingWrites += 1;
+							db.prepare(
+								`UPDATE session_meta
+								    SET cached_m0_bytes = ?,
+								        cached_m0_last_baseline_end_message_id = ?
+								  WHERE session_id = ?`,
+							).run(
+								Buffer.from(
+									"<session-history>PAIR_B</session-history>",
+									"utf8",
+								),
+								"entry-user",
+								sessionId,
+							);
+						}
+						const exec = db.exec.bind(db);
+						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
+							if (sql === "BEGIN IMMEDIATE")
+								throw Object.assign(new Error("database is locked"), {
+									code: "SQLITE_BUSY",
+								});
+							return exec(sql);
+						});
+						try {
+							return injectM0M1Pi(...args);
+						} finally {
+							blocker.mockRestore();
+						}
+					},
+				);
+
+				const messages = buildMessages();
+				const result = await handler(
+					{ messages },
+					contextFor(sessionId, messages),
+				);
+
+				expect(competingWrites).toBe(1);
+				expect(JSON.stringify(result.messages)).toBe(pairA);
+				expect(gateSnapshots).toEqual([
+					{
+						foldDue: true,
+						foldExecuted: false,
+						shouldApplyPendingOps: false,
+						shouldRunHeuristics: false,
+						shouldRunReasoningCleanup: false,
+					},
+				]);
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("active");
+			} finally {
+				restoreObserver();
+				restoreInjection();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("Pi contended prefix replays cached bytes then drains on the next persisted fold", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-persist-before-serve";
