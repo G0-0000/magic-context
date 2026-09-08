@@ -559,14 +559,6 @@ pub(crate) fn filter_reasoning_ineligible_decisions(
 /// reference when the target already has a minted visible tag number.
 const DROPPED_PLACEHOLDER: &str = "[dropped]";
 
-fn safe_prefix(s: &str, max_len: usize) -> &str {
-    let mut end = max_len.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// Clamp a diff value to a region hint (edit_marker): first `EDIT_REGION_HINT_LEN`
 /// UTF-16 units + the sentinel. Idempotent (already-hinted values pass through). Pure.
 fn region_hint(value: &str) -> String {
@@ -687,50 +679,19 @@ enum ArcShape {
     EditMarker,
 }
 
-/// Clamp ToolCall input values exactly like the TypeScript drop target: inputs at or
-/// below 500 JSON bytes remain intact; larger object values keep short strings while
-/// arrays and nested objects become compact summaries. The result is frozen at selection.
-fn skeleton_payload(input: &serde_json::Value) -> String {
-    const INPUT_CLAMP_BYTES: usize = 500;
-    const SKELETON_ARG_LEN: usize = 5;
-    let serialized_len = serde_json::to_string(input)
-        .map(|value| value.len())
-        .unwrap_or(0);
-    if serialized_len <= INPUT_CLAMP_BYTES {
-        return canonical_json(input);
-    }
-    let clamp_object = |object: &serde_json::Map<String, serde_json::Value>| {
-        let mut output = object.clone();
-        for value in output.values_mut() {
-            match value {
-                serde_json::Value::String(s) if s.chars().count() > SKELETON_ARG_LEN => {
-                    let byte_len = s
-                        .char_indices()
-                        .nth(SKELETON_ARG_LEN)
-                        .map(|(i, _)| i)
-                        .unwrap_or(s.len());
-                    *value = serde_json::Value::String(format!(
-                        "{}{}",
-                        safe_prefix(s, byte_len),
-                        TRUNCATION_SENTINEL
-                    ));
-                }
-                serde_json::Value::Array(items) => {
-                    *value = serde_json::Value::String(format!("[{} items]", items.len()));
-                }
-                serde_json::Value::Object(_) => {
-                    *value = serde_json::Value::String("[object]".to_string());
-                }
-                _ => {}
-            }
-        }
-        canonical_json(&serde_json::Value::Object(output))
-    };
-    match input {
-        serde_json::Value::Object(object) => clamp_object(object),
-        serde_json::Value::Array(items) => format!("[{} items]", items.len()),
-        _ => canonical_json(input),
-    }
+/// Build the only model-visible input for a dropped ToolCall shell. The tagged
+/// form is a pure function of the durable tag id; selection freezes the untagged
+/// form and the renderer fills in the tag from its durable overlay.
+pub(crate) fn dropped_input_payload(tag_id: Option<i64>) -> String {
+    let sentinel = tag_id.map_or_else(
+        || DROPPED_PLACEHOLDER.to_string(),
+        |tag_id| format!("[dropped §{tag_id}§]"),
+    );
+    canonical_json(&serde_json::json!({ "dropped": sentinel }))
+}
+
+fn skeleton_payload(_input: &serde_json::Value) -> String {
+    dropped_input_payload(None)
 }
 
 /// Expand a reduced arc into its per-block [`ReductionDecision`]s: the ToolCall block
@@ -2008,6 +1969,39 @@ mod tests {
     }
 
     // --- CK-model unit tests (no TS equivalent) ---
+
+    #[derive(Deserialize)]
+    struct DroppedInputMarkerGoldenCase {
+        label: String,
+        tag_id: i64,
+        input: serde_json::Value,
+        expected_frozen: serde_json::Value,
+        expected_tagged: serde_json::Value,
+    }
+
+    #[test]
+    fn dropped_input_marker_matches_typescript_golden() {
+        let cases: Vec<DroppedInputMarkerGoldenCase> =
+            serde_json::from_str(include_str!("../testdata/dropped-input-marker-golden.json"))
+                .expect("parse dropped-input-marker-golden.json");
+        assert!(!cases.is_empty(), "empty dropped-input marker golden");
+        for case in cases {
+            let frozen = skeleton_payload(&case.input);
+            let tagged = dropped_input_payload(Some(case.tag_id));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&frozen).unwrap(),
+                case.expected_frozen,
+                "{} frozen",
+                case.label
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&tagged).unwrap(),
+                case.expected_tagged,
+                "{} tagged",
+                case.label
+            );
+        }
+    }
 
     #[derive(Deserialize)]
     struct EditMarkerGoldenCase {

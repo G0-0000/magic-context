@@ -12,6 +12,7 @@ import {
     normalizeStoredProjectPath,
     ProjectIdentityError,
     resolveProjectIdentity,
+    resolveProjectIdentityForSession,
     resolveProjectIdentityStrict,
     storedPathBelongsToIdentity,
     takeDubiousOwnershipProjectIdentityWarning,
@@ -141,6 +142,48 @@ describe("project identity", () => {
         const directory = makeTempDir("project-identity-wrapper-");
 
         expect(resolveProjectIdentity(directory)).toBe(expectedDirIdentity(directory));
+    });
+
+    it("serves repeated session identity lookups before filesystem probes", () => {
+        const repo = makeRepoWithGitMetadata("project-identity-session-cache-");
+        let filesystemProbes = 0;
+        __setProjectIdentityTestHooks({
+            execFileSync: returningRootCommit(FIRST_ROOT_COMMIT),
+            onFilesystemProbe: () => {
+                filesystemProbes += 1;
+            },
+        });
+
+        const first = resolveProjectIdentityForSession(repo);
+        expect(first).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(filesystemProbes).toBeGreaterThan(0);
+        filesystemProbes = 0;
+
+        expect(resolveProjectIdentityForSession(repo)).toBe(first);
+        expect(filesystemProbes).toBe(0);
+    });
+
+    it("revalidates a session directory fallback when its cooldown expires", () => {
+        const directory = makeTempDir("project-identity-session-revalidate-");
+        let now = 1_000;
+        let filesystemProbes = 0;
+        __setProjectIdentityTestHooks({
+            execFileSync: returningRootCommit(FIRST_ROOT_COMMIT),
+            nowMs: () => now,
+            onFilesystemProbe: () => {
+                filesystemProbes += 1;
+            },
+        });
+
+        const fallback = resolveProjectIdentityForSession(directory);
+        mkdirSync(join(directory, ".git"));
+        filesystemProbes = 0;
+        expect(resolveProjectIdentityForSession(directory)).toBe(fallback);
+        expect(filesystemProbes).toBe(0);
+
+        now += 5 * 60 * 1000 + 1;
+        expect(resolveProjectIdentityForSession(directory)).toBe(`git:${FIRST_ROOT_COMMIT}`);
+        expect(filesystemProbes).toBeGreaterThan(0);
     });
 
     it("uses the no-git fast path without invoking git", () => {

@@ -80,6 +80,34 @@ describe("prompt-surface runtime", () => {
         expect(changedModel.primaryOverride).toBe(second);
     });
 
+    it("shares one frozen guidance epoch between the system hook and Rust adapter", () => {
+        const directory = tempDir();
+        const path = join(directory, "guidance.md");
+        const first = "## Magic Context\n\nShared first epoch";
+        const second = "## Magic Context\n\nShared second epoch";
+        writeFileSync(path, first);
+        const runtime = createPromptSurfaceRuntime({
+            userConfigDirectory: directory,
+            warn: () => undefined,
+        });
+        const systemEpochs = createPromptSurfaceGuidanceEpochCache(runtime);
+        const adapterEpochs = createPromptSurfaceGuidanceEpochCache(runtime);
+        const config = {
+            default: "full" as const,
+            guidance_override_path: "guidance.md",
+        };
+
+        const systemInitial = systemEpochs.resolve("session", config, "provider/model");
+        writeFileSync(path, second);
+        const adapterDeferred = adapterEpochs.resolve("session", config, "provider/model");
+        expect(adapterDeferred).toBe(systemInitial);
+        expect(adapterDeferred.primaryOverride).toBe(first);
+
+        adapterEpochs.clear("session");
+        const systemNextEpoch = systemEpochs.resolve("session", config, "provider/model");
+        expect(systemNextEpoch.primaryOverride).toBe(second);
+    });
+
     it("uses registration default, applies known overrides, and reports invalid IDs", () => {
         const warnings: string[] = [];
         const runtime = createPromptSurfaceRuntime({

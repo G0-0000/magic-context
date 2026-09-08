@@ -5,10 +5,8 @@ import type { ClassifyModuleClient } from "../features/magic-context/dreamer/cla
 import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
 import {
-    HISTORIAN_CHILD_TITLE_MATCHES,
     historianOrphanStaleMs,
     PRIVACY_SENSITIVE_CHILD_TASKS,
-    PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
     retrospectiveOrphanStaleMs,
     sweepOrphanedRetrospectiveChildren,
 } from "../features/magic-context/dreamer/retrospective-orphan-sweep";
@@ -60,7 +58,11 @@ import { log } from "../shared/logger";
 import type { ModelHarness } from "../shared/model-resolution";
 import type { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
-import { beginBootQuietPeriod, scheduleAfterBootQuiet } from "./boot-quiet";
+import {
+    beginBootQuietPeriod,
+    scheduleAfterBootQuiet,
+    setBootQuietPeriodForTests,
+} from "./boot-quiet";
 import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
@@ -470,10 +472,25 @@ async function sweepProject(
         );
     }
 
-    await sweepOrphanedHistorianChildren(reg);
-
     const dreamerConfig = reg.dreamerConfig;
     const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
+    const runtimeConfigs =
+        dreamingEnabled && dreamerConfig
+            ? buildDreamTaskRuntimeConfigs(
+                  dreamerConfig,
+                  reg.harness,
+                  reg.language,
+                  reg.mural?.model,
+              )
+            : [];
+    await sweepOrphanedInternalChildren(
+        reg,
+        runtimeConfigs
+            .filter((config) =>
+                (PRIVACY_SENSITIVE_CHILD_TASKS as readonly string[]).includes(config.task),
+            )
+            .map((config) => config.timeoutMinutes),
+    );
     if (commitIndexingEnabled && reg.gitCommitIndexing) {
         await sweepGitCommits({
             directory: reg.directory,
@@ -495,12 +512,6 @@ async function sweepProject(
         // runs due tasks grouped by conflict-domain under keyed leases. The
         // executor runs in THIS registration's own checkout (not a sibling
         // worktree the shared git:<sha> identity might resolve to).
-        const runtimeConfigs = buildDreamTaskRuntimeConfigs(
-            dreamerConfig,
-            reg.harness,
-            reg.language,
-            reg.mural?.model,
-        );
         const executor = createDreamTaskExecutor({
             client: reg.client,
             sessionDirectory: reg.directory,
@@ -535,41 +546,17 @@ async function sweepProject(
         if (ran > 0) {
             log(`[dreamer] timer tick (${origin}) ${reg.projectIdentity} — ran ${ran} task(s)`);
         }
-
-        // PRIVACY backstop: remove crash-orphaned children carrying raw user or
-        // project text only after the longest swept task's timeout has elapsed.
-        // OpenCode-only (Pi subprocess children die with their process); skip
-        // when no opencode.db.
-        const privacySweepTimeouts = runtimeConfigs
-            .filter((c) => (PRIVACY_SENSITIVE_CHILD_TASKS as readonly string[]).includes(c.task))
-            .map((c) => c.timeoutMinutes);
-        const ocDb = openOpenCodeDb();
-        if (ocDb) {
-            try {
-                await sweepOrphanedRetrospectiveChildren({
-                    opencodeDb: ocDb,
-                    client: reg.client,
-                    sessionDirectory: reg.directory,
-                    staleMs: retrospectiveOrphanStaleMs(privacySweepTimeouts),
-                    titleMatches: PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
-                });
-            } catch (sweepError) {
-                log(
-                    `[dreamer] retrospective orphan sweep failed for ${reg.projectIdentity}:`,
-                    sweepError,
-                );
-            } finally {
-                closeQuietly(ocDb);
-            }
-        }
     } catch (error) {
         log(`[dreamer] timer-triggered task scheduling failed for ${reg.projectIdentity}:`, error);
     }
 }
 
-async function sweepOrphanedHistorianChildren(reg: ProjectRegistration): Promise<void> {
+async function sweepOrphanedInternalChildren(
+    reg: ProjectRegistration,
+    privacyTimeoutMinutes: readonly number[],
+): Promise<void> {
     const config = reg.historianChildSweep;
-    if (!config || config.keepSubagents) return;
+    if (!config) return;
 
     const ocDb = openOpenCodeDb();
     if (!ocDb) return;
@@ -578,17 +565,39 @@ async function sweepOrphanedHistorianChildren(reg: ProjectRegistration): Promise
             opencodeDb: ocDb,
             client: reg.client,
             sessionDirectory: reg.directory,
-            staleMs: historianOrphanStaleMs(config.timeoutMs, config.fallbackModelCount),
-            titleMatches: HISTORIAN_CHILD_TITLE_MATCHES,
+            staleMs: {
+                privacy: retrospectiveOrphanStaleMs(privacyTimeoutMinutes),
+                historian: historianOrphanStaleMs(config.timeoutMs, config.fallbackModelCount),
+            },
+            keepSubagents: config.keepSubagents,
         });
     } catch (error) {
         log(
-            `[magic-context] historian child orphan sweep failed for ${reg.projectIdentity}:`,
+            `[magic-context] internal child orphan sweep failed for ${reg.projectIdentity}:`,
             error,
         );
     } finally {
         closeQuietly(ocDb);
     }
+}
+
+export function _resetDreamTimerForTests(): void {
+    if (activeTimer) {
+        clearInterval(activeTimer);
+        activeTimer = null;
+    }
+    if (startupTickTimer) {
+        clearTimeout(startupTickTimer);
+        startupTickTimer = null;
+    }
+    for (const timer of startupTimers.values()) {
+        clearTimeout(timer);
+    }
+    startupTimers.clear();
+    startupJitters.clear();
+    nextStartupJitterSlot = 0;
+    registeredProjects.clear();
+    setBootQuietPeriodForTests(null);
 }
 
 async function runCompiledSmartNoteSweep(reg: ProjectRegistration, db: Database): Promise<void> {

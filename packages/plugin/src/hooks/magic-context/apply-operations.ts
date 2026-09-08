@@ -16,10 +16,8 @@ import type { TagTarget } from "./tag-messages";
 /**
  * Agent-initiated (ctx_reduce) drops of a tool call within the newest N tool
  * calls keep a structural skeleton — the tool_use/tool_result pair survives
- * with the canonical `[dropped §N§]` placeholder as its output — instead of
- * being removed outright. (Long input arg VALUES are separately clamped with
- * `...[truncated]`: that's value-shortening, not a drop, so it keeps its own
- * marker.)
+ * with the canonical `[dropped §N§]` placeholder as its output and a single
+ * non-executable dropped-input marker — instead of being removed outright.
  *
  * WHY: when every recent tool call vanishes from the wire, models (especially
  * smaller ones) lose the anchors showing what they actually did and start

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,6 +11,7 @@ import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
+import { createDefaultBoundarySnapshotForTests } from "./protected-tail-boundary";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { runCompartmentPhase } from "./transform-compartment-phase";
 
@@ -80,7 +82,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mc-compartment-phase-"));
     process.env.XDG_DATA_HOME = tempDir;
-    __ignoredNotificationTest.setMidTurnDetector(() => false);
+    __ignoredNotificationTest.setHoldDetector(() => false);
 });
 
 afterEach(() => {
@@ -94,6 +96,90 @@ afterEach(() => {
         } catch {
             /* Ignore EBUSY on Windows */
         }
+});
+
+describe("runCompartmentPhase boundary handoff", () => {
+    it("reuses the trigger boundary anchor without rereading the compartment row", async () => {
+        const sessionId = "ses-boundary-handoff";
+        createOpenCodeDb(
+            sessionId,
+            Array.from({ length: 6 }, (_, index) => ({
+                id: `m${index + 1}`,
+                role: index % 2 === 0 ? "user" : "assistant",
+                text: `message ${index + 1}`,
+            })),
+        );
+        const realDb = openDatabase();
+        appendCompartments(realDb, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 2,
+                startMessageId: "m1",
+                endMessageId: "m2",
+                title: "one",
+                content: "summary",
+            },
+        ]);
+        const preparedSql: string[] = [];
+        const db = new Proxy(realDb, {
+            get(target, prop, receiver) {
+                if (prop === "prepare") {
+                    return (sql: string) => {
+                        preparedSql.push(sql);
+                        return target.prepare.call(target, sql);
+                    };
+                }
+                const value = Reflect.get(target, prop, receiver);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        }) as typeof realDb;
+        const input = [{ info: { id: "m6", role: "assistant" }, parts: [] }];
+        const run = async () => {
+            const messages = structuredClone(input);
+            await runCompartmentPhase({
+                canRunCompartments: true,
+                fullFeatureMode: true,
+                sessionMeta: { compartmentInProgress: true },
+                contextUsage: { percentage: 20 },
+                boundaryContextLimit: 12_000,
+                boundaryExecuteThresholdPercentage: 65,
+                boundaryUsage: { percentage: 20, inputTokens: 1_000 },
+                boundaryUsageSource: "live",
+                db,
+                sessionId,
+                resolvedSessionId: sessionId,
+                historianChunkTokens: 25_000,
+                compartmentDirectory: "/tmp",
+                messages: messages as never,
+                pendingCompartmentInjection: null,
+                deferredHistoryRefreshSessions: new Set(),
+                preResolvedBoundarySnapshot: {
+                    ...createDefaultBoundarySnapshotForTests(sessionId),
+                    mode: "transform-force",
+                    offset: 3,
+                    lastCompartmentEndMessageId: "m2",
+                    protectedTailStart: 5,
+                    eligibleEndOrdinal: 5,
+                    rawMessageCountAtTrigger: 6,
+                },
+            });
+            return messages;
+        };
+        const first = await run();
+        const second = await run();
+        const digest = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+        expect(digest(second)).toBe(digest(first));
+        expect(
+            preparedSql.some(
+                (sql) =>
+                    sql.includes("MAX(end_message)") ||
+                    (sql.includes("SELECT end_message_id") && sql.includes("ORDER BY sequence")),
+            ),
+        ).toBe(false);
+    });
 });
 
 describe("runCompartmentPhase - 95% emergency notification idempotency", () => {

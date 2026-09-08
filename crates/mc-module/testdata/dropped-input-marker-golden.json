@@ -1,0 +1,38 @@
+[
+  {
+    "label": "bash",
+    "tag_id": 431,
+    "input": { "command": "which docker" },
+    "expected_frozen": { "dropped": "[dropped]" },
+    "expected_tagged": { "dropped": "[dropped §431§]" }
+  },
+  {
+    "label": "edit",
+    "tag_id": 432,
+    "input": {
+      "filePath": "/tmp/example.ts",
+      "oldString": "same prefix old value",
+      "newString": "same prefix new value"
+    },
+    "expected_frozen": { "dropped": "[dropped]" },
+    "expected_tagged": { "dropped": "[dropped §432§]" }
+  },
+  {
+    "label": "write",
+    "tag_id": 433,
+    "input": { "filePath": "/tmp/example.txt", "content": "payload" },
+    "expected_frozen": { "dropped": "[dropped]" },
+    "expected_tagged": { "dropped": "[dropped §433§]" }
+  },
+  {
+    "label": "ctx_memory",
+    "tag_id": 434,
+    "input": {
+      "action": "write",
+      "category": "ARCHITECTURE",
+      "content": "durable memory"
+    },
+    "expected_frozen": { "dropped": "[dropped]" },
+    "expected_tagged": { "dropped": "[dropped §434§]" }
+  }
+]

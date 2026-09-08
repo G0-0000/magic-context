@@ -10,6 +10,9 @@ import {
     getCompartments,
     getLastCompartmentEndMessage,
 } from "../../features/magic-context/compartment-storage";
+import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { promoteSessionFactsDurable } from "../../features/magic-context/memory/promotion";
+import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
     acquireWrapupInProgress,
     getWrapupInProgressState,
@@ -105,14 +108,25 @@ function baseCtx(db: Database, state = liveState()): ManagedWrapupContext {
 }
 
 describe("runManagedWrapup", () => {
-    it("drains multiple chunks and lets the runner decide actual final-chunk keep", async () => {
+    it("promotes facts from every non-final wrapup window and skips only the final window", async () => {
         const db = createDb();
         try {
             const sessionId = "ses-wrapup-multi";
+            const project = resolveProjectIdentity("/tmp/project");
             const forceKeepFlags: boolean[] = [];
             const ctx = baseCtx(db);
             ctx.runCompartmentAgentForWrapup = mock(async (deps) => {
-                forceKeepFlags.push(deps.forceKeepLastCompartment === true);
+                const finalWindow = deps.forceKeepLastCompartment === true;
+                forceKeepFlags.push(finalWindow);
+                const chunkNumber = forceKeepFlags.length;
+                if (!finalWindow) {
+                    promoteSessionFactsDurable(db, sessionId, project, [
+                        {
+                            category: "PROJECT_RULES",
+                            content: `Durable wrapup fact from chunk ${chunkNumber}.`,
+                        },
+                    ]);
+                }
                 const before = Math.max(1, getLastCompartmentEndMessage(db, sessionId) + 1);
                 const end = Math.min(deps.boundarySnapshot.eligibleEndOrdinal - 1, before + 2);
                 appendRange(db, sessionId, before, end);
@@ -127,7 +141,15 @@ describe("runManagedWrapup", () => {
             expect(result).toContain(
                 "If you want it applied on the very next message, run /ctx-flush first.",
             );
-            expect(forceKeepFlags).toEqual([true, true, true]);
+            expect(forceKeepFlags).toEqual([false, false, true]);
+            const promoted = getMemoriesByProject(db, project).map((memory) => memory.content);
+            expect(promoted).toHaveLength(2);
+            expect(promoted).toEqual(
+                expect.arrayContaining([
+                    "Durable wrapup fact from chunk 1.",
+                    "Durable wrapup fact from chunk 2.",
+                ]),
+            );
             expect(getLastCompartmentEndMessage(db, sessionId)).toBe(9);
             expect(getWrapupInProgressState(db, sessionId)).toBeNull();
             expect(ctx.liveSessionState.deferredHistoryRefreshSessions.has(sessionId)).toBe(true);

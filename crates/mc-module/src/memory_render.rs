@@ -295,7 +295,11 @@ pub fn render_new_compartments(
     let bodies: Vec<String> = compartments
         .iter()
         .map(|c| crate::decay_render::render_compartment_at_tier(c, 1))
+        .filter(|body| !body.is_empty())
         .collect();
+    if bodies.is_empty() {
+        return String::new();
+    }
     format!(
         "<new-compartments>\n{}\n</new-compartments>",
         bodies.join("\n\n")

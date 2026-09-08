@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ import { COMPARTMENT_RENDER_EPOCH } from "@magic-context/core/hooks/magic-contex
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	__test,
+	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	materializeM0Pi,
 	materializeM0PiWithRetry,
@@ -590,6 +592,35 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
+	it("reads project docs once on a HARD fold and replays byte-identical output", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-docs-snapshot-"));
+		let reads = 0;
+		const restoreObserver = __test.setProjectDocsReadObserverForTests(() => {
+			reads += 1;
+		});
+		try {
+			writeFileSync(join(cwd, "AGENTS.md"), "# Stable project rules\n");
+			const state = piState("ses-pi-docs-snapshot", cwd);
+			const hashPass = (): string => {
+				const messages = [userMessage("same user input", 10)];
+				injectM0M1Pi(state, db, messages as never);
+				return createHash("sha256")
+					.update(JSON.stringify(messages))
+					.digest("hex");
+			};
+
+			const firstHash = hashPass();
+			expect(reads).toBe(1);
+			expect(hashPass()).toBe(firstHash);
+			expect(reads).toBe(1);
+		} finally {
+			restoreObserver();
+			rmSync(cwd, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
 	it("gates project docs block and hash with injectDocs=false", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-docs-gate-"));
@@ -1067,7 +1098,17 @@ describe("injectM0M1Pi", () => {
 				return originalExec(sql);
 			}) as typeof db.exec;
 
-			const { m0, snapshotMarkers } = materializeM0PiWithRetry(state, db);
+			const passSnapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			const { m0, snapshotMarkers } = materializeM0PiWithRetry(
+				state,
+				db,
+				3,
+				passSnapshot,
+			);
 
 			expect(injectedRace).toBe(true);
 			expect(snapshotMarkers.maxCompartmentSeq).toBe(0);

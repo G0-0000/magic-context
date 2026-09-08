@@ -236,10 +236,10 @@ pub struct WrapupBoundaryResolution {
 /// Chunked tail measurement in the historian's `U:`/`A:`/`TC:` block format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkEstimate {
-    /// Token count used by trigger decisions. When scanning stops early, this
-    /// saturates at `budget_stop` so `has_more` never under-reports the threshold.
+    /// Actual tokens in emitted formatted blocks, without budget saturation.
     pub tokens: f64,
-    /// True when the scan stopped before the eligible tail ended.
+    /// True only when a real formatted block could not fit the scan budget.
+    /// Trailing filtered rows do not count as remaining narratable content.
     pub has_more: bool,
     /// Formatted block strings produced by the chunk-formatting step and then tokenized.
     pub formatted_blocks: Vec<String>,
@@ -687,11 +687,6 @@ fn chunked_message_estimate_with_estimator(
 ) -> ChunkEstimate {
     let mut ordered = messages.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|message| message.message_ordinal);
-    let total_message_count = ordered
-        .iter()
-        .map(|message| message.message_ordinal)
-        .max()
-        .unwrap_or(ordered.len() as u64);
     let mut builder = ChunkBuilder::new(budget_stop, token_estimator);
 
     for message in &ordered {
@@ -705,7 +700,7 @@ fn chunked_message_estimate_with_estimator(
             break;
         }
     }
-    builder.finish(total_message_count, eligible_end_ordinal)
+    builder.finish()
 }
 
 /// Check whether a compartment/historian run should fire from the in-memory tail.
@@ -1569,9 +1564,7 @@ struct ChunkBuilder<'a> {
     budget_stop: f64,
     token_estimator: &'a mut dyn FnMut(&str) -> usize,
     total_tokens: f64,
-    measured_tokens: f64,
     messages_processed: usize,
-    last_ordinal: u64,
     current_block: Option<ChunkBlock>,
     pending_noise_meta: Vec<(u64, String)>,
     formatted_blocks: Vec<String>,
@@ -1587,9 +1580,7 @@ impl<'a> ChunkBuilder<'a> {
             budget_stop,
             token_estimator,
             total_tokens: 0.0,
-            measured_tokens: 0.0,
             messages_processed: 0,
-            last_ordinal: 0,
             current_block: None,
             pending_noise_meta: Vec::new(),
             formatted_blocks: Vec::new(),
@@ -1715,35 +1706,20 @@ impl<'a> ChunkBuilder<'a> {
             self.commit_cluster_count += 1;
         }
         self.last_flushed_role.clone_from(&current_block.role);
-        self.last_ordinal = current_block
-            .meta
-            .last()
-            .map(|(ordinal, _)| *ordinal)
-            .unwrap_or(current_block.end_ordinal);
         self.messages_processed += current_block.meta.len();
         self.formatted_blocks.push(block_text);
         self.block_tokens.push(block_tokens);
         self.total_tokens += block_tokens;
-        self.measured_tokens += block_tokens;
         true
     }
 
-    fn finish(
-        mut self,
-        total_message_count: u64,
-        eligible_end_ordinal: Option<u64>,
-    ) -> ChunkEstimate {
+    fn finish(mut self) -> ChunkEstimate {
         let _ = self.flush_current_block();
-        let terminal = eligible_end_ordinal
-            .map(|end| end.saturating_sub(1).min(total_message_count))
-            .unwrap_or(total_message_count);
-        let has_more = self.last_ordinal < terminal;
-        let tokens = if has_more && self.total_tokens < self.budget_stop && self.total_tokens > 0.0
-        {
-            self.budget_stop
-        } else {
-            self.total_tokens
-        };
+        // Only a rejected formatted block proves the scan ran out of budget.
+        // The final raw ordinal may belong to filtered tool results, ignored text,
+        // or reasoning; comparing it with the last emitted ordinal invents content.
+        let has_more = self.stopped_early;
+        let tokens = self.total_tokens;
         ChunkEstimate {
             tokens,
             has_more,
@@ -2681,6 +2657,334 @@ mod tests {
         ]
     }
 
+    /// Synthetic sensitivity fixture, not a replay of a captured provider session.
+    /// Each admission is assumed to publish successfully before the next step; the
+    /// pure trigger has no mid-turn input, so publication coalescing cannot help it.
+    #[test]
+    fn twenty_step_tool_cadence_without_mid_turn_coalescing() {
+        assert_eq!(derive_trigger_budget(167_000.0, 65.0), 5_428.0);
+        assert_eq!(derive_trigger_budget(872_000.0, 75.0), 32_700.0);
+        let output = "build output line with useful diagnostic details\n".repeat(500);
+        for (label, limit, threshold) in [
+            ("CC-T65", 167_000.0, 65.0),
+            ("CC-T75", 167_000.0, 75.0),
+            ("OC-T75", 872_000.0, 75.0),
+        ] {
+            println!("{label}: boundary.context_limit={limit}, threshold={threshold}, pre_clamp={}, rounded_clamped={}, tail_bar={}", limit * threshold / 100.0 * 0.05, derive_trigger_budget(limit, threshold), derive_trigger_budget(limit, threshold) * 3.0);
+            for policy in [
+                "HOLD-mid_turn-false",
+                "rewrite-at-most-4x",
+                "raw-since-publish-20k",
+                "budget-min-10k",
+            ] {
+                let mut messages = Vec::new();
+                let mut ctx = TriggerContext {
+                    boundary: BoundaryContext {
+                        context_limit: limit,
+                        execute_threshold_percentage: threshold,
+                        usage_percentage: 75.0,
+                        usage_input_tokens: limit * 0.75,
+                        ..BoundaryContext::default()
+                    },
+                    ..TriggerContext::default()
+                };
+                if policy == "budget-min-10k" {
+                    ctx.boundary.trigger_budget =
+                        Some(derive_trigger_budget(limit, threshold).max(10_000.0));
+                }
+                let mut publications = Vec::new();
+                let mut total_rewrite = 0;
+                let mut total_raw = 0;
+                println!("geometry,step,reason,start,end,messages,raw_tokens,tc_tokens,m1_tokens,tail_tokens,rewrite_tokens,rewrite_per_raw");
+                for step in 1..=20 {
+                    // The 2/4/6/8-message cycle models one to four complete tool arcs.
+                    for _ in 0..((step - 1) % 4 + 1) {
+                        let ordinal = messages.len() as u64 + 1;
+                        let arc = format!("arc-{ordinal}");
+                        messages.push(tool_call_msg(ordinal, &arc));
+                        messages.push(tool_result_msg(ordinal + 1, &arc, &output));
+                    }
+                    let decision = check_compartment_trigger(&messages, &ctx);
+                    if !decision.fire {
+                        continue;
+                    }
+                    let boundary = decision.boundary.as_ref().unwrap();
+                    let start = boundary.eligible_head.start;
+                    let end = decision.consume_through_ordinal.unwrap();
+                    assert!(end < boundary.protected_start_ordinal);
+                    assert!(ctx
+                        .boundary
+                        .last_compartment_end_ordinal
+                        .is_none_or(|last| start > last));
+                    let raw: usize = messages
+                        .iter()
+                        .filter(|m| (start..=end).contains(&m.message_ordinal))
+                        .flat_map(|m| &m.blocks)
+                        .map(|b| b.original_token_count)
+                        .sum();
+                    let chunk =
+                        chunked_message_estimate(&messages, start, Some(end + 1), 100_000.0);
+                    let formatted_tokens: f64 = chunk.block_tokens.iter().sum();
+                    assert!(formatted_tokens < derive_trigger_budget(limit, threshold));
+                    // Price a hypothetical next-wire rewrite, not provider billing:
+                    // fixed 8k prefix before m1, initial 2k m1, 256 tokens per summary,
+                    // and constant 75% pre-publication usage with no other reducers.
+                    let m1 = 2_000 + 256 * (publications.len() + 1);
+                    let rewrite = (limit * 0.75) as usize - 8_000 - raw + 256;
+                    let tail = rewrite - m1;
+                    let force = ctx.boundary.usage_percentage
+                        >= escalation_bands(threshold).force_materialize_percentage;
+                    let admitted = force
+                        || match policy {
+                            "rewrite-at-most-4x" => rewrite <= 4 * raw,
+                            "raw-since-publish-20k" => raw >= 20_000,
+                            _ => true,
+                        };
+                    if !admitted {
+                        continue;
+                    }
+                    total_rewrite += rewrite;
+                    total_raw += raw;
+                    println!("{label}/{policy},{step},{},{start},{end},{},{raw},{formatted_tokens},{m1},{tail},{rewrite},{:.2}", decision.reason.unwrap().as_str(), end - start + 1, rewrite as f64 / raw as f64);
+                    publications.push((step, start, end));
+                    ctx.boundary.last_compartment_end_ordinal = Some(end);
+                }
+                println!("{label}/{policy}: {} assumed publications over 20 steps: {publications:?}; total_raw={total_raw}, total_rewrite={total_rewrite}", publications.len());
+                let expected = match (label, policy) {
+                    ("OC-T75", "rewrite-at-most-4x") => 0,
+                    ("OC-T75", "raw-since-publish-20k") => 6,
+                    ("OC-T75", _) => 11,
+                    (_, "rewrite-at-most-4x") => 7,
+                    (_, "raw-since-publish-20k") => 8,
+                    _ => 14,
+                };
+                assert_eq!(publications.len(), expected, "{label}/{policy}");
+            }
+        }
+    }
+
+    /// Opt-in replay of private captures; only aggregate measurements are printed.
+    /// The capture directory stays outside version control because it contains user content.
+    #[test]
+    #[ignore = "requires CADENCE_REPLAY_DIR with private transform captures"]
+    fn captured_tool_cadence_measurements() {
+        let root = std::path::PathBuf::from(std::env::var("CADENCE_REPLAY_DIR").unwrap());
+        let load = |path: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(root.join(path)).unwrap()).unwrap()
+        };
+        let manifest = load("manifest.json");
+        let selected = manifest["selected_publications"].as_array().unwrap();
+        let mut prior_coverage = None;
+        let mut count = 0;
+        for exchange in manifest["exchanges"].as_array().unwrap() {
+            let paths = exchange["transform_files"].as_array().unwrap();
+            let request = load(paths[0].as_str().unwrap());
+            let response = load(paths[2].as_str().unwrap());
+            let parsed: crate::transform::TransformRequest =
+                serde_json::from_value(request.clone()).unwrap();
+            let coverage = response["coverage_ordinal"].as_u64().unwrap();
+            if selected.contains(&exchange["exchange"]) {
+                count += 1;
+                let start = prior_coverage.unwrap() + 1;
+                let projection = crate::ck_wire::project_messages(&parsed.messages).unwrap();
+                let cached = crate::boundary_messages(
+                    &parsed,
+                    &projection,
+                    &std::sync::Mutex::new(crate::BoundaryTokenCache::new(16 * 1024 * 1024)),
+                );
+                let (limit, input, percentage) =
+                    crate::usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
+                let chunk = crate::historian_chunk::build_historian_chunk(
+                    &parsed.messages,
+                    &projection.blocks,
+                    start,
+                    100_000,
+                    coverage + 1,
+                );
+                let raw: usize = cached
+                    .messages
+                    .iter()
+                    .filter(|m| (start..=coverage).contains(&m.message_ordinal))
+                    .flat_map(|m| &m.blocks)
+                    .map(|b| b.original_token_count)
+                    .sum();
+                let raw_bytes: usize = cached
+                    .messages
+                    .iter()
+                    .filter(|m| (start..=coverage).contains(&m.message_ordinal))
+                    .flat_map(|m| &m.blocks)
+                    .map(|b| b.byte_size)
+                    .sum();
+                let output = response["ck_messages"].as_array().unwrap();
+                let m1_index = output
+                    .iter()
+                    .position(|m| {
+                        m["content"].as_array().unwrap().iter().any(|b| {
+                            b["kind"]["text"]
+                                .as_str()
+                                .is_some_and(|s| s.contains("<session-history-since>"))
+                        })
+                    })
+                    .unwrap();
+                let texts = |message: &Value| -> String {
+                    message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|b| {
+                            b["kind"]["text"]
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| serde_json::to_string(&b["kind"]).unwrap())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                };
+                let m1 = texts(&output[m1_index]);
+                let tail = output[m1_index + 1..]
+                    .iter()
+                    .map(texts)
+                    .collect::<Vec<_>>()
+                    .join("");
+                let rewrite_tokens = estimate_tokens(&m1) + estimate_tokens(&tail);
+                let native = load(&format!("captures/{}-fwd-body", exchange["exchange"]));
+                let native_messages = native["messages"].as_array().unwrap();
+                let native_m1 = serde_json::to_string(&native_messages[m1_index]).unwrap();
+                assert!(native_m1.contains("<session-history-since>"));
+                let native_tail: Vec<String> = native_messages[m1_index + 1..]
+                    .iter()
+                    .map(|m| serde_json::to_string(m).unwrap())
+                    .collect();
+                let native_tokens = estimate_tokens(&native_m1)
+                    + native_tail
+                        .iter()
+                        .map(|m| estimate_tokens(m))
+                        .sum::<usize>();
+                println!("NATIVE exchange={} m1_bytes={} tail_bytes={} rewrite_tokens={native_tokens} ratio={:.2}",exchange["exchange"],native_m1.len(),native_tail.iter().map(String::len).sum::<usize>(),native_tokens as f64 / raw as f64);
+                println!("CAPTURE exchange={} range={start}-{coverage} raw_tokens={raw} raw_bytes={raw_bytes} assembly_tokens={} m1_bytes={} tail_bytes={} rewrite_tokens={rewrite_tokens} rewrite_per_raw={:.2} context_limit={limit} usable_soft={} usable_hard={} input={input} pct={percentage:.3} host_threshold={} logged_progress={}", exchange["exchange"], chunk.token_estimate, m1.len(), tail.len(), rewrite_tokens as f64 / raw as f64, request["geometry"]["usable_soft"],request["geometry"]["usable_hard"],request["effective_execute_threshold"],response["historian"]["progress"]);
+                for threshold in [65.0, 75.0] {
+                    let ctx = TriggerContext {
+                        boundary: BoundaryContext {
+                            context_limit: limit,
+                            execute_threshold_percentage: threshold,
+                            usage_percentage: percentage,
+                            usage_input_tokens: input,
+                            last_compartment_end_ordinal: Some(start - 1),
+                            prior_boundary_ordinal: start - 1,
+                            migration_floor_active: true,
+                            ..BoundaryContext::default()
+                        },
+                        ..TriggerContext::default()
+                    };
+                    let decision = check_compartment_trigger(&cached.messages, &ctx);
+                    if exchange["exchange"] == 12978 && threshold == 65.0 {
+                        assert!(
+                            !decision.fire,
+                            "captured 12978 must not fire on trailing filtered noise"
+                        );
+                        assert_eq!(
+                            decision.no_fire_cause,
+                            Some(HistorianNoFireCause::BelowMinimumEligibleContent)
+                        );
+                    }
+                    let boundary = resolve_protected_tail_boundary(&cached.messages, &ctx.boundary);
+                    let measured = chunked_message_estimate(
+                        &cached.messages,
+                        start,
+                        Some(boundary.protected_start_ordinal),
+                        derive_trigger_budget(limit, threshold) * 3.0,
+                    );
+                    println!("REPLAY exchange={} T={threshold} fire={} reason={:?} protected={} raw_eligible={} formatted_tokens={} reported_tokens={} has_more={}",exchange["exchange"],decision.fire, decision.reason,boundary.protected_start_ordinal,boundary.true_raw_eligible_tokens,measured.block_tokens.iter().sum::<f64>(),measured.tokens,measured.has_more);
+                }
+                assert!(coverage >= start);
+                assert!(raw > 0);
+            }
+            prior_coverage = Some(coverage);
+        }
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn trailing_filtered_rows_do_not_inflate_chunk_progress() {
+        for kind in ["tool-result", "ignored", "reasoning", "all-noise"] {
+            let mut tail = vec![
+                tool_call_msg(1, "arc"),
+                tool_result_msg(2, "arc", "small output"),
+            ];
+            match kind {
+                "ignored" => {
+                    tail[1] = text_msg(2, Role::User, "ignored content");
+                    tail[1].blocks[0].ignored = true;
+                }
+                "reasoning" => {
+                    tail[1] = text_msg(2, Role::Assistant, "private reasoning");
+                    tail[1].blocks[0].kind = SelKind::Reasoning;
+                }
+                "all-noise" => tail[0].blocks[0].ignored = true,
+                _ => {}
+            }
+            let chunk = chunked_message_estimate(&tail, 1, Some(3), 16_284.0);
+            assert!(
+                !chunk.has_more,
+                "{kind}: exhausted formatted content is not a budget stop"
+            );
+            assert_eq!(
+                chunk.tokens,
+                chunk.block_tokens.iter().sum::<f64>(),
+                "{kind}"
+            );
+            assert!(chunk.tokens < 100.0, "{kind}");
+        }
+    }
+
+    #[test]
+    fn thin_filtered_tail_refuses_without_blocking_pressure_folds() {
+        let tail = vec![
+            tool_call_msg(1, "arc"),
+            tool_result_msg(2, "arc", &"output ".repeat(1_200)),
+            text_msg(3, Role::Assistant, &"protected ".repeat(20_000)),
+        ];
+        for fold_only in [false, true] {
+            let mut ctx = TriggerContext {
+                boundary: BoundaryContext {
+                    context_limit: 167_000.0,
+                    execute_threshold_percentage: 65.0,
+                    usage_percentage: 75.0,
+                    usage_input_tokens: 125_250.0,
+                    fold_is_only_reclaim: fold_only,
+                    prior_boundary_ordinal: 3,
+                    migration_floor_active: true,
+                    ..BoundaryContext::default()
+                },
+                ..TriggerContext::default()
+            };
+            let decision = check_compartment_trigger(&tail, &ctx);
+            assert!(!decision.fire);
+            assert_eq!(
+                decision.no_fire_cause.unwrap().canonical_cause(),
+                "below_min_chunk"
+            );
+            for pressure in [85.0, 95.0] {
+                ctx.boundary.usage_percentage = pressure;
+                ctx.boundary.usage_input_tokens = 167_000.0 * pressure / 100.0;
+                let forced = check_compartment_trigger(&tail, &ctx);
+                assert_eq!(forced.reason, Some(TriggerReason::ForceBand));
+            }
+        }
+    }
+
+    #[test]
+    fn real_formatted_budget_stop_preserves_measured_progress() {
+        let tail = vec![
+            text_msg(1, Role::User, "small"),
+            text_msg(2, Role::Assistant, &"substance ".repeat(100)),
+        ];
+        let chunk = chunked_message_estimate(&tail, 1, Some(3), 50.0);
+        assert!(chunk.has_more);
+        assert_eq!(chunk.tokens, chunk.block_tokens.iter().sum::<f64>());
+        assert!(chunk.tokens < 50.0);
+    }
+
     fn ctx_for_tests() -> BoundaryContext {
         BoundaryContext {
             context_limit: 20_000.0,
@@ -3341,7 +3645,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_has_more_saturates_at_budget_stop() {
+    fn oversized_first_block_preserves_real_budget_stop() {
         let tail = vec![
             text_msg(1, Role::User, &"one ".repeat(200)),
             text_msg(2, Role::Assistant, &"two ".repeat(200)),

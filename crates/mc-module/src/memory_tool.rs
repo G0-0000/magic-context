@@ -416,20 +416,18 @@ pub fn search_available_corpora_for_session_with_diagnostics(
     }
     if options.include_notes {
         for note in store.search_notes_like(project_path, session_id, query)? {
-            if first_match(&note.content, query).is_some()
-                || note
-                    .surface_condition
-                    .as_deref()
-                    .is_some_and(|condition| first_match(condition, query).is_some())
-            {
-                ranked.push(note_search_hit(note, query));
+            if let Some(hit) = note_search_hit(note, query) {
+                ranked.push(hit);
             }
         }
     }
 
     ranked.sort_by(|left, right| {
-        left.rank
-            .cmp(&right.rank)
+        right
+            .result
+            .score_hundredths
+            .cmp(&left.result.score_hundredths)
+            .then_with(|| left.rank.cmp(&right.rank))
             .then_with(|| right.recency.cmp(&left.recency))
             .then_with(|| left.result.id.cmp(&right.result.id))
     });
@@ -584,22 +582,104 @@ fn memory_search_hit(memory: StoredMemorySearchRow, query: &str) -> RankedSearch
     }
 }
 
-fn note_search_hit(note: StoredNoteSearchRow, query: &str) -> RankedSearchResult {
-    let matched_text = if first_match(&note.content, query).is_some() {
+fn tokenize_keyword_needle(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let push_current = |tokens: &mut Vec<String>, current: &mut String| {
+        if current.len() > 1
+            && current.chars().any(|ch| ch.is_ascii_alphanumeric())
+            && !tokens.contains(current)
+        {
+            tokens.push(std::mem::take(current));
+        } else {
+            current.clear();
+        }
+    };
+    for ch in text.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | ':' | '-') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_current(&mut tokens, &mut current);
+        }
+    }
+    if !current.is_empty() {
+        push_current(&mut tokens, &mut current);
+    }
+    tokens
+}
+
+fn raw_note_keyword_score(text: &str, query: &str) -> Option<f64> {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return None;
+    }
+    let normalized_text = text.to_lowercase();
+    let query_tokens = tokenize_keyword_needle(&normalized_query);
+    let note_tokens: BTreeSet<String> = tokenize_keyword_needle(&normalized_text)
+        .into_iter()
+        .collect();
+    let exact = normalized_text.contains(&normalized_query);
+    let matched_tokens = query_tokens
+        .iter()
+        .filter(|token| note_tokens.contains(*token))
+        .count();
+    if !exact && matched_tokens == 0 {
+        return None;
+    }
+    let matched_unique_tokens = query_tokens
+        .iter()
+        .filter(|token| note_tokens.contains(*token))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let coverage = if query_tokens.is_empty() {
+        0.0
+    } else {
+        matched_tokens as f64 / query_tokens.len() as f64
+    };
+    let density = if note_tokens.is_empty() {
+        0.0
+    } else {
+        matched_unique_tokens as f64 / note_tokens.len() as f64
+    };
+    let exact_phrase =
+        exact && (query_tokens.len() > 1 || normalized_text.trim() == normalized_query);
+    let all_tokens = query_tokens.len() > 1 && matched_tokens == query_tokens.len();
+    Some(
+        (if exact_phrase { 2.0 } else { 0.0 })
+            + coverage * density
+            + if all_tokens { 0.5 * density } else { 0.0 },
+    )
+}
+
+fn note_search_hit(note: StoredNoteSearchRow, query: &str) -> Option<RankedSearchResult> {
+    const MAX_NOTE_KEYWORD_SCORE: f64 = 3.5;
+    const SINGLE_SOURCE_SCORE_HUNDREDTHS: f64 = 80.0;
+
+    let mut search_text = note.content.clone();
+    if let Some(condition) = note.surface_condition.as_deref() {
+        search_text.push('\n');
+        search_text.push_str(condition);
+    }
+    let raw_score = raw_note_keyword_score(&search_text, query)?;
+    let score_hundredths = ((raw_score / MAX_NOTE_KEYWORD_SCORE) * SINGLE_SOURCE_SCORE_HUNDREDTHS)
+        .clamp(0.0, SINGLE_SOURCE_SCORE_HUNDREDTHS)
+        .round()
+        .max(1.0) as i64;
+    let matched_text = if raw_note_keyword_score(&note.content, query).is_some() {
         note.content.as_str()
     } else {
         note.surface_condition
             .as_deref()
             .unwrap_or(note.content.as_str())
     };
-    RankedSearchResult {
+    Some(RankedSearchResult {
         rank: 1,
         recency: note.updated_at_ms,
         result: MemorySearchResult {
             source_kind: MemorySearchSourceKind::Note,
             id: note.id,
             snippet: snippet_around_match(matched_text, query),
-            score_hundredths: 95,
+            score_hundredths,
             category: None,
             sequence: None,
             title: None,
@@ -612,7 +692,7 @@ fn note_search_hit(note: StoredNoteSearchRow, query: &str) -> RankedSearchResult
             note_session_id: Some(note.session_id),
             source_project_path: None,
         },
-    }
+    })
 }
 
 fn compartment_search_hit(
@@ -736,7 +816,7 @@ fn snippet_around_match(text: &str, query: &str) -> String {
 mod tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
-    use mc_store::{InsertMemoryInput, StoredCompartment};
+    use mc_store::{InsertMemoryInput, NoteInput, StoredCompartment};
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
@@ -777,6 +857,27 @@ mod tests {
         store
             .insert_memory(input(project, category, content, now))
             .unwrap()
+    }
+
+    fn insert_note(
+        store: &McStore,
+        project: &str,
+        session_id: &str,
+        content: &str,
+        now_ms: i64,
+    ) -> i64 {
+        store
+            .insert_note(NoteInput {
+                project_path: project,
+                route_project_root: None,
+                session_id,
+                content,
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms,
+            })
+            .unwrap()
+            .id
     }
 
     fn workspace(store: &McStore, own: &str, foreign: &str) {
@@ -1046,6 +1147,67 @@ mod tests {
             limited[1].source_kind,
             MemorySearchSourceKind::CompartmentTitle
         );
+    }
+
+    #[test]
+    fn note_search_excludes_dismissed_rows_and_scores_keyword_relevance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:own";
+        let session_id = "session-notes";
+        let dense = insert_note(
+            &store,
+            project,
+            session_id,
+            "needle semantic calibration decision",
+            10,
+        );
+        let weak = insert_note(
+            &store,
+            project,
+            session_id,
+            "A long unrelated reminder with background context and one needle token",
+            20,
+        );
+        let dismissed = insert_note(
+            &store,
+            project,
+            session_id,
+            "needle semantic calibration decision dismissed",
+            30,
+        );
+        store
+            .dismiss_note(project, session_id, dismissed, None, 40)
+            .unwrap()
+            .unwrap();
+
+        let excluded = BTreeSet::new();
+        let outcome = search_available_corpora_for_session_with_diagnostics(
+            &store,
+            project,
+            session_id,
+            "needle semantic calibration decision",
+            MemorySearchOptions {
+                limit: 10,
+                include_memories: false,
+                include_messages: false,
+                include_notes: true,
+                excluded_memory_ids: &excluded,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome
+                .results
+                .iter()
+                .map(|result| result.id)
+                .collect::<Vec<_>>(),
+            vec![dense, weak]
+        );
+        assert_eq!(outcome.results[0].score_hundredths, 80);
+        assert_eq!(outcome.results[1].score_hundredths, 1);
+        assert!(!outcome.results.iter().any(|result| result.id == dismissed));
     }
 
     #[test]

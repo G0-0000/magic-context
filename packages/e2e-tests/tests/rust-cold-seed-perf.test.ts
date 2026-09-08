@@ -130,7 +130,6 @@ function astroShape(sessionId: string): Record<string, unknown> {
         },
         provider_id: "anthropic",
         model_key: "perf-fixture",
-        mid_turn: false,
         channel2_nudge_state: "idle",
         emergency_recovery_armed: false,
     };

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,10 @@ import {
 	appendCompartments,
 	getCompartments,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	__resetProjectIdentityForTests,
+	__setProjectIdentityTestHooks,
+} from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
@@ -38,6 +43,7 @@ import {
 import {
 	getEmergencyInputSample,
 	getOverflowState,
+	recordDetectedContextLimit,
 	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
@@ -90,6 +96,54 @@ import {
 	userMessage,
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
+
+describe("Pi context project identity cache", () => {
+	it("serves byte-identical output with cached identity and one host-usage read per context", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-project-identity-cache";
+		const project = mkdtempSync(join(tmpdir(), "mc-pi-project-"));
+		const fake = createFakePi();
+		let probes = 0;
+		let usageReads = 0;
+		__setProjectIdentityTestHooks({
+			onFilesystemProbe: () => {
+				probes += 1;
+			},
+		});
+		try {
+			registerPiContextHandler(fake.pi as never, { db });
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] } | undefined>;
+			const pass = async (): Promise<string> => {
+				const messages = [userMessage("stable project request", 1)];
+				const result = await handler({ messages: messages as never[] }, {
+					...fakeContext(sessionId, project, ["entry-user"], messages as never),
+					getContextUsage: () => {
+						usageReads += 1;
+						return { tokens: 100, percent: 1, contextWindow: 10_000 };
+					},
+				} as never);
+				return createHash("sha256")
+					.update(JSON.stringify(result?.messages ?? messages))
+					.digest("hex");
+			};
+
+			const firstHash = await pass();
+			expect(probes).toBeGreaterThan(0);
+			probes = 0;
+			expect(await pass()).toBe(firstHash);
+			expect(probes).toBe(0);
+			expect(usageReads).toBe(2);
+		} finally {
+			__resetProjectIdentityForTests();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("Pi pressure guards", () => {
 	it("keeps the emergency recovery bump as a floor instead of a cap", () => {
@@ -204,21 +258,26 @@ describe("Pi scheduler decision observability", () => {
 		) => Promise<{ messages: never[] } | undefined>,
 		sessionId: string,
 		messages: ReturnType<typeof userMessage>[],
+		usagePercentage = 0,
 	): Promise<void> {
-		await handler(
-			{ messages: messages as never[] },
-			fakeContext(
+		await handler({ messages: messages as never[] }, {
+			...fakeContext(
 				sessionId,
 				process.cwd(),
 				messages.map((_message, index) => `entry-${index}`),
 				messages as never,
-			) as never,
-		);
+			),
+			getContextUsage: () => ({
+				tokens: usagePercentage * 1_000,
+				percent: usagePercentage,
+				contextWindow: 100_000,
+			}),
+		} as never);
 	}
 
-	it("logs the durable queue depth and mid-turn boundary reason", async () => {
+	it("applies pending automatic reclaim on the first busting pass of a marathon turn", async () => {
 		const db = createTestDb();
-		const sessionId = "ses-decision-log-mid-turn";
+		const sessionId = "ses-first-busting-pass-reclaim";
 		const lines: string[] = [];
 		const restoreObserver =
 			contextHandlerInternals.setPendingDecisionLogObserverForTests((line) =>
@@ -229,44 +288,59 @@ describe("Pi scheduler decision observability", () => {
 			registerPiContextHandler(fake.pi as never, {
 				db,
 				heuristics: {},
+				injection: { injectionBudgetTokens: 10_000 },
+				protectedTags: 1,
 			});
 			const handler = fake.handlers.get("context") as Parameters<
 				typeof runPass
 			>[0];
-			const firstPass = [
-				userMessage("first", 1),
-				assistantMessage("answer", 2),
-			];
+			const coveredUser = userMessage("covered request", 1);
+			const coveredAssistant = assistantMessage("covered answer", 2);
+			const firstPass = [coveredUser, coveredAssistant];
 			await runPass(handler, sessionId, firstPass);
+
+			const reclaimTag = getTagsBySession(db, sessionId).find(
+				(tag) => tag.status === "active",
+			);
+			expect(reclaimTag).toBeDefined();
+			queuePendingOp(db, sessionId, reclaimTag?.id ?? -1, "drop");
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "entry-0",
+					endMessageId: "entry-1",
+					title: "Published history",
+					content: "U: covered request\nA: covered answer",
+					p1: "U: covered request\nA: covered answer",
+				},
+			]);
+			signalPiDeferredHistoryRefresh(sessionId);
+			signalPiDeferredMaterialization(sessionId);
 			lines.length = 0;
-			queuePendingOp(db, sessionId, 1, "drop");
-			updateSessionMeta(db, sessionId, {
-				lastContextPercentage: 70,
-				lastInputTokens: 70_000,
-				lastResponseTime: Date.now(),
-			});
-			const midTurnPass = [
-				userMessage("second", 3),
+
+			const marathonPass = [
+				coveredUser,
+				coveredAssistant,
+				userMessage("keep steering", 3),
 				assistantToolCall("call-1", "ctx_reduce", {}, 4),
 			];
-			await runPass(handler, sessionId, midTurnPass);
+			await runPass(handler, sessionId, marathonPass, 75);
 
 			expect(lines).toContain(
-				"pending ops WILL NOT APPLY — reason=mid_turn_boundary pendingOps=1 context=70.0%",
+				"pending ops WILL APPLY — reason=deferred_publication, pendingOps=1 context=75.0%",
 			);
 			expect(lines).toContain(
-				"heuristics WILL NOT RUN — reason=mid_turn_boundary",
+				"heuristics WILL RUN — reason=scheduler_execute (pendingOps=1, scheduler=execute), context=75.0%, turn=n/a",
 			);
-
-			lines.length = 0;
-			const boundaryPass = [
-				userMessage("third", 5),
-				assistantMessage("answer", 6),
-			];
-			await runPass(handler, sessionId, boundaryPass);
-			expect(lines).toContain(
-				"pending ops WILL APPLY — reason=scheduler_execute (scheduler=execute), pendingOps=1 context=70.0%",
-			);
+			expect(getPendingOps(db, sessionId)).toHaveLength(0);
+			expect(
+				getTagsBySession(db, sessionId).find((tag) => tag.id === reclaimTag?.id)
+					?.status,
+			).toBe("dropped");
+			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(false);
+			expect(consumeDeferredMaterialization(sessionId)).toBe(false);
 		} finally {
 			restoreObserver();
 			clearContextHandlerSession(sessionId);
@@ -1542,13 +1616,9 @@ describe("registerPiContextHandler", () => {
 			};
 
 			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
-			expect(toolArguments(1)).toEqual({
-				__magic_context_dropped__: fullSentinel,
-			});
+			expect(toolArguments(1)).toEqual({ dropped: fullSentinel });
 			expect(textOf(output[2])).toBe(fullSentinel);
-			expect(toolArguments(3)).toEqual({
-				__magic_context_replacement__: truncatedSentinel,
-			});
+			expect(toolArguments(3)).toEqual({ dropped: truncatedSentinel });
 			expect(textOf(output[4])).toBe(truncatedSentinel);
 			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
 			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
@@ -2272,6 +2342,44 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("clears a stale unkeyed detected limit from the same database after restart", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "mc-pi-stale-limit-"));
+		const path = join(dir, "context.db");
+		const sessionId = "ses-pi-stale-detected-restart";
+		let db = createTestDb(path);
+		try {
+			recordDetectedContextLimit(db, sessionId, 131_232);
+			closeQuietly(db);
+			db = createTestDb(path);
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+			const notify = mock(async () => undefined);
+
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId,
+				message: assistantMessage("done", 1, {
+					provider: "ninfer",
+					model: "qwen3.8-27b-nvfp4",
+					usage: { input: 148_241, cacheRead: 0, cacheWrite: 0 },
+				}),
+				piContextWindow: 200_000,
+				notifyIssue: notify,
+			});
+
+			expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.lastUsageContextLimit).toBe(200_000);
+			expect(meta.lastContextPercentage).toBeCloseTo(
+				(148_241 / 200_000) * 100,
+				10,
+			);
+			expect(notify).not.toHaveBeenCalled();
+		} finally {
+			closeQuietly(db);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("alerts once when Pi's reported context window is below observed safe tokens", async () => {
 		const db = createTestDb();
 		try {
@@ -2302,14 +2410,17 @@ describe("registerPiContextHandler", () => {
 
 			const meta = getOrCreateSessionMeta(db, "ses-pi-pressure-alert");
 			expect(meta.cacheAlertSent).toBe(true);
-			expect(meta.lastContextPercentage).toBe(400);
+			expect(meta.lastContextPercentage).toBe(100);
+			expect(meta.lastUsageContextLimit).toBe(120_000);
 			expect(notify).toHaveBeenCalledTimes(1);
-			expect(notify.mock.calls[0]?.[0]).toContain(
-				"context limit of 30,000 tokens",
+			const warning = String(notify.mock.calls[0]?.[0]);
+			expect(warning).toContain("Pi reports a context limit of 30,000 tokens");
+			expect(warning).toContain(
+				"this session has sent 90,000 tokens successfully",
 			);
-			expect(notify.mock.calls[0]?.[0]).toContain(
-				"successfully sent 90,000 tokens",
-			);
+			expect(warning).toContain("larger proven value for its pressure math");
+			expect(warning).toContain("contextWindow");
+			expect(warning).not.toContain("Restart Pi");
 		} finally {
 			closeQuietly(db);
 		}

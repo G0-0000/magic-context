@@ -1,9 +1,11 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
 import {
     appendCompartments,
     replaceAllCompartmentState,
@@ -17,6 +19,7 @@ import {
     updateMemoryContent,
 } from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
+import { __projectDocsHashTest } from "../../features/magic-context/project-docs-hash";
 import { unifiedSearch } from "../../features/magic-context/search";
 import {
     bumpSessionFactsVersion,
@@ -1480,12 +1483,20 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(second[0])).not.toContain("FLAG_OFF_STRUCTURE_DOCS");
     });
 
-    it("folds current project docs on the next natural HARD materialization", () => {
+    it("keeps SOFT bytes stable across a docs edit and adopts it on the next HARD fold", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         writeFileSync(join(projectDirectory, "ARCHITECTURE.md"), "# Old architecture\n");
         const state = readStateFromMeta();
-        const first = [userMessage("m1", "hello")];
+        __projectDocsHashTest.reset();
+        const stableSignals = {
+            systemHash: "sys-v1",
+            modelKey: "model-v1",
+            cacheExpired: false,
+            lastResponseTime: 0,
+        };
+        const input = [userMessage("m1", "identical input")];
+        const first = structuredClone(input) as MessageLike[];
         injectM0M1({
             db,
             sessionId: SESSION_ID,
@@ -1493,56 +1504,60 @@ describe("m[0]/m[1] materialization", () => {
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
-            hardSignals: {
-                systemHash: "sys-v1",
-                modelKey: "model-v1",
-                cacheExpired: false,
-                lastResponseTime: 0,
-            },
+            hardSignals: stableSignals,
         });
         expect(renderedText(first[0])).toContain("Old architecture");
-        expect(
-            mustMaterialize({
-                db,
-                sessionId: SESSION_ID,
-                state,
-                projectPath: PROJECT_PATH,
-                projectDirectory,
-                injectDocs: false,
-                hardSignals: {
-                    systemHash: "sys-v1",
-                    modelKey: "model-v1",
-                    cacheExpired: false,
-                    lastResponseTime: 0,
-                },
-            }),
-        ).toEqual({ value: false, reason: null });
+        expect(__projectDocsHashTest.readCount()).toBe(1);
 
+        const softBeforeEdit = structuredClone(input) as MessageLike[];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: softBeforeEdit,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            hardSignals: stableSignals,
+        });
         writeFileSync(
             join(projectDirectory, "ARCHITECTURE.md"),
             "# Updated architecture\nFresh docs folded on hard bust.\n",
         );
-        const second = [userMessage("m2", "hello again")];
-        const result = injectM0M1({
+        const softAfterEdit = structuredClone(input) as MessageLike[];
+        const softResult = injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages: second,
+            messages: softAfterEdit,
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
-            hardSignals: {
-                systemHash: "sys-v2",
-                modelKey: "model-v1",
-                cacheExpired: false,
-                lastResponseTime: 0,
-            },
+            hardSignals: stableSignals,
+        });
+        const digest = (messages: MessageLike[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+        expect(softResult.m0RematerializedThisPass).toBe(false);
+        expect(digest(softAfterEdit)).toBe(digest(softBeforeEdit));
+        expect(renderedText(softAfterEdit[0])).toContain("Old architecture");
+        expect(__projectDocsHashTest.readCount()).toBe(1);
+
+        const hard = structuredClone(input) as MessageLike[];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: hard,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            hardSignals: { ...stableSignals, systemHash: "sys-v2" },
         });
 
         expect(result.m0RematerializedThisPass).toBe(true);
         expect(result.decision.reason).toBe("system_hash");
-        expect(renderedText(second[0])).toContain("Updated architecture");
-        expect(renderedText(second[0])).toContain("Fresh docs folded on hard bust.");
-        expect(renderedText(second[0])).not.toContain("Old architecture");
+        expect(renderedText(hard[0])).toContain("Updated architecture");
+        expect(renderedText(hard[0])).toContain("Fresh docs folded on hard bust.");
+        expect(renderedText(hard[0])).not.toContain("Old architecture");
+        expect(digest(hard)).not.toBe(digest(softAfterEdit));
+        expect(__projectDocsHashTest.readCount()).toBe(2);
     });
 
     it("classify writes stay cache-neutral until the next natural HARD materialization", () => {

@@ -368,13 +368,23 @@ pub fn render_session_ref_compartment(c: &ReferenceCompartment) -> String {
 }
 
 pub fn render_session_references_block(all_compartments: &[ReferenceCompartment]) -> String {
+    let all_compartments: Vec<_> = all_compartments
+        .iter()
+        .filter(|c| {
+            !(c.title.is_empty()
+                && c.content.is_empty()
+                && [&c.p1, &c.p2, &c.p3, &c.p4]
+                    .iter()
+                    .all(|p| p.as_deref().unwrap_or("").is_empty()))
+        })
+        .collect();
     if all_compartments.is_empty() {
         return String::new();
     }
     let start = all_compartments.len().saturating_sub(SESSION_REF_WINDOW);
     let body = all_compartments[start..]
         .iter()
-        .map(render_session_ref_compartment)
+        .map(|c| render_session_ref_compartment(c))
         .collect::<Vec<_>>()
         .join("\n\n");
     format!("<session_references>\n{body}\n</session_references>")

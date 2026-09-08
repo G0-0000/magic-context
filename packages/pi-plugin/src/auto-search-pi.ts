@@ -60,6 +60,7 @@ import type {
 } from "@magic-context/core/features/magic-context/search";
 import { unifiedSearch } from "@magic-context/core/features/magic-context/search";
 import {
+	type AutoSearchHintDecision,
 	type AutoSearchHintNoHintReason,
 	appendAutoSearchHintDecision,
 	getAutoSearchHintDecisions,
@@ -205,7 +206,7 @@ function findLatestMeaningfulUserMessage(
 	messages: AgentMessage[],
 	entryIds: readonly (string | undefined)[],
 	entryIdByRef?: ReadonlyMap<object, string> | null,
-): { message: UserMessage; messageId: string } | null {
+): { message: UserMessage; messageId: string; index: number } | null {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user") continue;
@@ -220,7 +221,9 @@ function findLatestMeaningfulUserMessage(
 				msg && typeof msg === "object"
 					? entryIdByRef.get(msg as object)
 					: undefined;
-			if (typeof byRef === "string") return { message: msg, messageId: byRef };
+			if (typeof byRef === "string") {
+				return { message: msg, messageId: byRef, index: i };
+			}
 			// Ref-map MISS with a ref-map present: do NOT fall back to the stale
 			// positional `entryIds[i]` — after a splice it points at the wrong
 			// message and would anchor the auto-search hint to the wrong user turn.
@@ -230,7 +233,9 @@ function findLatestMeaningfulUserMessage(
 
 		// No ref-map (pre-mutation caller): positional entryIds is authoritative.
 		const messageId = entryIds[i];
-		if (typeof messageId === "string") return { message: msg, messageId };
+		if (typeof messageId === "string") {
+			return { message: msg, messageId, index: i };
+		}
 		return null;
 	}
 
@@ -284,6 +289,8 @@ export async function runAutoSearchHintForPi(args: {
 	entryIdByRef?: ReadonlyMap<object, string> | null;
 	options: PiAutoSearchOptions;
 	ensureProjectRegistered?: () => Promise<void>;
+	/** Per-context projection loaded with note anchors so sticky replay reads session_meta once. */
+	decisions?: readonly AutoSearchHintDecision[];
 }): Promise<AgentMessage[]> {
 	const { sessionId, db, messages, options, entryIdByRef } = args;
 	const entryIds =
@@ -310,7 +317,7 @@ export async function runAutoSearchHintForPi(args: {
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;
-	const existing = getAutoSearchHintDecisions(db, sessionId);
+	const existing = args.decisions ?? getAutoSearchHintDecisions(db, sessionId);
 	const existingForMessage = existing.find(
 		(decision) => decision.messageId === userMsgId,
 	);
@@ -327,6 +334,13 @@ export async function runAutoSearchHintForPi(args: {
 		);
 		return messages;
 	}
+
+	// A retryable search may finish on a later tool continuation. Compute a new
+	// decision only while the target user is still the live array tail; otherwise
+	// appending the recovered hint would rewrite an already-served cache prefix.
+	// Persisted decisions were replayed above because replay is byte restoration,
+	// not a new mutation.
+	if (found.index !== messages.length - 1) return messages;
 
 	await args.ensureProjectRegistered?.();
 

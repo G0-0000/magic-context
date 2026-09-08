@@ -1,4 +1,3 @@
-import * as crypto from "node:crypto";
 import {
     type AuthorityModuleClient,
     checksumAuthoritySeedRows,
@@ -24,11 +23,9 @@ import {
     deriveTagLoadFloor,
     getActiveTagsBySession,
     getActiveTagTokenTotalsByMessage,
-    getHistorianFailureState,
     getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
     getTagsByNumbers,
-    loadPersistedUsage,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
@@ -40,11 +37,10 @@ import {
     clearPersistedReasoningWatermark,
     clearThinkingBindingRecoveryIf,
     getOverflowState,
-    loadProtectedTailMeta,
+    loadTransformPassStateSnapshot,
     recordOverflowDetected,
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
-    setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import type { Tagger } from "../../features/magic-context/tagger";
@@ -63,7 +59,6 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
-import { applyMidTurnDeferral, detectMidTurnBypassReason } from "./boundary-execution";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
@@ -99,7 +94,7 @@ import {
 } from "./inject-compartments";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, projectLkgEntry, resolveLkgModelKeys } from "./lkg-replay";
-import { dropSlot, getSlot } from "./lkg-slot";
+import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import { createPassOutcome } from "./pass-outcome";
 import {
@@ -111,7 +106,7 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { readRawSessionMessages } from "./read-session-chunk";
-import { findLastAssistantModelFromOpenCodeDb, midTurnFromMessages } from "./read-session-db";
+import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -124,7 +119,11 @@ import {
 } from "./strip-content";
 import { injectTemporalMarkers } from "./temporal-awareness";
 import { runCompartmentPhase } from "./transform-compartment-phase";
-import { loadContextUsage, resolveSchedulerDecision } from "./transform-context-state";
+import {
+    contextUsagePassSnapshot,
+    loadContextUsage,
+    resolveSchedulerDecision,
+} from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
     applyFlushedStatuses,
@@ -748,6 +747,7 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         const resolvedSessionId = sessionId;
+        beginLkgPass(sessionId);
         clearOpenCodePendingTransformDecision(sessionId);
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
 
@@ -998,7 +998,7 @@ export function createTransform(deps: TransformDeps) {
         // zero last_context_percentage / last_input_tokens; the proactive
         // shrinking-switch arm and the protected-tail boundary sizing need the
         // pre-reset values, so capture them once, here, up front.
-        const persistedUsageBeforeResets = loadPersistedUsage(db, sessionId);
+        const persistedUsageBeforeResets = contextUsagePassSnapshot(sessionMeta).persistedUsage;
 
         // Detect model changes early in the transform, BEFORE loading context
         // usage, so threshold checks (95% blocking, 80% emergency nudge) and the
@@ -1099,7 +1099,8 @@ export function createTransform(deps: TransformDeps) {
         // `persistedUsageBeforeResets` (captured above, before the model-change
         // clear too) holds the pre-reset usage that restart recovery and
         // protected-tail boundary sizing rely on.
-        const historianFailureState = getHistorianFailureState(db, sessionId);
+        const earlyStateSnapshot = loadTransformPassStateSnapshot(db, sessionId);
+        const historianFailureState = earlyStateSnapshot.historianFailure;
 
         if (isFirstTransformPassForSession && sessionMeta) {
             const persistedPct = sessionMeta.lastContextPercentage ?? 0;
@@ -1125,10 +1126,18 @@ export function createTransform(deps: TransformDeps) {
 
         // Compute context usage AFTER first-pass reset so threshold checks use
         // clean state (0%) instead of stale values from a previous model/session.
-        let contextUsageEarly = loadContextUsage(deps.contextUsageMap, db, sessionId);
+        let contextUsageEarly = loadContextUsage(
+            deps.contextUsageMap,
+            db,
+            sessionId,
+            contextUsagePassSnapshot(sessionMeta),
+        );
 
         let recoveryNoHeadEscapeActive = false;
         let emergencyRecoveryArmed = false;
+        let overflowStateMutatedThisPass = false;
+        let recoveryNoEligibleHeadCount =
+            earlyStateSnapshot.protectedTail.recoveryNoEligibleHeadCount;
         let emergencyRecoveryOrigin: "provider_overflow" | "proactive_model_shrink" | null = null;
         let usagePercentageSynthetic = false;
 
@@ -1192,7 +1201,7 @@ export function createTransform(deps: TransformDeps) {
                     armModelKey != null &&
                     piModelRefToCanonical(lastMeasuredModelKey) !==
                         piModelRefToCanonical(armModelKey) &&
-                    !getOverflowState(db, sessionId).needsEmergencyRecovery
+                    !earlyStateSnapshot.overflow.needsEmergencyRecovery
                 ) {
                     sessionLog(
                         sessionId,
@@ -1214,18 +1223,24 @@ export function createTransform(deps: TransformDeps) {
                     // noHeadEscape (below) suppress the bump we just armed, so
                     // reset it for a fresh evaluation against the new model.
                     resetProtectedTailNoEligibleHead(db, sessionId);
+                    recoveryNoEligibleHeadCount = 0;
+                    overflowStateMutatedThisPass = true;
                 }
 
-                const overflowState = getOverflowState(db, sessionId);
+                // A proactive arm is a deliberate write-after-read boundary. Only
+                // that path re-reads; otherwise the pass uses its coherent snapshot.
+                const overflowState = overflowStateMutatedThisPass
+                    ? getOverflowState(db, sessionId)
+                    : earlyStateSnapshot.overflow;
                 emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
                 emergencyRecoveryOrigin = overflowState.emergencyRecoveryOrigin;
                 if (contextUsageEarly.percentage < 80 && !overflowState.needsEmergencyRecovery) {
                     resetProtectedTailNoEligibleHead(db, sessionId);
+                    recoveryNoEligibleHeadCount = 0;
                 }
-                const protectedTailMeta = loadProtectedTailMeta(db, sessionId);
                 const noHeadEscape =
                     overflowState.needsEmergencyRecovery &&
-                    protectedTailMeta.recoveryNoEligibleHeadCount >= RECOVERY_NO_HEAD_LIMIT;
+                    recoveryNoEligibleHeadCount >= RECOVERY_NO_HEAD_LIMIT;
                 recoveryNoHeadEscapeActive = noHeadEscape;
                 if (
                     overflowState.needsEmergencyRecovery &&
@@ -1370,7 +1385,7 @@ export function createTransform(deps: TransformDeps) {
         // approves an execute pass, so no pending-op drain, heuristic cleanup,
         // age sweep or smart drop can fire, and the execute-only
         // lastResponseTime watermark write below stays quiet too.
-        const schedulerDecisionEarly = compactionOff
+        const schedulerDecision = compactionOff
             ? ("defer" as const)
             : resolveSchedulerDecision(
                   deps.scheduler,
@@ -1380,38 +1395,8 @@ export function createTransform(deps: TransformDeps) {
                   deps.getModelKey?.(sessionId),
                   resolvedContextLimit,
               );
-        const midTurn = midTurnFromMessages(messages);
-        const bypassReason = detectMidTurnBypassReason({
-            contextUsage: contextUsageEarly,
-            sessionMeta,
-            historyRefreshSessions: deps.historyRefreshSessions,
-            sessionId,
-            effectiveExecuteThresholdPercentage,
-        });
-
-        const {
-            midTurnAdjustedSchedulerDecision,
-            sideEffect,
-            deferReason: schedulerDeferReason,
-        } = applyMidTurnDeferral({
-            base: schedulerDecisionEarly,
-            bypassReason,
-            midTurn,
-        });
-
-        if (sideEffect === "set-flag") {
-            const flagPayload = {
-                id: crypto.randomUUID(),
-                reason: `${schedulerDecisionEarly}-${bypassReason}`,
-                recordedAt: Date.now(),
-            };
-            setDeferredExecutePendingIfAbsent(db, sessionId, flagPayload);
-        }
-
-        sessionLog(
-            sessionId,
-            `[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
-        );
+        const schedulerDeferReason =
+            schedulerDecision === "defer" ? ("scheduler_defer" as const) : null;
         // Capture explicit history refresh immediately before the first
         // prepareCompartmentInjection consumer and before any drain. This is a
         // per-pass local, not shared deps state: concurrent transforms must not
@@ -1424,7 +1409,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionMeta.compartmentInProgress) &&
             contextUsageEarly.percentage < forceMaterializationPercentage;
         const canConsumeDeferredEarly = canConsumeDeferredOnThisPass({
-            schedulerDecision: midTurnAdjustedSchedulerDecision,
+            schedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: false,
             activeRunBlocksMaterialization: earlyActiveRunBlocksMaterialization,
@@ -1468,6 +1453,7 @@ export function createTransform(deps: TransformDeps) {
                     usage: boundaryUsageForProtectedTail,
                     usageSource: boundaryUsageSource,
                     emergencyTailScale,
+                    protectedTailMeta: earlyStateSnapshot.protectedTail,
                 });
                 if (emergencyTailScale) return snapshot;
                 _boundarySnapshotCache = snapshot;
@@ -2096,7 +2082,6 @@ export function createTransform(deps: TransformDeps) {
 
         // Reuse the early scheduler result — inputs haven't changed.
         const contextUsage = contextUsageEarly;
-        const schedulerDecision = midTurnAdjustedSchedulerDecision;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
@@ -2135,8 +2120,7 @@ export function createTransform(deps: TransformDeps) {
             // Scheduler "execute" passes are safe for compressor (they already bust cache
             // via pending ops); snapshot-drain keeps same-pass compressor signals safe.
             safeForBackgroundCompression:
-                historianRunnable &&
-                (isCacheBusting || midTurnAdjustedSchedulerDecision === "execute"),
+                historianRunnable && (isCacheBusting || schedulerDecision === "execute"),
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalUserMemories: deps.experimentalUserMemories,
@@ -2204,7 +2188,7 @@ export function createTransform(deps: TransformDeps) {
             getActiveCompartmentRun(sessionId) !== undefined &&
             contextUsageEarly.percentage < forceMaterializationPercentage;
         const canConsumeDeferredLate = canConsumeDeferredOnThisPass({
-            schedulerDecision: midTurnAdjustedSchedulerDecision,
+            schedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: compartmentPhase.justAwaitedPublication,
             activeRunBlocksMaterialization: lateActiveRunBlocksMaterialization,
@@ -2517,7 +2501,7 @@ export function createTransform(deps: TransformDeps) {
                 // drops clear the durable row regardless of mode. Deferred so the
                 // pass tail does not pay a synchronous multi-MB write; the slot
                 // copy is detached from live messages.
-                const capturedSlot = getSlot(sessionId);
+                const capturedSlot = getInMemorySlot(sessionId);
                 if (capturedSlot) {
                     setImmediate(() => saveLkgSlotToDb(db, sessionId, capturedSlot));
                 }
@@ -2601,14 +2585,20 @@ export function createTransform(deps: TransformDeps) {
         // total to isolate real conversation). A message with any NULL-count tag
         // (legacy, mid-backfill) is absent here this pass and live-tokenizes,
         // converging to the stored path once the tagger backfills it.
-        let storedByMessage: Map<
+        let storedByMessage = new Map<
             string,
             { conversation: number; toolCall: number; hasNull: boolean }
-        >;
-        try {
-            storedByMessage = getActiveTagTokenTotalsByMessage(db, sessionId);
-        } catch {
-            storedByMessage = new Map();
+        >();
+        const hasUncachedMessageId = messages.some((message) => {
+            const messageId = (message.info as { id?: string }).id;
+            return messageId !== undefined && !msgTokens.has(messageId);
+        });
+        if (hasUncachedMessageId) {
+            try {
+                storedByMessage = getActiveTagTokenTotalsByMessage(db, sessionId);
+            } catch {
+                storedByMessage = new Map();
+            }
         }
         let conversationTokens = 0;
         let toolCallTokens = 0;

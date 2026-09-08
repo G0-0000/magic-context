@@ -113,7 +113,7 @@ Group multiple project repos into a **workspace** so their project memories pool
 
 Live **provider cache** telemetry: per-turn cache read/write, input tokens, and severity.
 
-**How to read the timeline.**
+**How to read the timeline.** Start with [Where a pass lands](/concepts/context-reduction/#where-a-pass-lands): the execute percentage is a trigger, not a target, so a post-pass bar can land at any retained size.
 
 - The timeline is segmented by context-limit changes; each segment has its own y-axis scale. Bars show prompt size against the window with an inner fill for the cached portion, and drop markers where Magic Context initiated a reclaim.
 - Severity per turn: `stable`, `info`, `warning`, `warming`, `bust`, `full_bust`. A **bust** means the cached prefix was largely invalidated, so expect higher fresh token use on the next call. Sessions whose provider does not report cache data show as `UNKNOWN`.

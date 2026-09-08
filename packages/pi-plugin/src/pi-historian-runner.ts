@@ -95,6 +95,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { persistFilteredNoise } from "@magic-context/core/hooks/magic-context/persist-filtered-noise";
 import { producerWindowFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import {
 	createDefaultBoundarySnapshotForTests,
@@ -657,9 +658,17 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const forceKeepLastCompartmentForChunk =
 				forceKeepLastCompartment === true && !chunk.hasMore;
 			if (!chunk.text || chunk.messageCount === 0) {
+				if (persistFilteredNoise(db, sessionId, chunk, eligibleEndOrdinal)) {
+					telemetry.status = "noop";
+					telemetry.failureReason = "filtered noise skipped";
+					telemetry.chunkStartOrdinal = offset;
+					telemetry.chunkEndOrdinal = eligibleEndOrdinal - 1;
+					rollbackDrainReservation();
+					return;
+				}
 				sessionLog(
 					sessionId,
-					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
+					`historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${eligibleEndOrdinal - 1}`,
 				);
 				if (boundarySnapshot.usagePercentage < 80) {
 					if (!isWrapupInProgress(db, sessionId))
@@ -1202,7 +1211,20 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					return false;
 				return true;
 			});
+			const unanchoredPromotionSkipReason = discardedLast
+				? "discarded_last"
+				: weakLookaheadFinalCompartment
+					? "weak_lookahead_final_compartment"
+					: null;
+			if (unanchoredPromotionSkipReason) {
+				sessionLog(
+					sessionId,
+					`historian unanchored promotion skipped: reason=${unanchoredPromotionSkipReason} facts=${validatedPass.facts?.length ?? 0} user_observations=${validatedPass.userObservations?.length ?? 0} primers=${validatedPass.primerCandidates?.length ?? 0} events_publishable=${publishableEvents.length}/${validatedPass.events?.length ?? 0}`,
+				);
+			}
 			let promotedFactRefs: Array<{ memoryId: number; content: string }> = [];
+			let promotedFactCount = 0;
+			let publishedEventCount = 0;
 			let persistedIds: number[] = [];
 
 			// Atomic publication: append + durable facts/events/drop queue + clear failure state.
@@ -1245,12 +1267,14 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				// renderer's m[1] new-memories watermark. Promotion is in the SAME
 				// transaction as the boundary floor below, so both commit or both roll back.
 				if (promotionActive && !skipUnanchoredPromotion) {
-					promotedFactRefs = promoteSessionFactsDurable(
+					const promotion = promoteSessionFactsDurable(
 						db,
 						sessionId,
 						projectPath,
 						validatedPass.facts ?? [],
 					);
+					promotedFactRefs = promotion.newMemoryRefs;
+					promotedFactCount = promotion.factsPromoted;
 				}
 
 				if (publishableEvents.length > 0) {
@@ -1261,6 +1285,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 							publishableEvents,
 							persistedIds,
 						);
+						publishedEventCount = publishableEvents.length;
 						sessionLog(
 							sessionId,
 							`stored ${publishableEvents.length} compartment event(s)`,
@@ -1497,7 +1522,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				telemetry.factsEmitted = facts.length;
 				telemetry.factsByCategory =
 					facts.length > 0 ? tallyFactsByCategory(facts) : null;
-				telemetry.eventsEmitted = publishableEvents.length;
+				telemetry.factsPromoted = promotedFactCount;
+				telemetry.eventsEmitted = (validatedPass.events ?? []).length;
+				telemetry.eventsPublished = publishedEventCount;
 				telemetry.importanceMin = imp.min;
 				telemetry.importanceMax = imp.max;
 				telemetry.importanceAvg = imp.avg;
@@ -1551,7 +1578,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				compartmentIdMax: telemetry.compartmentIdMax ?? null,
 				factsEmitted: telemetry.factsEmitted ?? 0,
 				factsByCategory: telemetry.factsByCategory ?? null,
+				factsPromoted: telemetry.factsPromoted ?? 0,
 				eventsEmitted: telemetry.eventsEmitted ?? 0,
+				eventsPublished: telemetry.eventsPublished ?? 0,
 				importanceMin: telemetry.importanceMin ?? null,
 				importanceMax: telemetry.importanceMax ?? null,
 				importanceAvg: telemetry.importanceAvg ?? null,

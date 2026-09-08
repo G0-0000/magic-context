@@ -123,6 +123,25 @@ Interpretation: outage sensitivity is confirmed operationally, but **coverage-ho
 
 The memory lane was 10/10 at rank 3 or better when the visible-memory filter was disabled. The one shipped-lane miss (`fact-10`) was already in that Alfonso session's visible memory block, so its exclusion is intentional. The broad full search nevertheless retained only 3/10 fact golds at rank 10, showing the same cross-source calibration problem from the opposite direction.
 
+### Issue #428 calibration rerun (September 7)
+
+The 50-query fixture was rerun before and after the note-lane correction with the same Qwen provider and production `unifiedSearch` path. The live corpus had grown from 1,655 to 1,706 Magic Context compartments since the August snapshot, so the current-snapshot pre-fix row is the direct comparison; the shipped August row remains as the acceptance reference.
+
+| Class | Build / snapshot | R@1 | R@5 | R@10 |
+|---|---|---:|---:|---:|
+| Conversation (n=20) | Shipped, August 29 | 35% | 45% | 50% |
+| Conversation (n=20) | Pre-fix rerun, September 7 | 25% | 50% | 50% |
+| Conversation (n=20) | Fixed rerun, September 7 | **40%** | **80%** | **80%** |
+| Fact/rule (n=10) | Shipped, August 29 | 0% | 0% | 30% |
+| Fact/rule (n=10) | Pre-fix rerun, September 7 | 0% | 0% | 30% |
+| Fact/rule (n=10) | Fixed rerun, September 7 | **20%** | **30%** | **30%** |
+
+Normalizing note relevance alone moved conversation recall to 25% / 65% / 75% and fact/rule recall to 20% / 30% / 60%, but conversation rank-1 recall remained below the shipped 35% gate. Inspection of the remaining winners showed calibrated conversation hits narrowly losing to boosted memory, primer, and commit results. Raising only the message/compartment source boost from 1.15 to 1.275 produced the fixed row above while preserving pre-fix fact/rule recall at rank 10; the note, memory, primer, and commit boosts were unchanged.
+
+The pre-fix current-snapshot conversation top tens contained 116 notes, including 41 dismissed-note slots, and notes won rank 1 on 10/20 queries. The fixed run contained no dismissed notes and no note results in those conversation top tens. Notes remain available in note-only searches when active, pending, or ready; their broad-search absence on this corpus follows from relevance scores rather than a source toggle.
+
+The rerun used `bun scripts/ctx-search-benchmark.ts --out <snapshot> --p1-cache <cache> --skip-p1`. The P1 probe was skipped because this gate measures the production full-search and memory lanes, not representation experiments.
+
 ### Conversation cohorts
 
 | Conversation form | n | Full R@10 | Conversation lane R@10 | Raw chunk R@10 |

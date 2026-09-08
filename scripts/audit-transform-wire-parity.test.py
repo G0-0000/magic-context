@@ -832,7 +832,7 @@ class AuditTransformWireParityTest(unittest.TestCase):
                     "rows": 2,
                     "decisions": {"defer": 2},
                     "pass_bands": {"Defer": 2},
-                    "defer_reasons": {"none": 1, "mid_turn_boundary": 1},
+                    "defer_reasons": {"none": 1, "legacy_mid_turn_boundary": 1},
                 },
             )
             self.assertEqual(

@@ -44,11 +44,11 @@ function insert(database: Database, id: string, title: string, dir: string, crea
 }
 
 describe("retrospectiveOrphanStaleMs", () => {
-    test("is at least 60min and scales with timeout×3", () => {
-        expect(retrospectiveOrphanStaleMs(20)).toBe(60 * 60_000); // 60min floor wins
-        expect(retrospectiveOrphanStaleMs(30)).toBe(90 * 60_000); // 30×3 wins
-        expect(retrospectiveOrphanStaleMs([10, 45, undefined])).toBe(135 * 60_000);
-        expect(retrospectiveOrphanStaleMs(undefined)).toBe(60 * 60_000);
+    test("is at least 60min and adds detached-writer grace after timeout×3", () => {
+        expect(retrospectiveOrphanStaleMs(20)).toBe(75 * 60_000);
+        expect(retrospectiveOrphanStaleMs(30)).toBe(105 * 60_000);
+        expect(retrospectiveOrphanStaleMs([10, 45, undefined])).toBe(150 * 60_000);
+        expect(retrospectiveOrphanStaleMs(undefined)).toBe(75 * 60_000);
     });
 });
 
@@ -167,22 +167,25 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
         expect(deleted).toEqual(["historian-budget-expired"]);
     });
 
-    test("preserves stale children when keep_subagents is enabled", async () => {
+    test("keep_subagents preserves ordinary children but still sweeps the privacy class", async () => {
         db = makeOpencodeDb();
         insert(db, "kept-historian", HISTORIAN_CHILD_TITLE, DIR, now - staleMs - 1);
+        insert(db, "private-retrospective", RETROSPECTIVE_CHILD_TITLE, DIR, now - staleMs - 2);
+        insert(db, "private-curate", CURATE_CHILD_TITLE, DIR, now - staleMs - 3);
+        insert(db, "private-docs", MAINTAIN_DOCS_CHILD_TITLE, DIR, now - staleMs - 4);
         const { client, deleted } = deleteClient();
 
         const count = await sweepOrphanedRetrospectiveChildren({
             opencodeDb: db,
             client,
             sessionDirectory: DIR,
-            staleMs,
+            staleMs: { privacy: staleMs, historian: staleMs },
             now,
             keepSubagents: true,
         });
 
-        expect(count).toBe(0);
-        expect(deleted).toEqual([]);
+        expect(count).toBe(3);
+        expect(deleted).toEqual(["private-docs", "private-curate", "private-retrospective"]);
     });
 
     test("treats a delete error (404 / already removed) as success", async () => {

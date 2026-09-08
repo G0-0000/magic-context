@@ -1673,6 +1673,12 @@ function canonicalSchedulerDecision(observation: Row): string {
 			: legacy;
 }
 
+function canonicalSchedulerDeferReason(value: unknown): string {
+	const reason = String(value ?? "none");
+	// Persisted rows may retain this reason from before turn-boundary deferral was retired.
+	return reason === "mid_turn_boundary" ? "legacy_mid_turn_boundary" : reason;
+}
+
 function decisionEvidence(
 	context: Database,
 	store: Database,
@@ -1758,7 +1764,7 @@ function decisionEvidence(
 				schedulerRows += 1;
 				const passBand = String(observation.scheduler_decision ?? "none");
 				const decision = canonicalSchedulerDecision(observation);
-				const deferReason = String(observation.defer_reason ?? "none");
+				const deferReason = canonicalSchedulerDeferReason(observation.defer_reason);
 				scheduler[decision] = (scheduler[decision] ?? 0) + 1;
 				schedulerPassBands[passBand] = (schedulerPassBands[passBand] ?? 0) + 1;
 				schedulerDeferReasons[deferReason] =

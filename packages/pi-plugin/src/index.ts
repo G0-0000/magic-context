@@ -61,7 +61,10 @@ import {
 	openDatabaseAsync,
 	setSqlitePragmaConfig,
 } from "@magic-context/core/features/magic-context/storage-db";
-import { getOverflowState } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import {
+	clearDetectedContextLimit,
+	getOverflowState,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { runDeferredV22Backfill } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
 import { setCtxReduceRegisteredGlobally } from "@magic-context/core/hooks/magic-context/ctx-reduce-availability";
 import {
@@ -159,6 +162,7 @@ import {
 	unregisterPiDreamerProject,
 } from "./dreamer";
 import { loadDefaultPiSessionApi } from "./dreamer/pi-session-api";
+import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
@@ -559,6 +563,7 @@ function resolvePiPressureContextLimit(args: {
 	sessionId: string;
 	piContextWindow: number;
 	model?: { provider?: string; id?: string; maxTokens?: number };
+	provenInputTokens?: number;
 }): number {
 	// Pi reports the model's context window directly (ctx.getContextUsage() /
 	// ctx.model.contextWindow) — its own authoritative source. We no longer
@@ -566,7 +571,11 @@ function resolvePiPressureContextLimit(args: {
 	// garbage window can't poison pressure (mirrors OpenCode's SDK sane bound).
 	let detectedContextLimit: number | undefined;
 	try {
-		const overflowState = getOverflowState(args.db, args.sessionId);
+		const modelKey =
+			args.model?.provider && args.model.id
+				? piModelRefToCanonical(`${args.model.provider}/${args.model.id}`)
+				: undefined;
+		const overflowState = getOverflowState(args.db, args.sessionId, modelKey);
 		if (overflowState.detectedContextLimit > 0) {
 			detectedContextLimit = overflowState.detectedContextLimit;
 		}
@@ -578,6 +587,7 @@ function resolvePiPressureContextLimit(args: {
 			rawContextWindow: args.piContextWindow,
 			model: args.model,
 			detectedContextLimit,
+			provenInputTokens: args.provenInputTokens,
 		}) ?? 0
 	);
 }
@@ -592,14 +602,13 @@ export async function persistPiPressureFromMessageEnd(args: {
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
 	const { provider, model } = getPiMessageModel(args.message);
-	const effectiveContextLimit = resolvePiPressureContextLimit({
-		db: args.db,
-		sessionId: args.sessionId,
-		piContextWindow: args.piContextWindow,
-		model: args.piModel ?? { provider, id: model },
-	});
+	const activeModel = args.piModel ?? { provider, id: model };
+	const modelKey =
+		activeModel.provider && activeModel.id
+			? piModelRefToCanonical(`${activeModel.provider}/${activeModel.id}`)
+			: undefined;
 	const usage = extractAssistantUsage(args.message);
-	const pressure = computePiPressure(usage, effectiveContextLimit);
+	const rawPressure = computePiPressure(usage, args.piContextWindow);
 	const msg =
 		args.message && typeof args.message === "object"
 			? (args.message as { errorMessage?: unknown })
@@ -607,55 +616,85 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const messageHadOverflowError =
 		typeof msg?.errorMessage === "string" &&
 		detectOverflow(msg.errorMessage).isOverflow;
+	const requestSucceeded = !messageHadOverflowError;
+	if (requestSucceeded && rawPressure) {
+		const rawOverflow = getOverflowState(args.db, args.sessionId);
+		const detectedLimitMatchesModel =
+			rawOverflow.detectedContextLimitModelKey === null ||
+			(modelKey !== undefined &&
+				rawOverflow.detectedContextLimitModelKey === modelKey);
+		if (
+			rawOverflow.detectedContextLimit > 0 &&
+			detectedLimitMatchesModel &&
+			rawPressure.inputTokens > rawOverflow.detectedContextLimit
+		) {
+			clearDetectedContextLimit(args.db, args.sessionId);
+			info(
+				`message_end: detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${rawPressure.inputTokens}-token request; using Pi contextWindow`,
+			);
+		}
+	}
+
+	const meta = getOrCreateSessionMeta(args.db, args.sessionId);
+	const observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
+	const effectiveContextLimit = resolvePiPressureContextLimit({
+		db: args.db,
+		sessionId: args.sessionId,
+		piContextWindow: args.piContextWindow,
+		model: activeModel,
+		provenInputTokens: observedSafeInputTokens,
+	});
+	const reportedContextLimit =
+		resolvePiUsableContextLimit({
+			rawContextWindow: args.piContextWindow,
+			model: activeModel,
+		}) ?? 0;
+	const pressure = computePiPressure(usage, effectiveContextLimit);
 	const updates: Partial<{
 		lastResponseTime: number;
 		lastContextPercentage: number;
 		lastInputTokens: number;
+		lastUsageContextLimit: number;
 		observedSafeInputTokens: number;
 		cacheAlertSent: boolean;
 	}> = { lastResponseTime: Date.now() };
 
 	if (pressure) {
-		const percentage = pressure.percentage;
-		const contextLimit = effectiveContextLimit;
-		const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-		const observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
+		const provenSafeInputTokens = requestSucceeded
+			? Math.max(observedSafeInputTokens, pressure.inputTokens)
+			: observedSafeInputTokens;
+		const contextLimit = requestSucceeded
+			? Math.max(effectiveContextLimit, provenSafeInputTokens)
+			: effectiveContextLimit;
+		const percentage =
+			contextLimit > 0 ? (pressure.inputTokens / contextLimit) * 100 : 0;
 		if (
-			percentage > 100 &&
-			observedSafeInputTokens > 0 &&
-			pressure.inputTokens <= observedSafeInputTokens * 2
+			requestSucceeded &&
+			reportedContextLimit > 0 &&
+			reportedContextLimit < provenSafeInputTokens &&
+			!meta.cacheAlertSent
 		) {
-			// Pi resolves the window from its own runtime, not a cache we could
-			// reload — so a >100% reading with a known-good safe baseline means
-			// Pi's reported contextWindow is genuinely wrong. There's nothing to
-			// re-fetch; surface the alert (overflow detection still captures a
-			// real lower cap separately).
-			if (!meta.cacheAlertSent) {
-				updates.cacheAlertSent = true;
-				const safeTokens = Math.max(
-					observedSafeInputTokens,
-					pressure.inputTokens,
-				);
-				const modelLabel =
-					provider && model ? `${provider}/${model}` : "the active model";
-				await args.notifyIssue?.(
-					`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(contextLimit)} tokens for ${modelLabel} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the reported limit looks wrong. Restart Pi if you suspect this is incorrect.`,
-				);
-			}
+			updates.cacheAlertSent = true;
+			const modelLabel =
+				activeModel.provider && activeModel.id
+					? `${activeModel.provider}/${activeModel.id}`
+					: "the active model";
+			await args.notifyIssue?.(
+				`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`,
+			);
 		}
 		updates.lastContextPercentage = percentage;
 		updates.lastInputTokens = pressure.inputTokens;
-		if (!messageHadOverflowError) {
-			updates.observedSafeInputTokens = Math.max(
-				observedSafeInputTokens,
-				pressure.inputTokens,
-			);
+		updates.lastUsageContextLimit = contextLimit;
+		if (requestSucceeded) {
+			updates.observedSafeInputTokens = provenSafeInputTokens;
 		}
 	} else if (typeof args.piTokens === "number") {
 		updates.lastInputTokens = args.piTokens;
 		if (effectiveContextLimit > 0) {
 			updates.lastContextPercentage =
 				(args.piTokens / effectiveContextLimit) * 100;
+			updates.lastUsageContextLimit = effectiveContextLimit;
 		}
 	}
 
@@ -1313,6 +1352,7 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
+	registerPiDroppedInputGuard(pi);
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled !== false;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay !== false;

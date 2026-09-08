@@ -143,8 +143,11 @@ export interface SynapseBatchLedgerInput {
     requestKey: string;
 }
 
-export function beginSynapseBatchLedger(db: Database, input: SynapseBatchLedgerInput): void {
-    const now = Date.now();
+export function beginSynapseBatchLedger(
+    db: Database,
+    input: SynapseBatchLedgerInput,
+    now = Date.now(),
+): void {
     db.prepare(
         `INSERT INTO synapse_batch_ledger
             (session_id, project_path, scope, manifest_json, request_key, status, created_at, updated_at)
@@ -168,10 +171,11 @@ export function finishSynapseBatchLedger(
     sessionId: string,
     requestKey: string,
     status: "complete" | "partial" | "failed",
+    now = Date.now(),
 ): void {
     db.prepare(
         "UPDATE synapse_batch_ledger SET status = ?, updated_at = ? WHERE session_id = ? AND request_key = ?",
-    ).run(status, Date.now(), sessionId, requestKey);
+    ).run(status, now, sessionId, requestKey);
 }
 
 /** Retention for synapse_batch_ledger rows keyed by a project's synthetic

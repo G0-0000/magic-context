@@ -448,9 +448,12 @@ export async function runPiWrapup(
 							}),
 						ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 						forceDrainQuota: true,
-						// The runner applies this only to the actual final chunk; token-capped
-						// chunks are downgraded based on readSessionChunk().hasMore.
-						forceKeepLastCompartment: true,
+						// The boundary resolver caps each run's window, so chunk.hasMore cannot
+						// see the full drain target. Request weak-lookahead preservation only
+						// for the window that reaches that target; the runner still downgrades
+						// the hint if its own chunk reader stops early within the window.
+						forceKeepLastCompartment:
+							plan.snapshot.eligibleEndOrdinal >= plan.targetEligibleEndOrdinal,
 						onPublished: () => {
 							updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd });
 							signalPiDeferredHistoryRefresh(sessionId);

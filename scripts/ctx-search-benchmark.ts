@@ -181,8 +181,8 @@ interface P1Row {
 
 const SOURCE_BOOSTS: Record<string, number> = {
 	memory: 1.3,
-	message: 1.15,
-	compartment: 1.15,
+	message: 1.275,
+	compartment: 1.275,
 	git_commit: 1.2,
 	primer: 1.25,
 	note: 1,

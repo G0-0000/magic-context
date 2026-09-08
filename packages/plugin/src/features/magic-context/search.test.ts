@@ -448,7 +448,7 @@ describe("unifiedSearch", () => {
         }
     });
 
-    it("finds dismissed and pending notes across all statuses", async () => {
+    it("excludes dismissed notes while keeping pending notes searchable", async () => {
         const dismissed = addNote(db, "session", {
             sessionId: "ses-note-status",
             content: "Decided to keep the fallback cache disabled because telemetry was noisy.",
@@ -473,7 +473,7 @@ describe("unifiedSearch", () => {
             db,
             "ses-note-status",
             "git:test",
-            "telemetry noisy fallback",
+            "fallback cache disabled noisy",
             {
                 limit: 5,
                 memoryEnabled: false,
@@ -494,16 +494,103 @@ describe("unifiedSearch", () => {
             },
         );
 
-        expect(dismissedResults[0]).toMatchObject({
-            source: "note",
-            noteId: dismissed.id,
-            status: "dismissed",
-        });
+        expect(dismissedResults).toEqual([]);
         expect(pendingResults[0]).toMatchObject({
             source: "note",
             noteId: pending.id,
             status: "pending",
         });
+    });
+
+    it("does not let a one-token dismissed note outrank a semantic memory", async () => {
+        const snapshot = registerEmbeddingProject(db, "git:test");
+        const memory = insertMemory(db, {
+            projectPath: "git:test",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "The semantic memory contains the durable calibration decision.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([0.5, Math.sqrt(0.75)]), snapshot.modelId);
+        queryEmbedding = new Float32Array([1, 0]);
+
+        const dismissed = addNote(db, "session", {
+            sessionId: "ses-dismissed-rank",
+            content: "needle",
+        });
+        expect(
+            dismissNote(db, dismissed.id, {
+                sessionId: "ses-dismissed-rank",
+                projectPath: "git:test",
+            }),
+        ).toBe(true);
+
+        const results = await unifiedSearch(
+            db,
+            "ses-dismissed-rank",
+            "git:test",
+            "needle semantic calibration decision",
+            {
+                limit: 5,
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+            },
+        );
+
+        expect(results[0]).toMatchObject({ source: "memory", memoryId: memory.id });
+        expect(
+            results.some((result) => result.source === "note" && result.noteId === dismissed.id),
+        ).toBe(false);
+    });
+
+    it("scores notes by normalized keyword relevance instead of result position", async () => {
+        const dense = addNote(db, "session", {
+            sessionId: "ses-note-relevance",
+            content: "needle semantic calibration decision",
+        });
+        const weak = addNote(db, "session", {
+            sessionId: "ses-note-relevance",
+            content:
+                "A long unrelated reminder with background, historical context, filler, and one needle token.",
+        });
+
+        const results = await unifiedSearch(
+            db,
+            "ses-note-relevance",
+            "git:test",
+            "needle semantic calibration decision",
+            {
+                limit: 5,
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                sources: ["note"],
+            },
+        );
+        const notes = results.filter(
+            (result): result is Extract<(typeof results)[number], { source: "note" }> =>
+                result.source === "note",
+        );
+
+        expect(notes.map((note) => note.noteId)).toEqual([dense.id, weak.id]);
+        expect(notes[0].score).toBeCloseTo(0.8, 6);
+        expect(notes[1].score).toBeCloseTo(1 / 210, 6);
+
+        const singleTokenResults = await unifiedSearch(
+            db,
+            "ses-note-relevance",
+            "git:test",
+            "needle",
+            {
+                limit: 5,
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                sources: ["note"],
+            },
+        );
+        const weakSingleTokenHit = singleTokenResults.find(
+            (result) => result.source === "note" && result.noteId === weak.id,
+        );
+        expect(weakSingleTokenHit?.score).toBeLessThan(0.02);
     });
 
     it("scopes note search to the current session and project notes", async () => {

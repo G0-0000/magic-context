@@ -27,6 +27,7 @@ import {
 import { recordMessageFtsRowid } from "./message-fts-rowid-map";
 import {
     _resetProjectEmbeddingRegistryForTests,
+    _setShadowBackfillNowForTests,
     _setTestProviderFactoryForProject,
     drainCommitBacklogForProject,
     embedSessionCompartmentChunks,
@@ -1742,7 +1743,9 @@ describe("project embedding registry", () => {
         expect(getShadowBackfillStopReason(projectIdentity, "memory")).toBe("stalled_no_progress");
     });
 
-    it("re-arms a stalled shadow backfill when the same identity registers after recovery", async () => {
+    it("re-arms a stalled shadow backfill only for an explicit manual run after recovery", async () => {
+        let now = Date.now();
+        _setShadowBackfillNowForTests(() => now);
         let providerRecovered = false;
         _setTestProviderFactoryForProject((config) => {
             if (config.provider === "local") return new FakeEmbeddingProvider(config.model);
@@ -1794,7 +1797,14 @@ describe("project embedding registry", () => {
         );
         expect(repeated?.generation).toBe(first?.generation);
         await flushShadowEmbeddingBacklog(projectIdentity);
+        expect(getShadowBackfillStopReason(projectIdentity, "memory")).toBe("stalled_no_progress");
+        expect(loadAllEmbeddings(db, projectIdentity, repeated!.modelId).size).toBe(0);
 
+        now += 60 * 60 * 1000 + 1;
+        registerProjectShadowEmbedding(db, projectIdentity, shadowConfig, "/tmp/shadow-rearm", {
+            manualBackfill: true,
+        });
+        await flushShadowEmbeddingBacklog(projectIdentity);
         expect(getShadowBackfillStopReason(projectIdentity, "memory")).toBe("drained");
         expect(loadAllEmbeddings(db, projectIdentity, repeated!.modelId).size).toBe(3);
     });

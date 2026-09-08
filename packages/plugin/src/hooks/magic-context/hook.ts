@@ -81,6 +81,7 @@ import {
     resolveHistorianContextLimit,
     resolveKnownHistorianContextLimit,
 } from "./derive-budgets";
+import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
 import {
     autoEmbedAttemptedBySession,
     clearEmbedSessionState,
@@ -1615,6 +1616,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             }
         },
         "command.execute.before": createCommandExecuteBeforeHook(commandHandler),
+        "tool.execute.before": createDroppedInputToolExecuteBeforeHook(),
         "tool.execute.after": createToolExecuteAfterHook({
             db,
             channel1StateBySession,

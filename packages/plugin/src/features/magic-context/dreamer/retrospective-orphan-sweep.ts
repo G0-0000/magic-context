@@ -8,10 +8,9 @@ type OpencodeClient = PluginContext["client"];
 /**
  * Age-gated backstop for internal children that carry raw user or project text.
  *
- * Historian children deliberately remain after prompt completion because OpenCode
- * can still have detached writers persisting their final parts. Dreamer children
- * normally delete themselves in `finally`, but a hard SIGKILL/OOM can orphan them.
- * This sweep is the safe retirement path for both cases.
+ * Internal children deliberately remain after prompt completion because OpenCode
+ * can still have detached writers persisting their final parts. This sweep is the
+ * only retirement path for historian and privacy-sensitive Dreamer children.
  *
  * CONCURRENCY: `session.delete` has no cross-process "active session" lease (OC
  * peer confirmed), so the ONLY safe filter is AGE — a child older than any
@@ -63,8 +62,13 @@ export const INTERNAL_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMatches = {
     prefixes: PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES.prefixes,
 };
 
-/** Stale threshold from task timeout(s): max(60min, maxTimeout×3) — comfortably
- *  past every swept child type so a live child is never swept. */
+const DREAMER_DETACHED_WRITER_GRACE_MS = 15 * 60_000;
+
+/**
+ * Keep privacy-sensitive Dreamer children beyond the longest task budget and an
+ * explicit detached-writer grace period. The 60-minute floor protects short or
+ * missing timeout configurations.
+ */
 export function retrospectiveOrphanStaleMs(
     taskTimeoutMinutes: number | undefined | readonly (number | undefined)[],
 ): number {
@@ -76,7 +80,7 @@ export function retrospectiveOrphanStaleMs(
         20,
     );
     const timeoutMs = maxTimeoutMinutes * 60_000;
-    return Math.max(60 * 60_000, timeoutMs * 3);
+    return Math.max(60 * 60_000, timeoutMs * 3 + DREAMER_DETACHED_WRITER_GRACE_MS);
 }
 
 const HISTORIAN_OUTER_ATTEMPTS = 3;
@@ -114,31 +118,77 @@ interface OrphanRow {
  * DB/schema/API error is logged and skipped (never throws into the caller's
  * sweep). Returns the count deleted.
  */
+type InternalChildStaleMs =
+    | number
+    | {
+          privacy: number;
+          historian: number;
+      };
+
+function titlePredicate(
+    matches: PrivacySensitiveChildTitleMatches,
+    params: unknown[],
+): string | null {
+    const exactClauses = matches.exact.length
+        ? [`title IN (${matches.exact.map(() => "?").join(", ")})`]
+        : [];
+    const prefixClauses = matches.prefixes.map(() => "title LIKE ?");
+    const clauses = [...exactClauses, ...prefixClauses];
+    if (clauses.length === 0) return null;
+    params.push(...matches.exact, ...matches.prefixes.map((prefix) => `${prefix}%`));
+    return `(${clauses.join(" OR ")})`;
+}
+
 export async function sweepOrphanedRetrospectiveChildren(args: {
     opencodeDb: Database | null;
     client: OpencodeClient;
     sessionDirectory: string;
-    staleMs: number;
+    staleMs: InternalChildStaleMs;
     titleMatches?: PrivacySensitiveChildTitleMatches;
     now?: number;
     keepSubagents?: boolean;
 }): Promise<number> {
-    const { opencodeDb, client, sessionDirectory, staleMs } = args;
-    const titleMatches = args.titleMatches ?? INTERNAL_CHILD_TITLE_MATCHES;
-    if (!opencodeDb || args.keepSubagents === true) return 0;
+    const { opencodeDb, client, sessionDirectory } = args;
+    if (!opencodeDb) return 0;
     const now = args.now ?? Date.now();
-    const cutoff = now - staleMs;
+    const predicateParams: unknown[] = [];
+    const agePredicates: string[] = [];
 
-    const exactClauses = titleMatches.exact.length
-        ? [`title IN (${titleMatches.exact.map(() => "?").join(", ")})`]
-        : [];
-    const prefixClauses = titleMatches.prefixes.map(() => "title LIKE ?");
-    const titleClauses = [...exactClauses, ...prefixClauses];
-    if (titleClauses.length === 0) return 0;
-    const titleParams = [
-        ...titleMatches.exact,
-        ...titleMatches.prefixes.map((prefix) => `${prefix}%`),
-    ];
+    if (typeof args.staleMs === "number") {
+        const requestedTitles = titlePredicate(
+            args.titleMatches ?? INTERNAL_CHILD_TITLE_MATCHES,
+            predicateParams,
+        );
+        if (!requestedTitles) return 0;
+        if (args.keepSubagents === true) {
+            const privacyTitles = titlePredicate(
+                PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
+                predicateParams,
+            );
+            if (!privacyTitles) return 0;
+            agePredicates.push(`(${requestedTitles} AND ${privacyTitles} AND time_created < ?)`);
+        } else {
+            agePredicates.push(`(${requestedTitles} AND time_created < ?)`);
+        }
+        predicateParams.push(now - args.staleMs);
+    } else {
+        const privacyTitles = titlePredicate(
+            PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
+            predicateParams,
+        );
+        if (privacyTitles) {
+            agePredicates.push(`(${privacyTitles} AND time_created < ?)`);
+            predicateParams.push(now - args.staleMs.privacy);
+        }
+        if (args.keepSubagents !== true) {
+            const historianTitles = titlePredicate(HISTORIAN_CHILD_TITLE_MATCHES, predicateParams);
+            if (historianTitles) {
+                agePredicates.push(`(${historianTitles} AND time_created < ?)`);
+                predicateParams.push(now - args.staleMs.historian);
+            }
+        }
+    }
+    if (agePredicates.length === 0) return 0;
 
     let rows: OrphanRow[];
     try {
@@ -146,13 +196,12 @@ export async function sweepOrphanedRetrospectiveChildren(args: {
             .prepare(
                 `SELECT id, time_created
                    FROM session
-                  WHERE (${titleClauses.join(" OR ")})
-                    AND directory = ?
-                    AND time_created < ?
+                  WHERE directory = ?
+                    AND (${agePredicates.join(" OR ")})
                   ORDER BY time_created ASC
                   LIMIT 200`,
             )
-            .all(...titleParams, sessionDirectory, cutoff) as OrphanRow[];
+            .all(sessionDirectory, ...predicateParams) as OrphanRow[];
     } catch (error) {
         // `session` table absent / schema drift / locked → skip silently.
         log(`[magic-context] internal child orphan sweep: read skipped (${String(error)})`);

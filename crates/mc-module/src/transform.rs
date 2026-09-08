@@ -45,9 +45,9 @@ use crate::scheduler::{
     SchedulerConfig, SchedulerInputs, SessionMeta, TailState,
 };
 use crate::selection::{
-    filter_reasoning_ineligible_decisions, is_reclaim_hint_excluded_tool, resolve_tool_tier,
-    select_reductions_with_outcome, PassClass, SelItem, SelKind, SelMessageRole, SelectionConfig,
-    SelectionContext, SelectionOutcome, AGE_RECLAIM_MIN_TOKENS,
+    dropped_input_payload, filter_reasoning_ineligible_decisions, is_reclaim_hint_excluded_tool,
+    resolve_tool_tier, select_reductions_with_outcome, PassClass, SelItem, SelKind, SelMessageRole,
+    SelectionConfig, SelectionContext, SelectionOutcome, AGE_RECLAIM_MIN_TOKENS,
 };
 use crate::tail_hygiene::{
     channel1_refire_tokens, effective_tail_hygiene, hygiene_band,
@@ -1747,9 +1747,15 @@ pub(crate) struct ProjectionCacheInput {
 pub struct TransformWithProjection {
     pub response: TransformResponse,
     pub projection: FlatProjection,
+    /// Historian preflight consumes the exact tag snapshot validated by this transform. The
+    /// snapshot is absent only on paths that return before normal tag hydration.
+    pub(crate) historian_tags: Option<Arc<Vec<McTagRow>>>,
     /// Native attachment uses the same validated tag baseline as the transform, avoiding a
     /// second numbers-only table scan after the response has been built.
     pub tag_numbers: BTreeMap<String, u64>,
+    /// Publication floor from the state accepted by this transform. Emergency follow-up uses it
+    /// as the pre-wait comparison point, then performs one fresh read after asynchronous work.
+    pub(crate) publication_floor_ordinal: Option<u64>,
     pub scheduler_pass: scheduler::PassDecision,
     pub scheduler_defer_reason: Option<scheduler::SchedulerDeferReason>,
     pub scheduler_drain_latch_active: bool,
@@ -2556,7 +2562,9 @@ fn lineage_protocol_passthrough(
     projection: FlatProjection,
 ) -> TransformWithProjection {
     TransformWithProjection {
+        historian_tags: None,
         tag_numbers: BTreeMap::new(),
+        publication_floor_ordinal: None,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -3142,7 +3150,9 @@ fn apply_additive_only(
         PassPlan::Defer | PassPlan::Reject(_) => None,
     };
     Ok(TransformWithProjection {
+        historian_tags: None,
         tag_numbers: BTreeMap::new(),
+        publication_floor_ordinal: meta.publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -3650,6 +3660,7 @@ fn apply_once(
                 );
             }
             return Ok(pending_passthrough_result(PendingPassthroughArgs {
+                historian_tags: Arc::clone(&tag_rows),
                 projection,
                 tag_numbers,
                 req,
@@ -3660,6 +3671,7 @@ fn apply_once(
                 reasoning_watermark: next_meta
                     .reasoning_cleared_through_tag
                     .max(next_meta.reasoning_cleared_through_ordinal),
+                publication_floor_ordinal: next_meta.publication_floor_ordinal,
                 transition_consumed: transition_consumed(&loaded.core),
                 committed: fingerprint_changed,
                 trim_mismatch,
@@ -3762,6 +3774,7 @@ fn apply_once(
             req.session_id, fingerprint, ambiguous
         );
         return Ok(pending_passthrough_result(PendingPassthroughArgs {
+            historian_tags: Arc::clone(&tag_rows),
             projection,
             tag_numbers,
             req,
@@ -3772,6 +3785,7 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
+            publication_floor_ordinal: meta.publication_floor_ordinal,
             transition_consumed: transition_consumed(&loaded.core),
             committed: true,
             trim_mismatch,
@@ -5850,7 +5864,9 @@ fn apply_once(
     timings.finalize = elapsed_ms(finalize_started_at);
     timings.total = elapsed_ms(total_started_at);
     Ok(TransformWithProjection {
+        historian_tags: Some(tag_rows),
         tag_numbers,
+        publication_floor_ordinal: meta.publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler_outcome.pass,
         scheduler_defer_reason: scheduler_outcome.defer_reason,
@@ -7800,6 +7816,7 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
 }
 
 struct PendingPassthroughArgs<'a> {
+    historian_tags: Arc<Vec<McTagRow>>,
     projection: FlatProjection,
     tag_numbers: BTreeMap<String, u64>,
     req: &'a TransformRequest,
@@ -7808,6 +7825,7 @@ struct PendingPassthroughArgs<'a> {
     rendered_memory_ids: Vec<i64>,
     revert_epoch: u64,
     reasoning_watermark: u64,
+    publication_floor_ordinal: Option<u64>,
     transition_consumed: bool,
     committed: bool,
     trim_mismatch: Option<TrimMismatch>,
@@ -7855,6 +7873,7 @@ fn pending_passthrough_messages(
 
 fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWithProjection {
     let PendingPassthroughArgs {
+        historian_tags,
         projection,
         tag_numbers,
         req,
@@ -7863,6 +7882,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         rendered_memory_ids,
         revert_epoch,
         reasoning_watermark,
+        publication_floor_ordinal,
         transition_consumed,
         committed,
         trim_mismatch,
@@ -7885,7 +7905,9 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
     timings.total = elapsed_ms(total_started_at);
     response.timings = Some(timings);
     TransformWithProjection {
+        historian_tags: Some(historian_tags),
         tag_numbers,
+        publication_floor_ordinal,
         projection,
         scheduler_pass: scheduler::PassDecision::Defer,
         scheduler_defer_reason: Some(scheduler::SchedulerDeferReason::SchedulerDefer),
@@ -8113,7 +8135,7 @@ fn tag_baseline_entry(
 /// Hydrate immutable tag rows from a cold baseline or an append-only tail. A post-read probe
 /// makes a concurrent mutation retry before its bytes reach the transform, and trigger-backed
 /// generations force a cold refill for replacement or deletion.
-fn load_cached_tags(
+pub(crate) fn load_cached_tags(
     store: &McStore,
     session_id: &str,
 ) -> Result<Arc<Vec<McTagRow>>, TransformError> {
@@ -13369,14 +13391,27 @@ fn build_output_with_tags_inner(
                     rebuilt.mark_modified();
                     for block in blocks {
                         if let Some(unit) = reduced.get(&block.block_index) {
-                            let display_payload = (unit.frozen_payload == "[dropped]"
-                                && unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
-                                .then(|| {
-                                    tag_overlay
-                                        .and_then(|overlay| overlay.tag_by_block_id.get(&block.id))
-                                        .map(|tag_number| format!("[dropped §{tag_number}§]"))
-                                })
-                                .flatten();
+                            let display_payload = if unit.kind == "skeleton" {
+                                let tag_number = (unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
+                                    .then(|| {
+                                        tag_overlay.and_then(|overlay| {
+                                            overlay.tag_by_block_id.get(&block.id).copied()
+                                        })
+                                    })
+                                    .flatten();
+                                Some(dropped_input_payload(tag_number))
+                            } else {
+                                (unit.frozen_payload == "[dropped]"
+                                    && unit.reset_rule != RED_SUPPRESS_TAG_OVERLAY_RULE)
+                                    .then(|| {
+                                        tag_overlay
+                                            .and_then(|overlay| {
+                                                overlay.tag_by_block_id.get(&block.id)
+                                            })
+                                            .map(|tag_number| format!("[dropped §{tag_number}§]"))
+                                    })
+                                    .flatten()
+                            };
                             rebuilt.content[block.block_index] = reduced_block(
                                 &block.wire,
                                 display_payload
@@ -23867,10 +23902,10 @@ pub(crate) mod tests {
                 .map(|part| part["state"]["input"].clone())
                 .collect::<Vec<_>>(),
             vec![
-                json!({ "detail": "xxxxx...[truncated]", "path": "a.txt" }),
-                json!({ "detail": "yyyyy...[truncated]", "path": "b.txt" }),
+                json!({ "dropped": "[dropped]" }),
+                json!({ "dropped": "[dropped]" }),
             ],
-            "model-visible native calls must retain only real argument keys"
+            "model-visible native calls must expose only the dropped-input marker"
         );
         assert!(parts.iter().all(|part| {
             part["state"]["status"] == "completed"
@@ -26902,7 +26937,7 @@ pub(crate) mod tests {
         let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
         assert_eq!(transition.action, "HARD");
         assert_ne!(transitioned_config, before_config);
-        assert!(transitioned_config.contains("tfe:4:tfe3"));
+        assert!(transitioned_config.contains("tfe:4:tfe4"));
         assert!(!serde_json::to_string(transition.messages())
             .unwrap()
             .contains("§1§"));
@@ -26944,7 +26979,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe:4:tfe3"));
+            .contains("tfe:4:tfe4"));
 
         let after_commit = run(&s, &request, &spine());
         assert_eq!(after_commit.action, "SOFT+");
@@ -26966,7 +27001,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe3"));
+            .contains("tfe4"));
 
         let replay = run(&s, &request, &spine());
         assert_eq!(replay.action, "SOFT+");
@@ -29464,7 +29499,7 @@ pub(crate) mod tests {
         let on_config = store.load("surface-flip").unwrap().meta.last_render_config;
         assert!(on_config.contains("tf1"));
         assert!(on_config.contains("gfull"));
-        assert!(on_config.contains("tfe:4:tfe3"));
+        assert!(on_config.contains("tfe:4:tfe4"));
         let on_steady = run(&store, &active, &spine());
         assert_ne!(on_steady.action, "HARD");
         assert_eq!(on_steady.surface_state, SurfaceState::Active);
@@ -33004,7 +33039,7 @@ pub(crate) mod tests {
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
             "mpe2".to_string(),
-            "tfe3".to_string(),
+            "tfe4".to_string(),
         );
         s.commit("staged-tfe", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
@@ -33020,7 +33055,7 @@ pub(crate) mod tests {
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
             "mpe3".to_string(),
-            "tfe3".to_string(),
+            "tfe4".to_string(),
         );
         assert_eq!(
             s.load("staged-tfe").unwrap().meta.last_render_config,
@@ -33043,19 +33078,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn opencode_identity_refuses_collateral_cc_profile_epoch_hard() {
+    fn opencode_identity_prices_global_skeleton_epoch_change_once() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let request = active_opencode_req(
-            "opencode-profile-epoch",
+            "opencode-skeleton-epoch",
             "rust-mode/tf1/gfull",
-            vec![wire_item("user", "m1", 1, &["stable bytes"])],
+            vec![unstamped_opencode_tool_pair(
+                "legacy-pair",
+                1,
+                "legacy-call",
+            )],
         );
         run(&s, &request, &spine());
         let mut loaded = s.load(&request.session_id).unwrap();
-        // Pin the previous format epochs to verify compatibility independently of this binary:
-        // memory 2, compartments 2, no OpenCode profile epoch, shared tagger 3.
-        let master_identity = effective_render_config_with_epochs(
+        let baseline_identity = loaded.meta.last_render_config.clone();
+        let old_identity = effective_render_config_with_epochs(
             &s,
             &request.render_config,
             "mre2".to_string(),
@@ -33063,12 +33101,40 @@ pub(crate) mod tests {
             String::new(),
             "tfe3".to_string(),
         );
-        assert_eq!(
-            loaded.meta.last_render_config.as_bytes(),
-            master_identity.as_bytes(),
-            "a Claude Code-only byte change must not alter OpenCode's render identity"
+        let new_identity = effective_render_config_with_epochs(
+            &s,
+            &request.render_config,
+            "mre2".to_string(),
+            "cre2".to_string(),
+            String::new(),
+            "tfe4".to_string(),
         );
-        loaded.meta.last_render_config = master_identity;
+        assert_ne!(old_identity, new_identity);
+
+        // Model a persisted epoch-3 session whose newest-window skeleton still
+        // contains legacy clamped arguments. Replacing those bytes must first
+        // advance render identity through a priced HARD, never a defer render.
+        loaded.core.frozen_units.extend([
+            red_unit(
+                "legacy-pair#0",
+                "skeleton",
+                r#"{"detail":"xxxxx...[truncated]","path":"pair.txt"}"#,
+            ),
+            red_unit("legacy-pair#1", "drop", "[dropped]"),
+            transition_consumed_unit(
+                &[
+                    RendererTransitionClass::PoisonedReasoning,
+                    RendererTransitionClass::UnmatchedPair,
+                    RendererTransitionClass::SplitCoverage,
+                    RendererTransitionClass::SyntheticAnchorSplit,
+                    RendererTransitionClass::ReductionEnvelope,
+                    RendererTransitionClass::TemporalParity,
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ]);
+        loaded.meta.last_render_config = old_identity;
         s.commit(
             &request.session_id,
             loaded.row_version,
@@ -33076,10 +33142,40 @@ pub(crate) mod tests {
             &loaded.meta,
         )
         .unwrap();
-        let replay = run(&s, &request, &spine());
+
+        let first = run(&s, &request, &spine());
+        assert_eq!(first.action, "HARD", "epoch 4 must price the byte change");
+        assert_eq!(first.materialize_reason.as_deref(), Some("epoch_change"));
+        assert_eq!(baseline_identity, new_identity);
         assert_eq!(
-            replay.action, "SOFT+",
-            "OpenCode must not pay a collateral HARD"
+            s.load(&request.session_id).unwrap().meta.last_render_config,
+            new_identity
+        );
+        let marker_input = first
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match &block.kind {
+                ck_wire::CkKind::ToolCall { input, .. } => Some(input),
+                _ => None,
+            })
+            .expect("served skeleton tool input");
+        assert_eq!(
+            marker_input
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["dropped"]
+        );
+
+        let replay = run(&s, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(first.messages()).unwrap(),
+            serde_json::to_vec(replay.messages()).unwrap(),
+            "post-HARD defer replay must remain byte-identical"
         );
     }
 

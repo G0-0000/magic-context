@@ -32,7 +32,12 @@ interface QueuedIgnoredNotification {
 
 const queuedIgnoredNotifications = new Map<string, QueuedIgnoredNotification[]>();
 const flushingIgnoredNotifications = new Set<string>();
-let midTurnDetector = (sessionId: string): boolean => shouldHoldIgnoredNotification(sessionId);
+const idleSessions = new Set<string>();
+const lastDeliveredText = new Map<string, string>();
+const activityEpoch = new Map<string, number>();
+const defaultHoldDetector = (sessionId: string): boolean =>
+    !idleSessions.has(sessionId) || shouldHoldIgnoredNotification(sessionId);
+let holdDetector = defaultHoldDetector;
 let notificationServerUrl: string | undefined;
 let noticeDeleter: ((sessionId: string, messageId: string) => Promise<boolean>) | undefined;
 let notificationDiagnosticObserverForTests: ((message: string) => void) | undefined;
@@ -44,6 +49,7 @@ function notificationDiagnostic(sessionId: string, message: string): void {
 
 function queueIgnoredNotification(notification: QueuedIgnoredNotification): void {
     const queued = queuedIgnoredNotifications.get(notification.sessionId) ?? [];
+    if (queued.at(-1)?.text === notification.text) return;
     queued.push(notification);
     if (queued.length > MAX_QUEUED_IGNORED_NOTIFICATIONS) {
         queued.splice(0, queued.length - MAX_QUEUED_IGNORED_NOTIFICATIONS);
@@ -109,13 +115,16 @@ export const __ignoredNotificationTest = {
     reset(): void {
         queuedIgnoredNotifications.clear();
         flushingIgnoredNotifications.clear();
-        midTurnDetector = (sessionId: string): boolean => shouldHoldIgnoredNotification(sessionId);
+        idleSessions.clear();
+        lastDeliveredText.clear();
+        activityEpoch.clear();
+        holdDetector = defaultHoldDetector;
         notificationServerUrl = undefined;
         noticeDeleter = undefined;
         notificationDiagnosticObserverForTests = undefined;
     },
-    setMidTurnDetector(detector: (sessionId: string) => boolean): void {
-        midTurnDetector = detector;
+    setHoldDetector(detector: (sessionId: string) => boolean): void {
+        holdDetector = detector;
     },
     setNoticeDeleter(deleter: (sessionId: string, messageId: string) => Promise<boolean>): void {
         noticeDeleter = deleter;
@@ -196,9 +205,10 @@ async function sendIgnoredMessageNow(
     params: NotificationParams,
     forcePersist: boolean,
 ): Promise<NotificationDeliveryDisposition> {
+    const epoch = activityEpoch.get(sessionId) ?? 0;
     // A final active-run check closes the window created by the title/context
     // lookups below. The normal caller checks before entering this function too.
-    if (midTurnDetector(sessionId)) {
+    if (holdDetector(sessionId)) {
         holdIgnoredNotification(
             { client, sessionId, text, params, forcePersist },
             "during target checks",
@@ -217,10 +227,12 @@ async function sendIgnoredMessageNow(
         return "skipped";
     }
 
+    if ((activityEpoch.get(sessionId) ?? 0) !== epoch) return "skipped";
+
     // Check again immediately before constructing the prompt. This prevents an
     // active run that began during title lookup or prompt-context resolution
     // from receiving a new user row.
-    if (midTurnDetector(sessionId)) {
+    if (holdDetector(sessionId)) {
         holdIgnoredNotification(
             { client, sessionId, text, params, forcePersist },
             "during target checks",
@@ -270,7 +282,8 @@ async function sendIgnoredMessageNow(
 
     // The context lookup above can yield to a newly started run. Check directly
     // before the SDK call so the final mutation gate covers that last window too.
-    if (midTurnDetector(sessionId)) {
+    if ((activityEpoch.get(sessionId) ?? 0) !== epoch) return "skipped";
+    if (holdDetector(sessionId)) {
         holdIgnoredNotification({ client, sessionId, text, params, forcePersist }, "before append");
         return "queued";
     }
@@ -314,10 +327,12 @@ async function sendIgnoredMessageNow(
                 params,
                 forcePersist,
                 messageId,
+                epoch,
             })
         ) {
-            return "queued";
+            return (activityEpoch.get(sessionId) ?? 0) !== epoch ? "skipped" : "queued";
         }
+        lastDeliveredText.set(sessionId, text);
         notifyDelivered(sessionId, params);
         return "sent";
     } catch (error: unknown) {
@@ -383,18 +398,20 @@ async function revertNoticeIfUnsafe(notification: {
     params: NotificationParams;
     forcePersist: boolean;
     messageId: string | undefined;
+    epoch: number;
 }): Promise<boolean> {
     // Re-read the hold predicate after the write. If a run started or an
     // unanswered real user prompt exists, our row must not remain the newest
     // user message: OpenCode's loop-exit check uses MessageV2.latest without
     // filtering ignored/noReply rows. Prefer a lost notice over a phantom turn.
-    if (!midTurnDetector(notification.sessionId)) return false;
+    const superseded = (activityEpoch.get(notification.sessionId) ?? 0) !== notification.epoch;
+    if (!superseded && !holdDetector(notification.sessionId)) return false;
     if (notification.messageId) {
         const deleted = await deleteNoticeMessage(notification.sessionId, notification.messageId);
         if (deleted) {
             notificationDiagnostic(
                 notification.sessionId,
-                `notice rolled back (deleted row ${notification.messageId}); queued for idle delivery`,
+                `notice rolled back (deleted row ${notification.messageId}); ${superseded ? "discarded after activity" : "queued for idle delivery"}`,
             );
         } else {
             sessionLog(
@@ -408,6 +425,7 @@ async function revertNoticeIfUnsafe(notification: {
             "notice landed while a run was active but the new row id was not returned",
         );
     }
+    if (superseded) return true;
     queueIgnoredNotification({
         client: notification.client,
         sessionId: notification.sessionId,
@@ -438,7 +456,7 @@ export async function sendIgnoredMessage(
     // OpenCode's MessageV2.latest is role-based and treats an ignored-only user
     // row as the latest user turn. Do not create that invisible chronology entry
     // while a run is in flight or an unanswered real prompt exists.
-    if (midTurnDetector(sessionId)) {
+    if (holdDetector(sessionId)) {
         holdIgnoredNotification(
             { client, sessionId, text, params, forcePersist },
             "before target checks",
@@ -446,23 +464,26 @@ export async function sendIgnoredMessage(
         return "queued";
     }
 
+    // Reusing the already-delivered state is successful delivery, not a missing notice.
+    if (lastDeliveredText.get(sessionId) === text) return "sent";
     return sendIgnoredMessageNow(client, sessionId, text, params, forcePersist);
 }
 
 /**
- * Flush queued status lines after an event that may have made the session idle.
- * The event hook and tool.execute.after both call this; the same DB-backed gate
- * remains authoritative, so a non-idle event is harmless.
+ * Flush queued status lines only with an observed harness idle authorization.
+ * A terminal assistant message is not proof that OpenCode's run loop has exited.
  */
 export async function flushIgnoredMessages(sessionId: string): Promise<void> {
-    if (flushingIgnoredNotifications.has(sessionId) || midTurnDetector(sessionId)) return;
+    if (flushingIgnoredNotifications.has(sessionId) || holdDetector(sessionId)) return;
     const queued = queuedIgnoredNotifications.get(sessionId);
     if (!queued || queued.length === 0) return;
 
+    const epoch = activityEpoch.get(sessionId) ?? 0;
     queuedIgnoredNotifications.delete(sessionId);
     flushingIgnoredNotifications.add(sessionId);
     try {
         for (const notification of queued) {
+            if ((activityEpoch.get(sessionId) ?? 0) !== epoch) break;
             const disposition = await sendIgnoredMessage(
                 notification.client,
                 notification.sessionId,
@@ -487,6 +508,9 @@ export async function flushIgnoredMessages(sessionId: string): Promise<void> {
 export function clearIgnoredMessages(sessionId: string): void {
     queuedIgnoredNotifications.delete(sessionId);
     flushingIgnoredNotifications.delete(sessionId);
+    idleSessions.delete(sessionId);
+    lastDeliveredText.delete(sessionId);
+    activityEpoch.delete(sessionId);
 }
 
 /**
@@ -523,4 +547,38 @@ export async function sendUserPrompt(
         const msg = getErrorMessage(error);
         sessionLog(sessionId, "failed to send user prompt:", msg);
     }
+}
+
+/** Only session.idle authorizes user-row notices; activity revokes that authorization synchronously. */
+export function observeIgnoredNotificationEvent(event: {
+    type: string;
+    properties?: unknown;
+}): void {
+    const record = (value: unknown): Record<string, unknown> | undefined =>
+        value !== null && typeof value === "object"
+            ? (value as Record<string, unknown>)
+            : undefined;
+    const props = record(event.properties);
+    const info = record(props?.info);
+    const part = record(props?.part);
+    const sessionId = props?.sessionID ?? info?.sessionID ?? part?.sessionID;
+    if (typeof sessionId !== "string") return;
+    if (event.type === "session.idle") {
+        idleSessions.add(sessionId);
+        return;
+    }
+    if (event.type === "session.deleted") {
+        clearIgnoredMessages(sessionId);
+        return;
+    }
+    const active =
+        (event.type === "session.status" && record(props?.status)?.type !== "idle") ||
+        (event.type === "message.updated" && info?.role === "assistant") ||
+        (event.type === "message.part.updated" &&
+            part?.ignored !== true &&
+            part?.type !== "compaction");
+    if (!active) return;
+    idleSessions.delete(sessionId);
+    activityEpoch.set(sessionId, (activityEpoch.get(sessionId) ?? 0) + 1);
+    queuedIgnoredNotifications.delete(sessionId);
 }

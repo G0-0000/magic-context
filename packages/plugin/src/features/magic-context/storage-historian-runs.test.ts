@@ -61,7 +61,9 @@ test("records a success run with full metrics and reads back", () => {
         compartmentIdMax: 12,
         factsEmitted: 4,
         factsByCategory: { ARCHITECTURE: 3, NAMING: 1 },
+        factsPromoted: 3,
         eventsEmitted: 2,
+        eventsPublished: 1,
         importanceMin: 25,
         importanceMax: 88,
         importanceAvg: 56.5,
@@ -89,6 +91,8 @@ test("records a success run with full metrics and reads back", () => {
     expect(JSON.parse(row.facts_by_category_json as string)).toEqual({
         ARCHITECTURE: 3,
         NAMING: 1,
+        facts_promoted: 3,
+        events_published: 1,
     });
     expect(row.events_emitted).toBe(2);
     expect(row.importance_avg).toBe(56.5);

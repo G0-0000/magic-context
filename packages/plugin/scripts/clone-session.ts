@@ -119,6 +119,8 @@ const MAGIC_CONTEXT_EXCLUDED_REASONS: Record<string, string> = {
     recomp_facts: "recomp staging belongs to the source pass",
     recalls: "recall rows reference source tag ids",
 };
+const RETIRED_META_COLUMNS = new Set(["deferred_execute_state"]);
+
 const RESET_META_COLUMNS = new Set([
     "channel2_nudge_state",
     "channel2_nudge_claimed_at",
@@ -133,7 +135,6 @@ const RESET_META_COLUMNS = new Set([
     "emergency_recovery_origin",
     "compartment_in_progress",
     "wrapup_in_progress_state",
-    "deferred_execute_state",
     "last_transform_error",
 ]);
 
@@ -1054,11 +1055,16 @@ function copyContextMeta(
     partIds: IdMap,
 ): void {
     if (!tableExists(db, "session_meta")) return;
+    const metaColumns = columns(db, "session_meta").filter(
+        (column) => column.name !== "session_id" && !RETIRED_META_COLUMNS.has(column.name),
+    );
+    const selectedColumns = ["session_id", ...metaColumns.map((column) => column.name)]
+        .map(quoteIdentifier)
+        .join(", ");
     const source = db
-        .prepare("SELECT * FROM session_meta WHERE session_id = ?")
+        .prepare(`SELECT ${selectedColumns} FROM session_meta WHERE session_id = ?`)
         .get(sourceSessionId) as SqlRow | undefined;
     if (!source) return;
-    const metaColumns = columns(db, "session_meta").filter((column) => column.name !== "session_id");
     const assignments = metaColumns.map((column) => `${quoteIdentifier(column.name)} = ?`).join(", ");
     const values = metaColumns.map((column) => {
         const reset = contextMetaReset(column);

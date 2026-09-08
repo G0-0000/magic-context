@@ -1,4 +1,5 @@
 // @ts-check
+import { unified } from "@astrojs/markdown-remark";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import { remarkBaseLinks } from "./remark-base-links.mjs";
@@ -7,14 +8,20 @@ import { remarkBaseLinks } from "./remark-base-links.mjs";
 export default defineConfig({
     site: "https://docs.cortexkit.io",
     base: "/magic-context",
+    redirects: {
+        "/concepts/how-it-works/": "/magic-context/concepts/context-reduction/#where-a-pass-lands",
+    },
     // Nest output under /magic-context so the deployed asset tree matches the
     // URL space — sibling CortexKit plugin docs will share this subdomain.
     outDir: "./dist-root/magic-context",
     markdown: {
-        remarkPlugins: [remarkBaseLinks({ base: "/magic-context" })],
+        processor: unified({
+            remarkPlugins: [remarkBaseLinks({ base: "/magic-context" })],
+        }),
     },
     integrations: [
         starlight({
+            disable404Route: true,
             customCss: ["./src/styles/reference-tables.css"],
             title: "Magic Context",
             description:

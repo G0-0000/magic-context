@@ -10,6 +10,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     resolveCacheTtl,
     resolveContextLimit,
+    resolveContextWindowGeometry,
     resolveExecuteThreshold,
     resolveExecuteThresholdDetail,
     resolveModelKey,
@@ -47,6 +48,49 @@ describe("event-resolvers", () => {
 
             //#then
             expect(limit).toBe(200_000);
+        });
+
+        it("keeps a model-scoped successful request as a floor after a catalog regression", async () => {
+            const db = new Database(":memory:");
+            initializeDatabase(db);
+            runMigrations(db);
+            const sessionId = "ses-proven-context-floor";
+            try {
+                clearModelsDevCache();
+                await refreshModelLimitsFromApi({
+                    config: {
+                        providers: async () => ({
+                            data: {
+                                providers: [
+                                    {
+                                        id: "custom",
+                                        models: {
+                                            model: { limit: { context: 30_000 } },
+                                        },
+                                    },
+                                ],
+                            },
+                        }),
+                    },
+                });
+                updateSessionMeta(db, sessionId, {
+                    lastContextPercentage: 100,
+                    lastInputTokens: 90_000,
+                    lastUsageContextLimit: 90_000,
+                    lastObservedModelKey: "custom/model",
+                    observedSafeInputTokens: 90_000,
+                });
+
+                const context = { db, sessionID: sessionId };
+                expect(resolveContextLimit("custom", "model", context)).toBe(90_000);
+                expect(resolveTrustedContextLimit("custom", "model", context)).toBe(90_000);
+                expect(resolveContextWindowGeometry("custom", "model", context)?.usableSoft).toBe(
+                    90_000,
+                );
+            } finally {
+                clearModelsDevCache();
+                closeQuietly(db);
+            }
         });
 
         it("does not reserve output twice from a detected prompt-only ceiling", async () => {

@@ -150,10 +150,16 @@ export function runCompartmentPhase(
 
     return withRawSessionMessageCache(() => {
         try {
+            const preResolved = args.preResolvedBoundarySnapshot;
+            const hasPreResolvedAnchor = preResolved?.lastCompartmentEndMessageId !== undefined;
             primeTailRawMessageCache({
                 sessionId: args.resolvedSessionId,
-                lastCompartmentEnd: getLastCompartmentEndMessage(args.db, args.resolvedSessionId),
-                anchorMessageId: getLastCompartmentEndMessageId(args.db, args.resolvedSessionId),
+                lastCompartmentEnd: hasPreResolvedAnchor
+                    ? preResolved.offset - 1
+                    : getLastCompartmentEndMessage(args.db, args.resolvedSessionId),
+                anchorMessageId: hasPreResolvedAnchor
+                    ? (preResolved.lastCompartmentEndMessageId ?? null)
+                    : getLastCompartmentEndMessageId(args.db, args.resolvedSessionId),
             });
         } catch (error) {
             // Priming is a pure optimization — on any failure the phase falls
@@ -201,8 +207,18 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             rebuiltHistoryThisPass,
         };
     }
-    let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null = null;
-    let lastObservedCompartmentEnd = -1;
+    let rawEligibility: ReturnType<typeof getRawHistoryEligibility> | null =
+        args.preResolvedBoundarySnapshot
+            ? {
+                  lastCompartmentEnd: args.preResolvedBoundarySnapshot.offset - 1,
+                  offset: args.preResolvedBoundarySnapshot.offset,
+                  rawMessageCount: args.preResolvedBoundarySnapshot.rawMessageCountAtTrigger,
+                  hasRawBeyondLastCompartment:
+                      args.preResolvedBoundarySnapshot.rawMessageCountAtTrigger >=
+                      args.preResolvedBoundarySnapshot.offset,
+              }
+            : null;
+    let lastObservedCompartmentEnd = rawEligibility?.lastCompartmentEnd ?? -1;
     let cachedBoundarySnapshot: ProtectedTailBoundarySnapshot | null = null;
 
     function hasNewRawHistoryForCompartment(): boolean {

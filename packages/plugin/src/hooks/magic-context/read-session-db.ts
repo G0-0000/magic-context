@@ -14,7 +14,7 @@ interface RawCountRow {
     count?: number;
 }
 
-interface AssistantMidTurnRow {
+interface AssistantAwaitingToolsRow {
     id?: string;
     finish?: string | null;
     timeCreated?: number;
@@ -91,7 +91,7 @@ export function getRawSessionMessageCountFromDb(db: Database, sessionId: string)
     return typeof row?.count === "number" ? row.count : 0;
 }
 
-interface MidTurnMessage {
+interface TurnStateMessage {
     info: Record<string, unknown>;
     parts: readonly unknown[];
 }
@@ -133,17 +133,17 @@ function isMachineGeneratedPart(value: unknown): boolean {
     );
 }
 
-function messageTimeCreated(message: MidTurnMessage, fallback: number): number {
+function messageTimeCreated(message: TurnStateMessage, fallback: number): number {
     const time = asRecord(message.info.time);
     return typeof time?.created === "number" ? time.created : fallback;
 }
 
 function latestMessageByRole(
-    messages: readonly MidTurnMessage[],
+    messages: readonly TurnStateMessage[],
     role: "assistant" | "user",
     realUserOnly = false,
-): { message: MidTurnMessage; timeCreated: number } | null {
-    let latest: { message: MidTurnMessage; timeCreated: number; index: number } | null = null;
+): { message: TurnStateMessage; timeCreated: number } | null {
+    let latest: { message: TurnStateMessage; timeCreated: number; index: number } | null = null;
     for (const [index, message] of messages.entries()) {
         if (message.info.role !== role) continue;
         if (
@@ -165,8 +165,8 @@ function latestMessageByRole(
     return latest;
 }
 
-/** Apply the OpenCode DB mid-turn predicate to the transform pass's own message array. */
-export function midTurnFromMessages(messages: readonly MidTurnMessage[]): boolean {
+/** Return whether the latest assistant is still waiting for local tool execution. */
+export function assistantAwaitingToolsFromMessages(messages: readonly TurnStateMessage[]): boolean {
     const latestAssistant = latestMessageByRole(messages, "assistant");
     if (!latestAssistant) return false;
     const assistantTime = asRecord(latestAssistant.message.info.time);
@@ -182,9 +182,9 @@ export function midTurnFromMessages(messages: readonly MidTurnMessage[]): boolea
 
 /** Apply the notice-hold predicate to an in-memory OpenCode message array. */
 export function shouldHoldIgnoredNotificationFromMessages(
-    messages: readonly MidTurnMessage[],
+    messages: readonly TurnStateMessage[],
 ): boolean {
-    if (midTurnFromMessages(messages)) return true;
+    if (assistantAwaitingToolsFromMessages(messages)) return true;
     const latestAssistant = latestMessageByRole(messages, "assistant");
     if (latestAssistant) {
         const finish = latestAssistant.message.info.finish;
@@ -197,7 +197,7 @@ export function shouldHoldIgnoredNotificationFromMessages(
     );
 }
 
-function trackedMessages(session: TrackedSession): MidTurnMessage[] {
+function trackedMessages(session: TrackedSession): TurnStateMessage[] {
     return [...session.messages.values()]
         .sort((left, right) => left.timeCreated - right.timeCreated)
         .map((message) => ({
@@ -318,13 +318,13 @@ function resolvedDbIsAvailable(): {
     return { resolution, available };
 }
 
-export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+export function assistantAwaitingTools(_deps: unknown, sessionId: string): boolean {
     const availability = resolvedDbIsAvailable();
     const tracked = trackedSessions.get(sessionId);
-    if (tracked) return midTurnFromMessages(trackedMessages(tracked));
+    if (tracked) return assistantAwaitingToolsFromMessages(trackedMessages(tracked));
     if (!availability.available) return false;
     try {
-        return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
+        return withReadOnlySessionDb((db) => assistantAwaitingToolsFromOpenCodeDb(db, sessionId));
     } catch (error) {
         logProbeFailureOnce(availability.resolution, error);
         return false;
@@ -345,10 +345,9 @@ export const __openCodeTurnStateTest = {
 /**
  * Whether a noReply/ignored status notice must be held instead of appended.
  *
- * `isMidTurn` only covers an assistant waiting on tools, and it *releases*
- * when a newer real user message exists. That release is correct for the
- * mid-turn valve (a human interrupt ends the tool wait) and wrong for
- * notices: OpenCode's MessageV2.latest is role-based and does not skip
+ * `assistantAwaitingTools` only covers an assistant waiting on tools, and it releases
+ * when a newer real user message exists. Notices require a stronger guard:
+ * OpenCode's MessageV2.latest is role-based and does not skip
  * ignored rows, so a notice that becomes the newest user row while a run
  * is starting or in flight makes the loop-exit parentID check fail and
  * can fire a phantom generation. Hold whenever a run is in flight or an
@@ -358,7 +357,7 @@ export function shouldHoldIgnoredNotificationFromOpenCodeDb(
     db: Database,
     sessionId: string,
 ): boolean {
-    if (isMidTurnFromOpenCodeDb(db, sessionId)) return true;
+    if (assistantAwaitingToolsFromOpenCodeDb(db, sessionId)) return true;
     if (hasUnfinishedAssistant(db, sessionId)) return true;
     if (hasUnansweredRealUser(db, sessionId)) return true;
     return false;
@@ -381,7 +380,7 @@ export function shouldHoldIgnoredNotification(sessionId: string): boolean {
     }
 }
 
-export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+export function assistantAwaitingToolsFromOpenCodeDb(db: Database, sessionId: string): boolean {
     const latestAssistant = latestAssistantRow(db, sessionId);
 
     if (typeof latestAssistant?.id !== "string") return false;
@@ -441,15 +440,14 @@ export function hasNewerRealUserMessage(
     // the model-facing message, so a message whose parts are all ignored cannot
     // constitute a real user turn. ALL-parts semantics is load-bearing: a real
     // operator prompt may include a synthetic `agent` part from an @mention —
-    // classifying that as injected would release the mid-turn lock on genuine
-    // human input (the inverse bug, and worse). The EXISTS guard on part rows is
-    // the vacuous-ALL fence: a partless message satisfies "every part is
-    // machine-generated" trivially, so it must count as real to avoid incorrectly
-    // suppressing a lock release.
+    // classifying that as injected would leave the assistant tool-wait predicate
+    // active despite genuine human input. The EXISTS guard on part rows is the
+    // vacuous-ALL fence: a partless message satisfies "every part is machine-generated"
+    // trivially, so it must count as real.
     return row?.one === 1;
 }
 
-function latestAssistantRow(db: Database, sessionId: string): AssistantMidTurnRow | null {
+function latestAssistantRow(db: Database, sessionId: string): AssistantAwaitingToolsRow | null {
     return db
         .prepare(
             `SELECT id,
@@ -461,7 +459,7 @@ function latestAssistantRow(db: Database, sessionId: string): AssistantMidTurnRo
              ORDER BY time_created DESC
              LIMIT 1`,
         )
-        .get(sessionId) as AssistantMidTurnRow | null;
+        .get(sessionId) as AssistantAwaitingToolsRow | null;
 }
 
 function hasUnfinishedAssistant(db: Database, sessionId: string): boolean {

@@ -4,13 +4,11 @@ import {
     applyStrippedPlaceholderDelta,
     type ContextDatabase,
     captureChannel1PostReduceGraceBaseline,
-    clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
-    getHiddenSeamPlaceholderIds,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
@@ -18,11 +16,7 @@ import {
     getPendingOpsCount,
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
-    getProcessedImageStrippedIds,
-    getStaleReduceStrippedIds,
-    getStrippedPlaceholderIds,
     type PendingCompactionMarker,
-    peekDeferredExecutePending,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     setPendingCompactionMarkerState,
@@ -40,8 +34,10 @@ import {
     getPersistedCompactionMarkerState,
     getThinkingBindingRecoveryTarget,
     getTrailingBlankDecisions,
+    loadPostprocessReplaySnapshot,
     NEWEST_REASONING_BEARING_ASSISTANT,
     type PersistedCompactionMarkerState,
+    type PostprocessReplaySnapshot,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -60,7 +56,6 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { runAutoSearchHint } from "./auto-search-runner";
-import type { SchedulerDeferReason } from "./boundary-execution";
 import { hasReclaimRide } from "./cache-busting-signals";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
@@ -277,13 +272,22 @@ export async function applyTodoSynthesis(args: {
     todowriteAvailability: ToolAvailabilityVerdict;
     client?: PluginContext["client"];
     activeAgent?: string;
+    replaySnapshot?: Pick<
+        PostprocessReplaySnapshot,
+        "todoPermissionDenied" | "todoSyntheticAnchor"
+    >;
 }): Promise<number> {
     if (!args.fullFeatureMode || args.compactionOff) return 0;
 
-    const persistedAnchor = getPersistedTodoSyntheticAnchor(args.db, args.sessionId);
+    const persistedAnchor = args.replaySnapshot
+        ? args.replaySnapshot.todoSyntheticAnchor
+        : getPersistedTodoSyntheticAnchor(args.db, args.sessionId);
+    const persistedPermissionDenied = args.replaySnapshot
+        ? args.replaySnapshot.todoPermissionDenied
+        : getPersistedTodoPermissionDenied(args.db, args.sessionId);
     let permissionDenied =
         cachedToolPermissionDenied(args.sessionId, "todowrite") ??
-        getPersistedTodoPermissionDenied(args.db, args.sessionId) ??
+        persistedPermissionDenied ??
         false;
     const toolsMapUnavailable =
         args.todowriteAvailability.frozen && !args.todowriteAvailability.callable;
@@ -831,7 +835,7 @@ interface RunPostTransformPhaseArgs {
     usableWindow: number;
     schedulerDecision: "execute" | "defer";
     /** Use the defer reason resolved with the scheduler decision at the boundary; do not recompute it from this phase's inputs, which may no longer reflect that decision. */
-    schedulerDeferReason?: SchedulerDeferReason | null;
+    schedulerDeferReason?: "scheduler_defer" | null;
     fullFeatureMode: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved. Every mutating gate in
@@ -1206,15 +1210,21 @@ export async function runPostTransformPhase(
                   hardSignals: args.m0M1.hardSignals,
               })
             : { value: false, reason: null };
-    const firstRenderBust = m0M1EnabledForFold && !hasCompleteCachedM0M1(args.db, args.sessionId);
     let preparedPrefix: InjectM0M1Result | undefined;
-    const cachedPrefixBeforePreflight =
+    const shouldCaptureCachedPrefix =
         (foldDueDecision.value || args.schedulerDecision === "execute") &&
         m0M1EnabledForFold &&
-        !firstRenderBust &&
-        !emergencyDropEligible
-            ? prepareCachedM0M1Replay(args.db, args.sessionId)
-            : undefined;
+        !emergencyDropEligible;
+    const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
+        ? prepareCachedM0M1Replay(args.db, args.sessionId)
+        : undefined;
+    const completeCachedPrefixAvailable =
+        (args.sessionMeta.cachedM0Bytes != null && args.sessionMeta.cachedM1Bytes != null) ||
+        cachedPrefixBeforePreflight !== undefined ||
+        (m0M1EnabledForFold &&
+            !shouldCaptureCachedPrefix &&
+            hasCompleteCachedM0M1(args.db, args.sessionId));
+    const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
     let publishedM1RefreshedThisPass = false;
     const softRefreshOpportunity = args.schedulerDecision === "execute";
@@ -1351,13 +1361,13 @@ export async function runPostTransformPhase(
             forceMaterialization ||
             // The off-wire fold landed, so the prefix already busted. Heuristics
             // may ride it and bypass the once-per-turn guard without creating an
-            // independent mid-turn rewrite.
+            // independent prefix rewrite.
             foldExecutedThisPass ||
             firstRenderBust ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
-            // fires the tiered drop, even if the scheduler deferred mid-turn.
+            // fires the tiered drop even when the ordinary scheduler defers.
             emergencyDropEligible ||
             (args.schedulerDecision === "execute" &&
                 (!alreadyRanThisTurn || !args.fullFeatureMode)));
@@ -1458,8 +1468,6 @@ export async function runPostTransformPhase(
     }
     let explicitMaterializedSuccessfully = false;
     let deferredMaterializedSuccessfully = false;
-    let heuristicsRanSuccessfully = false;
-    let pendingOpsRanSuccessfully = false;
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
     let droppedCount = 0;
@@ -1836,10 +1844,6 @@ export async function runPostTransformPhase(
         if (shouldRunHeuristics) {
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
-            heuristicsRanSuccessfully = true;
-        }
-        if (shouldApplyPendingOps) {
-            pendingOpsRanSuccessfully = true;
         }
     } catch (error) {
         args.passOutcome?.record("pending-operation-failure");
@@ -1853,6 +1857,13 @@ export async function runPostTransformPhase(
             tokensBeforeReductions - estimateTokens(JSON.stringify(args.messages)),
         );
     }
+
+    // All replay-only fields below come from one coherent session_meta row.
+    // Writes that use compare-and-swap still perform their own winner re-read;
+    // this snapshot only coalesces independent reads between those mutations.
+    const replaySnapshot = !compactionOff
+        ? loadPostprocessReplaySnapshot(args.db, args.sessionId)
+        : undefined;
 
     // Stale ctx_reduce strip is a REPLAY-class transform driven by a FROZEN,
     // id-keyed watermark (`stale_reduce_stripped_ids`), mirroring reasoning /
@@ -1872,10 +1883,10 @@ export async function runPostTransformPhase(
     // moving boundary entirely. Empty reduce sentinels are Anthropic-only: on
     // other providers even a previously frozen id must stay native so no empty
     // text block can reach the wire.
-    if (canUseEmptySentinels && !compactionOff) {
+    if (canUseEmptySentinels && !compactionOff && replaySnapshot) {
         try {
             const t8 = performance.now();
-            const frozenStaleReduceIds = getStaleReduceStrippedIds(args.db, args.sessionId);
+            const frozenStaleReduceIds = replaySnapshot.staleReduceStrippedIds;
             const staleReduceResult = dropStaleReduceCalls(args.messages, frozenStaleReduceIds, {
                 detect: isCacheBustingPass,
                 protectedCount: args.protectedCount,
@@ -1900,10 +1911,10 @@ export async function runPostTransformPhase(
     // that first strip on the live watermark let a DEFER pass cross an older
     // image message and remove its images mid-prefix, busting the cache.
     // Freeze the id set on cache-busting passes; replay it every pass.
-    if (canUseEmptySentinels && !compactionOff) {
+    if (canUseEmptySentinels && !compactionOff && replaySnapshot) {
         try {
             const tImg = performance.now();
-            const frozenImageIds = getProcessedImageStrippedIds(args.db, args.sessionId);
+            const frozenImageIds = replaySnapshot.processedImageStrippedIds;
             const imageResult = stripProcessedImages(args.messages, frozenImageIds, {
                 detect: isCacheBustingPass && args.watermark > 0,
                 watermark: args.watermark,
@@ -2057,10 +2068,10 @@ export async function runPostTransformPhase(
     //
     // Compaction-off: placeholder/system-injected neutralization is strip
     // machinery — gated off; the wire keeps its original shape.
-    if (!compactionOff) {
+    if (!compactionOff && replaySnapshot) {
         const tPlaceholder = performance.now();
-        const persistedIds = getStrippedPlaceholderIds(args.db, args.sessionId);
-        const hiddenSeamIds = getHiddenSeamPlaceholderIds(args.db, args.sessionId);
+        const persistedIds = replaySnapshot.strippedPlaceholderIds;
+        const hiddenSeamIds = replaySnapshot.hiddenSeamPlaceholderIds;
 
         // Step 1: Replay prior decisions. Ordinary rows keep provider-safe
         // sentinels; non-Anthropic hidden-seam rows are removed to match the fold.
@@ -2163,11 +2174,11 @@ export async function runPostTransformPhase(
     // Sticky-injection replay (§2.4): every pass replays every persisted anchor
     // so cached user-message bytes remain identical until that message leaves
     // the visible window. Prune happens later, only on cache-busting passes.
-    if (args.fullFeatureMode && !compactionOff) {
-        for (const anchor of getNoteNudgeAnchors(args.db, args.sessionId)) {
+    if (args.fullFeatureMode && !compactionOff && replaySnapshot) {
+        for (const anchor of replaySnapshot.noteNudgeAnchors) {
             appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
         }
-        for (const decision of getAutoSearchHintDecisions(args.db, args.sessionId)) {
+        for (const decision of replaySnapshot.autoSearchHintDecisions) {
             if (decision.decision === "hint") {
                 appendReminderToUserMessageById(args.messages, decision.messageId, decision.text);
             }
@@ -2200,8 +2211,9 @@ export async function runPostTransformPhase(
     // Drain the persisted marker before todo synthesis so the todo anchor sees
     // the same summary representation that this pass will emit.
     let suppressV12HistoryDrain = false;
+    let persistedCompactionMarkerState = replaySnapshot?.compactionMarker ?? null;
     if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
-        const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+        const pending = replaySnapshot?.pendingCompactionMarker ?? null;
         if (pending) {
             if (
                 !pendingMarkerCoveredByConsumedBoundary(pending, args.pendingCompartmentInjection)
@@ -2222,6 +2234,12 @@ export async function runPostTransformPhase(
                     case "applied":
                     case "already-current":
                     case "stale-skip":
+                        // Marker application performs compare-and-swap/write work.
+                        // Re-read its committed winner before reconciling the wire.
+                        persistedCompactionMarkerState = getPersistedCompactionMarkerState(
+                            args.db,
+                            args.sessionId,
+                        );
                         if (
                             clearPendingCompactionMarkerAfterSuccessfulDrain({
                                 db: args.db,
@@ -2253,16 +2271,12 @@ export async function runPostTransformPhase(
     // here has state to replay; leaving it live would re-insert a synthetic
     // summary into the wire of a mode that must stay additive-only.
     if (!compactionOff) {
-        reconcileMarkerRepresentation(
-            args.messages,
-            getPersistedCompactionMarkerState(args.db, args.sessionId),
-            {
-                db: args.db,
-                sessionId: args.sessionId,
-                tagger: args.tagger,
-                ctxReduceAvailability: args.ctxReduceAvailability,
-            },
-        );
+        reconcileMarkerRepresentation(args.messages, persistedCompactionMarkerState, {
+            db: args.db,
+            sessionId: args.sessionId,
+            tagger: args.tagger,
+            ctxReduceAvailability: args.ctxReduceAvailability,
+        });
     }
 
     const deferredHistoryDrainEligible =
@@ -2323,6 +2337,7 @@ export async function runPostTransformPhase(
             todowriteAvailability: args.todowriteAvailability,
             client: args.client,
             activeAgent: args.activeAgent,
+            replaySnapshot,
         });
     }
 
@@ -2369,38 +2384,12 @@ export async function runPostTransformPhase(
         });
     }
 
-    const workExecutedSuccessfully =
-        explicitMaterializedSuccessfully ||
-        deferredMaterializedSuccessfully ||
-        heuristicsRanSuccessfully ||
-        pendingOpsRanSuccessfully;
-
     // Work-metrics (TUI sidebar Stats) are NOT computed here. They are a
     // display-only value read solely by the RPC sidebar handler, and the
     // computation is O(session age) — it was the dominant transform cost on
     // long sessions when run every pass. It now runs lazily and incrementally
     // in buildSidebarSnapshot (rpc-handlers.ts) when the TUI actually polls,
     // keeping the prompt path free of it.
-
-    if (workExecutedSuccessfully) {
-        try {
-            const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
-            if (currentFlag !== null) {
-                const cleared = clearDeferredExecutePendingIfMatches(
-                    args.db,
-                    args.sessionId,
-                    currentFlag,
-                );
-                sessionLog(
-                    args.sessionId,
-                    `[boundary-exec] deferred-execute drain: ${cleared ? "cleared" : "stale-noop"} reason=${currentFlag.reason}`,
-                );
-            }
-        } catch (err) {
-            args.passOutcome?.record("deferred-execute-drain-failure");
-            sessionLog(args.sessionId, `[boundary-exec] drain failed (continuing): ${err}`);
-        }
-    }
 
     if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {
         // Resolve memory ids currently rendered in the <session-history>
@@ -2499,13 +2488,12 @@ export async function runPostTransformPhase(
     // Persist before first mutation so a fresh defer rebuild can always reproduce
     // any stripped bytes. The newest assistant is excluded from both detection
     // and replay because Anthropic requires its signed blocks byte-identically.
-    const mergedReasoningStrippedIds = new Set<string>();
+    const mergedReasoningStrippedIds = new Set(replaySnapshot?.mergedReasoningStrippedIds ?? []);
     const thinkingBindingRecoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
     if (canUseEmptySentinels && !compactionOff) {
         try {
-            for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
-                mergedReasoningStrippedIds.add(id);
+            for (const id of mergedReasoningStrippedIds) {
                 if (id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) {
                     const messageId = id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
                     if (messageId.length > 0) thinkingBindingRecoveryMessageIds.add(messageId);
@@ -2513,7 +2501,7 @@ export async function runPostTransformPhase(
             }
 
             const flagTarget = args.thinkingBindingRecoveryEnabledForModel
-                ? getThinkingBindingRecoveryTarget(args.db, args.sessionId)
+                ? (replaySnapshot?.thinkingBindingRecoveryTarget ?? null)
                 : null;
             if (flagTarget) {
                 const messageId =
@@ -2579,17 +2567,9 @@ export async function runPostTransformPhase(
         }
     }
 
-    const trailingBlankDecisions = new Map<string, TrailingBlankDecision>();
-    if (canUseEmptySentinels && !compactionOff) {
-        try {
-            for (const [id, decision] of getTrailingBlankDecisions(args.db, args.sessionId)) {
-                trailingBlankDecisions.set(id, decision);
-            }
-        } catch (error) {
-            args.passOutcome?.record("trailing-blank-decision-load-exception");
-            sessionLog(args.sessionId, "transform failed loading trailing blank decisions:", error);
-        }
-    }
+    const trailingBlankDecisions = new Map<string, TrailingBlankDecision>(
+        replaySnapshot?.trailingBlankDecisions ?? [],
+    );
 
     const newestAssistantId =
         typeof trailingBlankNewestAssistant?.info.id === "string"

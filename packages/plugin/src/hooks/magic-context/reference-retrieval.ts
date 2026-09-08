@@ -20,6 +20,7 @@
  * Embedding work at historian time: ZERO.
  */
 import { escapeXmlAttr, escapeXmlContent } from "../../features/magic-context/compartment-storage";
+import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import { REFERENCE_SEEDS, type ReferenceSeed } from "./reference-seeds.generated";
 
 /**
@@ -202,6 +203,7 @@ function renderSessionRefCompartment(c: ReferenceCompartment): string {
  * no prior compartments (young session — seeds carry calibration alone).
  */
 export function renderSessionReferencesBlock(allCompartments: ReferenceCompartment[]): string {
+    allCompartments = allCompartments.filter((c) => !isNoContentCompartment(c));
     if (allCompartments.length === 0) return "";
     const recent = allCompartments.slice(-SESSION_REF_WINDOW);
     const body = recent.map(renderSessionRefCompartment).join("\n\n");

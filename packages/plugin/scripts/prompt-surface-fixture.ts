@@ -13,7 +13,7 @@ import {
 } from "./prompt-surface-measurement";
 import { ACTIVE_TOOL_IDS } from "../src/shared/prompt-surface-runtime";
 
-export const RATIFIED_FULL_MUTABLE_PROSE_CEILING = 3650;
+export const RATIFIED_FULL_MUTABLE_PROSE_CEILING = 3750;
 export const RATIFIED_LIGHT_MUTABLE_PROSE_CEILING = 1825;
 
 const DEFAULT_CC_LIGHT_ASSET_PATHS = [

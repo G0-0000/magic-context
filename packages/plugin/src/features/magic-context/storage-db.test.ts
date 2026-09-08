@@ -53,6 +53,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
 const originalNodeEnv = process.env.NODE_ENV;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function makeTempDir(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -118,6 +119,8 @@ afterEach(() => {
     else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
     if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalNodeEnv;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 
     for (const dir of tempDirs) {
         try {

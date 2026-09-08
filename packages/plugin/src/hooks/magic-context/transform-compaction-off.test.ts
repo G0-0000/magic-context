@@ -70,7 +70,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 beforeEach(() => {
-    __ignoredNotificationTest.setMidTurnDetector(() => false);
+    __ignoredNotificationTest.setHoldDetector(() => false);
 });
 
 afterEach(() => {

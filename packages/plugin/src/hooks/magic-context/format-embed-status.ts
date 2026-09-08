@@ -1,4 +1,5 @@
 import type { EmbeddingCoverageStatus } from "../../features/magic-context/project-embedding-registry";
+import { describeShadowBackfillWriteRefusal } from "../../features/magic-context/shadow-backfill-state";
 import type { EmbedDrainUiStatus } from "./embed-session-state";
 
 export function formatEmbedStatusText(
@@ -46,5 +47,10 @@ export function formatEmbedStatusText(
             drainLine = "Drain: idle";
     }
     lines.push(drainLine);
+    for (const stall of coverage.shadowBackfillStalls) {
+        lines.push(
+            `Shadow ${stall.scope}: stalled_no_progress — ${describeShadowBackfillWriteRefusal(stall.writeRefusalReason)}.`,
+        );
+    }
     return lines.join("\n");
 }

@@ -23,6 +23,7 @@ export interface ResolvePiWindowGeometryArgs {
 	rawContextWindow?: number;
 	model?: PiModelLimit;
 	detectedContextLimit?: number;
+	provenInputTokens?: number;
 	persistedInputTokens?: number;
 	persistedPercentage?: number;
 	reserveConfig?: OutputReserveConfig;
@@ -88,22 +89,41 @@ export function resolvePiWindowGeometry(
 			harness: "pi",
 		},
 	);
+	if (!result) return result;
+	let resolved = result;
+	if (outputReserveOverride === undefined && isSaneLimit(persistedUsable)) {
+		const usableSoft = Math.round(persistedUsable);
+		resolved = {
+			...resolved,
+			usableSoft,
+			usableHard: Math.max(usableSoft, resolved.usableHard),
+			derivation: {
+				...resolved.derivation,
+				reserve: Math.max(0, resolved.derivation.window - usableSoft),
+			},
+		};
+	}
+
 	if (
-		!result ||
-		outputReserveOverride !== undefined ||
-		!isSaneLimit(persistedUsable)
-	)
-		return result;
-	const usableSoft = Math.round(persistedUsable);
-	return {
-		...result,
-		usableSoft,
-		usableHard: Math.max(usableSoft, result.usableHard),
-		derivation: {
-			...result.derivation,
-			reserve: Math.max(0, result.derivation.window - usableSoft),
-		},
-	};
+		!isSaneLimit(args.detectedContextLimit) &&
+		isSaneLimit(args.provenInputTokens) &&
+		args.provenInputTokens > resolved.usableSoft
+	) {
+		const usableSoft = args.provenInputTokens;
+		const window = Math.max(resolved.derivation.window, usableSoft);
+		resolved = {
+			...resolved,
+			usableSoft,
+			usableHard: Math.max(usableSoft, resolved.usableHard),
+			derivation: {
+				...resolved.derivation,
+				window,
+				reserve: Math.max(0, window - usableSoft),
+			},
+		};
+	}
+
+	return resolved;
 }
 
 export function resolvePiUsableContextLimit(

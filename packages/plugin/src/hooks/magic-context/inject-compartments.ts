@@ -18,8 +18,8 @@ import {
 import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
+import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
-    computeProjectDocsHash,
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
@@ -1369,7 +1369,6 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
     markers: M0SnapshotMarkers;
     workspace: WorkspaceRenderContext;
 } {
-    const projectDirectory = args.projectDirectory ?? args.projectPath ?? "";
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     const materializedAt = Date.now();
     const workspace = resolveWorkspaceRenderContext({
@@ -1401,10 +1400,9 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
                 : args.projectPath
                   ? (getMaxMemoryMutationId(args.db, args.projectPath) ?? 0)
                   : 0,
-            projectDocsHash:
-                projectDirectory && args.injectDocs !== false
-                    ? computeProjectDocsHash(projectDirectory)
-                    : "",
+            // Project docs are not a materialization trigger. The HARD renderer
+            // replaces this placeholder with the hash of the bytes it actually read.
+            projectDocsHash: "",
             materializedAt,
             sessionFactsVersion: getSessionFactsVersion(args.db, args.sessionId),
             upgradeState: getUpgradeState(args.db, args.sessionId),
@@ -1426,14 +1424,9 @@ function refreshVolatileMarkerInputs(
     markers: M0SnapshotMarkers,
     args: M0SnapshotMarkerReadArgs,
 ): M0SnapshotMarkers {
-    const projectDirectory = args.projectDirectory ?? args.projectPath ?? "";
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     return {
         ...markers,
-        projectDocsHash:
-            projectDirectory && args.injectDocs !== false
-                ? computeProjectDocsHash(projectDirectory)
-                : "",
         materializedAt: Date.now(),
         systemHash: hard.systemHash,
         toolSetHash: hard.toolSetHash ?? "",
@@ -1458,7 +1451,8 @@ function refreshVolatileMarkerInputs(
  * additions/mutations/classification changes, m0 mutations, epoch/profile bumps,
  * membership transitions, alias writes, and legacy upgrades change at least one
  * probe field. `sessionFactsVersion` is intentionally absent because its getter is
- * pinned to zero and no longer renders; project docs retain their filesystem probe.
+ * pinned to zero and no longer renders. Project docs are intentionally absent too:
+ * edits join the next natural HARD fold rather than triggering one.
  * A changed field falls through to the authoritative multi-read implementation.
  */
 export function readCurrentM0SnapshotMarkers(args: M0SnapshotMarkerReadArgs): M0SnapshotMarkers {
@@ -2329,11 +2323,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     snapshotMarkers.muralHash = frozenMuralHash;
     snapshotMarkers.materializedAt = foldMaterializedAt;
     const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
-    const phase3ProjectDocsHash = readProjectDocsForM0(
-        projectDirectory,
-        options.injectDocs,
-    ).canonicalHash;
-
     options.beforePhase3ForTest?.();
 
     let m1Text = M1_EMPTY_PLACEHOLDER;
@@ -2370,7 +2359,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                 : projectPath
                   ? (getMaxMemoryMutationId(options.db, projectPath) ?? 0)
                   : 0,
-            projectDocsHash: phase3ProjectDocsHash,
+            projectDocsHash: snapshotMarkers.projectDocsHash,
             materializedAt: foldMaterializedAt,
             sessionFactsVersion: getSessionFactsVersion(options.db, options.sessionId),
             upgradeState: getUpgradeState(options.db, options.sessionId),
@@ -2646,7 +2635,9 @@ function renderM1WithMetadata(
 
     const newCompartments = withCompartmentDates(
         options.sessionId,
-        readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq),
+        readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq).filter(
+            (c) => !isNoContentCompartment(c),
+        ),
         options.temporalAwareness,
     );
     if (newCompartments.length > 0) {

@@ -118,13 +118,14 @@ describe("recordDetectedContextLimit", () => {
         expect(otherModel.detectedContextLimitModelKey).toBe("anthropic/claude-small");
     });
 
-    it("keeps legacy unkeyed detected limits usable", () => {
+    it("does not apply an unkeyed detected limit to a requested model", () => {
         ensureSessionMetaRow(db, "ses_legacy_limit");
         recordDetectedContextLimit(db, "ses_legacy_limit", 64_000);
 
         expect(getOverflowState(db, "ses_legacy_limit", "openai/gpt-4o").detectedContextLimit).toBe(
-            64_000,
+            0,
         );
+        expect(getOverflowState(db, "ses_legacy_limit").detectedContextLimit).toBe(64_000);
     });
 
     it("persists proactive model-shrink origin without a detected limit", () => {

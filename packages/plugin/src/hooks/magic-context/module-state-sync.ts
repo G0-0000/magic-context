@@ -27,7 +27,6 @@ import {
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
     getPersistedTodoSyntheticAnchor,
-    peekDeferredExecutePending,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getPendingOps } from "../../features/magic-context/storage-ops";
 import {
@@ -123,12 +122,6 @@ export interface ModulePendingCompactionMarkerSeed {
     published_at: number;
 }
 
-export interface ModuleDeferredExecuteSeed {
-    id: string;
-    reason: string;
-    recorded_at: number;
-}
-
 export type ModuleStripKind =
     | "placeholder"
     | "system_injected"
@@ -172,7 +165,6 @@ export interface ModuleStateSyncPayload {
         todo_synthetic_anchor?: ModuleTodoSyntheticAnchorSeed | null;
         emergency_latches?: ModuleEmergencyLatchSeed;
         pending_compaction_marker?: ModulePendingCompactionMarkerSeed | null;
-        deferred_execute_state?: ModuleDeferredExecuteSeed | null;
         channel2_nudge_state?: string;
         strip_seeds?: ModuleStripSeed[];
         strip_seed_skipped?: number;
@@ -212,6 +204,11 @@ export interface ModuleStateSyncOptions {
     stateSyncDeltas?: boolean;
     /** Share adoption state across every authority sync attempt in one transform pass. */
     authoritySeqAdoption?: { used: boolean };
+    /**
+     * The adapter observed no event capable of changing an acknowledged watermark.
+     * This bypasses both capability and own-store reads; force/restart seeds ignore it.
+     */
+    knownWatermarksUnchanged?: boolean;
 }
 
 export interface ModuleCompartmentMirrorRow {
@@ -588,9 +585,11 @@ export function loadModuleWatermarks(args: {
     projectPath?: string;
     /** Reuse the workspace resolved by the enclosing payload build. */
     workspace?: ModuleWorkspaceContext;
+    /** Reuse the enclosing pass's session_meta projection. */
+    sessionMeta?: ReturnType<typeof getOrCreateSessionMeta>;
 }): ModuleWatermarks {
     const workspace = args.workspace ?? resolveModuleWorkspaceContext(args.db, args.projectPath);
-    const sessionMeta = getOrCreateSessionMeta(args.db, args.sessionId);
+    const sessionMeta = args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId);
     const compartmentRow = args.db
         .prepare(
             "SELECT COALESCE(MAX(sequence), -1) AS max_sequence FROM compartments WHERE session_id = ?",
@@ -1083,7 +1082,6 @@ export function buildPagedModuleStateSyncPayloads(
         todoSyntheticAnchor?: ModuleTodoSyntheticAnchorSeed | null;
         emergencyLatches?: ModuleEmergencyLatchSeed;
         pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
-        deferredExecuteState?: ModuleDeferredExecuteSeed | null;
         channel2NudgeState?: string;
         stripSeeds?: ModuleStripSeed[];
         stripSeedSkipped?: number;
@@ -1172,7 +1170,6 @@ export function buildPagedModuleStateSyncPayloads(
         stripSeeds?: ModuleStripSeed[];
         stripSeedSkipped?: number;
         pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
-        deferredExecuteState?: ModuleDeferredExecuteSeed | null;
         channel2NudgeState?: string;
     }): ModuleStateSyncPayload => ({
         method: "state_sync",
@@ -1229,9 +1226,6 @@ export function buildPagedModuleStateSyncPayloads(
                       ...(args.pendingCompactionMarker !== undefined
                           ? { pending_compaction_marker: args.pendingCompactionMarker }
                           : {}),
-                      ...(args.deferredExecuteState !== undefined
-                          ? { deferred_execute_state: args.deferredExecuteState }
-                          : {}),
                       ...(args.channel2NudgeState !== undefined
                           ? { channel2_nudge_state: args.channel2NudgeState }
                           : {}),
@@ -1261,7 +1255,6 @@ export function buildPagedModuleStateSyncPayloads(
         pendingDropSkipped: args.pendingDropSkipped,
         autoSearchHintSkipped: args.autoSearchHintSkipped,
         pendingCompactionMarker: args.pendingCompactionMarker,
-        deferredExecuteState: args.deferredExecuteState,
         channel2NudgeState: args.channel2NudgeState,
     });
     const envelopeMarginBytes = moduleWireBodyBytes({
@@ -1304,7 +1297,6 @@ export function buildPagedModuleStateSyncPayloads(
             pendingDropSkipped: args.pendingDropSkipped,
             autoSearchHintSkipped: args.autoSearchHintSkipped,
             pendingCompactionMarker: args.pendingCompactionMarker,
-            deferredExecuteState: args.deferredExecuteState,
             channel2NudgeState: args.channel2NudgeState,
             ...batch,
         });
@@ -1329,6 +1321,7 @@ export async function buildModuleStateSyncPayload(args: {
     ModuleStateSyncPayload | null | "m0_mutation" | "mismatch" | "unresolved" | "seed_budget"
 > {
     const workspace = resolveModuleWorkspaceContext(args.pass.db, args.pass.projectPath);
+    const sessionMeta = getOrCreateSessionMeta(args.pass.db, args.pass.sessionId);
     // One authority pool has one writer. While MODULE owns memories, this sender only mirrors
     // module changes back to TypeScript and must not send the TypeScript view in the other direction.
     const omitAuthorityMemorySections = args.options?.authorityState === "MODULE";
@@ -1337,6 +1330,7 @@ export async function buildModuleStateSyncPayload(args: {
         sessionId: args.pass.sessionId,
         projectPath: args.pass.projectPath,
         workspace,
+        sessionMeta,
     });
     if (
         !args.force &&
@@ -1517,7 +1511,6 @@ export async function buildModuleStateSyncPayload(args: {
                   queued_at: row.queuedAt,
               }))
             : [];
-    const sessionMeta = getOrCreateSessionMeta(args.pass.db, args.pass.sessionId);
     const pendingDropSeedState = args.force
         ? buildPendingDropSeeds({ db: args.pass.db, sessionId: args.pass.sessionId, readRawById })
         : null;
@@ -1576,19 +1569,6 @@ export async function buildModuleStateSyncPayload(args: {
                     end_message_id: pendingMarker.endMessageId,
                     published_at: pendingMarker.publishedAt,
                 };
-    const deferredPending = args.force
-        ? peekDeferredExecutePending(args.pass.db, args.pass.sessionId)
-        : undefined;
-    const deferredExecuteState =
-        deferredPending === undefined
-            ? undefined
-            : deferredPending === null
-              ? null
-              : {
-                    id: deferredPending.id,
-                    reason: deferredPending.reason,
-                    recorded_at: deferredPending.recordedAt,
-                };
     const channel2NudgeState = args.force
         ? getChannel2NudgeState(args.pass.db, args.pass.sessionId)
         : undefined;
@@ -1631,7 +1611,6 @@ export async function buildModuleStateSyncPayload(args: {
         todoSyntheticAnchor,
         emergencyLatches,
         pendingCompactionMarker,
-        deferredExecuteState,
         channel2NudgeState,
         stripSeeds: stripSeeds && stripSeeds.length > 0 ? stripSeeds : undefined,
         stripSeedSkipped: undefined,
@@ -1661,9 +1640,6 @@ export async function buildModuleStateSyncPayload(args: {
             acked_watermarks: currentWatermarks,
             ...(pendingCompactionMarker !== undefined
                 ? { pending_compaction_marker: pendingCompactionMarker }
-                : {}),
-            ...(deferredExecuteState !== undefined
-                ? { deferred_execute_state: deferredExecuteState }
                 : {}),
             ...(channel2NudgeState !== undefined
                 ? { channel2_nudge_state: channel2NudgeState }
@@ -1777,6 +1753,13 @@ export async function syncModuleState(args: {
     options?: ModuleStateSyncOptions;
 }): Promise<ModuleStateSyncResult> {
     let force = args.force;
+    if (
+        !force &&
+        args.options?.knownWatermarksUnchanged === true &&
+        args.state.lastAckedWatermarks !== null
+    ) {
+        return { status: "no_change" };
+    }
     const adoption = args.options?.authoritySeqAdoption ?? { used: false };
     const resolveStateSyncDeltas = async (afterGenerationChange = false): Promise<boolean> => {
         let capability = afterGenerationChange ? undefined : args.options?.stateSyncDeltas;

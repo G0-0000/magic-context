@@ -744,7 +744,7 @@ export const MIGRATIONS: Migration[] = [
     },
     {
         version: 15,
-        description: "Add deferred_execute_state column for boundary execution drain",
+        description: "Add the now-retired deferred_execute_state column",
         up: (db: Database) => {
             const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
                 name?: string;
