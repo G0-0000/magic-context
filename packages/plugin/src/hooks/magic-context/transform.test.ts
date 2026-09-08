@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,7 +56,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { __ignoredNotificationTest } from "./send-session-notification";
-import { createTransform } from "./transform";
+import { clearMessageTokensCache, createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
 type ToolPart = {
@@ -149,6 +150,105 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {
+        useTempDataHome("context-transform-hotpath-snapshot-");
+        const realDb = openDatabase();
+        const preparedSql: string[] = [];
+        const db = new Proxy(realDb, {
+            get(target, prop, receiver) {
+                if (prop === "prepare") {
+                    return (sql: string) => {
+                        preparedSql.push(sql);
+                        return target.prepare.call(target, sql);
+                    };
+                }
+                const value = Reflect.get(target, prop, receiver);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        }) as typeof realDb;
+        const sessionId = "ses-hotpath-snapshot";
+        const contextUsageMap = new Map([
+            [
+                sessionId,
+                {
+                    usage: { percentage: 20, inputTokens: 20_000 },
+                    updatedAt: 1_000,
+                    lastResponseTime: 1_000,
+                    hasUsageTokens: true,
+                },
+            ],
+        ]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap,
+            db,
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            directory: makeTempDir("context-transform-hotpath-project-"),
+            historianRunnable: false,
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "claude-test" }],
+            ]),
+        });
+        const input = Array.from({ length: 20 }, (_, index): TestMessage => {
+            const user = index % 2 === 0;
+            return {
+                info: {
+                    id: `hotpath-${index}`,
+                    role: user ? "user" : "assistant",
+                    sessionID: sessionId,
+                    ...(user
+                        ? { tools: { ctx_reduce: true, todowrite: true } }
+                        : { providerID: "anthropic", modelID: "claude-test" }),
+                },
+                parts: [{ type: "text", text: `stable ${index}` }],
+            };
+        });
+        const digest = (messages: TestMessage[]) =>
+            createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+
+        const first = structuredClone(input);
+        await transform({}, { messages: first });
+        preparedSql.length = 0;
+        const second = structuredClone(input);
+        await transform({}, { messages: second });
+
+        expect(digest(second)).toBe(digest(first));
+        expect(
+            preparedSql.filter((sql) => sql.includes("SELECT historian_failure_count")).length,
+        ).toBe(1);
+        expect(
+            preparedSql.filter((sql) => sql.includes("SELECT stale_reduce_stripped_ids")).length,
+        ).toBe(1);
+        expect(preparedSql.some((sql) => sql.includes("SELECT last_response_time FROM"))).toBe(
+            false,
+        );
+        expect(
+            preparedSql.some(
+                (sql) =>
+                    sql.includes("SELECT type, message_id, tool_owner_message_id") &&
+                    sql.includes("status = 'active'"),
+            ),
+        ).toBe(false);
+
+        clearMessageTokensCache(sessionId, "hotpath-0");
+        preparedSql.length = 0;
+        const afterRemovalInvalidation = structuredClone(input);
+        await transform({}, { messages: afterRemovalInvalidation });
+        expect(digest(afterRemovalInvalidation)).toBe(digest(second));
+        expect(
+            preparedSql.some(
+                (sql) =>
+                    sql.includes("SELECT type, message_id, tool_owner_message_id") &&
+                    sql.includes("status = 'active'"),
+            ),
+        ).toBe(true);
+    });
+
     it("keeps the raw array untouched when session metadata is unreadable", async () => {
         useTempDataHome("context-transform-meta-fault-");
         const db = openDatabase();

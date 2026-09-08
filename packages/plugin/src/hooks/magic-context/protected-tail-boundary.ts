@@ -2,6 +2,7 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import {
     loadProtectedTailMeta,
     markProtectedTailPolicyV3Seeded,
+    type ProtectedTailMeta,
     recordProtectedTailNoEligibleHead,
     resetProtectedTailNoEligibleHead,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -50,6 +51,7 @@ export interface ResolvedBoundaryContext {
     usage: BoundaryUsage | null;
     usageSource: "live" | "persisted" | "provisional-zero" | "manual-none";
     lastCompartmentEndOrdinal: number;
+    lastCompartmentEndMessageId?: string | null;
     priorBoundaryOrdinal: number;
     protectedTailPolicyVersion: number;
     migrationFloorActive: boolean;
@@ -72,6 +74,8 @@ export interface ProtectedTailBoundarySnapshot {
     sessionId: string;
     mode: BoundaryMode;
     offset: number;
+    /** Latest compartment anchor observed with offset; present on production resolutions. */
+    lastCompartmentEndMessageId?: string | null;
     offsetMessageId: string | null;
     protectedTailStart: number;
     protectedTailStartMessageId: string | null;
@@ -533,6 +537,7 @@ export function resolveProtectedTailBoundary(
             sessionId: ctx.sessionId,
             mode: ctx.mode,
             offset,
+            lastCompartmentEndMessageId: ctx.lastCompartmentEndMessageId,
             offsetMessageId: null,
             protectedTailStart: 1,
             protectedTailStartMessageId: null,
@@ -590,6 +595,7 @@ export function resolveProtectedTailBoundary(
             sessionId: ctx.sessionId,
             mode: ctx.mode,
             offset,
+            lastCompartmentEndMessageId: ctx.lastCompartmentEndMessageId,
             offsetMessageId: boundaryMessageId(index, offset),
             protectedTailStart,
             protectedTailStartMessageId: null,
@@ -742,6 +748,7 @@ export function resolveProtectedTailBoundary(
         sessionId: ctx.sessionId,
         mode: ctx.mode,
         offset,
+        lastCompartmentEndMessageId: ctx.lastCompartmentEndMessageId,
         offsetMessageId: boundaryMessageId(index, offset),
         protectedTailStart,
         protectedTailStartMessageId: boundaryMessageId(index, protectedTailStart),
@@ -781,6 +788,28 @@ export function resolveProtectedTailBoundary(
     };
 }
 
+function readLastCompartmentBoundary(
+    db: Database,
+    sessionId: string,
+): { endOrdinal: number; endMessageId: string | null } {
+    const row = db
+        .prepare(
+            `SELECT COALESCE(MAX(end_message), -1) AS max_end,
+                    (SELECT end_message_id FROM compartments
+                      WHERE session_id = ? ORDER BY sequence DESC LIMIT 1) AS end_message_id
+               FROM compartments WHERE session_id = ?`,
+        )
+        .get(sessionId, sessionId) as
+        | { max_end?: number | null; end_message_id?: string | null }
+        | undefined;
+    const endMessageId = row?.end_message_id;
+    return {
+        endOrdinal: typeof row?.max_end === "number" ? row.max_end : -1,
+        endMessageId:
+            typeof endMessageId === "string" && endMessageId.length > 0 ? endMessageId : null,
+    };
+}
+
 export function resolveBoundaryContext(args: {
     db: Database;
     sessionId: string;
@@ -802,10 +831,16 @@ export function resolveBoundaryContext(args: {
      * tests) — unchanged.
      */
     taggerFloor?: number;
+    /** Pass-owned session_meta values; refreshed by the caller on the next pass. */
+    protectedTailMeta?: Pick<
+        ProtectedTailMeta,
+        "priorBoundaryOrdinal" | "protectedTailPolicyVersion"
+    >;
 }): ResolvedBoundaryContext {
-    const lastCompartmentEndOrdinal = getLastCompartmentEndMessage(args.db, args.sessionId);
+    const lastCompartmentBoundary = readLastCompartmentBoundary(args.db, args.sessionId);
+    const lastCompartmentEndOrdinal = lastCompartmentBoundary.endOrdinal;
     const triggerBudget = deriveTriggerBudget(args.contextLimit, args.executeThresholdPercentage);
-    let meta = loadProtectedTailMeta(args.db, args.sessionId);
+    let meta = args.protectedTailMeta ?? loadProtectedTailMeta(args.db, args.sessionId);
     let migrationFloorActive = false;
     if (meta.protectedTailPolicyVersion < 3) {
         let legacyBoundary = 1;
@@ -853,6 +888,7 @@ export function resolveBoundaryContext(args: {
         usage: args.usage ?? null,
         usageSource: args.usageSource ?? (args.usage ? "live" : "provisional-zero"),
         lastCompartmentEndOrdinal,
+        lastCompartmentEndMessageId: lastCompartmentBoundary.endMessageId,
         priorBoundaryOrdinal: meta.priorBoundaryOrdinal,
         protectedTailPolicyVersion: meta.protectedTailPolicyVersion,
         migrationFloorActive,
@@ -979,6 +1015,7 @@ export function resolveWrapupProtectedTailBoundary(
         sessionId: ctx.sessionId,
         mode: "manual-wrapup",
         offset,
+        lastCompartmentEndMessageId: ctx.lastCompartmentEndMessageId,
         offsetMessageId: boundaryMessageId(index, offset),
         protectedTailStart: targetProtectedTailStart,
         protectedTailStartMessageId: boundaryMessageId(index, targetProtectedTailStart),

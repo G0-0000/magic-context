@@ -6,12 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     closeDatabase,
+    getOrCreateSessionMeta,
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { computeHardCacheExpired } from "./transform";
-import { loadContextUsage } from "./transform-context-state";
+import { contextUsagePassSnapshot, loadContextUsage } from "./transform-context-state";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -42,6 +43,79 @@ function createUsageMap() {
 }
 
 describe("loadContextUsage", () => {
+    it("trusts the event-updated live map and reloads when that signal changes", () => {
+        useTempDataHome("context-usage-live-signal-");
+        const db = openDatabase();
+        let prepared = 0;
+        const spiedDb = new Proxy(db, {
+            get(target, prop, receiver) {
+                if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+                return (sql: string) => {
+                    prepared += 1;
+                    return target.prepare.call(target, sql);
+                };
+            },
+        }) as typeof db;
+        const contextUsageMap = new Map([
+            [
+                "ses-live",
+                {
+                    usage: { percentage: 10, inputTokens: 10_000 },
+                    updatedAt: 1_000,
+                    lastResponseTime: 1_000,
+                    hasUsageTokens: true,
+                },
+            ],
+        ]);
+
+        expect(loadContextUsage(contextUsageMap, spiedDb, "ses-live")).toEqual({
+            percentage: 10,
+            inputTokens: 10_000,
+        });
+        contextUsageMap.set("ses-live", {
+            usage: { percentage: 20, inputTokens: 20_000 },
+            updatedAt: 2_000,
+            lastResponseTime: 2_000,
+            hasUsageTokens: true,
+        });
+        expect(loadContextUsage(contextUsageMap, spiedDb, "ses-live")).toEqual({
+            percentage: 20,
+            inputTokens: 20_000,
+        });
+        expect(prepared).toBe(0);
+    });
+
+    it("uses a pass-owned session metadata snapshot without a scalar re-read", () => {
+        useTempDataHome("context-usage-pass-snapshot-");
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-pass-snapshot", {
+            lastResponseTime: 3_000,
+            lastContextPercentage: 30,
+            lastInputTokens: 30_000,
+        });
+        const sessionMeta = getOrCreateSessionMeta(db, "ses-pass-snapshot");
+        let prepared = 0;
+        const spiedDb = new Proxy(db, {
+            get(target, prop, receiver) {
+                if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+                return (sql: string) => {
+                    prepared += 1;
+                    return target.prepare.call(target, sql);
+                };
+            },
+        }) as typeof db;
+
+        expect(
+            loadContextUsage(
+                createUsageMap(),
+                spiedDb,
+                "ses-pass-snapshot",
+                contextUsagePassSnapshot(sessionMeta),
+            ),
+        ).toEqual({ percentage: 30, inputTokens: 30_000 });
+        expect(prepared).toBe(0);
+    });
+
     it("loads persisted usage into an empty cache", () => {
         useTempDataHome("context-usage-load-");
         const db = openDatabase();
