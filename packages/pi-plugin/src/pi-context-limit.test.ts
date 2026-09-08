@@ -49,6 +49,27 @@ describe("resolvePiUsableContextLimit", () => {
 		).toBe(1_048_576);
 	});
 
+	test("keeps a successful request as a pressure floor when Pi reports a smaller window", () => {
+		expect(
+			resolvePiUsableContextLimit({
+				rawContextWindow: 30_000,
+				model: { provider: "custom", id: "model" },
+				provenInputTokens: 90_000,
+			}),
+		).toBe(90_000);
+	});
+
+	test("keeps a current detected overflow cap authoritative over older proof", () => {
+		expect(
+			resolvePiUsableContextLimit({
+				rawContextWindow: 200_000,
+				detectedContextLimit: 30_000,
+				provenInputTokens: 90_000,
+				model: { provider: "custom", id: "model" },
+			}),
+		).toBe(30_000);
+	});
+
 	test("applies detected wire truth before output reservation", () => {
 		expect(
 			resolvePiUsableContextLimit({

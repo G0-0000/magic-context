@@ -7,6 +7,7 @@ import {
 } from "../../features/magic-context/overflow-detection";
 import {
     armThinkingBindingRecovery,
+    clearDetectedContextLimit,
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     clearSession,
@@ -41,6 +42,7 @@ import type { ContextUsage, SessionMeta } from "../../features/magic-context/typ
 import { captureWindowReport } from "../../features/magic-context/window-report-ledger";
 import { log, sessionLog } from "../../shared/logger";
 import {
+    getSdkContextLimit,
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
@@ -336,6 +338,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 captureWindowReport({
                     db: deps.db,
                     sessionID: errInfo.sessionID,
+                    providerID: errInfo.providerID,
+                    modelID: errInfo.modelID,
                     matchedPattern: detection.matchedPattern,
                     reportedLimit: detection.reportedLimit,
                     reportedLimitProvenance: detection.reportedLimitProvenance,
@@ -351,6 +355,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 // still propagates to OpenCode / the parent agent through the
                 // normal event pipeline; that's the right recovery surface.
                 const sessionMeta = getOrCreateSessionMeta(deps.db, errInfo.sessionID);
+                const overflowModelKey =
+                    resolveModelKey(errInfo.providerID, errInfo.modelID) ??
+                    sessionMeta.lastObservedModelKey ??
+                    undefined;
                 if (sessionMeta.isSubagent) {
                     // Subagents can't run historian, so we skip the recovery
                     // flag — but the reported limit is still useful data for
@@ -364,7 +372,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             deps.db,
                             errInfo.sessionID,
                             detection.reportedLimit,
-                            undefined,
+                            overflowModelKey,
                             detection.reportedLimitProvenance,
                         );
                     }
@@ -390,7 +398,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             deps.db,
                             errInfo.sessionID,
                             detection.reportedLimit,
-                            undefined,
+                            overflowModelKey,
                             detection.reportedLimitProvenance,
                         );
                     }
@@ -405,7 +413,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     deps.db,
                     errInfo.sessionID,
                     detection.reportedLimit,
-                    undefined,
+                    overflowModelKey,
                     "provider_overflow",
                     detection.reportedLimitProvenance,
                 );
@@ -645,48 +653,79 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             deps.client as Parameters<typeof refreshModelLimitsAfterAuthOnce>[0],
                         );
                     }
+                    const requestSucceeded = !messageHadOverflowError;
+                    if (requestSucceeded) {
+                        const rawOverflow = getOverflowState(deps.db, info.sessionID);
+                        const detectedLimitMatchesModel =
+                            rawOverflow.detectedContextLimitModelKey === null ||
+                            (modelKey !== undefined &&
+                                rawOverflow.detectedContextLimitModelKey === modelKey);
+                        if (
+                            rawOverflow.detectedContextLimit > 0 &&
+                            detectedLimitMatchesModel &&
+                            totalInputTokens > rawOverflow.detectedContextLimit
+                        ) {
+                            clearDetectedContextLimit(deps.db, info.sessionID);
+                            sessionLog(
+                                info.sessionID,
+                                `detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${totalInputTokens}-token request; using catalog/default`,
+                            );
+                            deps.onSessionCacheInvalidated?.(info.sessionID);
+                        }
+                    }
+
                     let contextLimit = resolveContextLimit(info.providerID, info.modelID, {
                         db: deps.db,
                         sessionID: info.sessionID,
                     });
-                    let percentage = contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
-
-                    sessionLog(
-                        info.sessionID,
-                        `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
-                    );
-
                     const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
                     const observedSafeInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+                    const provenSafeInputTokens = requestSucceeded
+                        ? Math.max(observedSafeInputTokens, totalInputTokens)
+                        : observedSafeInputTokens;
+                    let catalogLimit =
+                        info.providerID && info.modelID
+                            ? getSdkContextLimit(info.providerID, info.modelID)
+                            : undefined;
+
                     if (
-                        percentage > 100 &&
-                        observedSafeInputTokens > 0 &&
-                        totalInputTokens <= observedSafeInputTokens * 2
+                        requestSucceeded &&
+                        catalogLimit !== undefined &&
+                        catalogLimit < provenSafeInputTokens
                     ) {
-                        const oldLimit = contextLimit;
+                        const oldLimit = catalogLimit;
                         if (deps.client) {
                             await refreshModelLimitsFromApi(
                                 deps.client as Parameters<typeof refreshModelLimitsFromApi>[0],
                             );
+                            catalogLimit =
+                                info.providerID && info.modelID
+                                    ? getSdkContextLimit(info.providerID, info.modelID)
+                                    : undefined;
                             contextLimit = resolveContextLimit(info.providerID, info.modelID, {
                                 db: deps.db,
                                 sessionID: info.sessionID,
                             });
-                            if (contextLimit >= totalInputTokens) {
-                                percentage = (totalInputTokens / contextLimit) * 100;
+                            if (
+                                catalogLimit !== undefined &&
+                                catalogLimit >= provenSafeInputTokens
+                            ) {
                                 sessionLog(
                                     info.sessionID,
-                                    `models-dev-cache: regression recovered for ${info.providerID}/${info.modelID} via refresh (was=${oldLimit}, now=${contextLimit})`,
+                                    `models-dev-cache: regression recovered for ${info.providerID}/${info.modelID} via refresh (was=${oldLimit}, now=${catalogLimit})`,
                                 );
                             }
                         }
 
-                        if (contextLimit < totalInputTokens && !sessionMeta.cacheAlertSent) {
-                            const safeTokens = Math.max(observedSafeInputTokens, totalInputTokens);
+                        if (
+                            catalogLimit !== undefined &&
+                            catalogLimit < provenSafeInputTokens &&
+                            !sessionMeta.cacheAlertSent
+                        ) {
                             const delivery = await sendIgnoredMessage(
                                 deps.client,
                                 info.sessionID,
-                                `⚠️ Magic Context: OpenCode reports a context limit of ${formatTokens(contextLimit)} tokens for ${info.providerID}/${info.modelID} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the cached limit looks wrong. Restart OpenCode if you suspect this is incorrect.`,
+                                `⚠️ Magic Context: OpenCode's catalog reports a context limit of ${formatTokens(catalogLimit)} tokens for ${info.providerID}/${info.modelID}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If the catalog is wrong for your provider, set provider.<provider-id>.models.<model-id>.limit.context in opencode.json.`,
                                 deps.getNotificationParams?.(info.sessionID) ?? {},
                             );
                             // The title guard can skip ignored-message posts until a
@@ -697,6 +736,16 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             }
                         }
                     }
+
+                    if (requestSucceeded) {
+                        contextLimit = Math.max(contextLimit, provenSafeInputTokens);
+                    }
+                    const percentage =
+                        contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
+                    sessionLog(
+                        info.sessionID,
+                        `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
+                    );
 
                     deps.contextUsageMap.set(info.sessionID, {
                         usage: {
@@ -712,11 +761,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     updates.lastInputTokens = totalInputTokens;
                     updates.lastUsageContextLimit = contextLimit;
                     updates.lastObservedModelKey = modelKey ?? null;
-                    if (!messageHadOverflowError) {
-                        updates.observedSafeInputTokens = Math.max(
-                            observedSafeInputTokens,
-                            totalInputTokens,
-                        );
+                    if (requestSucceeded) {
+                        updates.observedSafeInputTokens = provenSafeInputTokens;
                     }
 
                     const historianFailureState = getHistorianFailureState(deps.db, info.sessionID);

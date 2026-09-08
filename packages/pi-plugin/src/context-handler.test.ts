@@ -40,6 +40,7 @@ import {
 import {
 	getEmergencyInputSample,
 	getOverflowState,
+	recordDetectedContextLimit,
 	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
@@ -2337,6 +2338,44 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("clears a stale unkeyed detected limit from the same database after restart", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "mc-pi-stale-limit-"));
+		const path = join(dir, "context.db");
+		const sessionId = "ses-pi-stale-detected-restart";
+		let db = createTestDb(path);
+		try {
+			recordDetectedContextLimit(db, sessionId, 131_232);
+			closeQuietly(db);
+			db = createTestDb(path);
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+			const notify = mock(async () => undefined);
+
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId,
+				message: assistantMessage("done", 1, {
+					provider: "ninfer",
+					model: "qwen3.8-27b-nvfp4",
+					usage: { input: 148_241, cacheRead: 0, cacheWrite: 0 },
+				}),
+				piContextWindow: 200_000,
+				notifyIssue: notify,
+			});
+
+			expect(getOverflowState(db, sessionId).detectedContextLimit).toBe(0);
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.lastUsageContextLimit).toBe(200_000);
+			expect(meta.lastContextPercentage).toBeCloseTo(
+				(148_241 / 200_000) * 100,
+				10,
+			);
+			expect(notify).not.toHaveBeenCalled();
+		} finally {
+			closeQuietly(db);
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("alerts once when Pi's reported context window is below observed safe tokens", async () => {
 		const db = createTestDb();
 		try {
@@ -2367,14 +2406,17 @@ describe("registerPiContextHandler", () => {
 
 			const meta = getOrCreateSessionMeta(db, "ses-pi-pressure-alert");
 			expect(meta.cacheAlertSent).toBe(true);
-			expect(meta.lastContextPercentage).toBe(400);
+			expect(meta.lastContextPercentage).toBe(100);
+			expect(meta.lastUsageContextLimit).toBe(120_000);
 			expect(notify).toHaveBeenCalledTimes(1);
-			expect(notify.mock.calls[0]?.[0]).toContain(
-				"context limit of 30,000 tokens",
+			const warning = String(notify.mock.calls[0]?.[0]);
+			expect(warning).toContain("Pi reports a context limit of 30,000 tokens");
+			expect(warning).toContain(
+				"this session has sent 90,000 tokens successfully",
 			);
-			expect(notify.mock.calls[0]?.[0]).toContain(
-				"successfully sent 90,000 tokens",
-			);
+			expect(warning).toContain("larger proven value for its pressure math");
+			expect(warning).toContain("contextWindow");
+			expect(warning).not.toContain("Restart Pi");
 		} finally {
 			closeQuietly(db);
 		}
