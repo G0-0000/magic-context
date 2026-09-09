@@ -136,7 +136,7 @@ export function ensureMuralRendered(
  *  Pi-native prefixes (`openai-codex/…`, `google-antigravity/…`) are translated
  *  to the canonical OpenCode form before the models.dev lookup so both harnesses
  *  share one vision gate. Missing cache entries fail closed (no image). */
-function modelKeyAcceptsImages(modelKey: string | undefined): boolean {
+export function modelKeyAcceptsImages(modelKey: string | undefined): boolean {
     if (!modelKey) return false;
     const canonical = piModelRefToCanonical(modelKey);
     const separator = canonical.indexOf("/");

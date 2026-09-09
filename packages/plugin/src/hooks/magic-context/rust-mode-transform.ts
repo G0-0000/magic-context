@@ -17,7 +17,10 @@ import {
     resolveProjectIdentityForSession,
 } from "../../features/magic-context/memory/project-identity";
 import { getMemoryVerifications } from "../../features/magic-context/memory/storage-memory-verifications";
-import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
+import {
+    modelKeyAcceptsImages,
+    resolveMuralWire,
+} from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
@@ -1610,12 +1613,17 @@ export function createRustModeTransform(
         modelKey: string | undefined,
         budgetTokens: number | undefined,
     ): MuralWireOptions => {
+        // SDK refreshes can correct image support without changing the model key.
+        // Cache the candidate mural for the next permitted HARD (prefix rebuild);
+        // the Rust module keeps already-served m0 prefix bytes frozen on passes
+        // without cache-bust permission.
         const key = JSON.stringify([
             state.muralGeneration,
             state.muralCuePoolVersion,
             projectIdentity ?? null,
             modelKey ?? null,
             budgetTokens ?? null,
+            modelKeyAcceptsImages(modelKey),
         ]);
         if (options.disableHotPathIoCachesForTests !== true && state.muralCache?.key === key) {
             return state.muralCache.value;
