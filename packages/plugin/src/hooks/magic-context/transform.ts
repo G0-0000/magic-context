@@ -23,9 +23,9 @@ import {
     deriveTagLoadFloor,
     getActiveTagsBySession,
     getActiveTagTokenTotalsByMessage,
+    getDroppedTagsByNumbers,
     getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
-    getTagsByNumbers,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
@@ -1923,27 +1923,15 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        // P0 perf: replace single SELECT-everything load with three
-        // targeted queries. The hot transform path used to load every
-        // tag in the session (~50k rows on long-lived sessions) every
-        // pass; benchmark in scripts/benchmark-tag-queries.ts showed
-        // this single change recovers ~67ms per pass.
-        //
-        //   activeTags          → drives heuristic cleanup, nudger,
-        //                         caveman scope (active subset only;
-        //                         partial-index scan, ~0.6ms)
-        //   targetsSliceTags    → drives applyFlushedStatuses + caveman
-        //                         replay (visible target subset only;
-        //                         IN-list lookup against the existing
-        //                         (session_id, tag_number) index)
-        //   maxDroppedTagNumber → replaces the watermark for-loop with
-        //                         a single MAX() aggregate
-        //
-        // applyHeuristicCleanup and nudger both filter on
-        // status === "active" and short-circuit otherwise, so feeding
-        // them active-only is identical behavior. applyFlushedStatuses
-        // and caveman replay both filter to targets.has(tagNumber), so
-        // pre-filtering by tag_number is a no-op for correctness.
+        // Load only the tag subsets each consumer can act on:
+        //   activeTags          → heuristic cleanup, nudger and caveman replay.
+        //                         Caveman further filters to visible message tags
+        //                         with persisted compression depth > 0.
+        //   targetsSliceTags    → applyFlushedStatuses: dropped visible targets
+        //                         only, using the dropped-tag partial index.
+        //   maxDroppedTagNumber → watermark via a single MAX() aggregate.
+        // Fetching active/compacted rows again for status replay would hydrate
+        // the whole visible window just to discard those rows in its drop gate.
         const t1 = performance.now();
         const activeTags = compactionOff ? [] : getActiveTagsBySession(db, sessionId);
         logTransformTiming(sessionId, "getActiveTagsBySession", t1, `count=${activeTags.length}`);
@@ -1952,10 +1940,10 @@ export function createTransform(deps: TransformDeps) {
         const targetTagNumbers = [...targets.keys()];
         const targetsSliceTags = compactionOff
             ? []
-            : getTagsByNumbers(db, sessionId, targetTagNumbers);
+            : getDroppedTagsByNumbers(db, sessionId, targetTagNumbers);
         logTransformTiming(
             sessionId,
-            "getTagsByNumbers",
+            "getDroppedTagsByNumbers",
             t1b,
             `targets=${targetTagNumbers.length} fetched=${targetsSliceTags.length}`,
         );
@@ -2043,18 +2031,12 @@ export function createTransform(deps: TransformDeps) {
         // matches the gate that lets applyCavemanCleanup deepen depth in the
         // first place.
         //
-        // We feed the targets-slice subset (already loaded above for
-        // applyFlushedStatuses) — replay only acts on tags whose
-        // tag_number is in `targets` anyway, so passing the wider list
-        // would just give it more rows to filter and discard.
+        // Reuse this pass's active tags; replay filters to targets.has itself.
+        // Only message bytes have changed since that load: no await or tag
+        // status/depth write intervenes, so the snapshot is still current.
         if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
             const tCavemanReplay = performance.now();
-            const replayedCaveman = replayCavemanCompression(
-                sessionId,
-                db,
-                targets,
-                targetsSliceTags,
-            );
+            const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
             if (replayedCaveman > 0) {
                 sessionLog(sessionId, `caveman replay: re-applied ${replayedCaveman} text tags`);
             }

@@ -35,7 +35,9 @@ import {
     recordOverflowDetected,
     setChannel1NudgeState,
     setLastNudgeUndropped,
+    updateCavemanDepth,
     updateSessionMeta,
+    updateTagDropMode,
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import {
@@ -150,6 +152,182 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("hydrates only dropped rows for visible-target replay with 98% active tags", async () => {
+        useTempDataHome("context-transform-replay-rows-");
+        const realDb = openDatabase();
+        const replayRows: Array<{ status: string }> = [];
+        const replayChunkSizes: number[] = [];
+        const db = new Proxy(realDb, {
+            get(target, prop, receiver) {
+                if (prop === "prepare") {
+                    return (sql: string) => {
+                        const statement = target.prepare(sql);
+                        if (
+                            !/FROM tags WHERE session_id = \? AND (?:status = 'dropped' AND )?tag_number IN \(/.test(
+                                sql,
+                            )
+                        ) {
+                            return statement;
+                        }
+                        return new Proxy(statement, {
+                            get(stmt, key) {
+                                if (key === "all") {
+                                    return (...params: Parameters<typeof stmt.all>) => {
+                                        const rows = stmt.all(...params);
+                                        replayRows.push(...(rows as Array<{ status: string }>));
+                                        replayChunkSizes.push(params.length - 1);
+                                        return rows;
+                                    };
+                                }
+                                const value = Reflect.get(stmt, key);
+                                return typeof value === "function" ? value.bind(stmt) : value;
+                            },
+                        });
+                    };
+                }
+                const value = Reflect.get(target, prop, receiver);
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        }) as typeof realDb;
+        const sessionId = "ses-replay-row-count";
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => "defer" },
+            contextUsageMap: new Map(),
+            db,
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+        });
+        const input: TestMessage[] = Array.from({ length: 2000 }, (_, i) => ({
+            info: {
+                id: `replay-${i}`,
+                role: i % 2 === 0 ? "user" : "assistant",
+                sessionID: sessionId,
+            },
+            parts: [{ type: "text", text: `Stable result ${i}.` }],
+        }));
+        await transform({}, { messages: structuredClone(input) });
+        const tags = getTagsBySession(realDb, sessionId);
+        expect(tags).toHaveLength(2000);
+        for (let i = 49; i < tags.length; i += 50) {
+            updateTagStatus(realDb, sessionId, tags[i].tagNumber, "dropped");
+        }
+        expect(
+            getTagsBySession(realDb, sessionId).filter(
+                (tag) => tag.status === "active" && tag.cavemanDepth === 0,
+            ),
+        ).toHaveLength(1960);
+        replayRows.length = 0;
+        replayChunkSizes.length = 0;
+        await transform({}, { messages: structuredClone(input) });
+        expect(replayChunkSizes).toEqual([900, 900, 200]);
+        expect(replayRows).toHaveLength(40);
+        expect(replayRows.every((row) => row.status === "dropped")).toBe(true);
+    });
+
+    it("preserves the pre-optimization served-wire digest for mixed replay states", async () => {
+        useTempDataHome("context-transform-replay-wire-");
+        const db = openDatabase();
+        const sessionId = "ses-replay-wire";
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => "defer" },
+            contextUsageMap: new Map(),
+            db,
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+            cavemanTextCompression: { enabled: true, minChars: 50 },
+        });
+        const original =
+            "I just wanted to basically clearly explain that the implementation is actually quite complex because the historian and compartment machinery work together. ".repeat(
+                4,
+            );
+        const input: TestMessage[] = [
+            {
+                info: {
+                    id: "request",
+                    role: "user",
+                    sessionID: sessionId,
+                    tools: { ctx_reduce: true },
+                },
+                parts: [{ type: "text", text: "Please inspect the changes." }],
+            },
+            ...(["full", "truncated", "edit_marker"] as const).map((mode) => ({
+                info: { id: `tool-${mode}`, role: "assistant", sessionID: sessionId },
+                parts: [
+                    {
+                        type: "tool" as const,
+                        tool: "edit",
+                        callID: `call-${mode}`,
+                        state: {
+                            status: "completed",
+                            input: {
+                                filePath: "src/example.ts",
+                                oldString: "old value",
+                                newString: "new value",
+                            },
+                            output: `Original output for ${mode}`,
+                        },
+                    },
+                ],
+            })),
+            {
+                info: { id: "compressed", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: original }],
+            },
+            {
+                info: { id: "depth-zero", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "Keep the uncompressed explanation." }],
+            },
+            {
+                info: { id: "compacted", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "Previously compacted message still visible." }],
+            },
+            {
+                info: { id: "tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "Continue the review." }],
+            },
+        ];
+        await transform({}, { messages: structuredClone(input) });
+        const tags = getTagsBySession(db, sessionId);
+        for (const mode of ["full", "truncated", "edit_marker"] as const) {
+            const tag = tags.find((tag) => tag.type === "tool" && tag.messageId === `call-${mode}`);
+            expect(tag).toBeDefined();
+            updateTagStatus(db, sessionId, tag!.tagNumber, "dropped");
+            updateTagDropMode(db, sessionId, tag!.tagNumber, mode);
+        }
+        const compressedTag = tags.find((tag) => tag.messageId === "compressed:p0");
+        const compactedTag = tags.find((tag) => tag.messageId === "compacted:p0");
+        expect(compressedTag).toBeDefined();
+        expect(compactedTag).toBeDefined();
+        updateCavemanDepth(db, sessionId, compressedTag!.tagNumber, 1);
+        updateTagStatus(db, sessionId, compactedTag!.tagNumber, "compacted");
+        const served = structuredClone(input);
+        await transform({}, { messages: served });
+        expect(served.some((message) => message.info.id === "tool-full")).toBe(false);
+        for (const mode of ["truncated", "edit_marker"]) {
+            const message = served.find((message) => message.info.id === `tool-${mode}`);
+            expect(message).toBeDefined();
+            expect(toolOutput(message!, 0)).toContain("[dropped");
+        }
+        const compressed = served.find((message) => message.info.id === "compressed");
+        expect(compressed).toBeDefined();
+        expect(text(compressed!, 0)).not.toContain("I just wanted");
+        expect(text(compressed!, 0).length).toBeGreaterThan(0);
+        const digest = createHash("sha256").update(JSON.stringify(served)).digest("hex");
+        // Pinned from the full-target reader before narrowing the replay query:
+        // the optimization must retain every served byte, including caveman text.
+        expect(digest).toBe("0e3b74f2fc4379eeb93244788f0eb21920ac7892570303858c64cd2a19d810b0");
+    });
+
     it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {
         useTempDataHome("context-transform-hotpath-snapshot-");
         const realDb = openDatabase();
