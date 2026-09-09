@@ -356,6 +356,7 @@ describe("Pi dreamer wiring", () => {
 			deferredBusy: [],
 			failed: [],
 			failureDetails: [],
+			details: [],
 			backlogBefore: { curate: { pending: 1, total: 1 } },
 			backlogAfter: { curate: { pending: 1, total: 1 } },
 		});
@@ -363,6 +364,54 @@ describe("Pi dreamer wiring", () => {
 		expect(capturedSystem).toContain(
 			"Write human-readable prose you author in: Spanish (Español).",
 		);
+	});
+
+	test("preserves completed ctx_memory results for a tool-only curate run", async () => {
+		db = createDb();
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({
+						ok: true,
+						assistantText: "",
+						toolCallCount: 1,
+						completedToolCalls: [
+							{
+								name: "ctx_memory",
+								arguments: { action: "archive" },
+							},
+						],
+					})),
+				}) as never,
+		);
+		insertMemory(db, {
+			projectPath: "git:pi-curate-tool-only",
+			category: "PROJECT_RULES",
+			content: "Keep the memory pool concise.",
+		});
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: process.cwd(),
+			projectIdentity: "git:pi-curate-tool-only",
+			config: DreamerConfigSchema.parse({
+				model: "primary/curator",
+				tasks: { curate: { schedule: "0 4 * * *" } },
+			}),
+		});
+		registerPiDreamerProject(opts);
+
+		const result = await runPiDreamForProject(
+			"git:pi-curate-tool-only",
+			"curate",
+			opts.registrationOwner,
+		);
+
+		expect(result.failed).toEqual([]);
+		expect(result.ran).toEqual(["curate"]);
+		expect(result.details).toEqual([
+			"curate: 1 memory operation applied (archive)",
+		]);
 	});
 
 	test("shared curate validation retries Pi pseudo-tool-call text with the fallback model", async () => {

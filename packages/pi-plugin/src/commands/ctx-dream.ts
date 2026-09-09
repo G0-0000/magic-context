@@ -116,6 +116,12 @@ export function registerCtxDreamCommand(
 				);
 				const lines: string[] = [];
 				if (result.ran.length > 0) lines.push(`Ran: ${result.ran.join(", ")}`);
+				if ((result.details?.length ?? 0) > 0) {
+					lines.push(
+						"Details:",
+						...(result.details ?? []).map((detail) => `- ${detail}`),
+					);
+				}
 				if (result.failed.length > 0)
 					lines.push(`Failed: ${result.failed.join(", ")}`);
 				if ((result.failureDetails?.length ?? 0) > 0) {

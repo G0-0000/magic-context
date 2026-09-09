@@ -607,6 +607,24 @@ describe("task-scheduler — runManualDream", () => {
         expect(result.ran).toEqual(["verify"]);
     });
 
+    it("returns successful task detail for the manual command", async () => {
+        db = freshDb();
+        const tasks = [cfg("curate", "")];
+        const executor = async (): Promise<TaskExecOutcome> => ({
+            status: "completed",
+            detail: "curate: 2 memory operations applied (merge, archive)",
+        });
+        const result = await runManualDream({
+            db,
+            projectIdentity: PROJECT,
+            tasks,
+            executor,
+            task: "curate",
+        });
+
+        expect(result.details).toEqual(["curate: 2 memory operations applied (merge, archive)"]);
+    });
+
     it("a single DISABLED task can still be force-run by name", async () => {
         db = freshDb();
         const tasks = [cfg("maintain-docs", "")]; // disabled

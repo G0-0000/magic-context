@@ -57,6 +57,35 @@ function assistantMessages(text: string) {
     ];
 }
 
+function curateToolMessages(
+    calls: Array<{
+        action: string;
+        status: "completed" | "pending" | "error";
+    }>,
+    text?: string,
+    finish = "stop",
+) {
+    return [
+        {
+            info: { role: "assistant", time: { created: Date.now() }, finish },
+            parts: [
+                ...calls.map((call, index) => ({
+                    type: "tool",
+                    callID: `curate-call-${index}`,
+                    tool: "ctx_memory",
+                    state: {
+                        status: call.status,
+                        input: { action: call.action },
+                        ...(call.status === "completed" ? { output: "memory updated" } : {}),
+                        ...(call.status === "error" ? { error: "tool failed" } : {}),
+                    },
+                })),
+                ...(text ? [{ type: "text", text }] : []),
+            ],
+        },
+    ];
+}
+
 function providerFailureMessages(text: string) {
     return [
         {
@@ -261,6 +290,103 @@ describe("createDreamTaskExecutor — curate", () => {
         expect(capturedPrompt).not.toContain("verified_files");
     });
 
+    test("accepts tool-only curate output after completed ctx_memory operations", async () => {
+        db = freshDb();
+        const project = "/repo/curate-tool-only";
+        insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "Keep the memory pool concise.",
+        });
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "dream-child-tool-only" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: curateToolMessages([
+                        { action: "merge", status: "completed" },
+                        { action: "archive", status: "completed" },
+                    ]),
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+
+        const result = await executor(
+            { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-curate-tool-only",
+                leaseKey: leaseKeyFor("curate", project),
+            },
+        );
+
+        expect(result).toMatchObject({
+            status: "completed",
+            detail: expect.stringContaining("curate: 2 memory operations applied"),
+        });
+        const task = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
+            progress?: string;
+        };
+        expect(task.progress).toContain("curate: 2 memory operations applied");
+        expect(task.progress).toContain("merge");
+        expect(task.progress).toContain("archive");
+    });
+
+    test("rejects curate output when its ctx_memory call never completed", async () => {
+        db = freshDb();
+        const project = "/repo/curate-pending-tool";
+        insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "Keep the memory pool concise.",
+        });
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "dream-child-pending-tool" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: curateToolMessages(
+                        [{ action: "archive", status: "pending" }],
+                        undefined,
+                        "aborted",
+                    ),
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+
+        const result = await executor(
+            { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-curate-pending-tool",
+                leaseKey: leaseKeyFor("curate", project),
+            },
+        );
+
+        expect(result.status).toBe("failed");
+        expect(result.failureDetail).toContain("empty_completion");
+        const task = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
+            failure?: { failure_class?: string };
+        };
+        expect(task.failure?.failure_class).toBe("empty_completion");
+    });
+
     test("reports host-side curate refusal progress without failing the task", async () => {
         db = freshDb();
         const project = "/repo/curate-refusal-progress";
@@ -305,7 +431,10 @@ describe("createDreamTaskExecutor — curate", () => {
             },
         );
 
-        expect(result).toEqual({ status: "completed", schedulePatch: undefined });
+        expect(result).toEqual({
+            status: "completed",
+            detail: "curate: refused 1 unsafe mutation(s)",
+        });
         expect(progress).toContainEqual(
             expect.objectContaining({ task: "curate", processed: 1, refused: 1 }),
         );
@@ -334,7 +463,8 @@ describe("createDreamTaskExecutor — curate", () => {
                     return {};
                 }),
                 messages: mock(async () => ({
-                    data: assistantMessages(
+                    data: curateToolMessages(
+                        [{ action: "archive", status: "completed" }],
                         promptCalls === 1 ? CURATE_PSEUDO_TOOL_CALL : "curation complete",
                     ),
                 })),
@@ -363,7 +493,10 @@ describe("createDreamTaskExecutor — curate", () => {
         );
 
         expect(promptCalls).toBe(2);
-        expect(result).toEqual({ status: "completed", schedulePatch: undefined });
+        expect(result).toEqual({
+            status: "completed",
+            detail: "curate: 1 memory operation applied (archive)",
+        });
     });
 
     test("adds the content language directive to curated prose tasks", async () => {

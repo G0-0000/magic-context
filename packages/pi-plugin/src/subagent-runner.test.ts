@@ -1394,6 +1394,87 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		if (result.ok) expect(result.toolCallCount).toBe(2);
 	});
 
+	it("accepts a tool-only dreamer run after a completed ctx_memory result", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run({ ...baseOptions, agent: "dreamer" });
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "curate-1",
+						name: "ctx_memory",
+						arguments: { action: "archive" },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		});
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: "curate-1",
+				toolName: "ctx_memory",
+				content: [{ type: "text", text: "Archived memory." }],
+				isError: false,
+			},
+		});
+		child.emitClose(0);
+
+		expect(await resultPromise).toEqual({
+			ok: true,
+			assistantText: "",
+			toolCallCount: 1,
+			completedToolCalls: [
+				{ name: "ctx_memory", arguments: { action: "archive" } },
+			],
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+	});
+
+	it("rejects a tool-only dreamer run when ctx_memory returned an error", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run({ ...baseOptions, agent: "dreamer" });
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "curate-error",
+						name: "ctx_memory",
+						arguments: { action: "archive" },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		});
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: "curate-error",
+				toolName: "ctx_memory",
+				content: [{ type: "text", text: "Archive rejected." }],
+				isError: true,
+			},
+		});
+		child.emitClose(0);
+
+		const result = await resultPromise;
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.reason).toBe("no_assistant");
+	});
+
 	it("spawns pi, parses stdout, trims assistant text, and captures stderr", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, { piBinary: "custom-pi" });

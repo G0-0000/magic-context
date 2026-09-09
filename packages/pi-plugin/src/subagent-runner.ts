@@ -34,6 +34,7 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 import type { ResolvedModelEntry } from "@magic-context/core/shared/model-resolution";
 import { piHarnessKindFromExecutable } from "@magic-context/core/shared/pi-executable";
 import type {
+	CompletedSubagentToolCall,
 	SubagentProgressEvent,
 	SubagentRunner,
 	SubagentRunOptions,
@@ -1678,17 +1679,50 @@ export class PiSubagentRunner implements SubagentRunner {
 				});
 				if (settled) return;
 
+				const settleCompletedToolOnlyDreamer = (
+					messages: unknown[],
+					completedMemoryCalls: CompletedSubagentToolCall[],
+				): boolean => {
+					if (
+						!DREAMER_ACTION_AGENTS.has(options.agent) ||
+						completedMemoryCalls.length === 0
+					) {
+						return false;
+					}
+					settle({
+						ok: true,
+						assistantText: "",
+						toolCallCount: countToolCalls(messages),
+						completedToolCalls: completedMemoryCalls,
+						durationMs: Date.now() - startTime,
+						meta: { stderr: stderr.length > 0 ? stderr : undefined },
+					});
+					return true;
+				};
+
 				// Common case: terminal assistant message_end was observed.
 				// Pi print-mode often needs our drain SIGTERM after producing
 				// the final turn, so the captured stopReason/text is the source
 				// of truth; a signaled close here must not turn a valid answer
 				// into a fake subprocess failure.
 				if (sawAgentEnd) {
+					const outputMessages = agentEndMessages ?? accumulatedMessages;
+					const completedCalls = extractCompletedToolCalls(outputMessages);
+					const completedMemoryCalls = completedCalls.filter(
+						(call) => call.name === "ctx_memory",
+					);
 					const trimmedAssistantText = finalAssistantText?.trim() ?? null;
 					if (
 						trimmedAssistantText === null ||
 						trimmedAssistantText.length === 0
 					) {
+						if (
+							settleCompletedToolOnlyDreamer(
+								outputMessages,
+								completedMemoryCalls,
+							)
+						)
+							return;
 						const emptyAssistantReason =
 							trimmedAssistantText === null
 								? "pi agent_end did not include an assistant message"
@@ -1734,9 +1768,10 @@ export class PiSubagentRunner implements SubagentRunner {
 						// Prefer agent_end's authoritative full array; else the
 						// accumulated message_end stream. Counting toolCall content
 						// parts is event-name-independent (see countToolCalls).
-						toolCallCount: countToolCalls(
-							agentEndMessages ?? accumulatedMessages,
-						),
+						toolCallCount: countToolCalls(outputMessages),
+						...(completedMemoryCalls.length > 0
+							? { completedToolCalls: completedMemoryCalls }
+							: {}),
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});
@@ -1775,6 +1810,17 @@ export class PiSubagentRunner implements SubagentRunner {
 					});
 					return;
 				}
+
+				const completedMemoryCalls = extractCompletedToolCalls(
+					accumulatedMessages,
+				).filter((call) => call.name === "ctx_memory");
+				if (
+					settleCompletedToolOnlyDreamer(
+						accumulatedMessages,
+						completedMemoryCalls,
+					)
+				)
+					return;
 
 				settle({
 					ok: false,
@@ -2195,6 +2241,74 @@ export function extractFinalAssistant(messages: unknown[]): {
 		};
 	}
 	return { text: null, stopReason: null, errorMessage: null };
+}
+
+/** Pair assistant invocations with non-error tool-result messages from Pi's transcript. */
+export function extractCompletedToolCalls(
+	messages: unknown[],
+): CompletedSubagentToolCall[] {
+	const invocations = new Map<
+		string,
+		{ name: string; arguments: Record<string, unknown> }
+	>();
+	for (const message of messages) {
+		if (typeof message !== "object" || message === null) continue;
+		const candidate = message as { role?: unknown; content?: unknown };
+		if (candidate.role !== "assistant" || !Array.isArray(candidate.content))
+			continue;
+		for (const part of candidate.content) {
+			if (typeof part !== "object" || part === null) continue;
+			const call = part as {
+				type?: unknown;
+				id?: unknown;
+				toolCallId?: unknown;
+				name?: unknown;
+				toolName?: unknown;
+				arguments?: unknown;
+			};
+			if (call.type !== "toolCall") continue;
+			const id = typeof call.id === "string" ? call.id : call.toolCallId;
+			const name = typeof call.name === "string" ? call.name : call.toolName;
+			if (typeof id !== "string" || typeof name !== "string") continue;
+			const args =
+				typeof call.arguments === "object" &&
+				call.arguments !== null &&
+				!Array.isArray(call.arguments)
+					? (call.arguments as Record<string, unknown>)
+					: {};
+			invocations.set(id, { name, arguments: args });
+		}
+	}
+
+	const completed: CompletedSubagentToolCall[] = [];
+	const seen = new Set<string>();
+	for (const message of messages) {
+		if (typeof message !== "object" || message === null) continue;
+		const result = message as {
+			role?: unknown;
+			toolCallId?: unknown;
+			toolName?: unknown;
+			isError?: unknown;
+		};
+		if (
+			result.role !== "toolResult" ||
+			typeof result.toolCallId !== "string" ||
+			result.isError !== false ||
+			seen.has(result.toolCallId)
+		) {
+			continue;
+		}
+		const invocation = invocations.get(result.toolCallId);
+		if (!invocation) continue;
+		if (
+			typeof result.toolName === "string" &&
+			result.toolName !== invocation.name
+		)
+			continue;
+		seen.add(result.toolCallId);
+		completed.push(invocation);
+	}
+	return completed;
 }
 
 /**

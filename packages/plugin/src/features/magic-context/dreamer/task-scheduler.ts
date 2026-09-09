@@ -53,6 +53,8 @@ export interface TaskExecOutcome {
     /** Structured user-facing diagnostic while `error` remains the legacy value
      *  persisted in task schedule state. */
     failureDetail?: string;
+    /** Successful task detail surfaced by a manual `/ctx-dream` run. */
+    detail?: string;
     schedulePatch?: {
         /** retrospective content watermark (max message ts scanned this run). */
         retrospectiveWatermarkMs?: number | null;
@@ -288,7 +290,7 @@ interface DomainGroupCallbacks {
      * up. Scheduled ticks leave this unset (the next tick retries anyway).
      */
     leaseWaitMs?: number;
-    onRan?: (task: DreamTaskName) => void;
+    onRan?: (task: DreamTaskName, detail?: string) => void;
     onFailed?: (task: DreamTaskName, error?: string) => void;
     onBusy?: (task: DreamTaskName) => void;
 }
@@ -384,7 +386,7 @@ async function runDomainGroup(
                     null,
                     outcome.schedulePatch,
                 );
-                cb?.onRan?.(due.config.task);
+                cb?.onRan?.(due.config.task, outcome.detail);
             } else if (outcome.transient) {
                 recordTransientFailure(db, projectIdentity, due, finishedAt, outcome.error ?? null);
                 cb?.onFailed?.(due.config.task, outcome.failureDetail ?? outcome.error);
@@ -416,6 +418,8 @@ export interface ManualRunResult {
     failed: string[];
     /** User-visible error details for failed tasks, including incomplete backlogs. */
     failureDetails?: string[];
+    /** User-visible detail from successful tasks. */
+    details?: string[];
     /** Read-only backlog snapshot before the selected tasks started. */
     backlogBefore: DreamTaskBacklogMap;
     /** Read-only backlog snapshot after the selected tasks finished or were skipped. */
@@ -442,6 +446,7 @@ export async function runManualDream(
         deferredBusy: [],
         failed: [],
         failureDetails: [],
+        details: [],
         backlogBefore: {},
         backlogAfter: {},
     };
@@ -512,7 +517,10 @@ export async function runManualDream(
             runDomainGroup({ ...deps, executor: deps.executor }, group, {
                 forceGate,
                 leaseWaitMs: MANUAL_RUN_LEASE_WAIT_MS,
-                onRan: (t) => result.ran.push(t),
+                onRan: (t, detail) => {
+                    result.ran.push(t);
+                    if (detail) result.details?.push(detail);
+                },
                 onFailed: (task, error) => {
                     result.failed.push(task);
                     if (error) result.failureDetails?.push(`${task}: ${error}`);

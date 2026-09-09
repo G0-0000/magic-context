@@ -16,6 +16,7 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import { isRecord } from "../../../shared/record-type-guard";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -241,6 +242,51 @@ function validateCurateAssistantText(text: string): string {
         throw new Error("Curate returned an unresolved textual ctx_memory tool call.");
     }
     return text;
+}
+
+interface CurateMemoryOperationSummary {
+    totalCalls: number;
+    completedActions: string[];
+}
+
+interface CurateValidatedOutput {
+    text: string | null;
+    memoryOperations: CurateMemoryOperationSummary;
+}
+
+function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOperationSummary {
+    const summary: CurateMemoryOperationSummary = { totalCalls: 0, completedActions: [] };
+    if (!Array.isArray(messages)) return summary;
+
+    for (const message of messages) {
+        if (!isRecord(message) || !isRecord(message.info) || message.info.role !== "assistant") {
+            continue;
+        }
+        if (!Array.isArray(message.parts)) continue;
+        for (const part of message.parts) {
+            if (!isRecord(part) || part.type !== "tool") continue;
+            const toolName = part.tool ?? part.name;
+            if (toolName !== "ctx_memory") continue;
+            summary.totalCalls += 1;
+            if (!isRecord(part.state) || part.state.status !== "completed") continue;
+            const input = isRecord(part.state.input) ? part.state.input : null;
+            summary.completedActions.push(
+                typeof input?.action === "string" ? input.action : "unknown",
+            );
+        }
+    }
+
+    return summary;
+}
+
+function formatCurateMemoryOperations(actions: readonly string[]): string {
+    const actionCounts = new Map<string, number>();
+    for (const action of actions) actionCounts.set(action, (actionCounts.get(action) ?? 0) + 1);
+    const actionDetail = [...actionCounts]
+        .map(([action, count]) => (count === 1 ? action : `${action} ×${count}`))
+        .join(", ");
+    const noun = actions.length === 1 ? "operation" : "operations";
+    return `curate: ${actions.length} memory ${noun} applied${actionDetail ? ` (${actionDetail})` : ""}`;
 }
 
 /**
@@ -1316,16 +1362,34 @@ async function runAgenticTask(
                 fetchOutput: async () => {
                     const messagesResponse = await deps.client.session.messages({
                         path: { id: sessionId },
-                        query: { directory: docsDir, limit: 50 },
+                        query: {
+                            directory: docsDir,
+                            // Curate can use up to 150 steps, so its applied-operation
+                            // count must not be truncated to the newest 50 messages.
+                            ...(task === "curate" ? {} : { limit: 50 }),
+                        },
                     });
                     return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                         preferResponseOnMissingData: true,
                     });
                 },
-                validateOutput: (messages) => {
+                validateOutput: (messages): string | CurateValidatedOutput => {
                     const text = extractLatestAssistantText(messages);
+                    if (task !== "curate") {
+                        if (!text) throw new Error("Dreamer returned no assistant output.");
+                        return text;
+                    }
+
+                    const memoryOperations = inspectCurateMemoryOperations(messages);
+                    if (text) validateCurateAssistantText(text);
+                    if (memoryOperations.completedActions.length > 0) {
+                        return { text, memoryOperations };
+                    }
                     if (!text) throw new Error("Dreamer returned no assistant output.");
-                    return task === "curate" ? validateCurateAssistantText(text) : text;
+                    if (memoryOperations.totalCalls > 0) {
+                        throw new Error("Curate returned no completed ctx_memory tool result.");
+                    }
+                    return { text, memoryOperations };
                 },
             },
         );
@@ -1360,12 +1424,21 @@ async function runAgenticTask(
             }
         }
 
+        const curateOutput =
+            task === "curate" ? (run.validated as CurateValidatedOutput) : undefined;
+        const progress = [
+            curateOutput && curateOutput.memoryOperations.completedActions.length > 0
+                ? formatCurateMemoryOperations(curateOutput.memoryOperations.completedActions)
+                : null,
+            curateRefused > 0 ? `curate: refused ${curateRefused} unsafe mutation(s)` : null,
+        ]
+            .filter((value): value is string => Boolean(value))
+            .join("; ");
         helpers.recordRun("completed", null, {
             memoryChanges: helpers.computeMemoryDelta(memoryBefore),
-            progress:
-                curateRefused > 0 ? `curate: refused ${curateRefused} unsafe mutation(s)` : null,
+            progress: progress || null,
         });
-        return { status: "completed" };
+        return { status: "completed", ...(progress ? { detail: progress } : {}) };
     } finally {
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);

@@ -1451,6 +1451,7 @@ describe("createMagicContextCommandHandler", () => {
             const sendNotification = mock(async () => {});
             const runManual = mock(async () => ({
                 ran: ["verify"],
+                details: ["curate: 8 memory operations applied"],
                 skippedNoWork: [],
                 deferredBusy: [],
                 failed: [],
@@ -1484,6 +1485,9 @@ describe("createMagicContextCommandHandler", () => {
                 "ses-dream",
                 expect.stringContaining("Ran: verify"),
                 { toastDurationMs: 5000 },
+            );
+            expect(sendNotification.mock.calls[1]?.[1]).toContain(
+                "curate: 8 memory operations applied",
             );
         });
 

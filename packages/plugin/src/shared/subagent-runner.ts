@@ -182,6 +182,11 @@ export type SubagentProgressEvent =
  *   here so the OpenCode runner can surface the child session ID for log
  *   correlation when Step 5b lands.
  */
+export interface CompletedSubagentToolCall {
+    name: string;
+    arguments: Record<string, unknown>;
+}
+
 export type SubagentRunResult =
     | {
           ok: true;
@@ -196,6 +201,9 @@ export type SubagentRunResult =
            * the real session messages.
            */
           toolCallCount?: number;
+          /** Completed, non-error tool results preserved by runners that can
+           *  reconstruct invocation/result pairs from their transcript. */
+          completedToolCalls?: CompletedSubagentToolCall[];
           meta?: Record<string, unknown>;
       }
     | {

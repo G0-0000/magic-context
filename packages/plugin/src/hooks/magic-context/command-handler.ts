@@ -452,6 +452,9 @@ function readDreamTaskBacklogsSafely(
 function summarizeManualDream(s: ManualDreamSummary): string {
     const lines: string[] = ["## /ctx-dream", ""];
     if (s.ran.length > 0) lines.push(`Ran: ${s.ran.join(", ")}`);
+    if ((s.details?.length ?? 0) > 0) {
+        lines.push("Details:", ...(s.details ?? []).map((detail) => `- ${detail}`));
+    }
     if (s.failed.length > 0) lines.push(`Failed: ${s.failed.join(", ")}`);
     if ((s.failureDetails?.length ?? 0) > 0) {
         lines.push("Failure details:", ...(s.failureDetails ?? []).map((detail) => `- ${detail}`));
