@@ -8882,7 +8882,7 @@ impl McHandler {
         let handler_followup_ms = handler_followup_started_at.elapsed().as_secs_f64() * 1_000.0;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
-        let reasoning_watermark = result.reasoning_watermark;
+        let reasoning_clear_units = &result.reasoning_clear_units;
         let transition_consumed = result.transition_consumed;
         let mutation_exempt_mid = result.mutation_exempt_mid;
         let lineage_anchor_mid = result.lineage_anchor_mid;
@@ -8912,7 +8912,7 @@ impl McHandler {
             attach_native_messages_incremental(
                 &mut response,
                 &parsed,
-                reasoning_watermark,
+                reasoning_clear_units,
                 &tag_numbers,
                 mutation_exempt_mid.as_deref(),
                 lineage_anchor_mid.as_deref(),
@@ -8928,7 +8928,7 @@ impl McHandler {
         finalize_native_messages_response(
             &mut response,
             &parsed,
-            reasoning_watermark,
+            reasoning_clear_units,
             &tag_numbers,
             mutation_exempt_mid.as_deref(),
             lineage_anchor_mid.as_deref(),
@@ -12282,13 +12282,13 @@ fn serve_native_unsupported_profile_error(profile: &str) -> HandlerOutcome {
 fn attach_native_messages(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
-    reasoning_watermark: u64,
+    reasoning_clear_units: &[mc_core::FrozenUnit],
     mutation_exempt_mid: Option<&str>,
 ) {
     attach_native_messages_with_tags(
         response,
         request,
-        reasoning_watermark,
+        reasoning_clear_units,
         &std::collections::BTreeMap::new(),
         mutation_exempt_mid,
         None,
@@ -12333,7 +12333,7 @@ enum ProjectionCacheKeyMode {
 fn attach_native_messages_with_tags(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
-    reasoning_watermark: u64,
+    reasoning_clear_units: &[mc_core::FrozenUnit],
     tag_numbers: &BTreeMap<String, u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
@@ -12345,7 +12345,7 @@ fn attach_native_messages_with_tags(
     let native_messages = encode_full_native_messages(
         response,
         request,
-        reasoning_watermark,
+        reasoning_clear_units,
         tag_numbers,
         mutation_exempt_mid,
         lineage_anchor_mid,
@@ -12508,9 +12508,8 @@ fn native_reasoning_should_clear(
     served: &transform::ServedMessage,
     request: &TransformRequest,
     ingress_ordinals: &HashMap<&str, u64>,
-    reasoning_watermark: u64,
+    cleared_mids: &HashSet<&str>,
     tag_numbers: &BTreeMap<String, u64>,
-    newest_assistant_mid: Option<&str>,
 ) -> (u64, bool) {
     let Some(mid) = served.meta.harness_id.as_deref() else {
         return (0, false);
@@ -12521,17 +12520,15 @@ fn native_reasoning_should_clear(
     let tag_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
     let should_clear = served.role == "assistant"
         && !served.meta.synthetic
-        && reasoning_watermark > 0
         && transform::request_accepts_empty_content(request)
-        && tag_number <= reasoning_watermark
-        && newest_assistant_mid != Some(mid);
+        && cleared_mids.contains(mid);
     (tag_number, should_clear)
 }
 
 fn encode_full_native_messages(
     response: &transform::TransformResponse,
     request: &TransformRequest,
-    reasoning_watermark: u64,
+    reasoning_clear_units: &[mc_core::FrozenUnit],
     tag_numbers: &BTreeMap<String, u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
@@ -12571,7 +12568,7 @@ fn encode_full_native_messages(
             &mut native_messages,
             &served_messages,
             &request.messages,
-            reasoning_watermark,
+            reasoning_clear_units,
             request.mid_turn,
             tag_numbers,
         );
@@ -12659,7 +12656,7 @@ fn native_attachment_differential_enabled() -> bool {
 fn attach_native_messages_incremental(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
-    reasoning_watermark: u64,
+    reasoning_clear_units: &[mc_core::FrozenUnit],
     tag_numbers: &BTreeMap<String, u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
@@ -12728,6 +12725,7 @@ fn attach_native_messages_incremental(
         .as_mut()
         .map(|snapshot| std::mem::take(&mut snapshot.sidecar_sizes))
         .unwrap_or_default();
+    let cleared_mids = transform::reasoning_clear_mids(reasoning_clear_units);
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
@@ -12775,9 +12773,8 @@ fn attach_native_messages_incremental(
             served,
             request,
             &ingress_ordinals,
-            reasoning_watermark,
+            &cleared_mids,
             tag_numbers,
-            newest_assistant_mid,
         );
         message_keys.push(native_message_key(
             served,
@@ -12878,7 +12875,7 @@ fn attach_native_messages_incremental(
             &mut suffix_values,
             response.messages(),
             &request.messages,
-            reasoning_watermark,
+            reasoning_clear_units,
             request.mid_turn,
             tag_numbers,
         );
@@ -12911,7 +12908,7 @@ fn attach_native_messages_incremental(
         let full = encode_full_native_messages(
             response,
             request,
-            reasoning_watermark,
+            reasoning_clear_units,
             tag_numbers,
             mutation_exempt_mid,
             lineage_anchor_mid,
@@ -12975,7 +12972,7 @@ fn attach_native_messages_incremental(
 fn finalize_native_messages_response(
     response: &mut transform::TransformResponse,
     request: &TransformRequest,
-    reasoning_watermark: u64,
+    reasoning_clear_units: &[mc_core::FrozenUnit],
     tag_numbers: &BTreeMap<String, u64>,
     mutation_exempt_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
@@ -13022,7 +13019,7 @@ fn finalize_native_messages_response(
             encode_full_native_messages(
                 response,
                 request,
-                reasoning_watermark,
+                reasoning_clear_units,
                 tag_numbers,
                 mutation_exempt_mid,
                 lineage_anchor_mid,
@@ -13063,7 +13060,7 @@ fn passthrough_transform_response(request: &TransformRequest) -> HandlerOutcome 
             .collect(),
         request.full_array_fingerprint.clone(),
     );
-    attach_native_messages(&mut response, request, 0, None);
+    attach_native_messages(&mut response, request, &[], None);
     respond_transform(request, response)
 }
 
@@ -19062,7 +19059,7 @@ mod tests {
         finalize_native_messages_response(
             &mut response,
             &request,
-            1,
+            &test_reasoning_clear_units(&request, &BTreeMap::new(), 1),
             &BTreeMap::new(),
             None,
             None,
@@ -19303,11 +19300,11 @@ mod tests {
         revert_epoch: u64,
         mode: NativeCacheKeyMode,
     ) -> (transform::TransformResponse, NativeAttachmentCacheStats) {
-        run_native_cache_pass_with_watermark(
+        run_native_cache_pass_with_clear_units(
             cache,
             request,
             served,
-            1,
+            &test_reasoning_clear_units(request, tag_numbers, 1),
             tag_numbers,
             transition_consumed,
             revert_epoch,
@@ -19315,12 +19312,38 @@ mod tests {
         )
     }
 
+    // These encoder fixtures supply reasoning-clear units as if a cache-busting
+    // transform had already committed them. The encoder only replays those decisions.
+    fn test_reasoning_clear_units(
+        request: &TransformRequest,
+        tags: &BTreeMap<String, u64>,
+        cutoff: u64,
+    ) -> Vec<mc_core::FrozenUnit> {
+        let newest = transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
+        request
+            .messages
+            .iter()
+            .filter(|message| {
+                message.ck.role == "assistant"
+                    && Some(message.mid.as_str()) != newest
+                    && tags.get(&message.mid).copied().unwrap_or(message.ordinal) <= cutoff
+            })
+            .map(|message| mc_core::FrozenUnit {
+                key: format!("strip:reasoning_clear:{}", message.mid),
+                kind: "strip_reasoning_clear".to_string(),
+                frozen_payload: String::new(),
+                durability_class: mc_core::DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn run_native_cache_pass_with_watermark(
+    fn run_native_cache_pass_with_clear_units(
         cache: &Mutex<NativeAttachmentCache>,
         request: &TransformRequest,
         served: Vec<CkWireMessage>,
-        reasoning_watermark: u64,
+        reasoning_clear_units: &[mc_core::FrozenUnit],
         tag_numbers: &BTreeMap<String, u64>,
         transition_consumed: bool,
         revert_epoch: u64,
@@ -19349,7 +19372,7 @@ mod tests {
         let stats = attach_native_messages_incremental(
             &mut response,
             request,
-            reasoning_watermark,
+            reasoning_clear_units,
             tag_numbers,
             None,
             None,
@@ -19702,7 +19725,7 @@ mod tests {
         let second_stats = attach_native_messages_incremental(
             &mut response,
             &delta,
-            1,
+            &test_reasoning_clear_units(&delta, &BTreeMap::new(), 1),
             &BTreeMap::new(),
             None,
             None,
@@ -20419,7 +20442,7 @@ mod tests {
     }
 
     #[test]
-    fn newest_reasoning_becomes_historical_after_watermark_tail_advance() {
+    fn newest_reasoning_becomes_historical_after_committed_clear_decision() {
         let first_ingress = vec![ck_reasoning("reasoning-1", 1, "signed-1")];
         let first_native = vec![json!({
             "info": { "id": "reasoning-1", "role": "assistant" },
@@ -20438,11 +20461,11 @@ mod tests {
         );
         first_request.mid_turn = true;
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let (first, _) = run_native_cache_pass_with_watermark(
+        let (first, _) = run_native_cache_pass_with_clear_units(
             &cache,
             &first_request,
             vec![first_ingress[0].ck.clone()],
-            0,
+            &[],
             &BTreeMap::from([("reasoning-1".to_string(), 1)]),
             true,
             0,
@@ -20473,14 +20496,14 @@ mod tests {
             "replace_from": 1,
             "native_replace_from": 1,
         }));
-        let (second, stats) = run_native_cache_pass_with_watermark(
+        let (second, stats) = run_native_cache_pass_with_clear_units(
             &cache,
             &second_request,
             second_ingress
                 .iter()
                 .map(|message| message.ck.clone())
                 .collect(),
-            1,
+            &test_reasoning_clear_units(&second_request, &BTreeMap::new(), 1),
             &BTreeMap::from([
                 ("reasoning-1".to_string(), 1),
                 ("reasoning-2".to_string(), 2),
@@ -20538,11 +20561,11 @@ mod tests {
         target.mark_modified();
 
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
-        let (response, _) = run_native_cache_pass_with_watermark(
+        let (response, _) = run_native_cache_pass_with_clear_units(
             &cache,
             &request,
             served,
-            u64::MAX,
+            &test_reasoning_clear_units(&request, &BTreeMap::new(), u64::MAX),
             &BTreeMap::from([(target_mid.to_string(), 1)]),
             true,
             0,
@@ -20606,11 +20629,11 @@ mod tests {
 
         let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
         for _ in 0..2 {
-            let (response, _) = run_native_cache_pass_with_watermark(
+            let (response, _) = run_native_cache_pass_with_clear_units(
                 &cache,
                 &request,
                 served.clone(),
-                u64::MAX,
+                &test_reasoning_clear_units(&request, &BTreeMap::new(), u64::MAX),
                 &BTreeMap::from([(target_mid.to_string(), 1)]),
                 true,
                 0,
@@ -20808,7 +20831,7 @@ mod tests {
         attach_native_messages_incremental(
             &mut response,
             &request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -22145,16 +22168,13 @@ mod tests {
         assert_eq!(new_tag_numbers, old_tag_numbers);
 
         let loaded = store.load("ses").unwrap();
-        let reasoning_watermark = loaded
-            .meta
-            .reasoning_cleared_through_tag
-            .max(loaded.meta.reasoning_cleared_through_ordinal);
+        let reasoning_clear_units = &loaded.core.frozen_units;
         let mut replay: transform::TransformResponse = serde_json::from_value(actual).unwrap();
         replay.native_messages = None;
         attach_native_messages_with_tags(
             &mut replay,
             &parsed,
-            reasoning_watermark,
+            reasoning_clear_units,
             &old_tag_numbers,
             None,
             None,

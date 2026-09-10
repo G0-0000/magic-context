@@ -284,7 +284,7 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         attach_native_messages_incremental(
             &mut first,
             &request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -299,7 +299,7 @@ fn dg_goldens_exercise_incremental_native_differential_mode() {
         let stats = attach_native_messages_incremental(
             &mut replay,
             &request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
