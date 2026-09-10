@@ -170,11 +170,10 @@ const server: Plugin = async (ctx) => {
         if (hasBannerEntries)
             setTimeout(async () => {
                 try {
-                    const { sendIgnoredMessage } = await import(
+                    const { sendStatusNotification } = await import(
                         "./hooks/magic-context/send-session-notification"
                     );
-                    // sendIgnoredMessage already handles TUI (toast) vs Desktop (ignored message)
-                    // via isTuiConnected(). We need a session ID — use the first active session.
+                    // Route the RPC warning to the first active session; never append a chat row.
                     // SDK types don't expose `session.list()`'s actual response shape (the
                     // client surface has been through multiple revisions; some versions
                     // return `{ data: [...] }`, others return the array directly), so we
@@ -191,15 +190,7 @@ const server: Plugin = async (ctx) => {
                     const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
                     const sessionId = sessionList?.[0]?.id;
                     if (sessionId) {
-                        // Pin the session's last real turn (agent + model + variant)
-                        // onto the warning. Passing nothing makes OpenCode record the
-                        // DEFAULT agent/model on this ignored message — which both
-                        // mis-attributes the notice (shows the default agent, not the
-                        // session's) AND switches the model on the user's next turn,
-                        // busting the prefix cache. resolvePromptContext reads from
-                        // real session messages and returns null on a fresh/empty
-                        // session, so this degrades safely there.
-                        await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
+                        await sendStatusNotification(ctx.client, sessionId, warningText, {});
                     }
                 } catch {
                     // Intentional: config warning delivery must not crash startup
@@ -218,7 +209,7 @@ const server: Plugin = async (ctx) => {
         );
         setTimeout(async () => {
             try {
-                const { sendIgnoredMessage } = await import(
+                const { sendStatusNotification } = await import(
                     "./hooks/magic-context/send-session-notification"
                 );
                 type SessionListFn = () => Promise<
@@ -232,7 +223,8 @@ const server: Plugin = async (ctx) => {
                 );
                 const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
                 const sessionId = sessionList?.[0]?.id;
-                if (sessionId) await sendIgnoredMessage(ctx.client, sessionId, missingDbBanner, {});
+                if (sessionId)
+                    await sendStatusNotification(ctx.client, sessionId, missingDbBanner, {});
             } catch {
                 // A diagnostic banner must never make plugin startup fail.
             }
@@ -614,8 +606,7 @@ const server: Plugin = async (ctx) => {
     // Schema-fence warning for Desktop mode. If openDatabase() fail-closed
     // because the shared DB is newer than this build supports (cross-harness
     // partial upgrade), the user otherwise sees Magic Context silently stop
-    // working. Surface a clear, actionable message. (TUI/Pi see the log line;
-    // Desktop has no dialog surface, so this ignored-message path covers it.)
+    // working. Enqueue actionable RPC status without creating a user turn.
     {
         const fence = getSchemaFenceRejection();
         if (fence) {
@@ -670,13 +661,13 @@ const server: Plugin = async (ctx) => {
     // every launch, so a user who deliberately removed the sidebar could never
     // keep it removed.
 
-    // Desktop-only startup announcement: post a one-shot ignored message
+    // Desktop-only startup announcement: enqueue a one-shot RPC notification
     // describing what's new in this release.
     //
     // TUI delivery is handled by the TUI plugin via the `get-announcement` /
     // `mark-announced` RPC handlers (registered above). Both surfaces share
     // the same `last_announced_version` persistence file so dismissal in
-    // either harness suppresses the dialog/message in the other.
+    // either harness suppresses the announcement in the other.
     //
     // Deferred 8s so the active session has stabilized; runs fire-and-forget
     // so a failure here can never block plugin startup.

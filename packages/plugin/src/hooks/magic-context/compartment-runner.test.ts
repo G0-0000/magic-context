@@ -1,3 +1,7 @@
+import {
+    __resetNotificationStateForTests,
+    drainNotifications,
+} from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
@@ -72,6 +76,7 @@ async function runCompartmentAgentWithLease(
 
 afterEach(() => {
     __ignoredNotificationTest.reset();
+    __resetNotificationStateForTests();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -169,9 +174,9 @@ describe("executeContextRecomp", () => {
 
         expect(result).toContain("Rebuilt 1 compartment across 1 historian pass");
         expect(result).toContain("Covered raw history 1-4");
-        expect(
-            getIgnoredNotificationTexts(client.session.prompt as ReturnType<typeof mock>),
-        ).toContain("## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.");
+        expect(getRpcNotificationTexts(client.session.prompt as ReturnType<typeof mock>)).toContain(
+            "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.",
+        );
         expect(getCompartments(db, "ses-recomp")).toEqual([
             expect.objectContaining({
                 startMessage: 1,
@@ -249,7 +254,9 @@ describe("executeContextRecomp", () => {
         ).toBeNull();
     });
 
-    it("keeps published state unchanged when a later recomp pass fails", async () => {
+    it.each([
+        1, 2,
+    ])("keeps old state before progress and promotes validated progress when historian pass %i fails", async (failingPass) => {
         useTempDataHome("magic-recomp-fail-closed-");
         createOpenCodeDb("ses-recomp-fail", [
             { id: "m-1", role: "user", text: "eligible one" },
@@ -316,8 +323,8 @@ describe("executeContextRecomp", () => {
         });
         const prompt = mock(async () => {
             const callIndex = prompt.mock.calls.length;
-            if (callIndex >= 2) {
-                throw new Error("historian failed on second pass");
+            if (callIndex >= failingPass) {
+                throw new Error("historian pass failed");
             }
             return {};
         });
@@ -340,18 +347,27 @@ describe("executeContextRecomp", () => {
             directory: "/tmp",
         });
 
-        expect(result).toContain("historian failed on second pass");
+        // Only historian requests use prompt now; progress no longer consumes mock calls.
+        expect(result).toContain("historian pass failed");
         expect(getCompartments(db, "ses-recomp-fail")).toEqual([
             expect.objectContaining({
                 startMessage: 1,
                 endMessage: 2,
-                title: "published",
-                content: "published summary",
+                title: failingPass === 1 ? "published" : "Chunk one",
+                content: failingPass === 1 ? "published summary" : "Chunk one summary",
             }),
         ]);
-        expect(getSessionFacts(db, "ses-recomp-fail")).toEqual([
-            expect.objectContaining({ category: "WORKFLOW_RULES", content: "Published fact." }),
-        ]);
+        // Recomp publishes structure only; a published replacement has no legacy session facts.
+        expect(getSessionFacts(db, "ses-recomp-fail")).toEqual(
+            failingPass === 1
+                ? [
+                      expect.objectContaining({
+                          category: "WORKFLOW_RULES",
+                          content: "Published fact.",
+                      }),
+                  ]
+                : [],
+        );
     });
 
     it("retries once when historian skips a visible message and then publishes the repaired recomp result", async () => {
@@ -435,7 +451,7 @@ describe("executeContextRecomp", () => {
         expect(result).toContain("Rebuilt 1 compartment across 1 historian pass");
         expect(historianFetches).toBe(2);
         expect(getHistorianPromptCount(prompt)).toBe(2);
-        expect(getIgnoredNotificationTexts(prompt)).toEqual(
+        expect(getRpcNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.",
                 expect.stringContaining(
@@ -713,7 +729,7 @@ describe("executeContextRecomp", () => {
         }
 
         expect(result).toContain("prompt timed out after 300000ms");
-        expect(getIgnoredNotificationTexts(prompt)).toContain(
+        expect(getRpcNotificationTexts(prompt)).toContain(
             "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.",
         );
         expect(getCompartments(db, "ses-recomp-timeout")).toHaveLength(0);
@@ -808,7 +824,7 @@ describe("executeContextRecomp", () => {
         // the chunk rather than absorbing the gap.
         expect(result).toContain("## Magic Recomp");
         expect(result).toContain("Covered raw history 1-6");
-        expect(getIgnoredNotificationTexts(prompt)).toEqual(
+        expect(getRpcNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-6.",
             ]),
@@ -887,7 +903,7 @@ describe("executeContextRecomp", () => {
 
         // Overlapping compartments are NOT healed by gap healing, so retry/shrink triggers.
         expect(result).toContain("Recomp failed while rebuilding messages 1-6");
-        expect(getIgnoredNotificationTexts(prompt)).toEqual(
+        expect(getRpcNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-6.",
                 expect.stringContaining(
@@ -896,7 +912,7 @@ describe("executeContextRecomp", () => {
             ]),
         );
         expect(
-            getIgnoredNotificationTexts(prompt).some((text) =>
+            getRpcNotificationTexts(prompt).some((text) =>
                 text.includes("Retrying with a smaller chunk ending at"),
             ),
         ).toBe(false);
@@ -997,7 +1013,7 @@ describe("executeContextRecomp", () => {
         // Invalid full-size attempts force a smaller chunk; a successful smaller
         // pass must not permanently reduce the budget for the following pass.
         expect(result).toContain("Covered raw history 1-7");
-        expect(getIgnoredNotificationTexts(prompt)).toEqual(
+        expect(getRpcNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-6.",
                 "## Magic Recomp\n\nHistorian pass 2, attempt 1 started for messages 5-7.",
@@ -1096,13 +1112,14 @@ function createOpenCodeDb(
     }
 }
 
-function getIgnoredNotificationTexts(promptMock: ReturnType<typeof mock>): string[] {
-    return promptMock.mock.calls
-        .map(
-            (call) => call[0] as { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } },
-        )
-        .filter((input) => input.body?.noReply === true)
-        .map((input) => input.body?.parts?.[0]?.text ?? "");
+function getRpcNotificationTexts(promptMock: ReturnType<typeof mock>): string[] {
+    const ignored = promptMock.mock.calls
+        .map((call) => call[0] as { body?: { noReply?: boolean } })
+        .filter((input) => input.body?.noReply === true);
+    expect(ignored).toEqual([]);
+    return drainNotifications()
+        .filter((notice) => notice.type === "toast")
+        .map((notice) => String(notice.payload.message));
 }
 
 function getHistorianPromptCount(promptMock: ReturnType<typeof mock>): number {
@@ -2405,7 +2422,12 @@ describe("runCompartmentAgent", () => {
         // First failure on a fresh session → transient/reassuring framing (the
         // escalated "needs attention" + error detail only appears once failures
         // persist past HISTORIAN_PERSISTENT_FAILURE_THRESHOLD).
-        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
+        expect(
+            String(
+                drainNotifications(0, "ses-invalid-existing").find((n) => n.type === "toast")
+                    ?.payload.message,
+            ).toLowerCase(),
+        ).toContain("transient");
     });
 
     it("rejects invalid historian output without replacing compartments or facts", async () => {
@@ -2463,7 +2485,12 @@ describe("runCompartmentAgent", () => {
             expect.objectContaining({ category: "CONSTRAINTS", content: "Existing fact stays." }),
         ]);
         // First failure → transient framing (no raw error / no action ask yet).
-        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
+        expect(
+            String(
+                drainNotifications(0, "ses-invalid-output").find((n) => n.type === "toast")?.payload
+                    .message,
+            ).toLowerCase(),
+        ).toContain("transient");
     });
 
     it("alerts when historian model execution fails", async () => {
@@ -2508,7 +2535,12 @@ describe("runCompartmentAgent", () => {
         // unavailable") is still recorded in historian_failure_state for the
         // escalated notice + doctor diagnostics; it just isn't surfaced to the
         // user on a single transient blip.
-        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
+        expect(
+            String(
+                drainNotifications(0, "ses-model-failure").find((n) => n.type === "toast")?.payload
+                    .message,
+            ).toLowerCase(),
+        ).toContain("transient");
     });
 
     it("escalates the historian alert to an actionable notice after persistent failures", async () => {
@@ -2549,7 +2581,10 @@ describe("runCompartmentAgent", () => {
             directory: "/tmp",
         });
 
-        const notice = getIgnoredNotificationTexts(promptSession)[0];
+        const notice = String(
+            drainNotifications(0, "ses-persistent-failure").find((n) => n.type === "toast")?.payload
+                .message,
+        );
         expect(notice).toContain("needs attention");
         expect(notice).toContain("magic-context.jsonc");
         // The escalated notice surfaces the real error for diagnosis.

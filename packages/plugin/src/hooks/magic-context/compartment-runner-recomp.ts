@@ -45,7 +45,7 @@ import {
 } from "./protected-tail-boundary";
 import { getRawSessionMessageCount, readSessionChunk } from "./read-session-chunk";
 import { buildReferenceBlocks } from "./reference-retrieval";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 
 function insertRecompCompartmentRows(
     db: Database,
@@ -209,7 +209,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         const resumed = existingStaging !== null;
 
         if (resumed) {
-            await sendIgnoredMessage(
+            await sendStatusNotification(
                 client,
                 sessionId,
                 `## Magic Recomp — Resumed\n\nFound ${existingStaging.compartments.length} staged compartment(s) from ${existingStaging.passCount} previous pass(es), covering messages 1-${existingStaging.lastEndMessage}. Resuming from message ${offset}.`,
@@ -395,7 +395,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 extractionFree: true,
             });
 
-            await sendIgnoredMessage(
+            await sendStatusNotification(
                 client,
                 sessionId,
                 `## Magic Recomp\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} started for messages ${chunk.startIndex}-${chunk.endIndex}.`,
@@ -426,7 +426,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 callbacks: {
                     onRepairRetry: async (error) => {
                         emitProgress(`Repair retry (pass ${passCount + 1})…`);
-                        await sendIgnoredMessage(
+                        await sendStatusNotification(
                             client,
                             sessionId,
                             `## Magic Recomp\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a repair retry for messages ${chunk.startIndex}-${chunk.endIndex}.\n\nThe previous output did not validate: ${error}`,
@@ -450,7 +450,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         protectedTailStart,
                     );
                     if (smallerChunk.messageCount > 0 && smallerChunk.endIndex < chunk.endIndex) {
-                        await sendIgnoredMessage(
+                        await sendStatusNotification(
                             client,
                             sessionId,
                             `## Magic Recomp\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a smaller chunk ending at ${smallerChunk.endIndex} because messages ${chunk.startIndex}-${chunk.endIndex} could not be validated.\n\nValidator result: ${validatedPass.error}`,

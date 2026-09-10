@@ -24,7 +24,7 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
 
 interface RunCompartmentPhaseArgs {
@@ -433,7 +433,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             if (args.client && !activeRun.notificationSent) {
                 activeRun.notificationSent = true;
                 const notifParams = args.getNotificationParams?.() ?? {};
-                void sendIgnoredMessage(
+                void sendStatusNotification(
                     args.client,
                     args.sessionId,
                     `⏳ Context at ${args.contextUsage.percentage.toFixed(0)}% — Magic Context is comparting history before continuing. This may take up to 2 minutes.`,

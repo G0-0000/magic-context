@@ -247,8 +247,8 @@ async function sendIgnoredMessageNow(
     const c = client;
 
     // Pin the prompt context (agent + model + variant) to the session's most
-    // recent real turn. WHY: even though this is `noReply: true` (no assistant
-    // turn fires now), OpenCode's createUserMessage RECORDS prompt context on
+    // recent real turn. Even with `noReply: true`, OpenCode's createUserMessage
+    // RECORDS prompt context on
     // the appended user message, and THAT becomes the session's active
     // model/agent for the NEXT real turn. Passing nothing makes OpenCode record
     // the DEFAULT agent/model — which then switches the model on the user's
@@ -291,9 +291,8 @@ async function sendIgnoredMessageNow(
     const input = {
         path: { id: sessionId },
         body: {
-            // noReply prevents this status line from starting a new model loop.
-            // It does not make appending during an active loop safe; the caller
-            // defers while mid-turn, which is the separate safety gate.
+            // Explicit command replies retain the host's noReply request, but
+            // ignored user rows can still parent a run. Passive status uses RPC.
             noReply: true,
             agent,
             model,
@@ -330,7 +329,7 @@ async function sendIgnoredMessageNow(
                 epoch,
             })
         ) {
-            return (activityEpoch.get(sessionId) ?? 0) !== epoch ? "skipped" : "queued";
+            return "skipped";
         }
         lastDeliveredText.set(sessionId, text);
         notifyDelivered(sessionId, params);
@@ -411,7 +410,7 @@ async function revertNoticeIfUnsafe(notification: {
         if (deleted) {
             notificationDiagnostic(
                 notification.sessionId,
-                `notice rolled back (deleted row ${notification.messageId}); ${superseded ? "discarded after activity" : "queued for idle delivery"}`,
+                `notice rolled back (deleted row ${notification.messageId}); consumed after append`,
             );
         } else {
             sessionLog(
@@ -425,14 +424,10 @@ async function revertNoticeIfUnsafe(notification: {
             "notice landed while a run was active but the new row id was not returned",
         );
     }
-    if (superseded) return true;
-    queueIgnoredNotification({
-        client: notification.client,
-        sessionId: notification.sessionId,
-        text: notification.text,
-        params: notification.params,
-        forcePersist: notification.forcePersist,
-    });
+    // An append can itself start a run, whose parent cannot be deleted (HTTP 409).
+    // Re-queueing here would append the same notice at every subsequent idle event.
+    // Consume the attempt even if deletion succeeded or the SDK returned no row ID.
+    lastDeliveredText.set(notification.sessionId, notification.text);
     return true;
 }
 
@@ -581,4 +576,31 @@ export function observeIgnoredNotificationEvent(event: {
     idleSessions.delete(sessionId);
     activityEpoch.set(sessionId, (activityEpoch.get(sessionId) ?? 0) + 1);
     queuedIgnoredNotifications.delete(sessionId);
+}
+
+/** Publish passive status through RPC only: a noReply user row is still input to host run scheduling. */
+export async function sendStatusNotification(
+    _client: unknown,
+    sessionId: string,
+    text: string,
+    params: NotificationParams,
+): Promise<NotificationDeliveryDisposition> {
+    try {
+        const { pushNotification } = await import("../../shared/rpc-notifications");
+        pushNotification(
+            "toast",
+            {
+                title: extractToastTitle(text),
+                message: text,
+                variant: inferToastVariant(text),
+                duration: params.toastDurationMs ?? 5000,
+            },
+            sessionId,
+        );
+        notifyDelivered(sessionId, params);
+        return "sent";
+    } catch (error) {
+        sessionLog(sessionId, "status RPC enqueue failed:", getErrorMessage(error));
+        return "failed";
+    }
 }

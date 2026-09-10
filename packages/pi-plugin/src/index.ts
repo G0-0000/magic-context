@@ -1893,7 +1893,7 @@ async function startPiMagicContextRuntime(
 						{
 							client: null,
 							db,
-							sendIgnoredMessage: async (_client, _sid, text) => {
+							sendStatusNotification: async (_client, _sid, text) => {
 								ctx.ui.notify(text, "info");
 								return "sent";
 							},

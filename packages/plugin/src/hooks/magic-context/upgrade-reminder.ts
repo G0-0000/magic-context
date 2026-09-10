@@ -121,9 +121,8 @@ function buildResumeReminderText(resume: ResumeInfo): string {
 export interface UpgradeReminderDeps {
     client: unknown;
     db: Database;
-    /** Delivers a model-invisible ignored message to the session (non-TUI path:
-     *  Desktop/headless, where it persists in scrollback). */
-    sendIgnoredMessage: (
+    /** Delivers passive status outside the chat transcript (RPC or a harness toast). */
+    sendStatusNotification: (
         client: unknown,
         sessionId: string,
         text: string,
@@ -132,20 +131,19 @@ export interface UpgradeReminderDeps {
     /** Live notification params (model/variant/agent) for the active session. */
     getNotificationParams: (sessionId: string) => Record<string, unknown>;
     /** True when a TUI client is actively polling FOR THIS SESSION (decides
-     *  dialog vs ignored msg). Must be session-scoped: a TUI on a different
+     *  dialog vs status toast). Must be session-scoped: a TUI on a different
      *  session in the same process must not make this session take the dialog
      *  path. Optional: harnesses without an OpenCode-style TUI dialog system
      *  (e.g. Pi, which delivers via `ctx.ui.notify`) omit this and always take
-     *  the `sendIgnoredMessage` path. */
+     *  the `sendStatusNotification` path. */
     isTuiConnected?: (sessionId?: string) => boolean;
     /** Enqueue a server→TUI action so the TUI shows an interactive upgrade dialog
      *  ("Run upgrade now"/"Later") instead of a transient toast. TUI path only;
      *  omitted on harnesses without a dialog system. When `resume` is set, the
      *  dialog shows resume-flavored copy. */
     pushTuiDialogAction?: (sessionId: string, resume?: ResumeInfo) => void;
-    /** Whether delivery persists in scrollback. Default true for OpenCode.
-     *  Pi uses transient toasts, so it ignores the old explicit-dismissal stamp;
-     *  both harnesses still persist the shared cooldown and delivery cap. */
+    /** Whether to honor durable explicit dialog dismissals. Default true for OpenCode.
+     *  Pi has no dismissal dialog and opts out; both harnesses retain the cooldown and cap. */
     deliveryPersists?: boolean;
 }
 
@@ -225,7 +223,7 @@ export async function maybeSendUpgradeReminder(
             recordDelivery();
             sessionLog(sessionId, `upgrade-reminder: TUI dialog action enqueued (${kind})`);
         } else {
-            const delivery = await deps.sendIgnoredMessage(
+            const delivery = await deps.sendStatusNotification(
                 deps.client,
                 sessionId,
                 resume ? buildResumeReminderText(resume) : UPGRADE_REMINDER_TEXT,
@@ -235,12 +233,12 @@ export async function maybeSendUpgradeReminder(
                 recordDelivery();
                 sessionLog(
                     sessionId,
-                    `upgrade-reminder: ignored message delivered (${kind}, non-TUI)`,
+                    `upgrade-reminder: status notification enqueued (${kind}, non-TUI)`,
                 );
             } else {
                 sessionLog(
                     sessionId,
-                    `upgrade-reminder: ignored message not delivered (${kind}, non-TUI, ${delivery})`,
+                    `upgrade-reminder: status notification not enqueued (${kind}, non-TUI, ${delivery})`,
                 );
             }
         }

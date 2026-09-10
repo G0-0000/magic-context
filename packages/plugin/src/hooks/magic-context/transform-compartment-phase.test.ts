@@ -1,3 +1,4 @@
+import { drainNotifications } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -60,20 +61,6 @@ function createOpenCodeDb(
     } finally {
         closeQuietly(db);
     }
-}
-
-function countIgnoredNotifications(
-    promptMock: ReturnType<typeof mock>,
-    matchSubstring?: string,
-): number {
-    return promptMock.mock.calls
-        .map(
-            (call) => call[0] as { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } },
-        )
-        .filter((input) => input.body?.noReply === true)
-        .filter((input) =>
-            matchSubstring ? (input.body?.parts?.[0]?.text ?? "").includes(matchSubstring) : true,
-        ).length;
 }
 
 let tempDir: string | undefined;
@@ -183,24 +170,8 @@ describe("runCompartmentPhase boundary handoff", () => {
 });
 
 describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
-    /**
-     * Regression guard for the CI-only infinite-loop bug discovered on 2026-05-19:
-     *
-     * When pressure stays >=95% across multiple transform passes (e.g. force-cleanup
-     * usage that keeps reporting 85k tokens), the same compartment run stays active
-     * for the duration of historian execution. Without the `notificationSent`
-     * guard, each transform pass would call `sendIgnoredMessage(...)`, which uses
-     * `client.session.prompt` for an ignored status. OpenCode persists each such
-     * call as a USER message with finish=null in the session DB.
-     *
-     * On the next loop iteration, `latest(msgs)` returns the new notification-user
-     * as `lastUser` (highest ID), and `lastUser.id > lastAssistant.id` makes
-     * OpenCode's break condition `lastUser.id < lastAssistant.id` false →
-     * runLoop keeps calling the LLM → mock returns 85k usage again → transform
-     * fires again → notification fires again → INFINITE LOOP.
-     *
-     * The guard ensures sendIgnoredMessage runs at most once per ActiveCompartmentRun.
-     */
+    // High pressure may survive many transform passes. Publish one RPC status
+    // per active historian run, never a user row that could extend that run.
     it("sends the 95% comparting notification at most once per active compartment run", async () => {
         const sessionId = "ses-notification-guard";
 
@@ -217,8 +188,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
 
         const db = openDatabase();
 
-        // Stub a client that exposes session.prompt. sendIgnoredMessage calls
-        // the ignored-status prompt path — we count those to verify the guard.
+        // A status update must never call the prompt transport.
         const promptMock = mock(async () => ({ data: {} }));
         const client = {
             session: {
@@ -262,23 +232,35 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
         // Pass 1: pressure is high, activeRun exists with notificationSent=false.
         // The notification should fire exactly once and flip notificationSent=true.
         await runCompartmentPhase(baseArgs);
-        expect(countIgnoredNotifications(promptMock, "Context at 97%")).toBe(1);
+        expect(promptMock).not.toHaveBeenCalled();
+        expect(
+            drainNotifications(0, sessionId).filter((n) =>
+                String(n.payload.message).includes("Context at 97%"),
+            ),
+        ).toHaveLength(1);
         expect(activeRun?.notificationSent).toBe(true);
 
         // Pass 2: same activeRun, still notificationSent=true → no additional call.
         await runCompartmentPhase(baseArgs);
-        expect(countIgnoredNotifications(promptMock, "Context at 97%")).toBe(1);
+        expect(promptMock).not.toHaveBeenCalled();
+        expect(
+            drainNotifications(0, sessionId).filter((n) =>
+                String(n.payload.message).includes("Context at 97%"),
+            ),
+        ).toHaveLength(1);
 
         // Pass 3: still 1 — never re-fires while the same run is active.
         await runCompartmentPhase(baseArgs);
-        expect(countIgnoredNotifications(promptMock, "Context at 97%")).toBe(1);
+        expect(promptMock).not.toHaveBeenCalled();
+        expect(
+            drainNotifications(0, sessionId).filter((n) =>
+                String(n.payload.message).includes("Context at 97%"),
+            ),
+        ).toHaveLength(1);
 
         // Verify message text
-        const calls = promptMock.mock.calls as unknown as Array<
-            [{ body?: { parts?: Array<{ text?: string }> } }]
-        >;
-        const notifText = calls
-            .map((call) => call[0].body?.parts?.[0]?.text ?? "")
+        const notifText = drainNotifications(0, sessionId)
+            .map((notice) => String(notice.payload.message))
             .find((text) => text.includes("comparting history"));
         expect(notifText).toBeDefined();
         expect(notifText).toContain("Context at 97%");

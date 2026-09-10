@@ -1,3 +1,4 @@
+import { drainNotifications, registerNotificationSink } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -3500,10 +3501,13 @@ describe("createTransform historian failure handling", () => {
         recordOverflowDetected(db, sessionId, 100_000, "test-provider/emergency-100k");
         setEmergencyDropSample(db, sessionId, 110_000);
         const order: string[] = [];
-        const prompt = mock(async () => {
-            order.push("notify");
-            return {};
+        const removeSink = registerNotificationSink({
+            sessionId,
+            send: () => {
+                order.push("notify");
+            },
         });
+        const prompt = mock(async () => ({}));
         const abort = mock(async () => {
             order.push("abort");
             return { data: true };
@@ -3567,16 +3571,15 @@ describe("createTransform historian failure handling", () => {
             },
         );
 
+        removeSink();
         expect(order).toEqual(["notify", "abort"]);
+        expect(prompt).not.toHaveBeenCalled();
         expect(abort).toHaveBeenCalledWith({
             path: { id: sessionId },
             throwOnError: true,
         });
         expect(getEmergencyInputSample(db, sessionId)).toBe(0);
-        const notificationInput = prompt.mock.calls[0]?.[0] as {
-            body?: { parts?: Array<{ text?: string }> };
-        };
-        expect(notificationInput.body?.parts?.[0]?.text).toBe(
+        expect(drainNotifications(0, sessionId)[0]?.payload.message).toBe(
             "Context full — /ctx-flush or /clear to continue.",
         );
     });
@@ -3662,17 +3665,9 @@ describe("createTransform historian failure handling", () => {
 
         expect(createSession).toHaveBeenCalledTimes(1);
         expect(
-            (
-                prompt.mock.calls as unknown as Array<
-                    [{ body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }]
-                >
-            ).some((call) => {
-                const input = call[0];
-                return (
-                    input.body?.noReply === true &&
-                    (input.body?.parts?.[0]?.text ?? "").includes("Historian recovery")
-                );
-            }),
+            drainNotifications(0, "ses-recovery").some((notice) =>
+                String(notice.payload.message).includes("Historian recovery"),
+            ),
         ).toBe(true);
         expect(getHistorianFailureState(db, "ses-recovery")).toEqual({
             failureCount: 0,

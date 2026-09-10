@@ -109,7 +109,7 @@ import { readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 import { modelAcceptsEmptyContent } from "./sentinel";
 import {
     replayClearedReasoning,
@@ -180,12 +180,14 @@ function maybeSendProjectIdentityWarning(
     if (!deps.client) return;
     const warning = takeDubiousOwnershipProjectIdentityWarning(directory);
     if (!warning) return;
-    void sendIgnoredMessage(deps.client, sessionId, warning, notificationParams).catch((error) => {
-        sessionLog(
-            sessionId,
-            `project identity warning delivery failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-    });
+    void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
+        (error) => {
+            sessionLog(
+                sessionId,
+                `project identity warning delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        },
+    );
 }
 
 export function clearMessageTokensCache(sessionId: string, messageId?: string): void {
@@ -845,7 +847,7 @@ export function createTransform(deps: TransformDeps) {
                     // record in place, accepting a duplicate after a crash
                     // rather than permanently losing the notice.
                     noticeDelivered =
-                        (await sendIgnoredMessage(
+                        (await sendStatusNotification(
                             deps.client,
                             sessionId,
                             notice,
@@ -1257,7 +1259,7 @@ export function createTransform(deps: TransformDeps) {
                     };
                     usagePercentageSynthetic = true;
                 } else if (recoveryNoHeadEscapeActive && deps.client) {
-                    void sendIgnoredMessage(
+                    void sendStatusNotification(
                         deps.client,
                         sessionId,
                         "Magic Context can't compact yet — the recent history is a single in-progress block. Continuing; it will compact once the block completes. Run `/ctx-recomp` if this persists.",
@@ -1588,7 +1590,7 @@ export function createTransform(deps: TransformDeps) {
                 `transform: historian recovery triggered on session load after ${historianFailureState.failureCount} failure(s)`,
             );
             if (deps.client) {
-                void sendIgnoredMessage(
+                void sendStatusNotification(
                     deps.client,
                     sessionId,
                     `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
@@ -2411,9 +2413,9 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
                 // The notice must finish before self-abort so recovery instructions survive interruption.
-                let notification: Awaited<ReturnType<typeof sendIgnoredMessage>>;
+                let notification: Awaited<ReturnType<typeof sendStatusNotification>>;
                 try {
-                    notification = await sendIgnoredMessage(
+                    notification = await sendStatusNotification(
                         deps.client,
                         sessionId,
                         "Context full — /ctx-flush or /clear to continue.",

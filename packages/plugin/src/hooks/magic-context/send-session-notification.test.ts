@@ -181,13 +181,10 @@ describe("sendIgnoredMessage", () => {
         expect(input.body?.noReply).toBe(true);
     });
 
-    it("pins the session's last turn for a startup config warning too (no pinContext opt-out)", async () => {
-        // The config warning previously opted out of pinning, which made OpenCode
-        // record the DEFAULT agent/model — mis-attributing the notice and
-        // switching the model on the user's next turn. It now pins like any other
-        // notification.
+    it("pins the session's last turn for an explicit command reply without supplied context", async () => {
+        // Command replies must not switch the model used for the next real turn.
         const session = titledClientWithLastTurn();
-        const result = await sendIgnoredMessage({ session }, "ses-titled", "config warning", {});
+        const result = await sendIgnoredMessage({ session }, "ses-titled", "command result", {});
         expect(result).toBe("sent");
         const body = lastPromptBody(session.prompt);
         expect(body.agent).toBe("build");
@@ -195,7 +192,7 @@ describe("sendIgnoredMessage", () => {
         expect(body.variant).toBe("thinking");
     });
 
-    it("rolls back a notice that lands after a run starts and re-queues it", async () => {
+    it("rolls back a notice that lands after a run starts and consumes the attempt", async () => {
         const session = titledClientWithLastTurn();
         const observedRows = new Set(["msg_notice"]);
         const diagnostics: string[] = [];
@@ -213,14 +210,14 @@ describe("sendIgnoredMessage", () => {
 
         const result = await sendIgnoredMessage({ session }, "ses-rollback", "late status", {});
 
-        expect(result).toBe("queued");
+        expect(result).toBe("skipped");
         expect(observedRows.has("msg_notice")).toBe(false);
         expect(deleter).toHaveBeenCalledTimes(1);
         expect(deleter.mock.calls[0]?.[0]).toBe("ses-rollback");
         expect(deleter.mock.calls[0]?.[1]).toBe("msg_notice");
-        expect(__ignoredNotificationTest.pendingTexts("ses-rollback")).toEqual(["late status"]);
+        expect(__ignoredNotificationTest.pendingTexts("ses-rollback")).toEqual([]);
         expect(diagnostics).toEqual([
-            "notice rolled back (deleted row msg_notice); queued for idle delivery",
+            "notice rolled back (deleted row msg_notice); consumed after append",
         ]);
     });
 

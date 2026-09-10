@@ -71,7 +71,7 @@ import {
     observeOpenCodeTurnEvent,
 } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
-import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
+import { type NotificationParams, sendStatusNotification } from "./send-session-notification";
 import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
@@ -722,15 +722,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             catalogLimit < provenSafeInputTokens &&
                             !sessionMeta.cacheAlertSent
                         ) {
-                            const delivery = await sendIgnoredMessage(
+                            const delivery = await sendStatusNotification(
                                 deps.client,
                                 info.sessionID,
                                 `⚠️ Magic Context: OpenCode's catalog reports a context limit of ${formatTokens(catalogLimit)} tokens for ${info.providerID}/${info.modelID}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If the catalog is wrong for your provider, set provider.<provider-id>.models.<model-id>.limit.context in opencode.json.`,
                                 deps.getNotificationParams?.(info.sessionID) ?? {},
                             );
-                            // The title guard can skip ignored-message posts until a
-                            // session is safely titled; keep the flag unset unless
-                            // the notification actually reached a user-visible surface.
+                            // Retry only if the RPC notification could not be enqueued.
                             if (delivery === "sent") {
                                 updates.cacheAlertSent = true;
                             }

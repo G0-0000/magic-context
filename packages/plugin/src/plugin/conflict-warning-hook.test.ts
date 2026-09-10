@@ -6,6 +6,7 @@ import {
     flushIgnoredMessages,
     observeIgnoredNotificationEvent,
 } from "../hooks/magic-context/send-session-notification";
+import { drainNotifications } from "../shared/rpc-notifications";
 import { cleanupTestTempDir, createTestTempDir } from "../shared/test-temp-dir";
 import { __conflictWarningTest, sendStartupAnnouncement } from "./conflict-warning-hook";
 
@@ -35,7 +36,7 @@ describe("conflict-warning notifications", () => {
         temporaryRoot = undefined;
     });
 
-    it("holds the startup announcement while a run is in flight", async () => {
+    it("publishes startup status through RPC without appending chat rows", async () => {
         const temp = createTestTempDir("mc-conflict-");
         temporaryRoot = temp.dir;
         const directory = join(temp.dir, "project");
@@ -58,11 +59,13 @@ describe("conflict-warning notifications", () => {
         );
 
         expect(prompt).not.toHaveBeenCalled();
-        expect(markSeen).not.toHaveBeenCalled();
-        expect(__ignoredNotificationTest.pendingTexts(sessionId)).toEqual([
-            "✨ Magic Context — what's new in v9.9.9:\n\n  • A release feature",
-        ]);
-
+        expect(markSeen).toHaveBeenCalledWith("9.9.9");
+        expect(__ignoredNotificationTest.pendingTexts(sessionId)).toEqual([]);
+        expect(
+            drainNotifications(0, sessionId).some((notice) =>
+                String(notice.payload.message).includes("A release feature"),
+            ),
+        ).toBe(true);
         process.env.MAGIC_CONTEXT_NOTICE_GATE = "bypass";
         await flushIgnoredMessages(sessionId);
         expect(prompt).not.toHaveBeenCalled();
@@ -71,7 +74,7 @@ describe("conflict-warning notifications", () => {
             properties: { sessionID: sessionId },
         });
         await flushIgnoredMessages(sessionId);
-        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(prompt).not.toHaveBeenCalled();
         expect(markSeen).toHaveBeenCalledWith("9.9.9");
     });
 
@@ -83,14 +86,10 @@ describe("conflict-warning notifications", () => {
             "magic-context",
             "send-session-notification.ts",
         );
-        // These two assertions inspect the wire shape; runtime notification posts stay in the sender.
-        const allowedSites = new Set([
-            "hooks/magic-context/hook.test.ts:574",
-            "hooks/magic-context/hook.test.ts:679",
-        ]);
+        const allowedSites = new Set<string>();
         const needle = ["noReply", "true"].join(": ");
         const violations = sourceFiles(sourceRoot)
-            .filter((path) => path !== notificationSender)
+            .filter((path) => path !== notificationSender && !path.endsWith(".test.ts"))
             .flatMap((path) =>
                 readFileSync(path, "utf8")
                     .split("\n")
@@ -101,5 +100,25 @@ describe("conflict-warning notifications", () => {
             );
 
         expect(violations).toEqual([]);
+    });
+
+    it("allows ignored chat posts only at explicit command sites", () => {
+        const sourceRoot = join(import.meta.dir, "..");
+        // Counts pin each remaining command-owned call, not just its containing file.
+        const allowed = new Map([
+            ["hooks/magic-context/hook.ts", 1],
+
+            ["plugin/rpc-handlers.ts", 2],
+        ]);
+        const actual = new Map<string, number>();
+        const call = new RegExp(["sendIgnoredMessage", "\\s*\\("].join(""), "g");
+        for (const path of sourceFiles(sourceRoot)) {
+            if (path.endsWith(".test.ts") || path.endsWith("/send-session-notification.ts"))
+                continue;
+            const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+            const count = [...source.matchAll(call)].length;
+            if (count) actual.set(relative(sourceRoot, path), count);
+        }
+        expect(Object.fromEntries(actual)).toEqual(Object.fromEntries(allowed));
     });
 });

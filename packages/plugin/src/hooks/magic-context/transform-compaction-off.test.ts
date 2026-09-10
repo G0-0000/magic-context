@@ -1,3 +1,9 @@
+import { spyOn } from "bun:test";
+import * as rpcNotifications from "../../shared/rpc-notifications";
+import {
+    __resetNotificationStateForTests,
+    drainNotifications,
+} from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 /**
@@ -796,11 +802,12 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         await transform({}, { messages: transitionMessages });
 
         // The notice was delivered out of band with the contractual wording.
-        expect(promptMock).toHaveBeenCalledTimes(1);
-        const promptCall = promptMock.mock.calls[0][0] as {
-            body?: { parts?: Array<{ text?: string }>; noReply?: boolean };
-        };
-        const noticeText = promptCall.body?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
+        expect(promptMock).not.toHaveBeenCalled();
+        const noticeText = String(
+            drainNotifications(0, "ses-1").find((n) =>
+                String(n.payload.message).includes("compaction-off"),
+            )?.payload.message,
+        );
         expect(noticeText).toContain("compaction-off mode is now active");
         expect(noticeText).toContain(
             "the first turn after disabling may trigger one native compaction cycle on long sessions",
@@ -825,12 +832,15 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         queuePendingOp(db, "ses-1", 9, "drop");
         closeDatabase();
 
+        __resetNotificationStateForTests();
         let attempts = 0;
-        const promptMock = mock(async () => {
+        const originalPush = rpcNotifications.pushNotification;
+        const push = spyOn(rpcNotifications, "pushNotification").mockImplementation((...args) => {
             attempts += 1;
-            if (attempts === 1) throw new Error("notice transport rejected");
-            return { data: {} };
+            if (attempts === 1) throw new Error("RPC enqueue rejected");
+            return originalPush(...args);
         });
+        const promptMock = mock(async () => ({}));
         const client = { session: { prompt: promptMock } } as unknown as PluginContext["client"];
         const { transform } = makeOffTransform({ sessionId: "ses-1", client });
 
@@ -843,14 +853,15 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         await transform({}, { messages: secondMessages });
         expect(attempts).toBe(2);
         expect(getCompactionModeRecord(openDatabase(), "ses-1")).toBe("off");
-        const notices = promptMock.mock.calls.map((call) =>
-            JSON.stringify((call[0] as { body?: unknown }).body),
-        );
+        const notices = push.mock.calls.map((call) => JSON.stringify(call[1]));
+        push.mockRestore();
+        expect(promptMock).not.toHaveBeenCalled();
         expect(notices[0]).toContain("compaction-off mode is now active");
         expect(notices[1]).toBe(notices[0]);
     });
 
     it("restarts from a durable off notice record and delivers before settling", async () => {
+        __resetNotificationStateForTests();
         useTempDataHome("co-transition-notice-restart-");
         createOpenCodeDbForSession("ses-1");
         const db = openDatabase();
@@ -867,9 +878,12 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         const { transform } = makeOffTransform({ sessionId: "ses-1", client });
         await transform({}, { messages: makeMessages("ses-1") });
 
-        // Mutation direction: removing the durable pending record changes this
-        // restart into a no-op and the notice is never delivered.
-        expect(promptMock).toHaveBeenCalledTimes(1);
+        expect(promptMock).not.toHaveBeenCalled();
+        expect(
+            drainNotifications(0, "ses-1").some((n) =>
+                String(n.payload.message).includes("compaction-off mode is now active"),
+            ),
+        ).toBe(true);
         expect(getCompactionModeRecord(openDatabase(), "ses-1")).toBe("off");
     });
 

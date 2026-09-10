@@ -1,3 +1,4 @@
+import { drainNotifications } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
@@ -754,9 +755,10 @@ describe("createEventHandler", () => {
         expect(meta.cacheAlertSent).toBe(true);
         expect(meta.lastContextPercentage).toBe(100);
         expect(meta.lastUsageContextLimit).toBe(120_000);
-        expect(prompt).toHaveBeenCalledTimes(1);
-        const call = prompt.mock.calls[0]?.[0] as { body?: { parts?: Array<{ text?: string }> } };
-        const text = call.body?.parts?.[0]?.text ?? "";
+        expect(prompt).not.toHaveBeenCalled();
+        const notices = drainNotifications(0, "ses-regression-alert");
+        expect(notices).toHaveLength(1);
+        const text = String(notices[0].payload.message);
         expect(text).toContain("OpenCode's catalog reports a context limit of 30,000 tokens");
         expect(text).toContain("this session has sent 90,000 tokens successfully");
         expect(text).toContain("larger proven value for its pressure math");
@@ -764,7 +766,7 @@ describe("createEventHandler", () => {
         expect(text).not.toContain("Restart OpenCode");
     });
 
-    it("does not mark the cache alert sent when notification delivery fails", async () => {
+    it("delivers the cache alert over RPC even when the prompt transport is unavailable", async () => {
         useTempDataHome("context-event-cache-regression-alert-failed-");
         const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
         await refreshModelLimitsFromApi(providersClient(100_000));
@@ -809,8 +811,9 @@ describe("createEventHandler", () => {
         });
 
         const meta = getOrCreateSessionMeta(openDatabase(), "ses-regression-alert-failed");
-        expect(prompt).toHaveBeenCalledTimes(1);
-        expect(meta.cacheAlertSent).toBe(false);
+        expect(prompt).not.toHaveBeenCalled();
+        expect(meta.cacheAlertSent).toBe(true);
+        expect(drainNotifications(0, "ses-regression-alert-failed")).toHaveLength(1);
     });
 
     it("refreshes ttl for tokenless assistant updates when prior usage exists", async () => {

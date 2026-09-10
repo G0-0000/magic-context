@@ -89,7 +89,7 @@ import { hasRawMessageProvider, readSessionChunk } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { buildReferenceBlocks } from "./reference-retrieval";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 
 /** Suppress repeated historian failure notifications — at most once per 60 seconds per session */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
@@ -175,7 +175,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             sessionLog(sessionId, "historian alert suppressed (cooldown):", message.slice(0, 100));
             return;
         }
-        await sendIgnoredMessage(client, sessionId, message, getNotificationParams?.() ?? {});
+        await sendStatusNotification(client, sessionId, message, getNotificationParams?.() ?? {});
     };
 
     const truncateHistorianInputIfNeeded = (text: string, budget: number): string => {

@@ -446,7 +446,7 @@ describe("magic-context hook", () => {
         expect(notification.body?.parts?.[0]?.ignored).toBe(true);
     });
 
-    it("re-arms auto-embed when the first transform precedes compartment work", async () => {
+    it("silently embeds seven compartments on idle and latches subsequent drains", async () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-auto-embed-data-");
         const projectDir = makeTempDir("hook-auto-embed-project-");
         mkdirSync(join(projectDir, ".cortexkit"));
@@ -457,8 +457,22 @@ describe("magic-context hook", () => {
                 memory: { enabled: true },
             }),
         );
-        _setTestProviderFactoryForProject(() => new HookFakeEmbeddingProvider());
-        const deps = createMockDeps();
+        const provider = new HookFakeEmbeddingProvider();
+        const embedBatch = mock(provider.embedBatch.bind(provider));
+        provider.embedBatch = embedBatch;
+        _setTestProviderFactoryForProject(() => provider);
+        const prompts = createPromptMocks();
+        const hostDb = new Database(":memory:");
+        hostDb.exec("CREATE TABLE message (role TEXT, data TEXT)");
+        const appendUserRow = (input: unknown) => {
+            hostDb
+                .prepare("INSERT INTO message (role, data) VALUES ('user', ?)")
+                .run(JSON.stringify(input));
+        };
+        prompts.prompt = mock(appendUserRow);
+        prompts.promptAsync = mock(async (input: unknown) => appendUserRow(input));
+        const userRows = () => hostDb.prepare("SELECT * FROM message WHERE role = 'user'").all();
+        const deps = createMockDeps(prompts);
         deps.directory = projectDir;
         const hook = requireHook(createMagicContextHook(deps));
         const db = openDatabase();
@@ -486,33 +500,66 @@ describe("magic-context hook", () => {
             await runTransform();
             await waitUntil(() => !autoEmbedAttemptedBySession.has(sessionId));
 
-            appendCompartments(db, sessionId, [
-                {
-                    sequence: 0,
-                    startMessage: 1,
-                    endMessage: 1,
-                    startMessageId: "u1",
-                    endMessageId: "u1",
-                    title: "Late compartment",
-                    content: "Late compartment content",
-                    p1: "Late compartment content",
-                },
-            ]);
-            db.prepare(
-                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
-            ).run(sessionId, 1, "u1", "user", "Late compartment source text");
+            for (let i = 1; i <= 7; i++) {
+                appendCompartments(db, sessionId, [
+                    {
+                        sequence: i - 1,
+                        startMessage: i,
+                        endMessage: i,
+                        startMessageId: `u${i}`,
+                        endMessageId: `u${i}`,
+                        title: `Compartment ${i}`,
+                        content: `Content ${i}`,
+                        p1: `Content ${i}`,
+                    },
+                ]);
+                db.prepare(
+                    "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+                ).run(sessionId, i, `u${i}`, "user", `Source text ${i}`);
+            }
 
             await runTransform();
             await waitUntil(() => {
                 const coverage = getEmbeddingCoverageStatus(db, projectIdentity, sessionId);
                 return (
-                    coverage.session.total === 1 &&
-                    coverage.session.embedded === 1 &&
+                    coverage.session.total === 7 &&
+                    coverage.session.embedded === 7 &&
                     autoEmbedAttemptedBySession.has(sessionId)
                 );
             });
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            expect(userRows()).toEqual([]);
+            expect(prompts.prompt).not.toHaveBeenCalled();
+            expect(prompts.promptAsync).not.toHaveBeenCalled();
+            const calls = embedBatch.mock.calls.length;
+            expect(calls).toBeGreaterThan(0);
+            // Leave new work eligible: without the latch a second transform would drain it.
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 7,
+                    startMessage: 8,
+                    endMessage: 8,
+                    startMessageId: "u8",
+                    endMessageId: "u8",
+                    title: "Later",
+                    content: "Later",
+                    p1: "Later",
+                },
+            ]);
+            db.prepare(
+                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+            ).run(sessionId, 8, "u8", "user", "Later source text");
+            await runTransform();
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            expect(embedBatch.mock.calls.length).toBe(calls);
+            expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
+                total: 8,
+                embedded: 7,
+            });
+            expect(userRows()).toEqual([]);
         } finally {
             clearEmbedSessionState(sessionId);
+            hostDb.close();
         }
     });
 

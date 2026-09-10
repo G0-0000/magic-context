@@ -263,7 +263,7 @@ export function maybeAutoEmbedPiSession(
 	sessionId: string,
 	projectDir: string,
 	projectIdentity: string,
-	notify: (text: string) => void,
+	_notify: (text: string) => void,
 ): void {
 	if (autoEmbedAttemptedBySession.has(sessionId)) return;
 	if (embedPauseBySession.has(sessionId)) return;
@@ -298,24 +298,8 @@ export function maybeAutoEmbedPiSession(
 			// its (bounded) catch-up, so this drain returned "busy" each pass,
 			// reset its own latch, and re-announced the same count. Retries
 			// belong to the passive backfill; progress lives in /ctx-embed.
-			const embeddedBefore = coverage.session.embedded;
-			const { level } = await runEmbedDrain(
-				deps.db,
-				projectIdentity,
-				sessionId,
-			);
+			await runEmbedDrain(deps.db, projectIdentity, sessionId);
 			drainReachedTerminal = true;
-			const after = getEmbeddingCoverageStatus(
-				deps.db,
-				projectIdentity,
-				sessionId,
-			);
-			const embeddedNow = after.session.embedded - embeddedBefore;
-			if (level === "success" && embeddedNow > 0) {
-				notify(
-					`Embedded ${embeddedNow} compartment${embeddedNow === 1 ? "" : "s"} of history for semantic search.`,
-				);
-			}
 		} catch {
 			// best-effort background drain
 		} finally {

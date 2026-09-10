@@ -1,10 +1,11 @@
-import { afterEach, expect, it, mock } from "bun:test";
+import { afterEach, expect, it, mock, spyOn } from "bun:test";
 import { clearTrackedOpenCodeSession, observeOpenCodeTurnEvent } from "./read-session-db";
 import {
     __ignoredNotificationTest,
     flushIgnoredMessages,
     observeIgnoredNotificationEvent,
     sendIgnoredMessage,
+    setNotificationServerUrl,
 } from "./send-session-notification";
 
 const sessionId = "ses-sugaroverdose-timeline";
@@ -108,4 +109,47 @@ it("discards a notice whose idle authorization expires during target lookup even
     await flushIgnoredMessages(sessionId);
     expect(prompt).not.toHaveBeenCalled();
     expect(__ignoredNotificationTest.pendingTexts(sessionId)).toEqual([]);
+});
+
+it("consumes a held notice after append starts a run and rollback returns 409 without retrying", async () => {
+    let active = true;
+    const rows: Array<{ id: string; role: string; parentID?: string }> = [];
+    const prompt = mock(async () => {
+        const id = `notice-${rows.length}`;
+        rows.push({ id, role: "user" });
+        rows.push({ id: `assistant-${id}`, role: "assistant", parentID: id });
+        active = true;
+        return { info: { id } };
+    });
+    const client = { session: { prompt, get: async () => ({ title: "Real title" }) } };
+    __ignoredNotificationTest.setHoldDetector(() => active);
+    setNotificationServerUrl("http://localhost:12345");
+    const remove = spyOn(globalThis, "fetch").mockImplementation(
+        async () => new Response("Active run parent", { status: 409 }),
+    );
+    try {
+        await sendIgnoredMessage(
+            client,
+            sessionId,
+            "Embedded 7 compartments of history for semantic search.",
+            {
+                agent: "build",
+                variant: "default",
+                providerId: "local",
+                modelId: "27B",
+            },
+        );
+        expect(prompt).not.toHaveBeenCalled();
+        for (let cycle = 0; cycle < 14; cycle++) {
+            active = false;
+            await flushIgnoredMessages(sessionId);
+        }
+        expect(rows.filter((row) => row.role === "user")).toHaveLength(1);
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(remove).toHaveBeenCalledTimes(1);
+        expect(remove.mock.calls[0]?.[1]?.method).toBe("DELETE");
+        expect(__ignoredNotificationTest.pendingTexts(sessionId)).toEqual([]);
+    } finally {
+        remove.mockRestore();
+    }
 });

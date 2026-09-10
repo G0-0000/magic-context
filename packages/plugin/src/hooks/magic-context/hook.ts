@@ -124,7 +124,11 @@ import {
     getLiveNotificationParams,
 } from "./hook-handlers";
 import type { LiveSessionState } from "./live-session-state";
-import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
+import {
+    type NotificationParams,
+    sendIgnoredMessage,
+    sendStatusNotification,
+} from "./send-session-notification";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { maybeSendUpgradeReminder } from "./upgrade-reminder";
 
@@ -483,7 +487,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             agentBySession,
             deps.config.toast_duration_ms,
         );
-        void sendIgnoredMessage(deps.client, sessionId, warning, notificationParams).catch(
+        void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
             (error) => {
                 log(
                     `[magic-context] failed to send project identity warning for ${directory}: ${getErrorMessage(error)}`,
@@ -771,29 +775,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 // "busy"/zero-work each pass, reset its own latch, and re-announced
                 // the same count forever. Retries belong to the passive backfill;
                 // progress lives in /ctx-embed status and the sidebar.
-                const embeddedBefore = coverage.session.embedded;
                 await executeEmbedHistory(sessionId, { silent: true });
                 drainReachedTerminal = true;
-                const completedCoverage = getEmbeddingCoverageStatus(
-                    db,
-                    sessionProjectIdentity,
-                    sessionId,
-                );
-                const embeddedNow = completedCoverage.session.embedded - embeddedBefore;
-                if (embeddedNow > 0 && !isTuiConnected(sessionId)) {
-                    const notifyParams = getLiveNotificationParams(
-                        sessionId,
-                        liveModelBySession,
-                        variantBySession,
-                        agentBySession,
-                    );
-                    await sendIgnoredMessage(
-                        deps.client,
-                        sessionId,
-                        `Embedded ${embeddedNow} compartment${embeddedNow === 1 ? "" : "s"} of history for semantic search.`,
-                        { ...notifyParams },
-                    );
-                }
             } catch (error) {
                 log("[magic-context] auto-embed drain failed:", error);
             } finally {
@@ -1576,7 +1559,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                           {
                               client: deps.client,
                               db,
-                              sendIgnoredMessage,
+                              sendStatusNotification,
                               getNotificationParams: (sid) =>
                                   getLiveNotificationParams(
                                       sid,

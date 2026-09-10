@@ -80,7 +80,7 @@ function makeDeps(
     return {
         client: {},
         db,
-        sendIgnoredMessage: async (_client, _sid, text) => {
+        sendStatusNotification: async (_client, _sid, text) => {
             sent.push(text);
             return "sent";
         },
@@ -160,7 +160,7 @@ describe("E5 upgrade reminder", () => {
         const attempts: string[] = [];
         const deps: UpgradeReminderDeps = {
             ...makeDeps(db, attempts),
-            sendIgnoredMessage: async (_client, _sid, text) => {
+            sendStatusNotification: async (_client, _sid, text) => {
                 attempts.push(text);
                 return "skipped";
             },

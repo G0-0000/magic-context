@@ -34,7 +34,7 @@ import {
 } from "./protected-tail-boundary";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { setRecompStarting, setRecompTerminal } from "./recomp-orchestrator";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 
 export interface ManagedWrapupContext extends ManagedRecompContext {
     contextLimit: number;
@@ -372,13 +372,12 @@ export async function runManagedWrapup(
         // The command blocks until the drain finishes and fires no message events,
         // so nothing would indicate the run until completion. Two best-effort
         // surfaces, neither may affect the drain:
-        //  - sendIgnoredMessage: TUI gets a toast; Desktop/headless gets a
-        //    persisted ignored chat message (its only progress surface).
+        //  - sendStatusNotification: RPC toast, with no user-role chat row.
         //  - wrapup-progress-kick: starts the TUI sidebar's fast progress poll
         //    (the toast above cannot do that).
         if (!stoppedForFailure) {
             try {
-                void sendIgnoredMessage(
+                void sendStatusNotification(
                     ctx.client,
                     sessionId,
                     `Magic Wrapup started — compacting about ${plural(expectedChunks, "chunk")} of history. This can take a few minutes; the result posts here when done.`,

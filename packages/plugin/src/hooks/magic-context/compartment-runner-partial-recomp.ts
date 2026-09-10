@@ -35,7 +35,7 @@ import {
 import { clearInjectionCache } from "./inject-compartments";
 import { readSessionChunk } from "./read-session-chunk";
 import { buildReferenceBlocks } from "./reference-retrieval";
-import { sendIgnoredMessage } from "./send-session-notification";
+import { sendStatusNotification } from "./send-session-notification";
 
 export interface PartialRecompRange {
     /** Inclusive raw message ordinal to start rebuilding from. */
@@ -251,7 +251,7 @@ export async function executePartialRecompInternal(
         let currentTokenBudget = historianChunkTokens;
         let passAttempt = 1;
 
-        await sendIgnoredMessage(
+        await sendStatusNotification(
             client,
             sessionId,
             resumed
@@ -422,7 +422,7 @@ export async function executePartialRecompInternal(
                 extractionFree: true,
             });
 
-            await sendIgnoredMessage(
+            await sendStatusNotification(
                 client,
                 sessionId,
                 `## Magic Recomp — Partial\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} started for messages ${chunk.startIndex}-${chunk.endIndex}.`,
@@ -449,7 +449,7 @@ export async function executePartialRecompInternal(
                 language: deps.language,
                 callbacks: {
                     onRepairRetry: async (error) => {
-                        await sendIgnoredMessage(
+                        await sendStatusNotification(
                             client,
                             sessionId,
                             `## Magic Recomp — Partial\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a repair retry for messages ${chunk.startIndex}-${chunk.endIndex}.\n\nThe previous output did not validate: ${error}`,
@@ -468,7 +468,7 @@ export async function executePartialRecompInternal(
                         snapEnd + 1,
                     );
                     if (smallerChunk.messageCount > 0 && smallerChunk.endIndex < chunk.endIndex) {
-                        await sendIgnoredMessage(
+                        await sendStatusNotification(
                             client,
                             sessionId,
                             `## Magic Recomp — Partial\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a smaller chunk ending at ${smallerChunk.endIndex} because messages ${chunk.startIndex}-${chunk.endIndex} could not be validated.\n\nValidator result: ${validatedPass.error}`,

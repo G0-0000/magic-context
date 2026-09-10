@@ -98,10 +98,10 @@ describe("createChildSessionWithFence", () => {
                 payload: expect.objectContaining({ message: SCHEMA_PROBE_FAILURE_NOTICE }),
             }),
         );
-        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(prompt).not.toHaveBeenCalled();
     });
 
-    it("surfaces the latched failure through the TUI toast and parent warning paths", async () => {
+    it("surfaces the latched failure through RPC and persisted sidebar state without a parent chat row", async () => {
         const db = staleDatabase();
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses_parent");
         const create = mock(async () => ({ id: "child" }));
@@ -131,7 +131,7 @@ describe("createChildSessionWithFence", () => {
         expect(notifications).toContainEqual(
             expect.objectContaining({ type: "action", payload: { action: "refresh-sidebar" } }),
         );
-        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(prompt).not.toHaveBeenCalled();
         expect(
             db
                 .prepare("SELECT last_transform_error FROM session_meta WHERE session_id = ?")

@@ -7,7 +7,7 @@ import { updateSessionMeta } from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
 import { pushNotification } from "../../shared/rpc-notifications";
 import type { Database } from "../../shared/sqlite";
-import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
+import type { NotificationParams } from "./send-session-notification";
 
 export const STALE_PLUGIN_RESTART_NOTICE =
     "Magic Context: plugin build is older than its database — restart OpenCode";
@@ -61,15 +61,6 @@ async function surfaceSchemaFenceFailure(
         // The toast's companion action makes the persisted sidebar error visible
         // immediately instead of waiting for the next session event or poll.
         pushNotification("action", { action: "refresh-sidebar" }, args.parentSessionId);
-        // This is the same out-of-band boot-warning surface used for #266 mode
-        // transitions. It never joins the transform message array or nudge path.
-        await sendIgnoredMessage(
-            args.client,
-            args.parentSessionId,
-            notice,
-            args.notificationParams ?? {},
-            true,
-        );
     } catch (error) {
         sessionLog(
             args.parentSessionId,
