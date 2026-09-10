@@ -243,6 +243,43 @@ export function lkgContentDigestFromFields(fields: readonly LkgContentField[]): 
     return hash.digest("base64url");
 }
 
+export interface LkgInputSnapshot {
+    id: string;
+    fields: readonly LkgContentField[];
+}
+
+function equalContentFields(
+    left: readonly LkgContentField[],
+    right: readonly LkgContentField[],
+): boolean {
+    // OpenCode retains immutable token arrays for the unchanged prefix of a tail-only
+    // request. Reusing the same array needs no element-by-element comparison.
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+        if (!Object.is(left[index], right[index])) return false;
+    }
+    return true;
+}
+
+/** Compare captured tokens before reusing digests: a message can change without changing its id. */
+export function exactReusablePrefix(
+    current: readonly LkgInputSnapshot[],
+    prior: readonly LkgInputSnapshot[] | null,
+): number {
+    if (!prior) return 0;
+    let prefix = 0;
+    while (
+        prefix < current.length &&
+        prefix < prior.length &&
+        current[prefix]?.id === prior[prefix]?.id &&
+        equalContentFields(current[prefix]?.fields ?? [], prior[prefix]?.fields ?? [])
+    ) {
+        prefix += 1;
+    }
+    return prefix;
+}
+
 export interface LkgDigestEntry {
     id: string;
     signature: string;

@@ -6,6 +6,7 @@ import { replayLkg } from "@magic-context/core/hooks/magic-context/lkg-replay";
 import {
 	captureSlot,
 	dropSlot,
+	exactReusablePrefix,
 	getSlot,
 	incrementalLkgContentDigests,
 	type LkgContentField,
@@ -189,37 +190,6 @@ export function piStorageErrorReason(error: unknown): string {
 		if (typeof code === "string" && code.length > 0) return code;
 	}
 	return message;
-}
-
-function equalContentFields(
-	left: readonly LkgContentField[],
-	right: readonly LkgContentField[],
-): boolean {
-	if (left.length !== right.length) return false;
-	for (let index = 0; index < left.length; index += 1) {
-		if (!Object.is(left[index], right[index])) return false;
-	}
-	return true;
-}
-
-function exactReusablePrefix(
-	current: readonly PiLkgInputSnapshot[],
-	prior: readonly PiLkgInputSnapshot[] | null,
-): number {
-	if (!prior) return 0;
-	let prefix = 0;
-	while (
-		prefix < current.length &&
-		prefix < prior.length &&
-		current[prefix]?.id === prior[prefix]?.id &&
-		equalContentFields(
-			current[prefix]?.fields ?? [],
-			prior[prefix]?.fields ?? [],
-		)
-	) {
-		prefix += 1;
-	}
-	return prefix;
 }
 
 function snapshotInputs(

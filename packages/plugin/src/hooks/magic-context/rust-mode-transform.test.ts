@@ -3529,6 +3529,120 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
     });
 
+    it("reuses only the exact accepted prefix after an older stable-id mutation", async () => {
+        const sessionId = `rust-exact-prefix-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = Array.from({ length: 5 }, (_, index) => ({
+            info: { id: `m${index + 1}`, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: `original ${index}` }],
+        })) as MessageLike[];
+        let pass = 0;
+        const reused: number[] = [];
+        const scheduled: Array<() => void> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                return {
+                    decision: ++pass === 1 ? "HARD" : "SOFT+",
+                    row_version: pass,
+                    native_messages: structuredClone(input),
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            scheduleLkgCapture: (capture) => scheduled.push(capture),
+            onLkgCaptureForTests: (prefix) => reused.push(prefix),
+        });
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        expect(reused).toEqual([0]);
+        const firstSlot = getSlot(sessionId);
+        expect(firstSlot).toBeDefined();
+        const mutationIndex = 2;
+        (input[mutationIndex].parts[0] as { text: string }).text = "changed older content";
+        const output = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(scheduled).toHaveLength(1);
+        scheduled.shift()!();
+        const coldDigests = __rustModeTransformTest.rustCaptureDigests(
+            input.map((message) => ({
+                id: message.info.id,
+                fields: __rustModeTransformTest.messageContentSnapshot(message).fields,
+            })),
+            undefined,
+            null,
+        );
+        expect(getSlot(sessionId)?.inputContentDigests).toEqual(coldDigests.digests);
+        expect(reused).toEqual([0, mutationIndex]);
+        expect(JSON.stringify(output.messages)).toBe(JSON.stringify(input));
+        expect(getSlot(sessionId)?.jsonPrefix).toBe(JSON.stringify(output.messages));
+
+        // Model eviction after a failed durable refresh: the adapter remembers the
+        // newer accepted input, but storage can restore only the older slot.
+        resetLkgSlotsForTest();
+        registerLkgPersistence({
+            load: (id) => (id === sessionId ? firstSlot : undefined),
+            clear: () => {},
+        });
+        try {
+            await transform.run(
+                sessionId,
+                input,
+                { messages: [...input] },
+                makeMeta(db, sessionId),
+            );
+            expect(scheduled).toHaveLength(1);
+            scheduled.shift()!();
+            expect(reused).toEqual([0, mutationIndex, 0]);
+            expect(getSlot(sessionId)?.inputContentDigests).toEqual(coldDigests.digests);
+        } finally {
+            registerLkgPersistence(undefined);
+        }
+    });
+
+    it("does not replay captured bytes over a later same-tick nested writer", async () => {
+        const sessionId = `rust-detached-writer-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = makeMessages(sessionId);
+        const scheduled: Array<() => void> = [];
+        let pass = 0;
+        let unavailable = false;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                if (unavailable) throw new Error("module unavailable");
+                return {
+                    decision: ++pass === 1 ? "HARD" : "SOFT+",
+                    row_version: pass,
+                    native_messages: [
+                        {
+                            info: { id: "served", role: "assistant", sessionID: sessionId },
+                            parts: [{ type: "text", text: "captured module output" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            scheduleLkgCapture: (capture) => scheduled.push(capture),
+        });
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        expect(scheduled).toHaveLength(1);
+        (input[0].parts[0] as { text: string }).text = "later nested writer must survive";
+        scheduled.shift()!();
+        unavailable = true;
+        const output = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(JSON.stringify(output.messages)).toBe(JSON.stringify(input));
+        expect(JSON.stringify(output.messages)).not.toContain("captured module output");
+    });
+
     it("refreshes the LKG snapshot after an applied SOFT+ pass", async () => {
         const sessionId = `rust-lkg-soft-plus-${Date.now()}`;
         sessions.push(sessionId);

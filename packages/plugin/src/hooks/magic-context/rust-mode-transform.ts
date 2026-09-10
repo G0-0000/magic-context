@@ -75,6 +75,7 @@ import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import {
     captureSlot,
     dropSlot,
+    exactReusablePrefix,
     getSlot,
     incrementalLkgContentDigests,
     LKG_SNAPSHOT_ARRAY,
@@ -86,9 +87,13 @@ import {
     LKG_SNAPSHOT_STRING,
     LKG_SNAPSHOT_UNDEFINED,
     type LkgEntryNote,
+    type LkgInputSnapshot,
+    type LkgSlot,
     type MessageContentSnapshot,
+    messageContentFields,
     messageContentSnapshot,
     noteEntry,
+    signatureForFields,
     visitMessageContentFields,
 } from "./lkg-slot";
 import {
@@ -257,7 +262,7 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
 interface RustLkgCapturePlan {
     sessionId: string;
     inputIds: string[];
-    inputSnapshots: readonly MessageContentSnapshot[];
+    inputSnapshots: readonly Pick<MessageContentSnapshot, "fields">[];
     jsonPrefix: string;
     modelKey: string | null;
     providerKey: string | null;
@@ -274,7 +279,7 @@ interface RustWireCache {
     rawLastVisible: boolean;
     /** Content-sensitive per-message snapshots for the whole raw array. Delta passes
      * re-verify every reused message so in-place edits cannot ride a stale prefix. */
-    rawContentSnapshots: MessageContentSnapshot[];
+    rawContentSnapshots: Pick<MessageContentSnapshot, "fields">[];
     ckFingerprint: string;
     ckPrefixFingerprintBeforeLast: string;
     nativeFingerprint: string;
@@ -325,6 +330,11 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgCaptureSequence: number;
     lkgLastCapturedRowVersion: number;
     lkgSyncCaptureRequired: boolean;
+    lkgAcceptedCapture?: {
+        inputs: readonly LkgInputSnapshot[];
+        captureSequence: number;
+        rowVersion: number;
+    };
     /** A fallback replay is provider-visible output. Keep that exact representation through
      * deferred recovery; healthy-pass and raw-tail limits prevent indefinite stale replay. */
     lkgRepresentationFrozen: boolean;
@@ -363,6 +373,8 @@ export interface RustModeTransformOptions {
     memoryProjectIdentityResolverForTests?: typeof resolveProjectIdentity;
     /** Disable hot-path I/O caches to establish an uncached differential-timing baseline. */
     disableHotPathIoCachesForTests?: boolean;
+    /** Test-only callback after a capture is accepted, reporting the reused digest prefix length. */
+    onLkgCaptureForTests?: (reusedPrefix: number) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -413,13 +425,45 @@ function messageIdOf(message: MessageLike): string | null {
     return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-function contentSnapshotsFor(messages: readonly MessageLike[]): MessageContentSnapshot[] {
-    return messages.map(messageContentSnapshot);
+function contentSnapshotsFor(
+    messages: readonly MessageLike[],
+): Pick<MessageContentSnapshot, "fields">[] {
+    // Copy primitive field tokens before the RPC so later host mutations cannot alter
+    // this snapshot. Wire-prefix validation compares the fields directly, without a hash.
+    return messages.map((message) => ({ fields: messageContentFields(message) }));
+}
+
+function rustCaptureDigests(
+    inputs: readonly LkgInputSnapshot[],
+    prior: LkgSlot | undefined,
+    acceptedInputs: readonly LkgInputSnapshot[] | null,
+) {
+    const reusablePrefix = prior?.inputContentSignatures
+        ? exactReusablePrefix(inputs, acceptedInputs)
+        : 0;
+    const inputContentSignatures = [
+        ...(prior?.inputContentSignatures?.slice(0, reusablePrefix) ?? []),
+        ...inputs.slice(reusablePrefix).map((input) => signatureForFields(input.fields)),
+    ];
+    const incremental = incrementalLkgContentDigests(
+        inputs.map((input, index) => ({
+            ...input,
+            signature: inputContentSignatures[index] ?? "",
+        })),
+        prior?.inputContentSignatures
+            ? {
+                  ids: prior.inputIdSeq.slice(0, reusablePrefix),
+                  signatures: prior.inputContentSignatures.slice(0, reusablePrefix),
+                  digests: prior.inputContentDigests.slice(0, reusablePrefix),
+              }
+            : undefined,
+    );
+    return { ...incremental, inputContentSignatures };
 }
 
 function messageMatchesContentSnapshot(
     message: MessageLike,
-    snapshot: MessageContentSnapshot,
+    snapshot: Pick<MessageContentSnapshot, "fields">,
 ): boolean {
     let fieldIndex = 0;
     const matched = visitMessageContentFields(message, {
@@ -1612,6 +1656,8 @@ export function createRustModeTransform(
     ): boolean => {
         const slot = getSlot(sessionId);
         if (!slot) {
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, "lkg_miss");
             return false;
         }
@@ -1636,6 +1682,8 @@ export function createRustModeTransform(
         }
         if (!entry) {
             dropSlot(sessionId, "lkg_invalidated_reshape");
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, "lkg_invalidated_reshape");
             return false;
         }
@@ -1648,6 +1696,8 @@ export function createRustModeTransform(
             entry,
         });
         if (!replay.ok) {
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, replay.reason);
             return false;
         }
@@ -1708,7 +1758,7 @@ export function createRustModeTransform(
         sessionId: string,
         inputIds: readonly unknown[],
         inputKeys: ReturnType<typeof resolveLkgModelKeys>,
-        inputSnapshots: readonly MessageContentSnapshot[],
+        inputSnapshots: readonly Pick<MessageContentSnapshot, "fields">[],
         nativeMessages: readonly unknown[],
         responseRowVersion: number,
     ): RustLkgCapturePlan | null => {
@@ -1748,25 +1798,31 @@ export function createRustModeTransform(
         ) {
             return "superseded";
         }
-        // Steady passes append one message onto an unchanged prefix. Reuse the
-        // previous slot's digests for every id+content-signature match and hash
-        // only from the first changed entry so the deferred commit stays off the
-        // event-loop budget.
+        // Reuse requires the exact inputs from a previously accepted capture in this
+        // process; a restarted adapter has no such proof. Compute FNV signatures at
+        // commit, not before the RPC, retaining Pi's input_content_signatures format.
+        // Cache-busting/recovery captures still commit synchronously for durability.
         const prior = getSlot(plan.sessionId);
-        const inputContentSignatures = plan.inputSnapshots.map((snapshot) => snapshot.signature);
-        const { digests: inputContentDigests } = incrementalLkgContentDigests(
-            plan.inputIds.map((id, index) => ({
-                id,
-                signature: inputContentSignatures[index] ?? "",
-                fields: plan.inputSnapshots[index]?.fields ?? [],
-            })),
-            prior?.inputContentSignatures
-                ? {
-                      ids: prior.inputIdSeq,
-                      signatures: prior.inputContentSignatures,
-                      digests: prior.inputContentDigests,
-                  }
+        const inputs = plan.inputIds.map((id, index) => ({
+            id,
+            fields: plan.inputSnapshots[index]?.fields ?? [],
+        }));
+        // A failed durable refresh followed by eviction can hydrate an older slot.
+        // Its digests must not borrow the newer in-memory capture's equality proof.
+        const accepted = state.lkgAcceptedCapture;
+        const {
+            digests: inputContentDigests,
+            inputContentSignatures,
+            reusedPrefix,
+        } = rustCaptureDigests(
+            inputs,
+            prior?.modelKey === plan.modelKey &&
+                prior?.providerKey === plan.providerKey &&
+                prior?.captureSequence === accepted?.captureSequence &&
+                prior?.rowVersion === accepted?.rowVersion
+                ? prior
                 : undefined,
+            accepted?.inputs ?? null,
         );
         const slot = {
             jsonPrefix: plan.jsonPrefix,
@@ -1782,6 +1838,12 @@ export function createRustModeTransform(
         };
         const captured = captureSlot(plan.sessionId, slot);
         if (!captured) throw new Error("LKG slot rejected the prepared snapshot");
+        state.lkgAcceptedCapture = {
+            inputs,
+            captureSequence: plan.captureSequence,
+            rowVersion: plan.rowVersion,
+        };
+        options.onLkgCaptureForTests?.(reusedPrefix);
         // Durability across restarts: store the exact accepted snapshot (the
         // jsonPrefix string is reused as-is, never re-serialized). Best-effort —
         // a write failure leaves the in-memory slot serving this process.
@@ -3148,6 +3210,7 @@ export function createRustModeTransform(
                 // and its replay still applies durable binding-mismatch strips.
                 if (cacheBustingPass) {
                     dropSlot(sessionId, "lkg_cache_bust_pending_capture");
+                    state.lkgAcceptedCapture = undefined;
                 }
                 // Build the capture from the installed array. A priced replacement commits its
                 // snapshot before this transform can return, so a process death cannot leave the
@@ -3170,6 +3233,7 @@ export function createRustModeTransform(
                         return;
                     }
                     dropSlot(sessionId, `lkg_${mode}_capture_failed`);
+                    state.lkgAcceptedCapture = undefined;
                     state.lkgSyncCaptureRequired = true;
                     sessionLog(
                         sessionId,
@@ -3529,6 +3593,7 @@ export const __rustModeTransformTest = {
     applyNativeMessagesVerbatim,
     authoritySeedRows,
     contentSnapshotsFor,
+    rustCaptureDigests,
     snapshotTags: {
         array: LKG_SNAPSHOT_ARRAY,
         object: LKG_SNAPSHOT_OBJECT,
