@@ -1,0 +1,12 @@
+   Compiling mc-module v0.1.0 (/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/pool-258/crates/mc-module)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.98s
+     Running unittests src/lib.rs (target/debug/deps/mc_module-3a1f10a0309ca84b)
+
+running 4 tests
+test transform::tests::reasoning_clear_legacy_missing_fingerprint_holds_until_bust ... ok
+test tests::live_shaped_opencode_reasoning_clear_attaches_on_the_same_pass ... ok
+test transform::tests::reasoning_clear_legacy_adoption_preserves_cleared_and_held_bytes ... ok
+test transform::tests::reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1104 filtered out; finished in 0.44s
+
