@@ -3464,15 +3464,22 @@ export function createRustModeTransform(
                     if (memoryMirrorDue) {
                         const mirrorPullStartedAt = performance.now();
                         try {
-                            const cuePoolVersion = await pullMemoryMirrorOnce({
+                            const mirrorDrain = await pullMemoryMirrorOnce({
                                 db: deps.db,
-                                module: options.moduleClient as AuthorityModuleClient,
+                                module: options.moduleClient,
                             });
-                            if (cuePoolVersion !== state.muralCuePoolVersion) {
-                                state.muralCuePoolVersion = cuePoolVersion;
+                            if (mirrorDrain.cuePoolVersion !== state.muralCuePoolVersion) {
+                                state.muralCuePoolVersion = mirrorDrain.cuePoolVersion;
                                 state.muralCache = null;
                             }
-                            state.memoryMirrorProjectionKey = projectionKey;
+                            if (mirrorDrain.complete) {
+                                state.memoryMirrorProjectionKey = projectionKey;
+                            } else if (mirrorDrain.budgetExhausted) {
+                                sessionLog(
+                                    sessionId,
+                                    `rust memory mirror backlog deferred: rows_applied=${mirrorDrain.rowsApplied} backlog_remaining=true pages=${mirrorDrain.pagesPulled}`,
+                                );
+                            }
                         } catch (error) {
                             sessionLog(
                                 sessionId,

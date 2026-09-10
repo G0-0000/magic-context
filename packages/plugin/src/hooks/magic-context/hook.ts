@@ -15,9 +15,8 @@ import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
     applyMirroredNoteCompileFields,
-    applyMirrorPage,
+    drainMirrorPages,
     ensureContextStoreUuid,
-    getMirrorCursor,
     getModuleNoteEvaluationBridge,
     registerModuleNoteEvaluationBridge,
 } from "../../features/magic-context/context-authority";
@@ -876,16 +875,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.config.transform_mode === "rust" ? authorityRecoveryModuleClient : undefined;
     const syncModuleDomain = async (domain: "memories" | "notes"): Promise<void> => {
         if (!rustModeModuleClient?.mirrorPull) return;
-        for (;;) {
-            const cursor = getMirrorCursor(db, domain);
-            const response = await rustModeModuleClient.mirrorPull({
-                domain,
-                cursor,
-                limit: 1000,
-            });
-            const next = applyMirrorPage({ db, page: response.page });
-            if (!response.page.has_more || next === cursor) break;
-        }
+        await drainMirrorPages({
+            db,
+            module: rustModeModuleClient,
+            domain,
+            limit: 1000,
+        });
     };
     const syncModuleNotes = (): Promise<void> => syncModuleDomain("notes");
     const syncModuleMemories = (): Promise<void> => syncModuleDomain("memories");

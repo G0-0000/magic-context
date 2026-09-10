@@ -11,6 +11,7 @@ import {
     ensureContextStoreUuid,
     getAuthorityManagedMarker,
     resetAuthorityRoutingObservationsForTest,
+    TRANSFORM_MEMORY_MIRROR_PAGE_BUDGET,
 } from "../../features/magic-context/context-authority";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
@@ -2079,6 +2080,172 @@ describe("Rust mode authority adapter", () => {
         await run;
         await Bun.sleep(20);
         expect(mirrorCompleted).toBe(true);
+    });
+
+    it("drains every memory mirror page before stamping the transform projection", async () => {
+        const sessionId = `rust-memory-mirror-drain-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let memoryPulls = 0;
+        let transform!: ReturnType<typeof createRustModeTransform>;
+        const projectionKeysDuringPull: Array<string | null> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 7,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                projectionKeysDuringPull.push(
+                    transform.getState(sessionId).memoryMirrorProjectionKey,
+                );
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor + 1,
+                        has_more: memoryPulls < 4,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = makeMessages(sessionId);
+
+        await transform.run(
+            sessionId,
+            messages,
+            { messages: [...messages] },
+            makeMeta(db, sessionId),
+        );
+        await Bun.sleep(20);
+
+        expect(memoryPulls).toBe(4);
+        expect(projectionKeysDuringPull).toEqual([null, null, null, null]);
+        expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBe(
+            JSON.stringify([7, null, null, []]),
+        );
+    });
+
+    it("leaves a budget-exhausted memory mirror projection unstamped for the next pass", async () => {
+        const sessionId = `rust-memory-mirror-budget-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const mirrorPageBudget = TRANSFORM_MEMORY_MIRROR_PAGE_BUDGET;
+        let memoryPulls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 8,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor + 1,
+                        has_more: true,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] },
+                makeMeta(db, sessionId),
+            );
+            await Bun.sleep(20);
+        };
+
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            await run();
+            expect(memoryPulls).toBe(mirrorPageBudget);
+            expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBeNull();
+
+            await run();
+            expect(memoryPulls).toBe(mirrorPageBudget * 2);
+            expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBeNull();
+            const backlogLogs = logSpy.mock.calls.filter(
+                ([loggedSession, message]) =>
+                    loggedSession === sessionId &&
+                    message.includes("rows_applied=0 backlog_remaining=true pages=20"),
+            );
+            expect(backlogLogs).toHaveLength(2);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("does not repoll a completely drained memory mirror on stable passes", async () => {
+        const sessionId = `rust-memory-mirror-stable-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let memoryPulls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 9,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor,
+                        has_more: false,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] },
+                makeMeta(db, sessionId),
+            );
+            await Bun.sleep(20);
+        };
+
+        await run();
+        await run();
+        await run();
+        await run();
+
+        expect(memoryPulls).toBe(1);
+        expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBe(
+            JSON.stringify([9, null, null, []]),
+        );
     });
 
     it("caches mural bytes and pulls mirrors only when the module projection moves", async () => {
