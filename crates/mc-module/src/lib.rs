@@ -8925,6 +8925,18 @@ impl McHandler {
         } else {
             NativeAttachmentCacheStats::default()
         };
+        if let Err(error) = record_reasoning_native_evidence(
+            &store,
+            &mut response,
+            &parsed,
+            reasoning_clear_units,
+            &tag_numbers,
+            mutation_exempt_mid.as_deref(),
+            lineage_anchor_mid.as_deref(),
+            transition_consumed,
+        ) {
+            eprintln!("mc-module: native reasoning replay proof not recorded: {error}");
+        }
         finalize_native_messages_response(
             &mut response,
             &parsed,
@@ -12525,6 +12537,8 @@ fn native_reasoning_should_clear(
     (tag_number, should_clear)
 }
 
+include!("reasoning_native_evidence.rs");
+
 fn encode_full_native_messages(
     response: &transform::TransformResponse,
     request: &TransformRequest,
@@ -12725,7 +12739,7 @@ fn attach_native_messages_incremental(
         .as_mut()
         .map(|snapshot| std::mem::take(&mut snapshot.sidecar_sizes))
         .unwrap_or_default();
-    let cleared_mids = transform::reasoning_clear_mids(reasoning_clear_units);
+    let cleared_mids = transform::reasoning_native_clear_mids(reasoning_clear_units);
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);

@@ -1,105 +1,156 @@
-# Frozen cutoff versus frozen applied set — cache-core gate evidence
+# Reasoning-clear cache-core gate — revised delivery
 
-## Mechanism and scope
+This record supersedes the first delivery's CK-only adoption argument. The original fix remains: **a frozen age cutoff is not a frozen applied set**. The revision adds genuine pre-deploy fixtures, native evidence, generation fences, lifecycle handling, and serialized incremental-wire tests.
 
-OpenCode Rust/native typed-reasoning clearing previously treated a frozen numeric cutoff as permission to clear any now-non-exempt assistant. When the newest assistant changed, an older assistant first lost its signed reasoning on a deferred pass, even though the cutoff did not move.
+## 1. Genuine pre-fix fixture
 
-The fix stores `strip:reasoning_clear:<message-id>` units (`kind=strip_reasoning_clear`, empty sentinel payload, lineage durability). It reuses the existing strip-unit persistence, lookup, identity, and replay machinery. There is no schema migration, renderer epoch bump, or migration HARD.
+Generating commit: **`e2109bdc1d1f6fc0dd61c0b995083c12d700fe04`**.
 
-`new_reasoning_clear_units` receives the existing `is_bust_pass` permission from `apply_once`. That permission is derived from `is_provider_prefix_mutation_pass` after final classification, including the lineage-failure veto, and retains the existing primary-session scope of reasoning-age cleanup. It does not reconstruct permission from scheduler pressure or historian state. The cutoff still batches candidates; the newest assistant and lineage anchor cannot receive a new clear decision.
+The generator actually ran with that commit's `transform.rs`, `lib.rs`, `differential_goldens.rs`, and `mc-store/src/lib.rs`. Only an `include!` inside the existing test module was added to invoke the fixture generator. The working implementation was staged first, the old source installed using `git show`, and the implementation restored using `git checkout -- <paths> && touch <paths>` afterward. No stash or parent-checkout edits were used.
 
-CK rendering and both full and incremental native encoding consume the committed units. Native cache identity uses unit membership rather than the moving newest-assistant/age predicate. An existing clear is replayed without recalculating age or exemption. Native keep units cannot restore reasoning for a message with an authorized clear unit.
+Committed fixture files:
 
-### Deployment adoption, without a bust
+- `crates/mc-module/gen/reasoning-clear-legacy/pre-fix.sqlite` — the actual closed SQLite store from the old binary, not a post-fix snapshot with units deleted.
+- `pre-fix.json` — raw native ingress, request configuration, decoded CK output, native output, cutoff, row version, and generating commit.
+- `pre-fix.ck.json` — exact serialized CK bytes written by the old implementation, without a JSON-value parse/reserialize changing property order.
+- `pre-fix.native.json` — exact serialized native output bytes written by the old implementation.
+- Generator source: `crates/mc-module/src/transform/reasoning_clear_legacy_generator.rs` (intentionally not included in normal builds).
 
-The parent ruled out an epoch bump or migration HARD. A legacy session can adopt a unit on a deferred pass only if **every** current reasoning block's last-served fingerprint exactly matches its cleared representation. A prior native-keep unit prevents adoption. The helper uses the existing `served_output_fingerprint` state, not a new ledger.
+The source blob hashes collected before inserting the generator hook were checked against `git rev-parse e2109bdc:<path>`. The expected/actual hashes and fixture SHA-256 hashes are in `docs/evidence/loop-r4-reasoning/manifest.json` and `generator-source-blob-hashes.txt`. The complete generation output is `pre-fix-fixture-generation.txt`.
 
-An assistant last served with signed reasoning remains held even if its age is below the persisted cutoff and its exemption has moved. Missing fingerprints also hold the candidate until a later authorized bust. This conservative behavior is intentional; no prior application is inferred merely from a cutoff. The legacy regression verifies all previously served native messages, not only the held assistant.
+The real fixture demonstrates why CK proof cannot stand in for native proof: assistant `already` has an **empty reasoning shell in CK**, but its real OpenCode sidecar encoder **omits that part entirely** from native output. Assistant `old` still has signed reasoning because it is exempt. The regression checks both representations against independently recorded pre-fix bytes.
 
-## Regression evidence
+### Reproduction of fixture generation
 
-All new tests are lib tests included from `crates/mc-module/src/transform/reasoning_clear_tests.rs`.
+From a clean checkout of the delivery branch:
 
-### Red on the unchanged implementation
+1. Stage the live state with `git add -A`.
+2. Install the four source files listed above from `e2109bdc` using `git show <commit>:<path> > <path>`; record their `git hash-object` results.
+3. Insert `include!("transform/reasoning_clear_legacy_generator.rs");` inside `transform::tests`, before `reasoning_cutoff_batches_on_one_fold_and_survives_restart`.
+4. Run `cargo test -p mc-module --lib generate_pre_fix_reasoning_clear_fixture -- --nocapture`.
+5. Restore those four files from the staged state and touch them. Restore the incidental `Cargo.lock` change.
 
-`cargo test -p mc-module --lib reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart`
+The fixture is entirely synthetic; no live session or credentials were read.
 
-Exit **101**, before production edits:
+## 2. Adoption, holding, and retirement
+
+Durable decisions remain `strip:reasoning_clear:<message-id>` frozen units with an empty sentinel payload. New first applications consume the existing `is_bust_pass` permission, not a local pressure predicate.
+
+### First post-deploy DEFER
+
+A legacy cleared representation may be replayed only when:
+
+- the last-served CK fingerprints prove the exact cleared representation of **every** reasoning block;
+- the original source identity vector matches current ingress (not an identity re-adopted during this transform);
+- no native-keep decision contradicts that proof;
+- legacy replay has not retired.
+
+That bounded replay uses a **request-local** `strip:reasoning_clear_legacy:` unit. It is removed from `core.frozen_units` before committing (`transform.rs`, `reasoning_clear_units` extraction and removal immediately before `state_changed`). It is not a durable clear decision. Holding means replaying the previously cleared bytes, **not resurrecting signed ingress**.
+
+A previously signed/exempt assistant cannot enter this arm. The original red-first HARD → exemption movement → DEFER regression remains green.
+
+### Native proof
+
+After full/incremental native attachment has produced its actual output, `record_reasoning_native_evidence` records:
+
+- the exact native representations of the legacy-replayed messages;
+- their prospective representation under ordinary clear units;
+- the exact CK fingerprint vector;
+- a hash of raw native ingress, CK ingress, and render configuration;
+- `(revert_epoch, shadow_generation, shadow_seq)`;
+- the resulting metadata row version.
+
+Storage is **`mc_cache_state.meta.reasoning_replay_evidence`**. No table, schema migration, fence movement, or epoch bump was introduced.
+
+A DEFER can adopt an ordinary unit only if the CK proof and source identity still hold, the generation and row version are current, the source hash matches, and actual/prospective native representations are exactly equal. Missing or unequal native proof keeps the bounded legacy representation until proof exists or a later bust prices the transition. A bust-permitted pass can mint the ordinary decision without legacy evidence.
+
+The regression explicitly rejects a native proof whose prospective representation is changed to an empty-text sentinel. It also verifies that a stale generation can retain its known, unchanged legacy wire bytes **without being accepted as current adoption authority**.
+
+### Self-retirement
+
+`meta.reasoning_clear_initialized` retires legacy eligibility on the first priced native pass, or when all replayed cleared messages have ordinary units. Native proof is then discarded. `legacy_allowed` short-circuits on this flag, so stale stored fingerprints cannot reactivate legacy adoption later. The generation test includes a retired-state negative arm, and the retirement guard has an executed red mutation.
+
+## 3. Fingerprint writer, read snapshot, and generation validity
+
+Relevant source locations at delivery:
+
+- `mc-store/src/lib.rs:7350–7403`: `load_transform_snapshot` selects row version, core state, and metadata in one SQLite read transaction. Non-tag overlays share that snapshot.
+- `mc-module/src/transform.rs:3388–3399`: that snapshot is loaded before the separately validated tag baseline.
+- `transform.rs:5544–5548`: adoption receives **`&loaded.meta` and `loaded.row_version`**, plus the current projection. It does not use the working metadata identity map already updated by `apply_ingress_meta`.
+- `transform.rs:5786–5789`: the final CK output fingerprint and `served_output_generation` are written together. Both remain unchanged when a deferred frozen-prefix divergence prevents adopting a new fingerprint. The two early passthrough writers likewise stamp their output generation alongside their fingerprint.
+- `transform.rs:5846–5851`: `commit_transform` persists core and metadata under the expected row-version fence.
+- `reasoning_native_evidence.rs:25–27,60–77`: native evidence first checks the response row version against the current store row, then uses the store's CAS commit. A losing or late callback cannot stamp a different transform/hydration snapshot. Evidence row version is the committed successor, and the response is updated to that version.
+
+The adoption predicate distinguishes **historical bytes retained for holding** from **current-generation evidence authorizing adoption**. Legacy rows lack the new generation stamp; they cannot provide current native proof merely by having a numeric cutoff. A real attachment records new proof only after serving and verifying the bounded representation.
+
+Tests cover stale revert epoch, shadow generation, shadow sequence, metadata row version, changed source identity, native-representation mismatch, and a native attachment finishing after a newer hydration commit. A mutation that substitutes the old generation for the current generation goes red; so does removal of the native callback's row-version check.
+
+## 4. Lifecycle and exemption precedence
+
+### Same-lineage subsets/reverts
+
+`surviving_strip_units` retains reasoning-clear units across temporary subsets. They remain tied to the original message identity enforced by the existing frozen-target identity checks. They are not silently reminted for a different block.
+
+If an active clear's message becomes the newest assistant or a lineage anchor, `reasoning_exemption_repair` requests a **priced structural HARD**. Only after the common bust permission is established does `refresh_reasoning_clear_exemptions` mark the unit suspended (`reset_rule = newest-assistant-keep`). Its payload is unchanged. Native keep then wins and the signed representation is restored on that priced pass. The suspension remains in effect on subsequent DEFERs even when a newer assistant arrives. Another permitted bust can resume clearing.
+
+A legacy cleared assistant becoming exempt before unit adoption uses the same priced restoration rule. This is not a migration HARD: unchanged legacy sessions remain DEFER-shaped and byte-identical.
+
+The anchor test uses a real reasoning-bearing assistant that is **not** newest, proving the anchor condition independently. The re-exemption test reconstructs native deltas across three stable cleared DEFERs, a priced restoration, three stable kept DEFERs (including another newest-assistant change), and a priced resume. It also seeds a keep and clear on the same message to defend their precedence. No A→B→A wire flip is permitted on those deferred passes.
+
+### Descent / composed inheritance
+
+`mc-store/src/lib.rs:10854–10874` removes reasoning-clear and native-keep units from the copied target core, clears CK/native evidence, and resets adoption initialization. The new seam may reuse an old message ID without inheriting old reasoning authority. Other history/compartment state still follows the existing descent contract; the source lineage retains its own units.
+
+`lineage_descent_tests::reasoning_clear_units_and_proofs_do_not_cross_direct_or_composed_descent` tests direct A→B and composed A→B→C with B selected as the inherited source. Both targets receive the new anchor but neither receives source reasoning units/evidence. Removing the clear-unit filter makes this test fail.
+
+### Pi fork / branch
+
+Pi invokes `copySessionStateForClone` through `clone-inheritance.ts:200–206`. The copy uses explicit TS tables and selected metadata (`storage-clone.ts:233` onward), not Rust `mc_cache_state`. The new Pi test exercises both a prefix fork and a divergent branch; valid retained tags are copied, removed tags are omitted, and an intentionally colocated Rust state row containing a clear and native evidence is not copied. Rust state normally resides in a separate store, making that colocation fixture an additional negative control.
+
+Session deletion removes the state row through `McStore::delete_session`; no reasoning unit or proof can survive that row's removal.
+
+## 5. Combined rendering and serialized wire assertions
+
+`ReasoningNativeHarness` runs **`attach_native_messages_incremental` and `finalize_native_messages_response`** with real raw OpenCode sidecars. It rebuilds responses from `native_messages_delta` using `after` and `replace_from`, then compares **`serde_json::to_vec` bytes**. The migration test requires at least three actual deltas; a full-response-only fallback cannot pass that requirement.
+
+The combined fixture places leading whitespace, signed reasoning, and text in an assistant adjacent to another assistant. A typed clear owns those blocks; the merged-reasoning lane must not mint a second stripping decision for the same message. Three deferred passes, including further assistant growth, must preserve the exact reconstructed native bytes and show no CK prefix divergence.
+
+The old post-fix-generated migration fixture was replaced, not retained as migration proof. The original frozen-cutoff regression and existing DG suite remain green. As previously documented, TS typed age clearing has no equivalent newest-assistant exemption: `tag-messages.ts:500–502` collects all reasoning parts and `strip-content.ts:324–355` clears by age. The frozen per-part TS merged-assistant mechanism is a different lane. No unsupported TS↔Rust agreement claim is made for typed age clearing.
+
+## 6. Gates and complete evidence
+
+All complete stdout/stderr captures, not excerpts, are committed under **`docs/evidence/loop-r4-reasoning/`**. `manifest.json` lists every file's byte length and SHA-256, plus fixture/source provenance.
+
+Passed gates:
+
+- `cargo test -p mc-module -- --test-threads=1` — exit 0, 1109 lib tests passed, six existing ignores, four integration tests passed, binary/doc targets clean. Serial execution avoids the already-observed unrelated wall-clock test contention from the first delivery.
+- `cargo test -p mc-store -- --test-threads=1` — exit 0, 140 store tests.
+- `cargo clippy --all-targets -- -D warnings` — exit 0.
+- `cargo fmt --check` and explicit rustfmt checks for `include!` files — exit 0.
+- `bun test src/clone-inheritance.test.ts` in `packages/pi-plugin` — exit 0.
+- `bun run typecheck` in `packages/pi-plugin` — exit 0.
+- Restored module/store focused tests — exit 0 after deliberate mutations were removed.
+
+Dependencies were installed in this worktree with `bun install --frozen-lockfile --ignore-scripts` because the initial Pi run lacked `jsonc-parser`. No package manifest or Bun lock changed. The incidental local `subc-core` Cargo.lock version refresh was restored. AFT's language servers were unavailable; the compiled gates above are authoritative.
+
+### Executed mutation matrix
+
+Each run stages the live state with unconditional `git add -A`, applies a marked deliberate break, captures a **nonempty diff against the index**, runs the exact named test, restores with `git checkout -- <path> && touch <path>`, and captures an **empty diff against the index**. Full mutation logs and paired stat files are committed. Each selected test was the sole failure; other tests were filtered, not claimed as controls.
+
+| Control | Exact test name (module prefix omitted) | Result |
+| --- | --- | --- |
+| First-application permission | `reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart` | exit 101, byte-equality failure |
+| Native proof required before adoption | `reasoning_clear_pre_fix_database_migrates_ck_and_incremental_wire_without_bust` | exit 101, CK-only adoption rejected |
+| Current generation rather than old stamp | `reasoning_clear_rejects_previous_generation_and_hydration_evidence` | exit 101, stale evidence adopted |
+| Descent filter | `reasoning_clear_units_and_proofs_do_not_cross_direct_or_composed_descent` | exit 101, inherited clear detected |
+| Priced re-exemption repair | `reasoning_clear_reexemption_and_native_keep_collision_change_only_on_priced_passes` | exit 101, expected HARD became SOFT+ |
+| Native callback row-version fence | `reasoning_clear_native_proof_cannot_overwrite_a_newer_hydration_snapshot` | exit 101, newer snapshot overwritten |
+| Legacy retirement flag | `reasoning_clear_rejects_previous_generation_and_hydration_evidence` | exit 101, retired path reactivated |
+
+The original red-first output is also included as `original-lib-red.txt`:
 
 ```text
-test transform::tests::reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart ... FAILED
 assertion `left == right` failed: DEFER must not first-clear reasoning merely because its exemption moved
-test result: FAILED. 0 passed; 1 failed; 0 ignored
 ```
 
-The fixture uses supported age 10, 10% usage, and a 13-part user message. HARD freezes a cutoff containing the newest signed assistant A but leaves A intact. After reopening the store, an unchanged DEFER remains identical. Appending B then exposes the original defect.
-
-### Green contract
-
-1. `reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart`: HARD with A exempt → restart → B arrives → DEFER retains A's exact CK/native bytes and reports no old-prefix divergence → a subsequent HARD clears A → two DEFERs replay exactly.
-2. `reasoning_clear_legacy_adoption_preserves_cleared_and_held_bytes`: seed a legacy cutoff/fingerprint state without clear units; already-cleared reasoning is adopted on the first DEFER, held reasoning stays intact, the previous native prefix is identical, and the next HARD admits the held candidate.
-3. `reasoning_clear_legacy_missing_fingerprint_holds_until_bust`: missing last-served evidence cannot authorize adoption; a later authorized pass can mint the unit.
-4. Existing `reasoning_cutoff_batches_on_one_fold_and_survives_restart` remains green.
-
-The legacy fixture removes only the new decision units from a real committed snapshot. Its already-cleared and exempt sets have the same bytes the pre-fix predicate served. It does not compute expected replay bytes through the adoption helper.
-
-### Executed mutations
-
-Both mutations were marked `NON-VACUITY BREAK`, executed after unconditional `git add -A`, and restored with `git checkout -- <path> && touch <path>`. Neither remains in the tree.
-
-| Control neutralized | Exact red test (under `transform::tests::`) | Captured result | Diff against staged live state |
-| --- | --- | --- | --- |
-| First-application permission: force the mint condition true | `reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart` | Exit 101; DEFER byte-equality assertion failed; 0 passed, 1 failed, 1107 filtered | `reasoning_clear.rs`: 3 lines, +2/-1 while mutated; empty after restoration |
-| Last-served fingerprint proof: force equality true | `reasoning_clear_legacy_missing_fingerprint_holds_until_bust` | Exit 101; no-mint-on-missing-fingerprint assertion failed; 0 passed, 1 failed, 1107 filtered | `reasoning_clear.rs`: 1 line, +1 while mutated; empty after restoration |
-
-Each named test was the only selected test and the only failure in its mutation run. Other tests were filtered, not claimed as mutation controls.
-
-## Differential-golden applicability
-
-There is no equivalent **typed age-clear plus newest-assistant exemption** case on the TS leg at this revision:
-
-- `packages/plugin/src/hooks/magic-context/tag-messages.ts:500–502` includes all reasoning-bearing messages in `reasoningByMessage`.
-- `packages/plugin/src/hooks/magic-context/strip-content.ts:324–355` performs typed age clearing without a newest-assistant exemption.
-- The frozen per-part decisions from `4c105b84` concern **merged-assistant reasoning stripping** (`planMergedAssistantReasoningStrip`, `strip-content.ts:518–580`), a different lane with a run-shape keep rule, not this typed age-clear predicate.
-
-Therefore no new TS↔Rust agreement golden is claimed for this exact scenario. Existing DG tests remain green, including `dg_goldens_match_ts_wire_surface_and_gate_labels`, `dg_goldens_exercise_incremental_native_differential_mode`, and the DG perturbation guard. The two edits in `differential_goldens.rs` only replace the old zero-watermark argument with an empty frozen-decision slice.
-
-## Gates
-
-- `cargo test -p mc-module`: the parallel run passed 1101 lib tests but failed the unrelated wall-clock assertion `unaffected_transition_golden_is_byte_identical_and_detection_is_constant_time` at 62.434 µs/pass. Its isolated rerun passed at 27.149 µs/pass.
-- `cargo test -p mc-module -- --test-threads=1`: **exit 0**; 1102 lib tests passed, six existing ignores, four integration tests passed (including the live-daemon test), binary/doc targets clean. An earlier serial attempt hit a 240-second process cap after all lib tests passed; the complete rerun used a sufficient timeout.
-- Final native-prefix assertion strengthening: `cargo test -p mc-module --lib reasoning_clear_`: **exit 0**, all three focused tests passed.
-- `cargo clippy --all-targets -- -D warnings`: **exit 0**, rerun after the native-prefix assertion strengthening. The `--` separator forwards the warnings-as-errors flags to Clippy/rustc.
-- `cargo test -p mc-module --lib reasoning_clearing_is_not_applicable_to_claude_or_owned_broca`: **exit 0** after making its explicit decision target match the native message ID.
-- `cargo fmt --check`: **exit 0**.
-- `rustfmt --edition 2021 --check crates/mc-module/src/transform/reasoning_clear.rs crates/mc-module/src/transform/reasoning_clear_tests.rs`: **exit 0**; these files are included through `include!`.
-- AFT inspection could not obtain authoritative Rust diagnostics because the language server failed initialization; compiled tests and Clippy are the authoritative checks.
-
-Cargo refreshed the local `subc-core` lock entry from 0.17.21 to 0.17.22 during verification. That incidental `Cargo.lock` change was restored; it is not part of the delivery.
-
-## Exact evidence file list
-
-Committed:
-
-- `crates/mc-module/src/transform/reasoning_clear_tests.rs` — new lib regression and deployment-adoption tests.
-- `crates/mc-module/src/transform.rs` — existing cutoff regression and updated native replay fixtures; the production mint/replay integration.
-- `crates/mc-module/src/transform/reasoning_clear.rs` — decision producer, adoption proof, and replay consumer.
-- `crates/mc-module/src/lib.rs` — full/incremental native plumbing and existing encoder tests adapted to explicit decisions.
-- `crates/mc-module/src/differential_goldens.rs` — existing DG caller adaptation.
-- `docs/loop-r4-reasoning-clear-gate.md` — this gate record.
-
-Local, uncommitted raw evidence under `.cortexkit/alfonso/`:
-
-- `loop-r4-fix-red.txt`
-- `loop-r4-permission-mutation.txt`
-- `loop-r4-permission-mutation-stat.txt`
-- `loop-r4-adoption-mutation.txt`
-- `loop-r4-adoption-mutation-stat.txt`
-- `loop-r4-cargo-test.txt`
-- `loop-r4-cargo-test-serial.txt`
-- `loop-r4-focused-final.txt`
-- `loop-r4-clippy.txt`
-
-## Existing test contract adjustment
-
-The native encoder fixture formerly named `newest_reasoning_becomes_historical_after_watermark_tail_advance` is now `newest_reasoning_becomes_historical_after_committed_clear_decision`. Its clearing and native-cache assertions remain; it now explicitly supplies a committed clear unit. A watermark or tail advance alone is intentionally no longer authorization. The new end-to-end regression defends the previously missing no-first-clear-on-DEFER claim.
+No deliberate break remains in implementation files. No schema fence, deployment artifact, parent checkout, or production service was changed.

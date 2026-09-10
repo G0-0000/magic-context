@@ -1,0 +1,1 @@
+$ tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit

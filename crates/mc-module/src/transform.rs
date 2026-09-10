@@ -3621,6 +3621,7 @@ fn apply_once(
                 .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
             let mut next_meta = loaded.meta.clone();
             next_meta.served_output_fingerprint = served_fingerprints;
+            next_meta.served_output_generation = Some(reasoning_generation(&next_meta));
             let fingerprint_changed = next_meta != loaded.meta;
             let row_version = if fingerprint_changed {
                 #[cfg(test)]
@@ -3736,6 +3737,7 @@ fn apply_once(
             .as_ref()
             .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
         meta.served_output_fingerprint = served_fingerprints;
+        meta.served_output_generation = Some(reasoning_generation(&meta));
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
         let row_version = store.commit_transform(
@@ -4133,7 +4135,17 @@ fn apply_once(
                 .or_else(|| req.usage.as_ref().map(|usage| usage.context_limit_tokens))
                 .unwrap_or(200_000),
         );
-    let hard_fold_requested = pre_snapshot_inputs_changed
+    let reasoning_exemption_repair = !req.is_subagent
+        && (reasoning_clear_exemption_changed(&loaded.core, req, lineage_anchor_mid)
+            || legacy_reasoning_exemption_changed(
+                &loaded.core,
+                &loaded.meta,
+                req,
+                &projection,
+                lineage_anchor_mid,
+            ));
+    let hard_fold_requested = reasoning_exemption_repair
+        || pre_snapshot_inputs_changed
         || first_fold_due
         || boundary_divergence_recut.is_some()
         || scheduler_outcome.idle_ttl_fired
@@ -4429,6 +4441,9 @@ fn apply_once(
     }
     if pre_snapshot_inputs_changed {
         materialize_reason = Some("protected_tokens_inputs_changed".to_string());
+    }
+    if reasoning_exemption_repair {
+        materialize_reason = Some("reasoning_exemption_repair".to_string());
     }
 
     timings.planning = elapsed_ms(planning_started_at);
@@ -5518,6 +5533,7 @@ fn apply_once(
         output_meta.coverage_ordinal = None;
         no_trim_meta = Some(output_meta);
     }
+    refresh_reasoning_clear_exemptions(&mut core, req, is_bust_pass, lineage_anchor_mid);
     core.frozen_units.extend(new_reasoning_clear_units(
         &core,
         &meta,
@@ -5525,7 +5541,27 @@ fn apply_once(
         &tag_numbers,
         is_bust_pass,
         lineage_anchor_mid,
+        ReasoningClearSnapshot {
+            meta: &loaded.meta,
+            row_version: loaded.row_version,
+            projection: &projection,
+        },
     ));
+    let legacy_adoption_complete = core
+        .frozen_units
+        .iter()
+        .any(|unit| unit.key.starts_with("strip:reasoning_clear:"))
+        && !core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX));
+    if (is_bust_pass || legacy_adoption_complete)
+        && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
+        && req.serve_native
+    {
+        meta.reasoning_clear_initialized = true;
+        meta.reasoning_replay_evidence = None;
+    }
     let cleared_mids = reasoning_clear_mids(&core.frozen_units)
         .into_iter()
         .map(str::to_owned)
@@ -5749,6 +5785,7 @@ fn apply_once(
     // last-known-good representation while the mismatch remains.
     if !deferred_frozen_prefix_divergence {
         meta.served_output_fingerprint = served_fingerprints;
+        meta.served_output_generation = Some(reasoning_generation(&meta));
     }
 
     let channel2_output = channel2_directives(
@@ -5785,6 +5822,17 @@ fn apply_once(
     let scheduler_applied_reductions = frozen_red_targets(&core)
         .iter()
         .any(|target| !frozen_reductions_before.contains(target));
+    let reasoning_clear_units = core
+        .frozen_units
+        .iter()
+        .filter(|unit| {
+            unit.key.starts_with("strip:reasoning_clear:")
+                || unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX)
+        })
+        .cloned()
+        .collect();
+    core.frozen_units
+        .retain(|unit| !unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX));
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5901,12 +5949,7 @@ fn apply_once(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
-        reasoning_clear_units: core
-            .frozen_units
-            .iter()
-            .filter(|unit| unit.key.starts_with("strip:reasoning_clear:"))
-            .cloned()
-            .collect(),
+        reasoning_clear_units,
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
@@ -12541,6 +12584,7 @@ fn new_merged_reasoning_strip_units(
         .map(|unit| unit.key.as_str())
         .collect::<HashSet<_>>();
     let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let clear_lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
     let mut prev_assistant = false;
     let mut units = Vec::new();
     // Detect against the fully rendered message so earlier reductions and sentinel replacements
@@ -12550,7 +12594,9 @@ fn new_merged_reasoning_strip_units(
         let first_assistant_in_run = rendered.role == "assistant" && !prev_assistant;
         if let Some(mid) = rendered.meta.harness_id.as_deref() {
             let key = format!("strip:merged_reasoning:{mid}");
-            if !existing_keys.contains(key.as_str()) {
+            if !existing_keys.contains(key.as_str())
+                && active_reasoning_clear(&clear_lookup, mid).is_none()
+            {
                 let mut candidate = rendered.clone().into_message();
                 let mutation_exempt = mutation_exempt_mid == Some(mid);
                 if apply_serializer_residual_to_message(
@@ -13322,8 +13368,10 @@ fn build_output_with_tags_inner(
             .is_some_and(|(anchor_mid, _)| anchor_mid == msg.mid);
         let mutation_exempt =
             mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
-        let reasoning_mutation_exempt =
-            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+        let reasoning_mutation_exempt = reasoning_mutation_exempt_mid == Some(msg.mid.as_str())
+            || lineage_anchor_exempt
+            || output_message_strip_unit(&frozen_units, "reasoning_clear", &msg.mid)
+                .is_some_and(|unit| unit.reset_rule == REASONING_CLEAR_SUSPENDED);
         let first_assistant_in_run = msg.ck.role == "assistant" && !prev_assistant;
         let blocks = blocks_by_mid
             .get(msg.mid.as_str())
@@ -13528,6 +13576,7 @@ fn build_output_with_tags_inner(
                 if let Some(profile) = serializer_profile {
                     if output_message_strip_unit(&frozen_units, "merged_reasoning", &msg.mid)
                         .is_some()
+                        && active_reasoning_clear(&frozen_units, &msg.mid).is_none()
                     {
                         apply_serializer_residual_to_message(
                             profile,
@@ -13918,7 +13967,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
         return 0;
     }
 
-    let cleared_mids = reasoning_clear_mids(reasoning_clear_units);
+    let cleared_mids = reasoning_native_clear_mids(reasoning_clear_units);
 
     let mut cleared = 0;
     for raw_message in native_messages {
@@ -22339,6 +22388,7 @@ pub(crate) mod tests {
     }
 
     include!("transform/reasoning_clear_tests.rs");
+    include!("transform/reasoning_clear_gate_tests.rs");
 
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {
