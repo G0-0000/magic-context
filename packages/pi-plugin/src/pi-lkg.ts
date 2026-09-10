@@ -7,11 +7,13 @@ import {
 	captureSlot,
 	dropSlot,
 	getSlot,
+	incrementalLkgContentDigests,
 	type LkgContentField,
 	type LkgEntryNote,
 	lkgContentDigestFromFields,
 	lkgContentFields,
 	registerLkgPersistence,
+	signatureForFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/transform-operations";
 import { sessionLog } from "@magic-context/core/shared/logger";
@@ -38,9 +40,16 @@ export type PiLkgReplayResult =
 	| { ok: true; messages: MessageLike[] }
 	| { ok: false; reason: string };
 
+export interface PiLkgCaptureTiming {
+	sessionId: string;
+	elapsedMs: number;
+	reusedPrefix: number;
+}
+
 interface PiLkgSessionState {
 	captureSequence: number;
 	syncCaptureRequired: boolean;
+	acceptedInputs: readonly PiLkgInputSnapshot[] | null;
 }
 
 interface PiLkgCapturePlan {
@@ -182,6 +191,37 @@ export function piStorageErrorReason(error: unknown): string {
 	return message;
 }
 
+function equalContentFields(
+	left: readonly LkgContentField[],
+	right: readonly LkgContentField[],
+): boolean {
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index += 1) {
+		if (!Object.is(left[index], right[index])) return false;
+	}
+	return true;
+}
+
+function exactReusablePrefix(
+	current: readonly PiLkgInputSnapshot[],
+	prior: readonly PiLkgInputSnapshot[] | null,
+): number {
+	if (!prior) return 0;
+	let prefix = 0;
+	while (
+		prefix < current.length &&
+		prefix < prior.length &&
+		current[prefix]?.id === prior[prefix]?.id &&
+		equalContentFields(
+			current[prefix]?.fields ?? [],
+			prior[prefix]?.fields ?? [],
+		)
+	) {
+		prefix += 1;
+	}
+	return prefix;
+}
+
 function snapshotInputs(
 	messages: readonly unknown[],
 	entryIds: readonly (string | undefined)[] | null,
@@ -213,21 +253,26 @@ function snapshotInputs(
 
 /**
  * Adapt Pi's JSONL entry ids and native AgentMessage shape to the shared LKG
- * slot/replay implementation. SHA-256 work and durable writes run from
- * setImmediate; only immutable field references and the exact served JSON bytes
- * are captured synchronously, so a later pass cannot hash objects the handler
- * has already mutated.
+ * slot/replay implementation. FNV/SHA digest work and durable writes run from
+ * setImmediate; only detached field tokens and the exact served JSON bytes are
+ * captured synchronously, so a later pass cannot hash objects the handler has
+ * already mutated.
  */
 export function createPiLkgCoordinator(
 	db: Database,
 	scheduleCapture: (capture: () => void) => void = (capture) =>
 		setImmediate(capture),
+	onCaptureTiming?: (sample: PiLkgCaptureTiming) => void,
 ): PiLkgCoordinator {
 	registerLkgPersistence(createDbLkgPersistence(db));
 	const stateFor = (sessionId: string): PiLkgSessionState => {
 		let state = piLkgSessionStates.get(sessionId);
 		if (!state) {
-			state = { captureSequence: 0, syncCaptureRequired: false };
+			state = {
+				captureSequence: 0,
+				syncCaptureRequired: false,
+				acceptedInputs: null,
+			};
 			piLkgSessionStates.set(sessionId, state);
 		}
 		return state;
@@ -307,6 +352,7 @@ export function createPiLkgCoordinator(
 		if (snapshot.replayFailure) {
 			if (snapshot.replayFailure === "lkg_invalidated_reshape") {
 				dropSlot(snapshot.sessionId, snapshot.replayFailure);
+				stateFor(snapshot.sessionId).acceptedInputs = null;
 			}
 			return { ok: false, reason: snapshot.replayFailure };
 		}
@@ -324,7 +370,7 @@ export function createPiLkgCoordinator(
 				.map((input) => lkgContentDigestFromFields(input.fields)),
 			anchorIndex: snapshot.replayAnchorInputIndex,
 		};
-		return replayLkg({
+		const result = replayLkg({
 			sessionId: snapshot.sessionId,
 			messages: [] as MessageLike[],
 			modelKey: snapshot.modelKey,
@@ -335,6 +381,8 @@ export function createPiLkgCoordinator(
 			// stable-id/content fences are the applicable seam proof.
 			skipSeamValidation: true,
 		});
+		if (!result.ok) stateFor(snapshot.sessionId).acceptedInputs = null;
+		return result;
 	};
 
 	const captureAppliedPass: PiLkgCoordinator["captureAppliedPass"] = (args) => {
@@ -346,7 +394,9 @@ export function createPiLkgCoordinator(
 			if (typeof jsonPrefix !== "string") return;
 		} catch (error) {
 			dropSlot(snapshot.sessionId, "lkg_snapshot_serialize_failed");
-			stateFor(snapshot.sessionId).syncCaptureRequired = true;
+			const failedState = stateFor(snapshot.sessionId);
+			failedState.syncCaptureRequired = true;
+			failedState.acceptedInputs = null;
 			sessionLog(
 				snapshot.sessionId,
 				"LKG SNAPSHOT PREPARATION FAILED; forcing synchronous capture on the next applied pass:",
@@ -367,16 +417,64 @@ export function createPiLkgCoordinator(
 		};
 		if (args.cacheBusting) {
 			dropSlot(snapshot.sessionId, "lkg_cache_bust_pending_capture");
+			state.acceptedInputs = null;
 		}
+		// Keep all N stable inputs flattened before returning from this context handler.
+		// Pi passes a structured clone through awaited extension handlers, so a later
+		// extension in the same emitContext call may rewrite any returned entry before
+		// this immediate runs. MC's own pipeline can also replace entries. The deferred
+		// work therefore reads only detached primitive/symbol field tokens, never live
+		// MessageLike objects. message_end appends/scrubs a newly completed entry and
+		// streaming grows the in-flight assistant, neither of which belonged to this
+		// pass's input set. A newer context pass supersedes this plan by captureSequence.
+		// Fork/revert/switch are separate awaited host events; their next pass either
+		// supersedes this callback or invalidates reuse at its first id/field mismatch,
+		// while session cleanup increments and clears this session's capture state.
 		const commit = (): void => {
 			if (plan.captureSequence !== state.captureSequence) return;
+			const startedAt = performance.now();
+			let reusedPrefix = 0;
 			try {
+				const inputIdSeq = plan.inputs.map((input) => input.id);
+				const prior = getSlot(plan.sessionId);
+				const reusePrior =
+					prior?.inputContentSignatures !== undefined &&
+					prior.modelKey === plan.modelKey &&
+					prior.providerKey === plan.providerKey
+						? { slot: prior, signatures: prior.inputContentSignatures }
+						: undefined;
+				const reusablePrefix = reusePrior
+					? exactReusablePrefix(plan.inputs, state.acceptedInputs)
+					: 0;
+				const inputContentSignatures = [
+					...(reusePrior ? reusePrior.signatures.slice(0, reusablePrefix) : []),
+					...plan.inputs
+						.slice(reusablePrefix)
+						.map((input) => signatureForFields(input.fields)),
+				];
+				const incremental = incrementalLkgContentDigests(
+					plan.inputs.map((input, index) => ({
+						id: input.id,
+						signature: inputContentSignatures[index] ?? "",
+						fields: input.fields,
+					})),
+					reusePrior
+						? {
+								ids: reusePrior.slot.inputIdSeq.slice(0, reusablePrefix),
+								signatures: reusePrior.signatures.slice(0, reusablePrefix),
+								digests: reusePrior.slot.inputContentDigests.slice(
+									0,
+									reusablePrefix,
+								),
+							}
+						: undefined,
+				);
+				reusedPrefix = incremental.reusedPrefix;
 				const slot = {
 					jsonPrefix: plan.jsonPrefix,
-					inputIdSeq: plan.inputs.map((input) => input.id),
-					inputContentDigests: plan.inputs.map((input) =>
-						lkgContentDigestFromFields(input.fields),
-					),
+					inputIdSeq,
+					inputContentDigests: incremental.digests,
+					inputContentSignatures,
 					lastInputMessageId: plan.inputs.at(-1)?.id ?? "",
 					modelKey: plan.modelKey,
 					providerKey: plan.providerKey,
@@ -386,17 +484,29 @@ export function createPiLkgCoordinator(
 				if (!captureSlot(plan.sessionId, slot)) {
 					throw new Error("LKG slot rejected the Pi snapshot");
 				}
+				state.acceptedInputs = plan.inputs;
 				const persisted = saveLkgSlotToDb(db, plan.sessionId, slot);
 				state.syncCaptureRequired = !persisted;
 			} catch (error) {
 				if (plan.captureSequence !== state.captureSequence) return;
 				dropSlot(plan.sessionId, "lkg_async_capture_failed");
 				state.syncCaptureRequired = true;
+				state.acceptedInputs = null;
 				sessionLog(
 					plan.sessionId,
 					"LKG ASYNC CAPTURE FAILED; forcing synchronous capture on the next applied pass:",
 					error,
 				);
+			} finally {
+				try {
+					onCaptureTiming?.({
+						sessionId: plan.sessionId,
+						elapsedMs: performance.now() - startedAt,
+						reusedPrefix,
+					});
+				} catch {
+					// Timing diagnostics cannot change LKG capture behavior.
+				}
 			}
 		};
 		if (state.syncCaptureRequired) {
@@ -408,6 +518,7 @@ export function createPiLkgCoordinator(
 		} catch (error) {
 			dropSlot(plan.sessionId, "lkg_capture_schedule_failed");
 			state.syncCaptureRequired = true;
+			state.acceptedInputs = null;
 			sessionLog(
 				plan.sessionId,
 				"LKG CAPTURE SCHEDULE FAILED; forcing synchronous capture on the next applied pass:",

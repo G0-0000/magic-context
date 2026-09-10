@@ -85,9 +85,11 @@ import {
     LKG_SNAPSHOT_OBJECT,
     LKG_SNAPSHOT_STRING,
     LKG_SNAPSHOT_UNDEFINED,
-    type LkgContentField,
     type LkgEntryNote,
+    type MessageContentSnapshot,
+    messageContentSnapshot,
     noteEntry,
+    visitMessageContentFields,
 } from "./lkg-slot";
 import {
     clearCompartmentMirrorCursor,
@@ -252,11 +254,6 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
     ): Promise<ModuleCompartmentMirrorResponse>;
 }
 
-interface MessageContentSnapshot {
-    signature: string;
-    fields: LkgContentField[];
-}
-
 interface RustLkgCapturePlan {
     sessionId: string;
     inputIds: string[];
@@ -414,110 +411,6 @@ function messageInfo(value: unknown): Record<string, unknown> {
 function messageIdOf(message: MessageLike): string | null {
     const id = messageInfo(message).id;
     return typeof id === "string" && id.length > 0 ? id : null;
-}
-
-const FNV1A_32_OFFSET = 0x811c9dc5;
-const FNV1A_32_PRIME = 0x01000193;
-
-function updateFnv1a32(hash: number, value: string): number {
-    let next = hash;
-    for (let index = 0; index < value.length; index += 1) {
-        next ^= value.charCodeAt(index);
-        next = Math.imul(next, FNV1A_32_PRIME) >>> 0;
-    }
-    return next;
-}
-
-interface MessageContentFieldVisitor {
-    field(value: LkgContentField): boolean;
-    beginObject(): number | undefined;
-    endObject(token: number, entryCount: number): boolean;
-}
-
-function isSnapshotObjectChild(value: unknown): boolean {
-    return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
-}
-
-function visitMessageContentFields(value: unknown, visitor: MessageContentFieldVisitor): boolean {
-    if (value === null) return visitor.field(LKG_SNAPSHOT_NULL);
-    if (typeof value === "string") {
-        return visitor.field(LKG_SNAPSHOT_STRING) && visitor.field(value);
-    }
-    if (typeof value === "number") {
-        return visitor.field(LKG_SNAPSHOT_NUMBER) && visitor.field(value);
-    }
-    if (typeof value === "boolean") {
-        return visitor.field(LKG_SNAPSHOT_BOOLEAN) && visitor.field(value);
-    }
-    if (value === undefined || typeof value === "function" || typeof value === "symbol") {
-        return visitor.field(LKG_SNAPSHOT_UNDEFINED);
-    }
-    if (Array.isArray(value)) {
-        if (!visitor.field(LKG_SNAPSHOT_ARRAY) || !visitor.field(value.length)) return false;
-        for (const item of value) {
-            if (!visitMessageContentFields(item, visitor)) return false;
-        }
-        return true;
-    }
-    if (typeof value === "object") {
-        if (!visitor.field(LKG_SNAPSHOT_OBJECT)) return false;
-        const objectToken = visitor.beginObject();
-        if (objectToken === undefined) return false;
-        let entryCount = 0;
-        for (const key in value) {
-            if (!Object.hasOwn(value, key)) continue;
-            const child = (value as Record<string, unknown>)[key];
-            if (!isSnapshotObjectChild(child)) continue;
-            entryCount += 1;
-            if (
-                !visitor.field(LKG_SNAPSHOT_KEY) ||
-                !visitor.field(key) ||
-                !visitMessageContentFields(child, visitor)
-            ) {
-                return false;
-            }
-        }
-        return visitor.endObject(objectToken, entryCount);
-    }
-    return visitor.field(LKG_SNAPSHOT_UNDEFINED);
-}
-
-function messageContentFields(message: MessageLike): LkgContentField[] {
-    const fields: LkgContentField[] = [];
-    const complete = visitMessageContentFields(message, {
-        field(value) {
-            fields.push(value);
-            return true;
-        },
-        beginObject() {
-            const countIndex = fields.length;
-            fields.push(0);
-            return countIndex;
-        },
-        endObject(countIndex, entryCount) {
-            fields[countIndex] = entryCount;
-            return true;
-        },
-    });
-    if (!complete) throw new Error("message content snapshot traversal stopped unexpectedly");
-    return fields;
-}
-
-function signatureForFields(fields: readonly LkgContentField[]): string {
-    let hash = FNV1A_32_OFFSET;
-    for (const field of fields) {
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        hash = updateFnv1a32(hash, `${typeof field}:${value.length}:`);
-        hash = updateFnv1a32(hash, value);
-        hash = updateFnv1a32(hash, "\0");
-    }
-    return hash.toString(16).padStart(8, "0");
-}
-
-/** Capture an exact field snapshot plus its compact content-sensitive rolling hash. */
-function messageContentSnapshot(message: MessageLike): MessageContentSnapshot {
-    const fields = messageContentFields(message);
-    return { signature: signatureForFields(fields), fields };
 }
 
 function contentSnapshotsFor(messages: readonly MessageLike[]): MessageContentSnapshot[] {

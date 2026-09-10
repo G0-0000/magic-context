@@ -40,6 +40,7 @@ export interface PhaseTotals {
 	todoCapture: number;
 	channelAccounting: number;
 	workMetrics: number;
+	lkgCapture: number;
 	dbIo: number;
 	postTransform: number;
 	total: number;
@@ -197,6 +198,7 @@ export function summarizePhases(
 		todoCapture: stage("todoCapture"),
 		channelAccounting: stage("channelNudgeAccounting"),
 		workMetrics: stage("workMetrics"),
+		lkgCapture: stage("lkgCapture"),
 		dbIo: database.elapsedMs,
 		postTransform: stage("postTransformPhase"),
 		total,

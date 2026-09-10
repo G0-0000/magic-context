@@ -659,20 +659,27 @@ const piBranchLookupByProjection = new WeakMap<
 	PiBranchEntryLookup
 >();
 
+function logTransformElapsed(
+	sessionId: string,
+	stage: string,
+	elapsedMs: number,
+	extra?: string,
+): void {
+	const suffix = extra ? ` ${extra}` : "";
+	recordPiTransformTiming({ sessionId, stage, elapsedMs, extra });
+	sessionLog(
+		sessionId,
+		`transform stage: stage=${stage} elapsed=${elapsedMs.toFixed(1)}ms${suffix}`,
+	);
+}
+
 function logTransformTiming(
 	sessionId: string,
 	stage: string,
 	start: number,
 	extra?: string,
 ): void {
-	const elapsedMs = performance.now() - start;
-	const elapsed = elapsedMs.toFixed(1);
-	const suffix = extra ? ` ${extra}` : "";
-	recordPiTransformTiming({ sessionId, stage, elapsedMs, extra });
-	sessionLog(
-		sessionId,
-		`transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`,
-	);
+	logTransformElapsed(sessionId, stage, performance.now() - start, extra);
 }
 
 export function piVariantChangeBustsProviderCache(
@@ -2189,7 +2196,17 @@ export function registerPiContextHandler(
 	baseOptions: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
-	const lkgCoordinator = createPiLkgCoordinator(baseOptions.db);
+	const lkgCoordinator = createPiLkgCoordinator(
+		baseOptions.db,
+		undefined,
+		({ sessionId, elapsedMs, reusedPrefix }) =>
+			logTransformElapsed(
+				sessionId,
+				"lkgCapture",
+				elapsedMs,
+				`reusedPrefix=${reusedPrefix}`,
+			),
+	);
 
 	// Pi can switch projects mid-process (`/cd`, multi-root). A scheduler is
 	// pure (config in, decision out — no per-session state), so it's safe to

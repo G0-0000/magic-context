@@ -17,6 +17,7 @@ import {
 	__test as contextHandlerInternals,
 	registerPiContextHandler,
 } from "./context-handler";
+import { setPiTransformTimingObserver } from "./context-perf-hooks";
 import { reconcilePiLkgEntryIds } from "./pi-lkg";
 import {
 	assistantMessage,
@@ -289,6 +290,37 @@ describe("Pi context handler LKG replay", () => {
 				closeQuietly(locker);
 			}
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("reports deferred LKG capture as the lkgCapture timing stage", async () => {
+		const db = createTestDb();
+		const sessionId = "pi-lkg-capture-timing";
+		const samples: Array<{ stage: string; elapsedMs: number; extra?: string }> =
+			[];
+		const restoreTiming = setPiTransformTimingObserver((sample) =>
+			samples.push(sample),
+		);
+		sessions.add(sessionId);
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const handler = handlerFor(db);
+			expect(
+				await runPass(
+					handler,
+					sessionId,
+					[userMessage("timed prompt", 1)],
+					["entry-u1"],
+				),
+			).toBeDefined();
+			await nextImmediate();
+
+			const capture = samples.find((sample) => sample.stage === "lkgCapture");
+			expect(capture?.elapsedMs).toBeGreaterThanOrEqual(0);
+			expect(capture?.extra).toBe("reusedPrefix=0");
+		} finally {
+			restoreTiming();
 			closeQuietly(db);
 		}
 	});
