@@ -760,9 +760,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     (V2_MEMORY_CATEGORIES as readonly string[]).includes(args.category)
                         ? (args.category as MemoryCategory)
                         : memory.category;
+                // UNIQUE(project_path, category, normalized_hash) is on the
+                // stored path, which UPDATE leaves unchanged (legacy raw paths
+                // stay raw). Lookup with that same identity so a recategorize
+                // collision returns the duplicate error instead of throwing.
                 const duplicate = getMemoryByHash(
                     deps.db,
-                    targetIdentityForStoredPath(rawProjectPath),
+                    rawProjectPath,
                     targetCategory,
                     normalizedHash,
                 );

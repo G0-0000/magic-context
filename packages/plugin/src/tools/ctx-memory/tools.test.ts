@@ -1690,6 +1690,79 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)?.status).toBe("archived");
         });
 
+        it("rejects recategorizing a legacy raw-path memory onto an existing duplicate", async () => {
+            const rawProjectPath = "/legacy/raw-project";
+            const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
+            const legacyTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => projectIdentity,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+            });
+            const existing = insertMemory(db, {
+                projectPath: rawProjectPath,
+                category: "CONSTRAINTS",
+                content: "timeout=5s",
+            });
+            const memory = insertMemory(db, {
+                projectPath: rawProjectPath,
+                category: "CONFIG_DEFAULTS",
+                content: "timeout=5s",
+            });
+
+            const result = await legacyTools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    category: "CONSTRAINTS",
+                    content: "timeout=5s",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(
+                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
+            );
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONFIG_DEFAULTS",
+                content: "timeout=5s",
+                projectPath: rawProjectPath,
+            });
+        });
+
+        it("recategorizes a legacy raw-path memory when no duplicate exists under the stored path", async () => {
+            const rawProjectPath = "/legacy/raw-project";
+            const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
+            const legacyTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => projectIdentity,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+            });
+            const memory = insertMemory(db, {
+                projectPath: rawProjectPath,
+                category: "CONFIG_DEFAULTS",
+                content: "timeout=5s",
+            });
+
+            const result = await legacyTools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    category: "CONSTRAINTS",
+                    content: "timeout=5s",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONSTRAINTS.`);
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONSTRAINTS",
+                content: "timeout=5s",
+                projectPath: rawProjectPath,
+            });
+        });
+
         it("persists a valid category change on update", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
