@@ -83,7 +83,7 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
     {
         divergenceClass: "no_mc_pass_row",
         accounted: false,
-        rule: "no MC pass record within +/-5 s of the provider request/pass timestamp",
+        rule: "no MC pass record in [request - 30 s, request + 5 s]",
     },
     {
         divergenceClass: "accounted_ctx_flush",
@@ -178,34 +178,26 @@ export function isUnaccountedCacheBustClass(divergenceClass: string): boolean {
 
 export function nearestCacheBustDecision(
     decisions: readonly CacheBustDecisionAttribution[],
-    passTimestampMs: number,
+    requestTimestampMs: number,
     messageId?: string,
 ): CacheBustDecisionAttribution | undefined {
-    const withinJoinWindow = (decision: CacheBustDecisionAttribution): boolean =>
-        Math.abs((decision.requestObservedAtMs ?? decision.timestampMs) - passTimestampMs) <= 5_000;
+    const timeDelta = (decision: CacheBustDecisionAttribution): number =>
+        (decision.requestObservedAtMs ?? decision.timestampMs) - requestTimestampMs;
+    const withinJoinWindow = (decision: CacheBustDecisionAttribution): boolean => {
+        const delta = timeDelta(decision);
+        return delta >= -30_000 && delta <= 5_000;
+    };
+    const byDistance = (
+        left: CacheBustDecisionAttribution,
+        right: CacheBustDecisionAttribution,
+    ): number => Math.abs(timeDelta(left)) - Math.abs(timeDelta(right));
     const exact = messageId
         ? decisions
               .filter((decision) => decision.messageId === messageId && withinJoinWindow(decision))
-              .sort(
-                  (left, right) =>
-                      Math.abs((left.requestObservedAtMs ?? left.timestampMs) - passTimestampMs) -
-                      Math.abs((right.requestObservedAtMs ?? right.timestampMs) - passTimestampMs),
-              )[0]
+              .sort(byDistance)[0]
         : undefined;
     if (exact) return exact;
-
-    let nearest: CacheBustDecisionAttribution | undefined;
-    let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const decision of decisions) {
-        const distance = Math.abs(
-            (decision.requestObservedAtMs ?? decision.timestampMs) - passTimestampMs,
-        );
-        if (distance <= 5_000 && distance < nearestDistance) {
-            nearest = decision;
-            nearestDistance = distance;
-        }
-    }
-    return nearest;
+    return decisions.filter(withinJoinWindow).sort(byDistance)[0];
 }
 
 export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {

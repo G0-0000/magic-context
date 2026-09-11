@@ -118,7 +118,7 @@ describe("analyze-cache-bust dump discovery", () => {
         expect(rows[2]?.divergenceClass).toBe("no_mc_pass_row");
         expect(rows[2]?.rewrittenTokens).toBe(173524);
     });
-    test("joins decisions by provider response/pass time rather than request-start time", () => {
+    test("joins a pre-send pass by request time when its long response finishes four minutes later", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-pass-time-"));
         tempDirs.push(dir);
         const session = "ses_passtime123";
@@ -148,8 +148,13 @@ describe("analyze-cache-bust dump discovery", () => {
                 cache_creation_input_tokens: 0,
             }),
         );
-        const passTime = new Date("2026-09-11T07:00:20Z");
-        utimesSync(join(dir, `${bustStem}.response.json`), passTime, passTime);
+        const responseCompletion = new Date("2026-09-11T07:04:10Z");
+        utimesSync(
+            join(dir, `${bustStem}.response.json`),
+            responseCompletion,
+            responseCompletion,
+        );
+        const passTime = new Date("2026-09-11T06:59:45Z");
 
         const analysis = analyzeOpenCodeCacheBustSession({
             sessionId: session,

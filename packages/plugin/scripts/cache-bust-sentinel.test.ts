@@ -142,6 +142,46 @@ describe("cache-bust attribution contract", () => {
         }
     });
 
+    test("accounts all ten long-turn post-restart rows by request time", () => {
+        const rows = JSON.parse(
+            readFileSync(
+                join(
+                    import.meta.dir,
+                    "test-fixtures",
+                    "cache-bust-sentinel",
+                    "restart-long-turns.json",
+                ),
+                "utf8",
+            ),
+        ) as Array<{ session: string; request: string }>;
+        expect(rows).toHaveLength(10);
+        for (const row of rows) {
+            const requestTimestampMs = Date.parse(row.request);
+            const matched = nearestCacheBustDecision(
+                [
+                    decision({
+                        timestampMs: requestTimestampMs - 20_000,
+                        decision: "defer",
+                        materialized: true,
+                        materializeReason: "system_hash",
+                    }),
+                ],
+                requestTimestampMs,
+            );
+            expect(
+                classifyCacheBust({
+                    divergenceIndex: 0,
+                    previousMessageCount: 100,
+                    firstDivergenceRole: "system",
+                    rewrittenTokens: 400_000,
+                    promptTokens: 400_000,
+                    decision: matched,
+                }),
+                row.session,
+            ).toBe("accounted_hard_system_hash");
+        }
+    });
+
     test("keeps a tiny mid-history first_render seam unaccounted on a defer pass", () => {
         expect(
             classifyCacheBust({
