@@ -394,10 +394,11 @@ function updateMemoryContentInCurrentTransaction(
     memory: Memory,
     content: string,
     normalizedHash: string,
+    targetCategory: MemoryCategory = memory.category,
 ): void {
     db.prepare(
-        "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
-    ).run(content, normalizedHash, Date.now(), memory.id);
+        "UPDATE memories SET content = ?, category = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+    ).run(content, targetCategory, normalizedHash, Date.now(), memory.id);
     // The classify `shareable` verdict was scored against the OLD content; new
     // content invalidates it. Fail closed → private; the dreamer re-scores later.
     if (hasMemoryShareableColumn(db)) {
@@ -428,7 +429,9 @@ const ctxMemoryArgsShape = {
     category: tool.schema
         .enum([...V2_MEMORY_CATEGORIES])
         .optional()
-        .describe("What kind of fact this is (required for write; optional merge override)"),
+        .describe(
+            "What kind of fact this is (required for write; optional on update to recategorize, omitted keeps the current category; optional merge override)",
+        ),
     ids: tool.schema
         .array(tool.schema.number())
         .optional()
@@ -752,10 +755,15 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const normalizedHash = computeNormalizedHash(content);
+                const targetCategory =
+                    args.category &&
+                    (V2_MEMORY_CATEGORIES as readonly string[]).includes(args.category)
+                        ? (args.category as MemoryCategory)
+                        : memory.category;
                 const duplicate = getMemoryByHash(
                     deps.db,
                     targetIdentityForStoredPath(rawProjectPath),
-                    memory.category,
+                    targetCategory,
                     normalizedHash,
                 );
                 if (duplicate && duplicate.id !== memory.id) {
@@ -769,12 +777,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         memory,
                         content,
                         normalizedHash,
+                        targetCategory,
                     );
                     queueMemoryMutation(deps.db, {
                         projectPath: projectIdentity,
                         mutationType: "update",
                         targetMemoryId: memory.id,
-                        category: memory.category,
+                        category: targetCategory,
                         newContent: content,
                     });
                 });
@@ -787,7 +796,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
 
-                return `Updated memory [ID: ${memory.id}] in ${memory.category}.`;
+                return `Updated memory [ID: ${memory.id}] in ${targetCategory}.`;
             }
 
             if (args.action === "merge") {

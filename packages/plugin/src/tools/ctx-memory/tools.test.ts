@@ -1690,6 +1690,130 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)?.status).toBe("archived");
         });
 
+        it("persists a valid category change on update", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=5m",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    category: "CONSTRAINTS",
+                    content: "cache_ttl=10m",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONSTRAINTS.`);
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONSTRAINTS",
+                content: "cache_ttl=10m",
+            });
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                {
+                    mutationType: "update",
+                    targetMemoryId: memory.id,
+                    category: "CONSTRAINTS",
+                    newContent: "cache_ttl=10m",
+                },
+            ]);
+        });
+
+        it("keeps the current category when update omits category", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=5m",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    content: "cache_ttl=10m",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONFIG_VALUES.`);
+            expect(getMemoryById(db, memory.id)?.category).toBe("CONFIG_VALUES");
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                { mutationType: "update", category: "CONFIG_VALUES" },
+            ]);
+        });
+
+        it("keeps the current category when update receives an invalid category", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=5m",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    category: "NOT_A_CATEGORY",
+                    content: "cache_ttl=10m",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONFIG_VALUES.`);
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=10m",
+            });
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                { mutationType: "update", category: "CONFIG_VALUES" },
+            ]);
+        });
+
+        it("still rewrites content when recategorizing or omitting category", async () => {
+            const recategorized = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "old recategorize content",
+            });
+            const omitted = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "NAMING",
+                content: "old omitted-category content",
+            });
+
+            const recategorizeResult = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [recategorized.id],
+                    category: "PROJECT_RULES",
+                    content: "new recategorize content",
+                },
+                toolContext("ses-primary", "general"),
+            );
+            const omitResult = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [omitted.id],
+                    content: "new omitted-category content",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(recategorizeResult).toContain("in PROJECT_RULES");
+            expect(omitResult).toContain("in NAMING");
+            expect(getMemoryById(db, recategorized.id)).toMatchObject({
+                category: "PROJECT_RULES",
+                content: "new recategorize content",
+            });
+            expect(getMemoryById(db, omitted.id)).toMatchObject({
+                category: "NAMING",
+                content: "new omitted-category content",
+            });
+        });
+
         it("rolls back content updates when queueing the mutation fails", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",

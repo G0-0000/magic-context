@@ -376,7 +376,7 @@ Example: ctx_memory(action="write", category="CONSTRAINTS", content="Pi stores s
     "type": "string"
   },
   "category": {
-    "description": "What kind of fact this is (required for write; optional merge override)",
+    "description": "What kind of fact this is (required for write; optional on update to recategorize, omitted keeps the current category; optional merge override)",
     "type": "string",
     "enum": [
       "PROJECT_RULES",
