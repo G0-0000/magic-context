@@ -46,6 +46,7 @@ import {
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
+import { hasTrustedHardWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -59,6 +60,7 @@ import {
 import {
     resolveCacheTtl,
     resolveContextLimit,
+    resolveContextWindowGeometry,
     resolveModelKey,
     resolveSessionId,
 } from "./event-resolvers";
@@ -76,6 +78,7 @@ import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
+const usageRefusalLogSeen = new Set<string>();
 
 type CacheTtlConfig = string | Record<string, string>;
 
@@ -643,6 +646,27 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         (info.tokens?.input ?? 0) +
                         (info.tokens?.cache?.read ?? 0) +
                         (info.tokens?.cache?.write ?? 0);
+                    const baseGeometry = resolveContextWindowGeometry(
+                        info.providerID,
+                        info.modelID,
+                    );
+                    const trustedUsableHard =
+                        baseGeometry && hasTrustedHardWall(baseGeometry)
+                            ? baseGeometry.usableHard
+                            : undefined;
+                    const usageReadingValid =
+                        trustedUsableHard === undefined || totalInputTokens <= trustedUsableHard;
+                    if (!usageReadingValid && trustedUsableHard !== undefined) {
+                        const refusalKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
+                        if (!usageRefusalLogSeen.has(refusalKey)) {
+                            usageRefusalLogSeen.add(refusalKey);
+                            sessionLog(
+                                info.sessionID,
+                                `usage accounting refused reading ${totalInputTokens} above trusted usable hard ${trustedUsableHard}; sample ignored`,
+                            );
+                        }
+                    }
+                    const pressureInputTokens = usageReadingValid ? totalInputTokens : 0;
                     // Auth is provably live now (a request returned usage), so
                     // re-warm the model-limit cache once per process to overwrite
                     // any stale pre-auth limit (e.g. gpt-5.5 cached at the raw
@@ -654,7 +678,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         );
                     }
                     const requestSucceeded = !messageHadOverflowError;
-                    if (requestSucceeded) {
+                    const successfulUsageProof = requestSucceeded && usageReadingValid;
+                    if (successfulUsageProof) {
                         const rawOverflow = getOverflowState(deps.db, info.sessionID);
                         const detectedLimitMatchesModel =
                             rawOverflow.detectedContextLimitModelKey === null ||
@@ -663,12 +688,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         if (
                             rawOverflow.detectedContextLimit > 0 &&
                             detectedLimitMatchesModel &&
-                            totalInputTokens > rawOverflow.detectedContextLimit
+                            pressureInputTokens > rawOverflow.detectedContextLimit
                         ) {
                             clearDetectedContextLimit(deps.db, info.sessionID);
                             sessionLog(
                                 info.sessionID,
-                                `detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${totalInputTokens}-token request; using catalog/default`,
+                                `detected limit ${rawOverflow.detectedContextLimit} invalidated by a successful ${pressureInputTokens}-token request; using catalog/default`,
                             );
                             deps.onSessionCacheInvalidated?.(info.sessionID);
                         }
@@ -680,8 +705,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     });
                     const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
                     const observedSafeInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
-                    const provenSafeInputTokens = requestSucceeded
-                        ? Math.max(observedSafeInputTokens, totalInputTokens)
+                    const provenSafeInputTokens = successfulUsageProof
+                        ? Math.max(observedSafeInputTokens, pressureInputTokens)
                         : observedSafeInputTokens;
                     let catalogLimit =
                         info.providerID && info.modelID
@@ -689,7 +714,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             : undefined;
 
                     if (
-                        requestSucceeded &&
+                        successfulUsageProof &&
                         catalogLimit !== undefined &&
                         catalogLimit < provenSafeInputTokens
                     ) {
@@ -735,20 +760,20 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         }
                     }
 
-                    if (requestSucceeded) {
+                    if (successfulUsageProof) {
                         contextLimit = Math.max(contextLimit, provenSafeInputTokens);
                     }
                     const percentage =
-                        contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
+                        contextLimit > 0 ? (pressureInputTokens / contextLimit) * 100 : 0;
                     sessionLog(
                         info.sessionID,
-                        `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
+                        `event message.updated: totalInputTokens=${pressureInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
                     );
 
                     deps.contextUsageMap.set(info.sessionID, {
                         usage: {
                             percentage,
-                            inputTokens: totalInputTokens,
+                            inputTokens: pressureInputTokens,
                         },
                         updatedAt: now,
                         lastResponseTime: now,
@@ -756,10 +781,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     });
 
                     updates.lastContextPercentage = percentage;
-                    updates.lastInputTokens = totalInputTokens;
+                    updates.lastInputTokens = pressureInputTokens;
                     updates.lastUsageContextLimit = contextLimit;
                     updates.lastObservedModelKey = modelKey ?? null;
-                    if (requestSucceeded) {
+                    if (successfulUsageProof) {
                         updates.observedSafeInputTokens = provenSafeInputTokens;
                     }
 

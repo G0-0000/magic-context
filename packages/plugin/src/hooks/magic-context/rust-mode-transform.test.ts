@@ -416,9 +416,9 @@ describe("Rust mode authority adapter", () => {
 
         expect(geometry).toEqual({
             usable_soft: 255_616,
-            usable_hard: 368_000,
+            usable_hard: 400_000,
             derivation:
-                "s1-shared/context-output/context=272000/output=16384/mode=shared_upfront/usable-hard=368000",
+                "s1-shared/context-output/context=272000/output=16384/mode=shared_upfront/usable-hard=400000",
         });
     });
 

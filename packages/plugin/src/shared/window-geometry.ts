@@ -7,7 +7,6 @@ import type { ModelLimit } from "./models-dev-cache";
 
 export const WINDOW_OVERLAY_SCHEMA = "fusiform-window-overlay/v1";
 export const PROMPT_WALL_MARGIN = 4_096;
-export const PI_OUTPUT_FLOOR = 4_096;
 export const OPENCODE_OUTPUT_CAP = 32_000;
 
 const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
@@ -70,11 +69,14 @@ export interface ResolvedWindowOverlayFacts {
     facts: Record<string, WindowOverlayFact>;
 }
 
+export type WindowLimitSource = "catalog" | "overlay" | "provider" | "detected";
+
 export interface WindowDerivation {
     window: number;
     reserve: number;
     reserveSource: WindowReserveSource;
     geometry: WindowGeometry;
+    windowSource: WindowLimitSource;
 }
 
 export interface WindowGeometryResult {
@@ -446,20 +448,22 @@ export function deriveWindowGeometry(
     const catalogContext = isFinitePositive(catalogLimit?.context)
         ? catalogLimit.context
         : undefined;
+    const providerContext = isFinitePositive(providerLimit?.context)
+        ? providerLimit.context
+        : undefined;
     const advertised = numericOverlayFact(options.overlay, "window.advertised");
     const enforced = numericOverlayFact(options.overlay, "window.enforced");
-    let softContext = mergePositive(
-        enforced ?? advertised ?? catalogContext,
-        providerLimit?.context,
-    );
-    let hardContext = mergePositive(enforced ?? softContext, providerLimit?.context);
-    if (isFinitePositive(options.contextCap)) {
+    let softContext = mergePositive(enforced ?? advertised ?? catalogContext, providerContext);
+    let hardContext = mergePositive(enforced ?? softContext, providerContext);
+    const contextCap = isFinitePositive(options.contextCap) ? options.contextCap : undefined;
+    const hasContextCap = contextCap !== undefined;
+    if (contextCap !== undefined) {
         softContext = isFinitePositive(softContext)
-            ? Math.min(softContext, options.contextCap)
-            : options.contextCap;
+            ? Math.min(softContext, contextCap)
+            : contextCap;
         hardContext = isFinitePositive(hardContext)
-            ? Math.min(hardContext, options.contextCap)
-            : options.contextCap;
+            ? Math.min(hardContext, contextCap)
+            : contextCap;
     }
     const input = mergePositive(
         isFinitePositive(catalogLimit?.input) ? catalogLimit.input : undefined,
@@ -573,18 +577,21 @@ export function deriveWindowGeometry(
 
     const hardWindow = hardContext ?? softContext ?? input;
     if (!isFinitePositive(hardWindow)) return undefined;
+    const windowSource: WindowLimitSource = hasContextCap
+        ? "detected"
+        : providerContext !== undefined
+          ? "provider"
+          : enforced !== undefined || advertised !== undefined
+            ? "overlay"
+            : "catalog";
     let usableHard: number;
-    if (geometry === "separate") {
-        usableHard = hardWindow;
-    } else if (geometry === "shared_truncating") {
+    if (geometry === "shared_truncating") {
         usableHard = hardWindow - PROMPT_WALL_MARGIN;
-    } else if (options.harness === "pi" && providerID !== "openai-codex") {
-        usableHard = hardWindow - PI_OUTPUT_FLOOR;
-    } else if (options.harness === "pi") {
-        usableHard = hardWindow - (output ?? OPENCODE_OUTPUT_CAP);
     } else {
-        const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
-        usableHard = hardWindow - requestedOutput;
+        // Output reservation defines the soft scheduler denominator, not the
+        // absolute prompt wall. A successful request can consume part of the
+        // reserved output budget and still remain inside the provider window.
+        usableHard = hardWindow;
     }
     usableHard = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
     if (usableHard < usableSoft) {
@@ -606,6 +613,59 @@ export function deriveWindowGeometry(
             reserve: Math.floor(Math.max(0, resolvedWindow - usableSoft)),
             reserveSource,
             geometry,
+            windowSource,
+        },
+    };
+}
+
+export interface ProvenInputFloorResult {
+    geometry: WindowGeometryResult;
+    refused?: { reading: number; usableHard: number };
+}
+
+export function hasTrustedHardWall(geometry: WindowGeometryResult): boolean {
+    return geometry.derivation.windowSource !== "catalog";
+}
+
+/**
+ * Successful requests can disprove static catalog metadata, but cannot
+ * disprove a provider, overlay, or observed-overflow wall. A reading beyond
+ * that wall is malformed usage accounting and must not enlarge the geometry.
+ */
+export function applyProvenInputFloor(
+    geometry: WindowGeometryResult,
+    provenInputTokens: number | undefined,
+): ProvenInputFloorResult {
+    if (
+        !isFinitePositive(provenInputTokens) ||
+        provenInputTokens < MIN_PLAUSIBLE_CONTEXT_LIMIT ||
+        provenInputTokens <= geometry.usableSoft
+    ) {
+        return { geometry };
+    }
+    if (hasTrustedHardWall(geometry) && provenInputTokens > geometry.usableHard) {
+        return {
+            geometry,
+            refused: { reading: provenInputTokens, usableHard: geometry.usableHard },
+        };
+    }
+
+    const trustedHardWall = hasTrustedHardWall(geometry);
+    const window = trustedHardWall
+        ? geometry.derivation.window
+        : Math.max(geometry.derivation.window, provenInputTokens);
+    return {
+        geometry: {
+            ...geometry,
+            usableSoft: provenInputTokens,
+            usableHard: trustedHardWall
+                ? geometry.usableHard
+                : Math.max(geometry.usableHard, provenInputTokens),
+            derivation: {
+                ...geometry.derivation,
+                window,
+                reserve: Math.max(0, window - provenInputTokens),
+            },
         },
     };
 }

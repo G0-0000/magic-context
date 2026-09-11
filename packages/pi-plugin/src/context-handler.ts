@@ -186,6 +186,7 @@ import {
 	TEXT_TAG_IDENTITY_MARKER,
 	tagTranscript,
 } from "@magic-context/core/shared/tag-transcript";
+import { hasTrustedHardWall } from "@magic-context/core/shared/window-geometry";
 
 import {
 	clearAutoSearchForPiSession,
@@ -2698,6 +2699,7 @@ export function registerPiContextHandler(
 			let usageContextLimit = isSaneLimit(piUsage?.contextWindow)
 				? piUsage.contextWindow
 				: undefined;
+			let usageContextWindowSource: "observed" | "catalog" = "observed";
 			let detectedContextLimit: number | undefined;
 
 			// Overflow recovery: a previous LLM call ended with a
@@ -2759,13 +2761,53 @@ export function registerPiContextHandler(
 				const modelWindow = ctx.model?.contextWindow;
 				if (isSaneLimit(modelWindow)) {
 					usageContextLimit = modelWindow;
+					usageContextWindowSource = "catalog";
+				}
+			}
+			const baseWindowGeometry = resolvePiWindowGeometry({
+				rawContextWindow: usageContextLimit,
+				rawContextWindowSource: usageContextWindowSource,
+				model: ctx.model,
+				detectedContextLimit,
+			});
+			let provenInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+			if (
+				baseWindowGeometry &&
+				hasTrustedHardWall(baseWindowGeometry) &&
+				provenInputTokens > baseWindowGeometry.usableHard
+			) {
+				sessionLog(
+					sessionId,
+					`transform: persisted proven floor ${provenInputTokens} exceeds trusted usable hard ${baseWindowGeometry.usableHard}; cleared and re-resolved to ${baseWindowGeometry.usableSoft}`,
+				);
+				updateSessionMeta(options.db, sessionId, {
+					observedSafeInputTokens: 0,
+					cacheAlertSent: false,
+					lastUsageContextLimit: baseWindowGeometry.usableSoft,
+					lastInputTokens:
+						sessionMeta.lastInputTokens > baseWindowGeometry.usableHard
+							? 0
+							: sessionMeta.lastInputTokens,
+					lastContextPercentage:
+						sessionMeta.lastInputTokens > baseWindowGeometry.usableHard
+							? 0
+							: sessionMeta.lastContextPercentage,
+				});
+				provenInputTokens = 0;
+				sessionMeta.observedSafeInputTokens = 0;
+				sessionMeta.cacheAlertSent = false;
+				if (usageInputTokens > baseWindowGeometry.usableHard) {
+					usageInputTokens = 0;
+					usagePercentage = 0;
+					usedPersistedUsage = false;
 				}
 			}
 			const windowGeometry = resolvePiWindowGeometry({
 				rawContextWindow: usageContextLimit,
+				rawContextWindowSource: usageContextWindowSource,
 				model: ctx.model,
 				detectedContextLimit,
-				provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,
+				provenInputTokens: provenInputTokens || undefined,
 			});
 			usageContextLimit = windowGeometry?.usableSoft;
 			const effectiveExecuteThresholdPercentage = resolveExecuteThreshold(
@@ -4156,6 +4198,7 @@ function maybeFireHistorian(args: {
 		usageContextLimit = isSaneLimit(piUsage?.contextWindow)
 			? piUsage.contextWindow
 			: undefined;
+		let usageContextWindowSource: "observed" | "catalog" = "observed";
 		let detectedContextLimit: number | undefined;
 		// Cold-start: fall back to the model's window when usage hasn't reported
 		// a sane one yet (first pass after restart).
@@ -4164,6 +4207,7 @@ function maybeFireHistorian(args: {
 			isSaneLimit(ctx.model?.contextWindow)
 		) {
 			usageContextLimit = ctx.model.contextWindow;
+			usageContextWindowSource = "catalog";
 		}
 		// Apply the detected-overflow cap (authoritative real limit) just like the
 		// main pass — otherwise the trigger budget uses the wrong (larger) limit.
@@ -4181,6 +4225,7 @@ function maybeFireHistorian(args: {
 		}
 		usageContextLimit = resolvePiUsableContextLimit({
 			rawContextWindow: usageContextLimit,
+			rawContextWindowSource: usageContextWindowSource,
 			model: ctx.model,
 			detectedContextLimit,
 			provenInputTokens: sessionMeta.observedSafeInputTokens ?? undefined,

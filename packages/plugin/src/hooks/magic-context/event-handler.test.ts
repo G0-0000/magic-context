@@ -2,7 +2,7 @@ import { drainNotifications } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +52,7 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { getWindowReportsPath } from "../../features/magic-context/window-report-ledger";
 import { createEventHandler as createPluginEventHandler } from "../../plugin/event";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shared/window-geometry";
 import { createEventHandler } from "./event-handler";
 import { __ignoredNotificationTest } from "./send-session-notification";
 
@@ -74,6 +75,8 @@ afterEach(() => {
     transformDecisionLogTest.reset();
     closeDatabase();
     clearModelsDevCache();
+    setWindowOverlayPath(undefined);
+    clearWindowOverlayCacheForTest();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
 
@@ -597,6 +600,79 @@ describe("createEventHandler", () => {
         expect(getOrCreateSessionMeta(openDatabase(), "ses-usage").observedSafeInputTokens).toBe(
             135_000,
         );
+    });
+
+    it("refuses an impossible success reading above an overlay-backed wall", async () => {
+        useTempDataHome("context-event-impossible-usage-");
+        const overlayPath = join(makeTempDir("context-event-overlay-"), "window-overlay.json");
+        writeFileSync(
+            overlayPath,
+            JSON.stringify({
+                schema: "fusiform-window-overlay/v1",
+                generated_at: "2026-09-11T00:00:00Z",
+                minted_provider_ids: [],
+                cells: [
+                    {
+                        provider_id: "test-provider",
+                        model_id: "test-model",
+                        facts: {
+                            "window.enforced": {
+                                value: { kind: "stated", value: 272_000 },
+                                grade: "measured",
+                                units: "provider",
+                                boundary: "Observed",
+                                source_ref: "session regression fixture",
+                                observed_at: "2026-09-11T00:00:00Z",
+                            },
+                        },
+                    },
+                ],
+            }),
+        );
+        setWindowOverlayPath(overlayPath);
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "test-provider",
+                                models: {
+                                    "test-model": {
+                                        limit: { context: 272_000, output: 128_000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const deps = createDeps(contextUsageMap);
+        const handler = createEventHandler(deps);
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-impossible-usage",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 585_397, cache: { read: 8_320, write: 0 } },
+                    },
+                },
+            },
+        });
+
+        const meta = getOrCreateSessionMeta(deps.db, "ses-impossible-usage");
+        expect(meta.observedSafeInputTokens).toBe(0);
+        expect(meta.lastInputTokens).toBe(0);
+        expect(meta.lastUsageContextLimit).toBe(240_000);
+        expect(contextUsageMap.get("ses-impossible-usage")?.usage.inputTokens).toBe(0);
     });
 
     it("clears a stale unkeyed detected limit on the first successful event after restart", async () => {

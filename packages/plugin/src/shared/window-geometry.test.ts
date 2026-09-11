@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveLimit, resolveOutputReserve } from "./models-dev-cache";
 import {
+    applyProvenInputFloor,
     deriveWindowGeometry,
     formatWindowDerivationLine,
     parseWindowOverlay,
@@ -298,14 +299,51 @@ describe("window geometry", () => {
         expect(hooked?.derivation.reserve).toBe(30_000);
     });
 
+    test("uses the provider window as the absolute hard wall for shared geometry", () => {
+        const result = deriveWindowGeometry(
+            "openai-codex",
+            "gpt-5.6-sol",
+            { context: 272_000, output: 128_000 },
+            { providerLimit: { context: 272_000 } },
+        );
+
+        expect(result?.usableSoft).toBe(204_000);
+        expect(result?.usableHard).toBe(272_000);
+        expect(result?.derivation.windowSource).toBe("provider");
+    });
+
+    test("bounds proof at trusted hard walls but retains the static-catalog escape hatch", () => {
+        const trusted = deriveWindowGeometry(
+            "openai-codex",
+            "gpt-5.6-sol",
+            { context: 272_000, output: 128_000 },
+            { providerLimit: { context: 272_000 } },
+        );
+        expect(trusted).toBeDefined();
+        const raisedWithinWall = applyProvenInputFloor(trusted!, 255_834);
+        expect(raisedWithinWall.geometry.usableSoft).toBe(255_834);
+        expect(raisedWithinWall.geometry.usableHard).toBe(272_000);
+        const refused = applyProvenInputFloor(trusted!, 593_717);
+        expect(refused.refused).toEqual({ reading: 593_717, usableHard: 272_000 });
+        expect(refused.geometry.usableSoft).toBe(204_000);
+        expect(refused.geometry.usableHard).toBe(272_000);
+
+        const staticFallback = deriveWindowGeometry("custom", "model", { context: 30_000 });
+        expect(staticFallback).toBeDefined();
+        const escaped = applyProvenInputFloor(staticFallback!, 90_000);
+        expect(escaped.refused).toBeUndefined();
+        expect(escaped.geometry.usableSoft).toBe(90_000);
+        expect(escaped.geometry.usableHard).toBe(90_000);
+    });
+
     test("clamps an inversion and logs it", () => {
         const logs: string[] = [];
         const result = deriveWindowGeometry(
-            "provider",
+            "anthropic",
             "model",
-            { context: 200_000, input: 190_000, output: 10_000 },
+            { context: 200_000, input: 190_000, output: 0 },
             {
-                providerLimit: { context: 192_000, input: 190_000, output: 10_000 },
+                providerLimit: { context: 192_000, input: 190_000, output: 0 },
                 log: (message) => logs.push(message),
             },
         );

@@ -6251,7 +6251,12 @@ fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {
-    if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT {
+    if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
+        && geometry.is_none_or(|geometry| {
+            geometry.usable_hard < crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
+                || usage.context_limit_tokens <= geometry.usable_hard
+        })
+    {
         return usage.context_limit_tokens as f64;
     }
     // Usage is unfilled on the first pass of a session (no observed pass yet),
@@ -17399,6 +17404,18 @@ pub(crate) mod tests {
             transform_with_projection(&s, &split, &pctx("git:proj", "/nonexistent-docs", 0))
                 .unwrap();
         assert_eq!(forced.scheduler_pass, scheduler::PassDecision::Force85);
+
+        let poisoned_usage = ModuleUsage {
+            current_total_input_tokens: 285_310,
+            context_limit_tokens: 593_717,
+            final_wire_input_tokens: 0,
+            final_wire_trusted: false,
+        };
+        assert_eq!(
+            effective_context_limit_tokens(&poisoned_usage, split.geometry.as_ref()),
+            128_000.0,
+            "a host denominator above usable_hard must fall back to geometry soft"
+        );
 
         let no_geometry = with_usage(
             req("single-geometry", "cfg0", vec![item("m1", 1, "hello")]),

@@ -2342,6 +2342,53 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("self-heals a persisted proof above an observed hard wall", async () => {
+		const db = createTestDb();
+		const sessionId = "019de471-4fdc-762d-9286-624dfad0b5fe";
+		try {
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+			updateSessionMeta(db, sessionId, {
+				lastContextPercentage: 48.1,
+				lastInputTokens: 285_310,
+				lastUsageContextLimit: 593_717,
+				lastObservedModelKey: "openai/gpt-5.6-sol",
+				observedSafeInputTokens: 593_717,
+				cacheAlertSent: true,
+			});
+
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId,
+				message: assistantMessage("captured bad usage", 1, {
+					provider: "openai-codex",
+					model: "gpt-5.6-sol",
+					usage: {
+						input: 585_397,
+						output: 151,
+						cacheRead: 8_320,
+						cacheWrite: 0,
+						totalTokens: 593_868,
+					},
+				}),
+				piContextWindow: 272_000,
+				piModel: {
+					provider: "openai-codex",
+					id: "gpt-5.6-sol",
+					maxTokens: 128_000,
+				},
+			});
+
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.observedSafeInputTokens).toBe(0);
+			expect(meta.lastUsageContextLimit).toBe(204_000);
+			expect(meta.lastInputTokens).toBe(0);
+			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.cacheAlertSent).toBe(false);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("clears a stale unkeyed detected limit from the same database after restart", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "mc-pi-stale-limit-"));
 		const path = join(dir, "context.db");
@@ -2404,6 +2451,7 @@ describe("registerPiContextHandler", () => {
 						usage: { input: inputTokens, cacheRead: 0, cacheWrite: 0 },
 					}),
 					piContextWindow: 30_000,
+					piContextWindowSource: "catalog",
 					notifyIssue: notify,
 				});
 			}

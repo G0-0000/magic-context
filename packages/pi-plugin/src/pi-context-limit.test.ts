@@ -49,14 +49,40 @@ describe("resolvePiUsableContextLimit", () => {
 		).toBe(1_048_576);
 	});
 
-	test("keeps a successful request as a pressure floor when Pi reports a smaller window", () => {
+	test("keeps a successful request as a pressure floor when static model metadata is too small", () => {
 		expect(
 			resolvePiUsableContextLimit({
-				rawContextWindow: 30_000,
-				model: { provider: "custom", id: "model" },
+				model: {
+					provider: "custom",
+					id: "model",
+					contextWindow: 30_000,
+				},
 				provenInputTokens: 90_000,
 			}),
 		).toBe(90_000);
+	});
+
+	test("bounds successful-request proof by an observed runtime hard wall", () => {
+		const model = {
+			provider: "openai-codex",
+			id: "gpt-5.6-sol",
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		};
+		expect(
+			resolvePiUsableContextLimit({
+				rawContextWindow: 272_000,
+				model,
+				provenInputTokens: 255_834,
+			}),
+		).toBe(255_834);
+		expect(
+			resolvePiUsableContextLimit({
+				rawContextWindow: 272_000,
+				model,
+				provenInputTokens: 593_717,
+			}),
+		).toBe(204_000);
 	});
 
 	test("keeps a current detected overflow cap authoritative over older proof", () => {

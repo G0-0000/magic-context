@@ -108,7 +108,10 @@ import {
 } from "@magic-context/core/shared/prompt-surface-runtime";
 import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
-import { reloadWindowOverlay } from "@magic-context/core/shared/window-geometry";
+import {
+	hasTrustedHardWall,
+	reloadWindowOverlay,
+} from "@magic-context/core/shared/window-geometry";
 
 import { handlePiCloneSessionStart } from "./clone-inheritance";
 import {
@@ -166,7 +169,10 @@ import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
-import { resolvePiUsableContextLimit } from "./pi-context-limit";
+import {
+	resolvePiUsableContextLimit,
+	resolvePiWindowGeometry,
+} from "./pi-context-limit";
 import {
 	type PiHarnessKind,
 	resolvePiHarnessDetection,
@@ -557,10 +563,27 @@ function getPiMessageModel(message: unknown): {
 	};
 }
 
+const piUsageRefusalLogSeen = new Set<string>();
+
+function logPiUsageRefusalOnce(
+	sessionId: string,
+	reading: number,
+	usableHard: number,
+	reason: "current reading" | "persisted floor",
+): void {
+	const key = `${sessionId}|${reason}`;
+	if (piUsageRefusalLogSeen.has(key)) return;
+	piUsageRefusalLogSeen.add(key);
+	info(
+		`message_end: session=${sessionId} refused ${reason} ${reading} above trusted usable hard ${usableHard}; accounting sample ignored`,
+	);
+}
+
 function resolvePiPressureContextLimit(args: {
 	db: ContextDatabase;
 	sessionId: string;
 	piContextWindow: number;
+	piContextWindowSource?: "observed" | "catalog";
 	model?: { provider?: string; id?: string; maxTokens?: number };
 	provenInputTokens?: number;
 }): number {
@@ -584,6 +607,7 @@ function resolvePiPressureContextLimit(args: {
 	return (
 		resolvePiUsableContextLimit({
 			rawContextWindow: args.piContextWindow,
+			rawContextWindowSource: args.piContextWindowSource,
 			model: args.model,
 			detectedContextLimit,
 			provenInputTokens: args.provenInputTokens,
@@ -596,6 +620,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	sessionId: string;
 	message: unknown;
 	piContextWindow: number;
+	piContextWindowSource?: "observed" | "catalog";
 	piModel?: { provider?: string; id?: string; maxTokens?: number };
 	piTokens?: number;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
@@ -607,7 +632,34 @@ export async function persistPiPressureFromMessageEnd(args: {
 			? piModelRefToCanonical(`${activeModel.provider}/${activeModel.id}`)
 			: undefined;
 	const usage = extractAssistantUsage(args.message);
-	const rawPressure = computePiPressure(usage, args.piContextWindow);
+	const reportedGeometry = resolvePiWindowGeometry({
+		rawContextWindow: args.piContextWindow,
+		rawContextWindowSource: args.piContextWindowSource,
+		model: activeModel,
+	});
+	const trustedUsableHard =
+		reportedGeometry && hasTrustedHardWall(reportedGeometry)
+			? reportedGeometry.usableHard
+			: undefined;
+	const unboundedPressure = computePiPressure(usage, args.piContextWindow);
+	const rawPressure = computePiPressure(
+		usage,
+		args.piContextWindow,
+		trustedUsableHard,
+	);
+	if (
+		unboundedPressure &&
+		trustedUsableHard !== undefined &&
+		unboundedPressure.inputTokens > trustedUsableHard
+	) {
+		logPiUsageRefusalOnce(
+			args.sessionId,
+			unboundedPressure.inputTokens,
+			trustedUsableHard,
+			"current reading",
+		);
+	}
+
 	const msg =
 		args.message && typeof args.message === "object"
 			? (args.message as { errorMessage?: unknown })
@@ -635,20 +687,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}
 
 	const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-	const observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
-	const effectiveContextLimit = resolvePiPressureContextLimit({
-		db: args.db,
-		sessionId: args.sessionId,
-		piContextWindow: args.piContextWindow,
-		model: activeModel,
-		provenInputTokens: observedSafeInputTokens,
-	});
-	const reportedContextLimit =
-		resolvePiUsableContextLimit({
-			rawContextWindow: args.piContextWindow,
-			model: activeModel,
-		}) ?? 0;
-	const pressure = computePiPressure(usage, effectiveContextLimit);
+	let observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
 	const updates: Partial<{
 		lastResponseTime: number;
 		lastContextPercentage: number;
@@ -658,12 +697,54 @@ export async function persistPiPressureFromMessageEnd(args: {
 		cacheAlertSent: boolean;
 	}> = { lastResponseTime: Date.now() };
 
+	if (
+		trustedUsableHard !== undefined &&
+		observedSafeInputTokens > trustedUsableHard
+	) {
+		logPiUsageRefusalOnce(
+			args.sessionId,
+			observedSafeInputTokens,
+			trustedUsableHard,
+			"persisted floor",
+		);
+		observedSafeInputTokens = 0;
+		updates.observedSafeInputTokens = 0;
+		updates.cacheAlertSent = false;
+		updates.lastUsageContextLimit = reportedGeometry?.usableSoft ?? 0;
+		if (meta.lastInputTokens > trustedUsableHard) {
+			updates.lastInputTokens = 0;
+			updates.lastContextPercentage = 0;
+		}
+	}
+
+	const effectiveContextLimit = resolvePiPressureContextLimit({
+		db: args.db,
+		sessionId: args.sessionId,
+		piContextWindow: args.piContextWindow,
+		piContextWindowSource: args.piContextWindowSource,
+		model: activeModel,
+		provenInputTokens: observedSafeInputTokens,
+	});
+	const reportedContextLimit = reportedGeometry?.usableSoft ?? 0;
+	const pressure = computePiPressure(
+		usage,
+		effectiveContextLimit,
+		trustedUsableHard,
+	);
+
 	if (pressure) {
 		const provenSafeInputTokens = requestSucceeded
 			? Math.max(observedSafeInputTokens, pressure.inputTokens)
 			: observedSafeInputTokens;
 		const contextLimit = requestSucceeded
-			? Math.max(effectiveContextLimit, provenSafeInputTokens)
+			? resolvePiPressureContextLimit({
+					db: args.db,
+					sessionId: args.sessionId,
+					piContextWindow: args.piContextWindow,
+					piContextWindowSource: args.piContextWindowSource,
+					model: activeModel,
+					provenInputTokens: provenSafeInputTokens,
+				})
 			: effectiveContextLimit;
 		const percentage =
 			contextLimit > 0 ? (pressure.inputTokens / contextLimit) * 100 : 0;
@@ -688,7 +769,11 @@ export async function persistPiPressureFromMessageEnd(args: {
 		if (requestSucceeded) {
 			updates.observedSafeInputTokens = provenSafeInputTokens;
 		}
-	} else if (typeof args.piTokens === "number") {
+	} else if (
+		usage === null &&
+		typeof args.piTokens === "number" &&
+		(trustedUsableHard === undefined || args.piTokens <= trustedUsableHard)
+	) {
 		updates.lastInputTokens = args.piTokens;
 		if (effectiveContextLimit > 0) {
 			updates.lastContextPercentage =
@@ -2338,26 +2423,32 @@ async function startPiMagicContextRuntime(
 				cacheTtlConfig: resolveCurrentProjectDeps(ctx).config.cache_ttl,
 			});
 			// Compute pressure with OpenCode-equivalent semantics: pull
-			// the assistant's `usage` field and use
-			// `input + cacheRead + cacheWrite` (NOT output) divided by
-			// the effective context limit. The window comes from Pi's own
+			// the assistant's `usage` field, normalize inclusive OpenAI
+			// cached-input shapes against `totalTokens - output`, and reject
+			// impossible prompt readings above the observed hard wall. The
+			// accepted prompt count is divided by the effective context limit.
+			// The window comes from Pi's own
 			// runtime — `getContextUsage().contextWindow`, falling back to
 			// `ctx.model.contextWindow` if usage hasn't populated — NOT
 			// models.dev. `session_meta.detected_context_limit` still overrides
 			// it (in persistPiPressureFromMessageEnd) so post-overflow pressure
 			// reflects the real, lower limit. See `pi-pressure.ts` for rationale.
 			const piUsage = ctx.getContextUsage?.();
-			const piContextWindow =
+			const hasObservedContextWindow =
 				piUsage &&
 				typeof piUsage.contextWindow === "number" &&
-				piUsage.contextWindow > 0
-					? piUsage.contextWindow
-					: (ctx.model?.contextWindow ?? 0);
+				piUsage.contextWindow > 0;
+			const piContextWindow = hasObservedContextWindow
+				? piUsage.contextWindow
+				: (ctx.model?.contextWindow ?? 0);
 			await persistPiPressureFromMessageEnd({
 				db,
 				sessionId,
 				message: event.message,
 				piContextWindow,
+				piContextWindowSource: hasObservedContextWindow
+					? "observed"
+					: "catalog",
 				piModel: ctx.model,
 				piTokens:
 					piUsage && typeof piUsage.tokens === "number"
