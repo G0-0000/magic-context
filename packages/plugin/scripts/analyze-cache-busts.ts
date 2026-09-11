@@ -72,7 +72,7 @@ interface Args {
 
 interface MeterUsage {
     cacheRead: number;
-    cacheCreation: number;
+    cacheCreation?: number;
     input: number;
     total: number;
     source: string;
@@ -275,7 +275,7 @@ function meterUsage(
         }
         return {
             cacheRead: cachedTokens,
-            cacheCreation: 0,
+            cacheCreation: undefined,
             input: Math.max(0, promptTokens - cachedTokens),
             total: promptTokens,
             source,
@@ -298,7 +298,7 @@ function meterUsage(
     }
     return {
         cacheRead: cacheRead ?? 0,
-        cacheCreation: cacheCreation ?? 0,
+        cacheCreation,
         input: usage.input_tokens,
         total: (cacheRead ?? 0) + (cacheCreation ?? 0) + usage.input_tokens,
         source,
@@ -753,9 +753,7 @@ export function analyzeSnapshots(
                   : "AGREE";
         const rewrittenTokens =
             verdict === "BUST" || verdict === "LATENCY"
-                ? rebust
-                    ? current.usage.input
-                    : prevTotal - current.usage.cacheRead
+                ? (current.usage.cacheCreation ?? Math.max(0, prevTotal - current.usage.cacheRead))
                 : undefined;
         const decision = nearestCacheBustDecision(decisions, current.requestTimestampMs);
         const previousDecision = nearestCacheBustDecision(decisions, previous.requestTimestampMs);
@@ -778,6 +776,7 @@ export function analyzeSnapshots(
                       firstDivergenceRole: divergentSegment?.role,
                       firstDivergenceSize: divergentSegment?.bytes,
                       rewrittenTokens,
+                      cacheCreationTokens: current.usage.cacheCreation,
                       promptTokens: prevTotal,
                       inheritedFold: attributionDecision !== decision,
                       contentEvidence: [previous, current]

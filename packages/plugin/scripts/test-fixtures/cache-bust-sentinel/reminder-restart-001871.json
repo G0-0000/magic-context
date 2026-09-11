@@ -1,0 +1,19 @@
+{
+  "description": "Hermetic reduced shape, not a dump copy. 001861/001871 read and creation meters are incident evidence; 001851 primes the consecutive-short-read branch synthetically and 001881 models stabilization. Bodies are abbreviated; direct input is 4.",
+  "session": "ses_313660571ffeZTsf4koSJwk50Q",
+  "readings": [
+    { "sequence": "001851", "at": "2026-09-11T15:32:39.000Z", "read": 500000, "creation": 803 },
+    { "sequence": "001861", "at": "2026-09-11T15:33:39.000Z", "read": 492799, "creation": 803 },
+    { "sequence": "001871", "at": "2026-09-11T15:34:57.000Z", "read": 279468, "creation": 202813 },
+    { "sequence": "001881", "at": "2026-09-11T15:36:20.000Z", "read": 482285, "creation": 803 }
+  ],
+  "stripped": [null, null, "§436§", "§437§", "§438§", "§439§"],
+  "parts": [
+    "§434§ <!-- +2h 23m -->\nOpencode restarted",
+    "§435§ authored sibling",
+    "§436§ <system-reminder>\n<peer-message-notice>completed</peer-message-notice>\n</system-reminder>",
+    "§437§ <system-reminder>\nWake digest one\n</system-reminder>",
+    "§438§ <system-reminder>\nWake digest two\n</system-reminder>",
+    "§439§ <system-reminder>\nWake digest three\n</system-reminder>"
+  ]
+}

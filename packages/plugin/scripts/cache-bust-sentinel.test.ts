@@ -182,6 +182,24 @@ describe("cache-bust attribution contract", () => {
         }
     });
 
+    test("creation meter vetoes system-row forgiveness despite a tiny rewrite estimate", () => {
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 0,
+                previousMessageCount: 1197,
+                firstDivergenceRole: "system",
+                rewrittenTokens: 4,
+                cacheCreationTokens: 202_813,
+                promptTokens: 493_606,
+                decision: decision({
+                    decision: "defer",
+                    materialized: false,
+                    materializeReason: null,
+                }),
+            }),
+        ).toBe("accounted_hard_system_hash");
+    });
+
     test("keeps a tiny mid-history first_render seam unaccounted on a defer pass", () => {
         expect(
             classifyCacheBust({

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripSystemInjection } from "../src/hooks/magic-context/system-injection-stripper";
 import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
 
@@ -50,7 +51,11 @@ function writeDump(
             createdAt,
             session: `${session.slice(0, 12)}…`,
             files: { body: bodyPath, response: responsePath },
-            body: { messagesCount: Array.isArray((body as { messages?: unknown[] }).messages) ? (body as { messages: unknown[] }).messages.length : 0 },
+            body: {
+                messagesCount: Array.isArray((body as { messages?: unknown[] }).messages)
+                    ? (body as { messages: unknown[] }).messages.length
+                    : 0,
+            },
         }),
     );
 }
@@ -73,7 +78,9 @@ function bodyWithTail(text: string, tailBreakpoint = false): unknown {
         messages: [
             {
                 role: "user",
-                content: [{ type: "text", text: "cached prefix", cache_control: { type: "ephemeral" } }],
+                content: [
+                    { type: "text", text: "cached prefix", cache_control: { type: "ephemeral" } },
+                ],
             },
             { role: "assistant", content: [tail] },
         ],
@@ -85,12 +92,20 @@ function bodyWithTailCheckpoint(text: string): unknown {
         messages: [
             {
                 role: "user",
-                content: [{ type: "text", text: "cached prefix", cache_control: { type: "ephemeral" } }],
+                content: [
+                    { type: "text", text: "cached prefix", cache_control: { type: "ephemeral" } },
+                ],
             },
             { role: "assistant", content: [{ type: "text", text }] },
             {
                 role: "user",
-                content: [{ type: "text", text: "current tail checkpoint", cache_control: { type: "ephemeral" } }],
+                content: [
+                    {
+                        type: "text",
+                        text: "current tail checkpoint",
+                        cache_control: { type: "ephemeral" },
+                    },
+                ],
             },
         ],
     };
@@ -103,20 +118,124 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("reminder strip golden agrees with the Rust block-strip parser", () => {
+        const fixture = JSON.parse(
+            readFileSync(
+                join(
+                    import.meta.dir,
+                    "test-fixtures/cache-bust-sentinel/reminder-restart-001871.json",
+                ),
+                "utf8",
+            ),
+        ) as { parts: string[]; stripped: Array<string | null> };
+        expect(fixture.parts.map(stripSystemInjection)).toEqual(fixture.stripped);
+    });
+    test("001871 reminder restart uses creation meter and remains an unaccounted defer bust", () => {
+        const fixture = JSON.parse(
+            readFileSync(
+                join(
+                    import.meta.dir,
+                    "test-fixtures/cache-bust-sentinel/reminder-restart-001871.json",
+                ),
+                "utf8",
+            ),
+        ) as {
+            session: string;
+            readings: Array<{ sequence: string; at: string; read: number; creation: number }>;
+            parts: string[];
+        };
+        const dir = mkdtempSync(join(tmpdir(), "cache-reminder-restart-"));
+        tempDirs.push(dir);
+        for (const [index, reading] of fixture.readings.entries()) {
+            const parts = fixture.parts.map((text, part) => ({
+                type: "text",
+                text: index >= 2 && part >= 2 ? `§${434 + part}§ ` : text,
+            }));
+            const messages = Array.from({ length: 224 }, (_, n) => ({
+                role: "user",
+                content: [{ type: "text", text: `prefix ${n}` }],
+            }));
+            messages.push({ role: "user", content: parts });
+            const body = {
+                messages: [
+                    ...messages,
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "text",
+                                text: "checkpoint",
+                                cache_control: { type: "ephemeral" },
+                            },
+                        ],
+                    },
+                ],
+            };
+            writeDump(
+                dir,
+                `${reading.at.replaceAll(":", "-").replace(".", "-")}-${reading.sequence}-${fixture.session}`,
+                reading.at,
+                fixture.session,
+                body,
+                responseUsage({
+                    cache_read_input_tokens: reading.read,
+                    cache_creation_input_tokens: reading.creation,
+                    input_tokens: 4,
+                }),
+            );
+        }
+        const at = Date.parse(fixture.readings[2]!.at);
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, fixture.session), [
+            {
+                timestampMs: at,
+                decision: "SOFT+",
+                canonicalDecision: "defer",
+                deferReason: "scheduler_defer",
+                materialized: false,
+                materializeReason: null,
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 0,
+                inputTokens: 482285,
+                flush: false,
+                source: "fixture",
+            },
+        ]);
+        expect(rows[2]?.divergenceIndex).toBe(224);
+        expect(rows[2]?.verdict).toBe("BUST");
+        expect(rows[2]?.rewrittenTokens).toBe(202_813);
+        expect(rows[2]?.divergenceClass).toBe("unaccounted_defer_pass");
+        expect(rows[3]?.verdict).toBe("STABLE");
+    });
     test("does not forgive consecutive prefix rewrites at the same read floor", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-rebust-"));
         tempDirs.push(dir);
         const session = "ses_rebust";
-        const readings = [[254592, 1054], [16896, 173076], [16896, 173524], [190336, 493]];
+        const readings = [
+            [254592, 1054],
+            [16896, 173076],
+            [16896, 173524],
+            [190336, 493],
+        ];
         readings.forEach(([cacheRead, input], index) => {
-            writeDump(dir, `2026-09-11T07-56-0${index}-000Z-${session}`, `2026-09-11T07:56:0${index}Z`, session,
-                bodyWithBreakpointMessage(String(index)), responseUsage({input_tokens: input!, cache_read_input_tokens: cacheRead!, cache_creation_input_tokens: 0}));
+            writeDump(
+                dir,
+                `2026-09-11T07-56-0${index}-000Z-${session}`,
+                `2026-09-11T07:56:0${index}Z`,
+                session,
+                bodyWithBreakpointMessage(String(index)),
+                responseUsage({
+                    input_tokens: input!,
+                    cache_read_input_tokens: cacheRead!,
+                    cache_creation_input_tokens: 0,
+                }),
+            );
         });
         const rows = __test.analyzeSnapshots(snapshotsFor(dir, session));
-        expect(rows.map(row => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
+        expect(rows.map((row) => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
         expect(rows[1]?.divergenceClass).toBe("no_mc_pass_row");
         expect(rows[2]?.divergenceClass).toBe("no_mc_pass_row");
-        expect(rows[2]?.rewrittenTokens).toBe(173524);
+        expect(rows[2]?.rewrittenTokens).toBe(0);
     });
     test("joins a pre-send pass by request time when its long response finishes four minutes later", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-pass-time-"));
@@ -149,11 +268,7 @@ describe("analyze-cache-bust dump discovery", () => {
             }),
         );
         const responseCompletion = new Date("2026-09-11T07:04:10Z");
-        utimesSync(
-            join(dir, `${bustStem}.response.json`),
-            responseCompletion,
-            responseCompletion,
-        );
+        utimesSync(join(dir, `${bustStem}.response.json`), responseCompletion, responseCompletion);
         const passTime = new Date("2026-09-11T06:59:45Z");
 
         const analysis = analyzeOpenCodeCacheBustSession({
@@ -176,9 +291,7 @@ describe("analyze-cache-bust dump discovery", () => {
             ],
         });
 
-        expect(analysis.requests.at(-1)?.divergenceClass).toBe(
-            "accounted_hard_system_hash",
-        );
+        expect(analysis.requests.at(-1)?.divergenceClass).toBe("accounted_hard_system_hash");
     });
 
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
@@ -193,14 +306,27 @@ describe("analyze-cache-bust dump discovery", () => {
         writeDump(dir, currentStem, "2026-09-02T08:42:00Z", session, current);
         const prettyBody = `${JSON.stringify(current, null, 2)}\n`;
         writeFileSync(join(dir, `${currentStem}.body.json`), prettyBody);
-        const expected = [Buffer.byteLength(JSON.stringify(previous)), Buffer.byteLength(prettyBody)];
+        const expected = [
+            Buffer.byteLength(JSON.stringify(previous)),
+            Buffer.byteLength(prettyBody),
+        ];
         expect(snapshotsFor(dir, session).map((snapshot) => snapshot.bodyBytes)).toEqual(expected);
-        const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "analyze-cache-busts.ts"), "--session", session, "--dir", dir, "--all-rows"]);
+        const run = Bun.spawnSync([
+            process.execPath,
+            join(import.meta.dir, "analyze-cache-busts.ts"),
+            "--session",
+            session,
+            "--dir",
+            dir,
+            "--all-rows",
+        ]);
         expect(run.exitCode).toBe(0);
         const output = run.stdout.toString();
         expect(output).toContain("prevBodyBytes → curBodyBytes");
         expect(output).toContain("reusableNormalizedPrefix@breakpoint");
-        expect(output).toContain(`${expected[0]!.toLocaleString()}B → ${expected[1]!.toLocaleString()}B`);
+        expect(output).toContain(
+            `${expected[0]!.toLocaleString()}B → ${expected[1]!.toLocaleString()}B`,
+        );
     });
     test("loads and orders legacy and sequence+routing filename layouts by timestamp and sequence", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-fixture-"));
@@ -251,13 +377,21 @@ describe("analyze-cache-bust dump discovery", () => {
         const newStem = `2026-09-02T08-42-00-000Z-000001-${newSession}`;
         writeDump(anthropicDir, oldStem, "2026-09-02T08:41:00Z", oldSession, bodyWithTail("old"));
         writeDump(openaiDir, newStem, "2026-09-02T08:42:00Z", newSession, {
-            input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "new" }] }],
+            input: [
+                { type: "message", role: "user", content: [{ type: "input_text", text: "new" }] },
+            ],
         });
         utimesSync(join(anthropicDir, `${oldStem}.body.json`), new Date(1_000), new Date(1_000));
         utimesSync(join(openaiDir, `${newStem}.body.json`), new Date(2_000), new Date(2_000));
 
         const run = Bun.spawnSync(
-            [process.execPath, join(import.meta.dir, "analyze-cache-busts.ts"), "--session", "ses_ambiguous", "--all-rows"],
+            [
+                process.execPath,
+                join(import.meta.dir, "analyze-cache-busts.ts"),
+                "--session",
+                "ses_ambiguous",
+                "--all-rows",
+            ],
             {
                 env: {
                     ...process.env,
@@ -278,21 +412,25 @@ describe("analyze-cache-bust dump discovery", () => {
 
     test("resolves relative --since durations", () => {
         expect(__test.resolveTimeBound("30m", 1_800_000)).toBe("1970-01-01T00:00:00.000Z");
-        expect(__test.resolveTimeBound("2026-09-02T08:30:00Z", 0)).toBe(
-            "2026-09-02T08:30:00.000Z",
-        );
+        expect(__test.resolveTimeBound("2026-09-02T08:30:00Z", 0)).toBe("2026-09-02T08:30:00.000Z");
     });
 });
 
 describe("analyze-cache-bust normalized provider fixtures", () => {
     const fixtureRoot = join(import.meta.dir, "test-fixtures", "cache-bust-bodies");
     const fixtureJson = (source: string, file: string): Record<string, unknown> =>
-        JSON.parse(readFileSync(join(fixtureRoot, source, file), "utf8")) as Record<string, unknown>;
+        JSON.parse(readFileSync(join(fixtureRoot, source, file), "utf8")) as Record<
+            string,
+            unknown
+        >;
 
     for (const source of ["anthropic", "openai-auth"] as const) {
         test(`${source} names the normalized first-diverging message`, () => {
             const provider = source === "anthropic" ? "anthropic" : "openai";
-            const previous = normalizeRequestBody(fixtureJson(source, "001-request.json"), provider);
+            const previous = normalizeRequestBody(
+                fixtureJson(source, "001-request.json"),
+                provider,
+            );
             const current = normalizeRequestBody(fixtureJson(source, "002-request.json"), provider);
 
             const divergence = describeBodyPair(previous.messages, current.messages);
@@ -325,7 +463,9 @@ describe("analyze-cache-bust normalized provider fixtures", () => {
             expect(row.verdict).toBe("BUST");
             expect(row.current.provider).toBe(source === "anthropic" ? "anthropic" : "openai");
             expect(row.current.usage?.rule).toContain(
-                source === "anthropic" ? "Anthropic explicit cache" : "OpenAI implicit-prefix cache",
+                source === "anthropic"
+                    ? "Anthropic explicit cache"
+                    : "OpenAI implicit-prefix cache",
             );
         });
     }
@@ -416,7 +556,7 @@ describe("analyze-cache-bust provider meter verdicts", () => {
         expect(row.verdict).toBe("BUST");
         expect(row.byteVerdict).toBe("BUST");
         expect(row.meterVsBytes).toBe("AGREE");
-        expect(row.rewrittenTokens).toBe(120_216);
+        expect(row.rewrittenTokens).toBe(120_212);
     });
 
     test("forgives a tail divergence when the streamed usage meter reports a hit", () => {
@@ -490,7 +630,7 @@ describe("analyze-cache-bust provider meter verdicts", () => {
         expect(row.verdict).toBe("BUST");
         expect(row.shortRead).toBe(true);
         expect(row.byteVerdict).toBe("BUST");
-        expect(row.rewrittenTokens).toBe(88_693);
+        expect(row.rewrittenTokens).toBe(91_447);
     });
 
     test("labels a short read without reusable-prefix byte divergence as latency", () => {

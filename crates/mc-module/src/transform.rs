@@ -5568,6 +5568,13 @@ fn apply_once(
         output_meta.coverage_ordinal = None;
         no_trim_meta = Some(output_meta);
     }
+    if is_bust_pass {
+        for unit in &mut core.frozen_units {
+            if unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) {
+                unit.reset_rule.clear();
+            }
+        }
+    }
     refresh_reasoning_clear_exemptions(&mut core, req, is_bust_pass, lineage_anchor_mid);
     core.frozen_units.extend(new_reasoning_clear_units(
         &core,
@@ -5644,6 +5651,75 @@ fn apply_once(
         output_cache_snapshot.as_ref(),
         is_bust_pass,
     )?;
+    if !is_bust_pass {
+        let candidates =
+            legacy_system_strip_candidates(&core, &loaded.meta, &built_output.messages);
+        if !candidates.is_empty() {
+            let mut unstripped_core = core.clone();
+            for unit in &mut unstripped_core.frozen_units {
+                if candidates.contains(&unit.key) {
+                    unit.reset_rule = SYSTEM_STRIP_PENDING.to_string();
+                }
+            }
+            let unstripped = build_output_with_tags(
+                &unstripped_core,
+                output_meta,
+                &projection,
+                req,
+                (tagging_active || auto_search_active).then_some(&tag_overlay),
+                tail_reclaim_enabled && !req.is_subagent,
+                mutation_exempt_mid,
+                &tag_numbers,
+                meta.reasoning_cleared_through_tag
+                    .max(meta.reasoning_cleared_through_ordinal),
+                transition_committed,
+                None,
+                false,
+            )?;
+            let original_hashes = served_output_fingerprints(&unstripped.messages)
+                .into_iter()
+                .map(|block| (block.block_id, block.content_hash))
+                .collect::<HashMap<_, _>>();
+            let previous = loaded
+                .meta
+                .served_output_fingerprint
+                .iter()
+                .map(|block| (block.block_id.as_str(), block.content_hash.as_str()))
+                .collect::<HashMap<_, _>>();
+            let mut changed = false;
+            for unit in &mut core.frozen_units {
+                if !candidates.contains(&unit.key) {
+                    continue;
+                }
+                let target = unit.key.strip_prefix(SYSTEM_STRIP_BLOCK_PREFIX).unwrap();
+                if previous.get(target).is_none_or(|hash| {
+                    original_hashes
+                        .get(target)
+                        .is_some_and(|original| original == hash)
+                }) {
+                    unit.reset_rule = SYSTEM_STRIP_PENDING.to_string();
+                    changed = true;
+                }
+            }
+            if changed {
+                built_output = build_output_with_tags(
+                    &core,
+                    output_meta,
+                    &projection,
+                    req,
+                    (tagging_active || auto_search_active).then_some(&tag_overlay),
+                    tail_reclaim_enabled && !req.is_subagent,
+                    mutation_exempt_mid,
+                    &tag_numbers,
+                    meta.reasoning_cleared_through_tag
+                        .max(meta.reasoning_cleared_through_ordinal),
+                    transition_committed,
+                    None,
+                    false,
+                )?;
+            }
+        }
+    }
     let new_merged_reasoning_units = new_merged_reasoning_strip_units(
         &core,
         req,
@@ -11115,6 +11191,45 @@ fn strip_unit(kind: &str, mid: &str, payload: &str) -> FrozenUnit {
     }
 }
 
+const SYSTEM_STRIP_BLOCK_PREFIX: &str = "strip:system_injected_block:";
+const SYSTEM_STRIP_PENDING: &str = "await-priced-first-serve";
+
+// Older output-cache identities omitted block-level strips. A durable strip could
+// therefore coexist with last-served whole text. When rebuilding the original
+// block matches its last-served fingerprint, suspend the strip until a priced
+// pass. Already-served strips keep replaying; changed source bytes are not proof.
+fn legacy_system_strip_candidates(
+    core: &CoreState,
+    meta: &ModuleMeta,
+    rendered: &[ServedMessage],
+) -> HashSet<String> {
+    if !core
+        .frozen_units
+        .iter()
+        .any(|unit| unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && unit.reset_rule.is_empty())
+    {
+        return HashSet::new();
+    }
+    let current = served_output_fingerprints(rendered)
+        .into_iter()
+        .map(|block| (block.block_id, block.content_hash))
+        .collect::<HashMap<_, _>>();
+    let previous = meta
+        .served_output_fingerprint
+        .iter()
+        .map(|block| (block.block_id.as_str(), block.content_hash.as_str()))
+        .collect::<HashMap<_, _>>();
+    core.frozen_units
+        .iter()
+        .filter(|unit| unit.reset_rule.is_empty())
+        .filter_map(|unit| {
+            let target = unit.key.strip_prefix(SYSTEM_STRIP_BLOCK_PREFIX)?;
+            let hash = current.get(target)?;
+            (previous.get(target).copied() != Some(hash.as_str())).then(|| unit.key.clone())
+        })
+        .collect()
+}
+
 fn provider_sentinel_text(req: &TransformRequest) -> String {
     if request_accepts_empty_content(req) {
         String::new()
@@ -11633,6 +11748,7 @@ fn apply_surface_strips(
         if !reasoning_policy.exempt {
             if let Some(unit) =
                 output_message_strip_unit(frozen_units, "system_injected_block", block.id())
+                    .filter(|unit| unit.reset_rule != SYSTEM_STRIP_PENDING)
             {
                 rebuilt.content[index].kind = ck_wire::CkKind::Text {
                     text: unit.frozen_payload.clone(),
@@ -11669,6 +11785,9 @@ fn apply_surface_strips(
             }
         }
     }
+    if touched {
+        rebuilt.mark_modified();
+    }
     if stale_reduce && touched && !rebuilt.content.iter().any(has_meaningful_content) {
         rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text: sentinel })];
         rebuilt.mark_modified();
@@ -11696,6 +11815,7 @@ fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<Frozen
             // ids durable so their strip resumes deterministically if they return in a later
             // full-array request.
             unit.key.starts_with("strip:merged_reasoning:")
+                || unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX)
                 || unit.key.starts_with("strip:reasoning_age:")
                 || unit.key.starts_with("strip:reasoning_clear:")
                 || unit.key.starts_with("strip:trailing_blank_keep:")
@@ -12173,8 +12293,8 @@ impl<'a> FrozenUnitIndex<'a> {
                 .or_else(|| {
                     unit.key
                         .strip_prefix("strip:")
-                        .and_then(|rest| rest.rsplit_once(':'))
-                        .map(|(_, mid)| mid)
+                        .and_then(|rest| rest.split_once(':'))
+                        .map(|(_, target)| split_block_id(target).map_or(target, |(mid, _)| mid))
                 });
             if let Some(mid) = target_mid {
                 by_tail_mid.entry(mid).or_default().push(unit);
@@ -12229,7 +12349,10 @@ impl<'a> FrozenUnitLookup<'a> {
                             .unwrap_or_else(|| {
                                 unit.key
                                     .strip_prefix("strip:")
-                                    .is_some_and(|key| key.ends_with(&format!(":{mid}")))
+                                    .and_then(|key| key.split_once(':'))
+                                    .is_some_and(|(_, target)| {
+                                        split_block_id(target).map_or(target, |(mid, _)| mid) == mid
+                                    })
                             })
                     })
                     .collect(),
@@ -12341,6 +12464,7 @@ fn message_output_identity(
         digest_field(&mut hasher, unit.key.as_bytes());
         digest_field(&mut hasher, unit.kind.as_bytes());
         digest_field(&mut hasher, unit.frozen_payload.as_bytes());
+        digest_field(&mut hasher, unit.reset_rule.as_bytes());
     }
 
     *frozen_unit_scan_ms += elapsed_ms(frozen_unit_scan_started_at);
@@ -35271,6 +35395,166 @@ pub(crate) mod tests {
             hash.update(bytes);
         }
         format!("{:x}", hash.finalize())
+    }
+
+    #[test]
+    fn system_reminder_strip_matches_typescript_golden() {
+        let fixture: Value = serde_json::from_str(include_str!("../../../packages/plugin/scripts/test-fixtures/cache-bust-sentinel/reminder-restart-001871.json")).unwrap();
+        for (source, expected) in fixture["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(fixture["stripped"].as_array().unwrap())
+        {
+            assert_eq!(
+                strip_system_injection(source.as_str().unwrap()).as_deref(),
+                expected.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn system_reminder_legacy_unserved_units_defer_across_store_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let process_a = store(dir.path());
+        let request = req(
+            "reminder-restart",
+            "cfg0",
+            vec![wire_item(
+                "user",
+                "aft",
+                1,
+                &[
+                    "Opencode restarted",
+                    "authored sibling",
+                    "<system-reminder>peer-message-notice</system-reminder>",
+                    "<system-reminder>Wake digest one</system-reminder>",
+                    "<system-reminder>Wake digest two</system-reminder>",
+                    "<system-reminder>Wake digest three</system-reminder>",
+                ],
+            )],
+        );
+        run(&process_a, &request, &spine());
+        run(&process_a, &request, &spine());
+        let whole = run(&process_a, &request, &spine());
+        assert_eq!(whole.action, "SOFT+");
+        assert!(serde_json::to_string(&whole.ck_messages)
+            .unwrap()
+            .contains("Wake digest"));
+        let mut loaded = process_a.load(&request.session_id).unwrap();
+        // Model the old warm-cache omission: strips were committed, but the served
+        // fingerprint still records the unchanged six-part message.
+        for index in 2..6 {
+            loaded.core.frozen_units.push(strip_unit(
+                "system_injected_block",
+                &format!("aft#{index}"),
+                "",
+            ));
+        }
+        process_a
+            .commit(
+                &request.session_id,
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
+            .unwrap();
+        drop(process_a);
+        let process_b = store(dir.path());
+        let replay = run(&process_b, &request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            canonical_response_hash(&whole),
+            canonical_response_hash(&replay)
+        );
+        assert!(process_b
+            .load(&request.session_id)
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .filter(|unit| unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX))
+            .all(|unit| unit.reset_rule == SYSTEM_STRIP_PENDING));
+        let mut priced_request = request.clone();
+        priced_request.render_config = "cfg1".to_string();
+        let priced = run(&process_b, &priced_request, &spine());
+        assert_eq!(priced.action, "HARD");
+        assert!(!serde_json::to_string(&priced.ck_messages)
+            .unwrap()
+            .contains("Wake digest"));
+        drop(process_b);
+        let process_c = store(dir.path());
+        let replay = run(&process_c, &priced_request, &spine());
+        assert!(!serde_json::to_string(&replay.ck_messages)
+            .unwrap()
+            .contains("Wake digest"));
+    }
+
+    #[test]
+    fn system_reminder_bust_invalidates_warm_tail_before_restart() {
+        let (mut core, meta, mut request, _) = output_cache_fixture("baseline", "delta");
+        request.messages = vec![wire_item(
+            "user",
+            "aft",
+            1,
+            &[
+                "Opencode restarted",
+                "authored sibling",
+                "<system-reminder>peer-message-notice</system-reminder>",
+                "<system-reminder>Wake digest one</system-reminder>",
+                "<system-reminder>Wake digest two</system-reminder>",
+                "<system-reminder>Wake digest three</system-reminder>",
+            ],
+        )];
+        let projection = project_messages(&request.messages).unwrap();
+        let overlay = TagOverlayState {
+            tag_by_block_id: (0..6)
+                .map(|index| (format!("aft#{index}"), 434 + index as i64))
+                .collect(),
+            ..Default::default()
+        };
+        let whole = build_cached_fixture(
+            &core,
+            &meta,
+            &request,
+            &projection,
+            Some(&overlay),
+            None,
+            false,
+        );
+        let snapshot = SerializedOutputCacheSnapshot {
+            entries: whole.cache_entries,
+        };
+        for index in 2..6 {
+            core.frozen_units.push(strip_unit(
+                "system_injected_block",
+                &format!("aft#{index}"),
+                "",
+            ));
+        }
+        let bust = build_cached_fixture(
+            &core,
+            &meta,
+            &request,
+            &projection,
+            Some(&overlay),
+            Some(&snapshot),
+            true,
+        );
+        let cold = build_cached_fixture(
+            &core,
+            &meta,
+            &request,
+            &projection,
+            Some(&overlay),
+            None,
+            false,
+        );
+        assert_eq!(
+            canonical_output(&bust.messages),
+            canonical_output(&cold.messages),
+            "a priced strip must reach the warm wire, not first-apply after restart"
+        );
     }
 
     #[test]

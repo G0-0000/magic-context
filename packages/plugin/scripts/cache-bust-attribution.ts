@@ -61,6 +61,7 @@ export interface CacheBustAttributionInput {
     firstDivergenceRole?: string;
     firstDivergenceSize?: number;
     rewrittenTokens?: number;
+    cacheCreationTokens?: number;
     promptTokens?: number;
     contentEvidence?: string;
     compactionSeam?: boolean;
@@ -206,7 +207,11 @@ export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDi
         input.rewrittenTokens !== undefined && input.promptTokens && input.promptTokens > 0
             ? input.rewrittenTokens / input.promptTokens
             : Number.POSITIVE_INFINITY;
-    if (isSystemRow && rewrittenRatio < 0.05) return "system_row_shift";
+    const creationRatio =
+        input.cacheCreationTokens !== undefined && input.promptTokens && input.promptTokens > 0
+            ? input.cacheCreationTokens / input.promptTokens
+            : 0;
+    if (isSystemRow && rewrittenRatio < 0.05 && creationRatio < 0.05) return "system_row_shift";
 
     const decision = input.decision;
     if (!decision) return "no_mc_pass_row";
