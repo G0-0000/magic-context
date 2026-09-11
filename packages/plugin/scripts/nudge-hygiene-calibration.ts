@@ -2,14 +2,31 @@ import { realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
-import { computeProtectionWindow } from "../src/features/magic-context/protection-window";
+import { getProtectionWindowForSession } from "../src/features/magic-context/protection-window";
+import { getPendingOps } from "../src/features/magic-context/storage-ops";
+import {
+    getChannel1NudgeState,
+    getChannel2NudgeState,
+    getLastNudgeUndropped,
+} from "../src/features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../src/features/magic-context/types";
 import {
+    CHANNEL1_FLOOR_TOKENS,
+    CHANNEL1_MIN_TOKENS,
+    CHANNEL1_STICKY_REAL_USER_TURN_GAP,
+    CHANNEL2_FLOOR_TOKENS,
+    CHANNEL2_SEVERITY_THRESHOLD,
     decideChannel1,
     evaluateChannel2,
+    formatChannel1Evaluation,
+    formatChannel2Evaluation,
 } from "../src/hooks/magic-context/ctx-reduce-nudge";
+import { resolveCtxReduceAvailabilityFromMessages } from "../src/hooks/magic-context/ctx-reduce-availability";
 import type { MessageLike } from "../src/hooks/magic-context/tag-messages";
-import { measureTailHygiene } from "../src/hooks/magic-context/tail-hygiene-walk";
+import {
+    countRealUserMessages,
+    measureTailHygiene,
+} from "../src/hooks/magic-context/tail-hygiene-walk";
 import { Database } from "../src/shared/sqlite";
 import { applyTransforms } from "./context-dump/apply-transforms";
 import { stripMetadata } from "./context-dump/strip-metadata";
@@ -41,6 +58,11 @@ type RawContextTag = {
     tag_number: number;
 };
 
+type PersistedNudgeRow = {
+    last_nudge_tokens: number;
+    last_input_tokens: number;
+};
+
 type CalibrationResult = {
     label: string;
     sessionId: string;
@@ -53,6 +75,17 @@ type CalibrationResult = {
     severity: number;
     band: string;
     walkP95Ms: number;
+    measuredPartTokens: Record<string, { t: number; u: number; count: number }>;
+    persisted: {
+        lastNudgeTokensWholePromptAtReduce: number;
+        lastInputTokensWholePrompt: number;
+        lastNudgeUndropped: number;
+        channel1State: ReturnType<typeof getChannel1NudgeState>;
+        channel2LeaseState: ReturnType<typeof getChannel2NudgeState>;
+    };
+    gates: Record<string, unknown>;
+    channel1Log: string;
+    channel2Log: string;
 };
 
 function guardedPath(rawPath: string, testDataRoot: string): string {
@@ -280,6 +313,7 @@ function replaySession(
     opencodeDb: Database,
     label: string,
     sessionId: string,
+    protectionFloor: number | null,
 ): CalibrationResult {
     const coverageRow = contextDb
         .prepare(
@@ -292,13 +326,21 @@ function replaySession(
     const transformTags = readTransformTags(contextDb, sessionId);
     applyTransforms(messages, transformTags);
     const hygieneTags = readHygieneTags(contextDb, sessionId);
+    const pendingDropTagNumbers = new Set(
+        getPendingOps(contextDb, sessionId)
+            .filter((operation) => operation.operation === "drop")
+            .map((operation) => operation.tagId),
+    );
+    const protectionWindow = getProtectionWindowForSession(
+        contextDb,
+        sessionId,
+        protectionFloor,
+    );
     const input = {
         messages: messages as unknown as MessageLike[],
         tags: hygieneTags,
-        protectedTagNumbers: computeProtectionWindow(
-            hygieneTags,
-            PROTECTED_TOKEN_FLOOR,
-        ).protectedTagNumbers,
+        protectedTagNumbers: protectionWindow.protectedTagNumbers,
+        pendingDropTagNumbers,
     };
     const measured = measureTailHygiene(input);
     const durations: number[] = [];
@@ -307,6 +349,58 @@ function replaySession(
         measureTailHygiene(input);
         durations.push(performance.now() - started);
     }
+
+    const nudgeRow = contextDb
+        .prepare(
+            `SELECT last_nudge_tokens, last_input_tokens
+             FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as PersistedNudgeRow | undefined;
+    if (!nudgeRow) throw new Error(`no session_meta row for ${sessionId}`);
+    const channel1State = getChannel1NudgeState(contextDb, sessionId);
+    const channel2LeaseState = getChannel2NudgeState(contextDb, sessionId);
+    const lastNudgeUndropped = getLastNudgeUndropped(contextDb, sessionId);
+    const currentRealUserTurnCount = countRealUserMessages(input.messages);
+    const ctxReduceAvailability = resolveCtxReduceAvailabilityFromMessages(
+        sessionId,
+        input.messages,
+    );
+    const baseline = {
+        baselineU: measured.u,
+        baselineT: measured.t,
+        turnDeltaU: 0,
+        turnDeltaT: 0,
+        evaluable: true,
+        generationInvalidated: false,
+    };
+    const channel1 = decideChannel1({
+        ...baseline,
+        lastNudgeUndropped,
+        lastNudgeLevel: channel1State.level,
+        lastFireOrdinal: channel1State.ordinal,
+        currentRealUserTurnCount,
+        hasRecentReduce: false,
+        postReduceGracePending: channel1State.postReduceGracePending,
+        postReduceGraceBaselineU: channel1State.postReduceGraceBaselineU,
+        postReduceGracePreLevel: channel1State.postReduceGracePreLevel,
+    });
+    const channel2 = evaluateChannel2(baseline);
+    const stickyElapsed =
+        channel1State.ordinal > currentRealUserTurnCount
+            ? CHANNEL1_STICKY_REAL_USER_TURN_GAP
+            : currentRealUserTurnCount - channel1State.ordinal;
+    const currentRank = { quiet: 0, gentle: 1, firm: 2, urgent: 3 }[channel1.band];
+    const preReduceLevel = channel1State.postReduceGracePreLevel ?? channel1State.level;
+    const preReduceRank = preReduceLevel === "" ? 0 : { gentle: 1, firm: 2, urgent: 3 }[preReduceLevel];
+    const measuredPartTokens: Record<string, { t: number; u: number; count: number }> = {};
+    for (const part of measured.parts) {
+        const aggregate = measuredPartTokens[part.kind] ?? { t: 0, u: 0, count: 0 };
+        aggregate.t += part.tokens;
+        aggregate.u += part.uTokens;
+        aggregate.count += 1;
+        measuredPartTokens[part.kind] = aggregate;
+    }
+
     return {
         label,
         sessionId,
@@ -319,6 +413,104 @@ function replaySession(
         severity: measured.u / Math.max(measured.t, 1),
         band: band(measured.u, measured.t),
         walkP95Ms: percentile95(durations),
+        measuredPartTokens,
+        persisted: {
+            lastNudgeTokensWholePromptAtReduce: nudgeRow.last_nudge_tokens,
+            lastInputTokensWholePrompt: nudgeRow.last_input_tokens,
+            lastNudgeUndropped,
+            channel1State,
+            channel2LeaseState,
+        },
+        gates: {
+            ctxReduceAvailability: {
+                pass: ctxReduceAvailability.callable,
+                frozen: ctxReduceAvailability.frozen,
+                reason: ctxReduceAvailability.callable ? "callable" : "filtered-out",
+            },
+            baseline: { pass: true, evaluable: true, generationInvalidated: false },
+            protectionWindow: {
+                floor: protectionWindow.status.floor,
+                protectedCount: protectionWindow.status.protectedCount,
+                protectedMass: protectionWindow.status.protectedMass,
+                cutoff: protectionWindow.cutoff,
+            },
+            channel1MinimumTail: {
+                actual: measured.t,
+                threshold: CHANNEL1_MIN_TOKENS,
+                pass: measured.t >= CHANNEL1_MIN_TOKENS,
+            },
+            channel1ReclaimableFloor: {
+                actual: measured.u,
+                threshold: CHANNEL1_FLOOR_TOKENS,
+                pass: measured.u >= CHANNEL1_FLOOR_TOKENS,
+            },
+            postReduceComplianceGrace: {
+                baselineU: channel1.graceBaselineU,
+                growth: channel1.graceGrowth,
+                growthThreshold: channel1.growthThreshold,
+                formula: "max(25000, round(0.08 * T))",
+                regrowthReached: channel1.graceGrowth >= channel1.growthThreshold,
+                preReduceLevel,
+                escalatedAbovePreReduceBand: currentRank > preReduceRank,
+                holds: channel1.verdictReason === "post-reduce-compliance-grace",
+            },
+            cadence: {
+                lastNudgeUndropped,
+                growth: channel1.cadenceGrowth,
+                growthThreshold: channel1.growthThreshold,
+                pass: channel1.cadenceGrowth >= channel1.growthThreshold,
+            },
+            stickyFloor: {
+                lastFireOrdinal: channel1State.ordinal,
+                currentRealUserTurnCount,
+                elapsed: stickyElapsed,
+                threshold: CHANNEL1_STICKY_REAL_USER_TURN_GAP,
+                turnsRemaining: channel1.stickyTurnsRemaining,
+                pass: channel1.stickyTurnsRemaining === 0,
+            },
+            bandHysteresis: {
+                previousLevel: channel1State.level,
+                currentBand: channel1.band,
+                holds: channel1.dampeningState === "band-hysteresis",
+            },
+            channel1Verdict: {
+                fire: ctxReduceAvailability.callable && channel1.fire,
+                dampening: channel1.dampeningState,
+                reason: ctxReduceAvailability.callable
+                    ? channel1.verdictReason
+                    : "ctx-reduce-unavailable",
+            },
+            channel2MinimumTail: {
+                actual: measured.t,
+                threshold: CHANNEL1_MIN_TOKENS,
+                pass: measured.t >= CHANNEL1_MIN_TOKENS,
+            },
+            channel2ReclaimableFloor: {
+                actual: measured.u,
+                threshold: CHANNEL2_FLOOR_TOKENS,
+                pass: measured.u >= CHANNEL2_FLOOR_TOKENS,
+            },
+            channel2RatioCeiling: {
+                actual: channel2.severity,
+                threshold: CHANNEL2_SEVERITY_THRESHOLD,
+                pass: channel2.severity >= CHANNEL2_SEVERITY_THRESHOLD,
+            },
+            channel2Lease: {
+                state: channel2LeaseState || "empty",
+                permitsArm: channel2LeaseState === "",
+            },
+            channel2Verdict: {
+                trigger: ctxReduceAvailability.callable && channel2.shouldTrigger,
+                reason: ctxReduceAvailability.callable
+                    ? channel2.verdictReason
+                    : "ctx-reduce-unavailable",
+            },
+        },
+        channel1Log: formatChannel1Evaluation(channel1, ctxReduceAvailability.callable),
+        channel2Log: formatChannel2Evaluation(channel2, {
+            ctxReduceCallable: ctxReduceAvailability.callable,
+            leaseBefore: channel2LeaseState,
+        }),
     };
 }
 
@@ -327,6 +519,7 @@ const { values } = parseArgs({
         "context-db": { type: "string" },
         "opencode-db": { type: "string" },
         output: { type: "string" },
+        session: { type: "string" },
     },
 });
 const testDataRootRaw = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
@@ -347,8 +540,14 @@ const opencodeDb = new Database(opencodeDbPath, { readonly: true });
 contextDb.exec("PRAGMA query_only = ON");
 opencodeDb.exec("PRAGMA query_only = ON");
 try {
-    const results = CALIBRATION_SESSIONS.map(({ label, sessionId }) =>
-        replaySession(contextDb, opencodeDb, label, sessionId),
+    const sessions = values.session
+        ? [{ label: `requested-${values.session}`, sessionId: values.session, protectionFloor: null }]
+        : CALIBRATION_SESSIONS.map((session) => ({
+              ...session,
+              protectionFloor: PROTECTED_TOKEN_FLOOR,
+          }));
+    const results = sessions.map(({ label, sessionId, protectionFloor }) =>
+        replaySession(contextDb, opencodeDb, label, sessionId, protectionFloor),
     );
     const distribution = Object.fromEntries(
         ["quiet", "gentle", "firm", "urgent", "channel2"].map((name) => [
@@ -360,11 +559,16 @@ try {
         {
             formula: "clamp(U / max(T, 1), 0, 1)",
             constantsChanged: false,
-            protectedTokenFloor: PROTECTED_TOKEN_FLOOR,
-            snapshotMode: "readonly VACUUM-INTO fixture replay",
+            protectedTokenFloor: values.session ? "persisted-session-snapshot" : PROTECTED_TOKEN_FLOOR,
+            snapshotMode: "readonly database replay",
             results,
             distribution,
-            flagshipPositiveControl: { u: 162_000, t: 249_000, severity: 0.651, band: "channel2" },
+            flagshipPositiveControl: {
+                u: 162_000,
+                t: 249_000,
+                severity: 162_000 / 249_000,
+                band: band(162_000, 249_000),
+            },
             walkCostGate: measureWalkCostGate(),
         },
         null,
