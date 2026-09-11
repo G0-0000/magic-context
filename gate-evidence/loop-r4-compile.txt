@@ -1,0 +1,21 @@
+   Compiling mc-module v0.1.0 (/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/pool-258/crates/mc-module)
+error[E0425]: cannot find value `tags` in this scope
+     --> crates/mc-module/src/lib.rs:19064:52
+      |
+19064 |             &test_reasoning_clear_units(&request, &tags, 1),
+      |                                                    ^^^^ not found in this scope
+
+error[E0425]: cannot find value `second_request` in this scope
+     --> crates/mc-module/src/lib.rs:19712:42
+      |
+19712 |             &test_reasoning_clear_units(&second_request, &tags, 1),
+      |                                          ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `tags` in this scope
+     --> crates/mc-module/src/lib.rs:19712:59
+      |
+19712 |             &test_reasoning_clear_units(&second_request, &tags, 1),
+      |                                                           ^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `mc-module` (lib test) due to 3 previous errors

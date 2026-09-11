@@ -1763,6 +1763,9 @@ pub struct TransformWithProjection {
     pub trim_mismatch: Option<TrimMismatch>,
     pub revert_epoch: u64,
     pub reasoning_watermark: u64,
+    /// Committed reasoning-clear units that let native finalization replay the same
+    /// decisions as CK rendering without reconsidering age or newest-assistant status.
+    pub reasoning_clear_units: Vec<FrozenUnit>,
     /// Whether unmatched native tool shells may use the transition coalescer. The durable marker
     /// records that the compatibility salt already triggered the required cache-invalidating HARD,
     /// so all later replays use the same encoding.
@@ -2573,6 +2576,7 @@ fn lineage_protocol_passthrough(
         trim_mismatch: None,
         revert_epoch: 0,
         reasoning_watermark: 0,
+        reasoning_clear_units: Vec::new(),
         transition_consumed: false,
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
@@ -3163,6 +3167,7 @@ fn apply_additive_only(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
+        reasoning_clear_units: Vec::new(),
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
@@ -3616,6 +3621,7 @@ fn apply_once(
                 .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
             let mut next_meta = loaded.meta.clone();
             next_meta.served_output_fingerprint = served_fingerprints;
+            next_meta.served_output_generation = Some(reasoning_generation(&next_meta));
             let fingerprint_changed = next_meta != loaded.meta;
             let row_version = if fingerprint_changed {
                 #[cfg(test)]
@@ -3731,6 +3737,7 @@ fn apply_once(
             .as_ref()
             .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
         meta.served_output_fingerprint = served_fingerprints;
+        meta.served_output_generation = Some(reasoning_generation(&meta));
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
         let row_version = store.commit_transform(
@@ -4128,7 +4135,17 @@ fn apply_once(
                 .or_else(|| req.usage.as_ref().map(|usage| usage.context_limit_tokens))
                 .unwrap_or(200_000),
         );
-    let hard_fold_requested = pre_snapshot_inputs_changed
+    let reasoning_exemption_repair = !req.is_subagent
+        && (reasoning_clear_exemption_changed(&loaded.core, req, lineage_anchor_mid)
+            || legacy_reasoning_exemption_changed(
+                &loaded.core,
+                &loaded.meta,
+                req,
+                &projection,
+                lineage_anchor_mid,
+            ));
+    let hard_fold_requested = reasoning_exemption_repair
+        || pre_snapshot_inputs_changed
         || first_fold_due
         || boundary_divergence_recut.is_some()
         || scheduler_outcome.idle_ttl_fired
@@ -4424,6 +4441,9 @@ fn apply_once(
     }
     if pre_snapshot_inputs_changed {
         materialize_reason = Some("protected_tokens_inputs_changed".to_string());
+    }
+    if reasoning_exemption_repair {
+        materialize_reason = Some("reasoning_exemption_repair".to_string());
     }
 
     timings.planning = elapsed_ms(planning_started_at);
@@ -5513,6 +5533,44 @@ fn apply_once(
         output_meta.coverage_ordinal = None;
         no_trim_meta = Some(output_meta);
     }
+    refresh_reasoning_clear_exemptions(&mut core, req, is_bust_pass, lineage_anchor_mid);
+    core.frozen_units.extend(new_reasoning_clear_units(
+        &core,
+        &meta,
+        req,
+        &tag_numbers,
+        is_bust_pass,
+        lineage_anchor_mid,
+        ReasoningClearSnapshot {
+            meta: &loaded.meta,
+            row_version: loaded.row_version,
+            projection: &projection,
+        },
+    ));
+    let legacy_adoption_complete = core
+        .frozen_units
+        .iter()
+        .any(|unit| unit.key.starts_with("strip:reasoning_clear:"))
+        && !core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX));
+    if (is_bust_pass || legacy_adoption_complete)
+        && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
+        && req.serve_native
+    {
+        meta.reasoning_clear_initialized = true;
+        meta.reasoning_replay_evidence = None;
+    }
+    let cleared_mids = reasoning_clear_mids(&core.frozen_units)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    core.frozen_units.retain(|unit| {
+        unit.key
+            .strip_prefix("strip:native_reasoning_keep:")
+            .is_none_or(|mid| !cleared_mids.contains(mid))
+    });
     let output_meta = no_trim_meta.as_ref().unwrap_or(&meta);
     // OpenCode must replay the newest signed assistant's complete native vector. Its
     // demotion is not permission to apply previously withheld overlays on a defer.
@@ -5524,7 +5582,9 @@ fn apply_once(
     if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) && req.serve_native {
         if let Some(mid) = latest_assistant_reasoning_mutation_exempt_mid(&req.messages) {
             if req.messages.iter().any(|message| {
-                message.mid == mid && message.ck.content.iter().any(is_reasoning_block)
+                message.mid == mid
+                    && !cleared_mids.contains(mid)
+                    && message.ck.content.iter().any(is_reasoning_block)
             }) {
                 let key = format!("strip:native_reasoning_keep:{mid}");
                 if !core.frozen_units.iter().any(|unit| unit.key == key) {
@@ -5725,6 +5785,7 @@ fn apply_once(
     // last-known-good representation while the mismatch remains.
     if !deferred_frozen_prefix_divergence {
         meta.served_output_fingerprint = served_fingerprints;
+        meta.served_output_generation = Some(reasoning_generation(&meta));
     }
 
     let channel2_output = channel2_directives(
@@ -5761,6 +5822,17 @@ fn apply_once(
     let scheduler_applied_reductions = frozen_red_targets(&core)
         .iter()
         .any(|target| !frozen_reductions_before.contains(target));
+    let reasoning_clear_units = core
+        .frozen_units
+        .iter()
+        .filter(|unit| {
+            unit.key.starts_with("strip:reasoning_clear:")
+                || unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX)
+        })
+        .cloned()
+        .collect();
+    core.frozen_units
+        .retain(|unit| !unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX));
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -5877,6 +5949,7 @@ fn apply_once(
         reasoning_watermark: meta
             .reasoning_cleared_through_tag
             .max(meta.reasoning_cleared_through_ordinal),
+        reasoning_clear_units,
         transition_consumed: transition_consumed(&core),
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
@@ -7916,6 +7989,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs<'_>) -> TransformWith
         trim_mismatch,
         revert_epoch,
         reasoning_watermark,
+        reasoning_clear_units: Vec::new(),
         transition_consumed,
         mutation_exempt_mid,
         lineage_anchor_mid: None,
@@ -11293,6 +11367,8 @@ fn tag_age_cutoff(req: &TransformRequest, tag_numbers: &BTreeMap<String, u64>) -
     Some(max_tag.saturating_sub(req.clear_reasoning_age))
 }
 
+include!("transform/reasoning_clear.rs");
+
 fn new_frozen_strip_units(
     core: &CoreState,
     req: &TransformRequest,
@@ -11493,6 +11569,7 @@ fn apply_surface_strips(
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_policy: ReasoningMutationPolicy,
 ) {
+    replay_reasoning_clear(frozen_units, &message.mid, rebuilt);
     let sentinel = provider_sentinel_text(req);
     let whole_strip = (!reasoning_policy.exempt)
         .then(|| {
@@ -11531,20 +11608,7 @@ fn apply_surface_strips(
                 continue;
             }
         }
-        let clear_typed_reasoning = !reasoning_policy.exempt
-            && message.ck.role == "assistant"
-            && aged
-            && request_accepts_empty_content(req)
-            && matches!(&block.wire.kind, ck_wire::CkKind::Reasoning { .. });
-        if clear_typed_reasoning {
-            rebuilt.content[index].kind = ck_wire::CkKind::Reasoning {
-                text: String::new(),
-                signature: None,
-            };
-            rebuilt.content[index].mark_modified();
-            touched = true;
-            continue;
-        }
+
         let should_strip =
             (request_accepts_empty_content(req) && stale_reduce && is_reduce_block(&block.wire))
                 || ((image_seed
@@ -11599,6 +11663,7 @@ fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<Frozen
             // full-array request.
             unit.key.starts_with("strip:merged_reasoning:")
                 || unit.key.starts_with("strip:reasoning_age:")
+                || unit.key.starts_with("strip:reasoning_clear:")
                 || unit.key.starts_with("strip:trailing_blank_keep:")
                 || unit.key.starts_with("strip:trailing_blank_strip:")
                 || unit
@@ -12519,6 +12584,7 @@ fn new_merged_reasoning_strip_units(
         .map(|unit| unit.key.as_str())
         .collect::<HashSet<_>>();
     let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let clear_lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
     let mut prev_assistant = false;
     let mut units = Vec::new();
     // Detect against the fully rendered message so earlier reductions and sentinel replacements
@@ -12528,7 +12594,9 @@ fn new_merged_reasoning_strip_units(
         let first_assistant_in_run = rendered.role == "assistant" && !prev_assistant;
         if let Some(mid) = rendered.meta.harness_id.as_deref() {
             let key = format!("strip:merged_reasoning:{mid}");
-            if !existing_keys.contains(key.as_str()) {
+            if !existing_keys.contains(key.as_str())
+                && active_reasoning_clear(&clear_lookup, mid).is_none()
+            {
                 let mut candidate = rendered.clone().into_message();
                 let mutation_exempt = mutation_exempt_mid == Some(mid);
                 if apply_serializer_residual_to_message(
@@ -13300,8 +13368,10 @@ fn build_output_with_tags_inner(
             .is_some_and(|(anchor_mid, _)| anchor_mid == msg.mid);
         let mutation_exempt =
             mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
-        let reasoning_mutation_exempt =
-            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
+        let reasoning_mutation_exempt = reasoning_mutation_exempt_mid == Some(msg.mid.as_str())
+            || lineage_anchor_exempt
+            || output_message_strip_unit(&frozen_units, "reasoning_clear", &msg.mid)
+                .is_some_and(|unit| unit.reset_rule == REASONING_CLEAR_SUSPENDED);
         let first_assistant_in_run = msg.ck.role == "assistant" && !prev_assistant;
         let blocks = blocks_by_mid
             .get(msg.mid.as_str())
@@ -13445,6 +13515,9 @@ fn build_output_with_tags_inner(
                         rebuilt.mark_modified();
                     }
                 }
+                if mutation_exempt {
+                    replay_reasoning_clear(&frozen_units, &msg.mid, &mut rebuilt);
+                }
                 if !mutation_exempt {
                     apply_surface_strips(
                         &frozen_units,
@@ -13503,6 +13576,7 @@ fn build_output_with_tags_inner(
                 if let Some(profile) = serializer_profile {
                     if output_message_strip_unit(&frozen_units, "merged_reasoning", &msg.mid)
                         .is_some()
+                        && active_reasoning_clear(&frozen_units, &msg.mid).is_none()
                     {
                         apply_serializer_residual_to_message(
                             profile,
@@ -13802,7 +13876,7 @@ pub(crate) fn clear_served_native_reasoning(
     native_messages: &mut [Value],
     served_messages: &[CkWireMessage],
     ingress_messages: &[CkIngressMessage],
-    watermark: u64,
+    reasoning_clear_units: &[FrozenUnit],
     mid_turn: bool,
 ) -> usize {
     clear_served_native_reasoning_with_tags(
@@ -13811,14 +13885,15 @@ pub(crate) fn clear_served_native_reasoning(
         native_messages,
         served_messages,
         ingress_messages,
-        watermark,
+        reasoning_clear_units,
         mid_turn,
         &BTreeMap::new(),
     )
 }
 
-// Native encoding is deliberately last: it needs both the CK result and ingress/tag
-// ownership to prevent the codec's latest-assistant shortcut from restoring old reasoning.
+// Run native encoding last and replay the same committed clear units as CK rendering.
+// Codec-specific shortcuts must neither restore reasoning nor clear it for the first
+// time on a deferred pass that has no permission to change provider-visible bytes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clear_served_native_reasoning_with_tags(
     profile: SerializerProfile,
@@ -13826,7 +13901,7 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
     native_messages: &mut [Value],
     served_messages: &[CkWireMessage],
     ingress_messages: &[CkIngressMessage],
-    watermark: u64,
+    reasoning_clear_units: &[FrozenUnit],
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> usize {
@@ -13836,7 +13911,7 @@ pub(crate) fn clear_served_native_reasoning_with_tags(
         native_messages,
         served_messages.iter(),
         ingress_messages,
-        watermark,
+        reasoning_clear_units,
         mid_turn,
         tag_numbers,
     )
@@ -13849,7 +13924,7 @@ pub(crate) fn clear_served_native_reasoning_from_served(
     native_messages: &mut [Value],
     served_messages: &[ServedMessage],
     ingress_messages: &[CkIngressMessage],
-    watermark: u64,
+    reasoning_clear_units: &[FrozenUnit],
     mid_turn: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> usize {
@@ -13859,7 +13934,7 @@ pub(crate) fn clear_served_native_reasoning_from_served(
         native_messages,
         served_messages.iter().map(Deref::deref),
         ingress_messages,
-        watermark,
+        reasoning_clear_units,
         mid_turn,
         tag_numbers,
     )
@@ -13871,14 +13946,14 @@ fn clear_served_native_reasoning_from_iter<'a>(
     provider_accepts_empty_content: bool,
     native_messages: &mut [Value],
     served_messages: impl IntoIterator<Item = &'a CkWireMessage>,
-    ingress_messages: &[CkIngressMessage],
-    watermark: u64,
+    _ingress_messages: &[CkIngressMessage],
+    reasoning_clear_units: &[FrozenUnit],
     _mid_turn: bool,
-    tag_numbers: &BTreeMap<String, u64>,
+    _tag_numbers: &BTreeMap<String, u64>,
 ) -> usize {
     if profile != SerializerProfile::OpencodeAiSdk
         || !provider_accepts_empty_content
-        || watermark == 0
+        || reasoning_clear_units.is_empty()
     {
         return 0;
     }
@@ -13892,22 +13967,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
         return 0;
     }
 
-    let mut ordinal_by_mid = HashMap::new();
-    let mut newest_assistant_mid = None;
-    let mut newest_assistant_ordinal = 0;
-    for message in ingress_messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic)
-    {
-        ordinal_by_mid.insert(message.mid.as_str(), message.ordinal);
-        if message.ck.role == "assistant"
-            && has_reasoning_replay_content(message)
-            && message.ordinal >= newest_assistant_ordinal
-        {
-            newest_assistant_ordinal = message.ordinal;
-            newest_assistant_mid = Some(message.mid.as_str());
-        }
-    }
+    let cleared_mids = reasoning_native_clear_mids(reasoning_clear_units);
 
     let mut cleared = 0;
     for raw_message in native_messages {
@@ -13924,11 +13984,7 @@ fn clear_served_native_reasoning_from_iter<'a>(
         {
             continue;
         }
-        let Some(&ordinal) = ordinal_by_mid.get(mid) else {
-            continue;
-        };
-        let age_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
-        if age_number > watermark || newest_assistant_mid == Some(mid) {
+        if !cleared_mids.contains(mid) {
             continue;
         }
 
@@ -21777,7 +21833,7 @@ pub(crate) mod tests {
                 &mut native,
                 std::slice::from_ref(&live.ck),
                 &ingress,
-                u64::MAX,
+                &[],
                 false,
             ),
             0
@@ -22331,6 +22387,9 @@ pub(crate) mod tests {
         );
     }
 
+    include!("transform/reasoning_clear_tests.rs");
+    include!("transform/reasoning_clear_gate_tests.rs");
+
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {
         fn signed_assistant(mid: &str, ordinal: u64) -> CkIngressMessage {
@@ -22767,7 +22826,7 @@ pub(crate) mod tests {
                 &mut native,
                 &served,
                 &ingress,
-                60,
+                &[strip_unit("reasoning_clear", "old", "")],
                 false,
             ),
             1,
@@ -22783,7 +22842,7 @@ pub(crate) mod tests {
                 &mut native,
                 &served,
                 &ingress,
-                60,
+                &[strip_unit("reasoning_clear", "old", "")],
                 false,
             ),
             0
@@ -22807,7 +22866,7 @@ pub(crate) mod tests {
                 &mut in_flight,
                 &served,
                 &ingress,
-                60,
+                &[strip_unit("reasoning_clear", "old", "")],
                 true,
             ),
             1
@@ -22901,7 +22960,7 @@ pub(crate) mod tests {
                     &mut native,
                     std::slice::from_ref(&message),
                     &ingress,
-                    1,
+                    &[strip_unit("reasoning_clear", "assistant", "")],
                     false,
                 ),
                 0
@@ -25977,7 +26036,7 @@ pub(crate) mod tests {
         let first_stats = crate::attach_native_messages_incremental(
             &mut first,
             &request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -26007,7 +26066,7 @@ pub(crate) mod tests {
         let replay_stats = crate::attach_native_messages_incremental(
             &mut replay,
             &request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -26176,7 +26235,7 @@ pub(crate) mod tests {
         crate::attach_native_messages_incremental(
             &mut first_native,
             &first_request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -26203,7 +26262,7 @@ pub(crate) mod tests {
         let stats = crate::attach_native_messages_incremental(
             &mut moved_native,
             &moved_request,
-            0,
+            &[],
             &BTreeMap::new(),
             None,
             None,
@@ -35325,7 +35384,7 @@ pub(crate) mod tests {
         let mut response =
             TransformResponse::passthrough(served, request.full_array_fingerprint.clone());
         let attach_started_at = Instant::now();
-        crate::attach_native_messages(&mut response, &request, 0, None);
+        crate::attach_native_messages(&mut response, &request, &[], None);
         let attach_ms = elapsed_ms(attach_started_at);
         let encode_started_at = Instant::now();
         let _encoded = serde_json::to_vec(&response).unwrap();
