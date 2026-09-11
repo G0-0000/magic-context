@@ -1,0 +1,11 @@
+{
+    "model": "gpt-fixture",
+    "instructions": "stable system",
+    "input": [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "cached prefix before" }]
+        }
+    ]
+}

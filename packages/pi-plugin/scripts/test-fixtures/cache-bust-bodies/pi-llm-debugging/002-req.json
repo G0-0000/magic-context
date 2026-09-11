@@ -1,0 +1,11 @@
+{
+	"model": "gpt-fixture",
+	"instructions": "stable pi system",
+	"input": [
+		{
+			"type": "message",
+			"role": "user",
+			"content": [{ "type": "input_text", "text": "pi body after" }]
+		}
+	]
+}

@@ -1,23 +1,23 @@
 #!/usr/bin/env bun
 /**
- * analyze-cache-busts.ts — walk a session's anthropic-auth request dumps in
- * order and attribute prompt changes while using the provider's usage meter
- * as the cache-hit verdict.
+ * analyze-cache-busts.ts — walk a session's authentication-plugin request
+ * dumps and attribute prompt changes using the provider's usage meter.
  *
- * The opencode-anthropic-auth plugin dumps every outbound request body to a
- * temp dir (`<tmpdir>/opencode-anthropic-auth-dumps/*.body.json`) alongside a
- * `.meta.json` and, when available, a `.response.json`. This tool reconstructs
- * the wire-order segment list for each request and finds the first segment
- * whose content changed versus the preceding same-session request. That byte
- * comparison is attribution only: Anthropic's cache usage meter determines
- * whether the request actually busted the cache.
+ * anthropic-auth bodies use `system` + `messages[]` and explicit cache-control
+ * breakpoints. openai-auth bodies are OpenAI Responses requests: `instructions`
+ * + `input[]`, where message, function-call, and function-output items share an
+ * implicit prefix cache. WebSocket openai-auth captures may omit response files.
+ * Both shapes are normalized to role + part type/length/text-prefix messages so
+ * attribution and --show-diff have the same output on either lane.
  *
  * Usage:
  *   bun scripts/analyze-cache-busts.ts <sessionIdPrefix> [options]
  *   bun scripts/analyze-cache-busts.ts --session <sessionIdPrefix> [options]
  * Options:
  *   --session <id>   session id or prefix (positional form is also supported)
- *   --dir <path>     dump dir (default: <tmpdir>/opencode-anthropic-auth-dumps)
+ *   --dir <path>     inspect only one explicit dump dir (legacy override)
+ *   --anthropic-dir  anthropic-auth dir (env: OPENCODE_ANTHROPIC_AUTH_DUMP_DIR)
+ *   --openai-dir     openai-auth dir (env: OPENCODE_OPENAI_AUTH_DUMP_DIR)
  *   --since <time>   created at/after ISO time or duration ago (for example 30m)
  *   --until <time>   created at/before ISO time or duration ago
  *   --limit <N>      only the last N requests in range
@@ -25,21 +25,41 @@
  *   --all-busts      list every diverging segment, not just the first
  *   --all-rows       also print STABLE and UNMETERED rows
  */
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    type BodyProvider,
+    describeNormalizedMessage,
+    type NormalizedMessage,
+    normalizeRequestBody,
+} from "./cache-bust-body-sources";
 
 type Json = Record<string, unknown>;
 type ByteVerdict = "BUST" | "STABLE";
 type MeterVerdict = ByteVerdict | "LATENCY" | "UNMETERED";
 type MeterVsBytes = "AGREE" | "BYTES-ONLY" | "LATENCY" | "UNMETERED";
 
-interface Segment {
+interface Segment extends NormalizedMessage {
     id: string;
-    hash: string;
-    bytes: number;
-    breakpoint: boolean;
+}
+
+interface DumpSource {
+    provider: BodyProvider;
+    dir: string;
+    label: string;
+}
+
+interface Args {
+    sessionPrefix: string;
+    sources: DumpSource[];
+    since?: string;
+    until?: string;
+    limit?: number;
+    showDiff: boolean;
+    allBusts: boolean;
+    allRows: boolean;
+    help: boolean;
 }
 
 interface MeterUsage {
@@ -48,6 +68,8 @@ interface MeterUsage {
     input: number;
     total: number;
     source: string;
+    provider: BodyProvider;
+    rule: string;
 }
 
 interface Snapshot {
@@ -57,6 +79,8 @@ interface Snapshot {
     createdAt: string;
     session: string;
     messagesCount: number;
+    provider: BodyProvider;
+    sourceDir: string;
     segments: Segment[];
     usage?: MeterUsage;
     orderCreatedAt: string;
@@ -78,26 +102,35 @@ interface AnalysisRow {
     rewrittenTokens?: number;
 }
 
-function sha(s: string): string {
-    return createHash("sha256").update(s).digest("hex").slice(0, 10);
+interface DumpCandidate {
+    source: DumpSource;
+    session: string;
+    latestMtimeMs: number;
+    totalBytes: number;
+    dumpCount: number;
 }
 
-function parseArgs(argv: string[]): {
-    sessionPrefix: string;
-    dir: string;
-    since?: string;
-    until?: string;
-    limit?: number;
-    showDiff: boolean;
-    allBusts: boolean;
-    allRows: boolean;
-} {
+interface SnapshotSelection {
+    snapshots: Snapshot[];
+    selected?: DumpCandidate;
+    candidates: DumpCandidate[];
+}
+
+function parseArgs(argv: string[]): Args {
     const args = argv.slice(2);
     const getOpt = (name: string): string | undefined => {
         const i = args.indexOf(name);
         return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
     };
-    const valueOptions = new Set(["--session", "--dir", "--since", "--until", "--limit"]);
+    const valueOptions = new Set([
+        "--session",
+        "--dir",
+        "--anthropic-dir",
+        "--openai-dir",
+        "--since",
+        "--until",
+        "--limit",
+    ]);
     let positionalSession = "";
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
@@ -111,15 +144,37 @@ function parseArgs(argv: string[]): {
         }
     }
     const limitRaw = getOpt("--limit");
+    const singleDir = getOpt("--dir");
+    const sources: DumpSource[] = singleDir
+        ? [{ provider: "anthropic", dir: singleDir, label: "explicit --dir" }]
+        : [
+              {
+                  provider: "anthropic",
+                  dir:
+                      getOpt("--anthropic-dir") ??
+                      process.env.OPENCODE_ANTHROPIC_AUTH_DUMP_DIR ??
+                      join(tmpdir(), "opencode-anthropic-auth-dumps"),
+                  label: "anthropic-auth",
+              },
+              {
+                  provider: "openai",
+                  dir:
+                      getOpt("--openai-dir") ??
+                      process.env.OPENCODE_OPENAI_AUTH_DUMP_DIR ??
+                      join(tmpdir(), "opencode-openai-auth-dumps"),
+                  label: "openai-auth",
+              },
+          ];
     return {
         sessionPrefix: getOpt("--session") ?? positionalSession,
-        dir: getOpt("--dir") ?? join(tmpdir(), "opencode-anthropic-auth-dumps"),
+        sources,
         since: getOpt("--since"),
         until: getOpt("--until"),
         limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
         showDiff: args.includes("--show-diff"),
         allBusts: args.includes("--all-busts"),
         allRows: args.includes("--all-rows"),
+        help: args.includes("--help") || args.includes("-h"),
     };
 }
 
@@ -146,7 +201,7 @@ function parseDumpFilename(file: string): {
     const session = /(?:^|-)(ses_[A-Za-z0-9]+)(?=-|\.meta\.json$)/.exec(file);
     if (!timestamp || !session) return null;
     const rest = file.slice(timestamp.index + timestamp[0].length);
-    const sequence = /^-(\d+)(?=-ses_)/.exec(rest);
+    const sequence = /-(\d+)(?=-ses_)/.exec(rest);
     return {
         createdAt: `${timestamp[1]}:${timestamp[2]}:${timestamp[3]}.${timestamp[4]}Z`,
         sequence: sequence ? Number.parseInt(sequence[1], 10) : 0,
@@ -159,82 +214,47 @@ function sessionMatches(candidate: string, prefix: string): boolean {
     return candidate.startsWith(prefix) || prefix.startsWith(visibleHead);
 }
 
-/** Recursively strip `cache_control` fields because marker movement is not content. */
-function stripCacheControl(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(stripCacheControl);
-    if (value && typeof value === "object") {
-        const out: Json = {};
-        for (const [k, v] of Object.entries(value as Json)) {
-            if (k === "cache_control") continue;
-            out[k] = stripCacheControl(v);
-        }
-        return out;
-    }
-    return value;
-}
-
-function hasCacheControl(block: unknown): boolean {
-    return !!block && typeof block === "object" && "cache_control" in (block as Json);
-}
-
-function messageHasBreakpoint(msg: Json): boolean {
-    const content = msg.content;
-    if (Array.isArray(content)) return content.some((part) => hasCacheControl(part));
-    return hasCacheControl(msg);
-}
-
-/** Normalize the per-request billing nonce so it isn't seen as a content change. */
-function normalizeSystemText(text: string): string {
-    return text.replace(/cch=[^;]*;/g, "cch=<NONCE>;");
-}
-
-function blockText(block: unknown): string {
-    if (block && typeof block === "object" && typeof (block as Json).text === "string") {
-        return (block as Json).text as string;
-    }
-    return JSON.stringify(stripCacheControl(block));
-}
-
-function normalizedSystemSegment(block: unknown): string {
-    return normalizeSystemText(blockText(block));
-}
-
-function normalizedMessageSegment(message: Json): string {
-    return JSON.stringify({ role: message.role, content: stripCacheControl(message.content) });
-}
-
-function buildSegments(body: Json): Segment[] {
-    const segs: Segment[] = [];
-    const system = body.system;
-    const sysBlocks = Array.isArray(system) ? system : system != null ? [system] : [];
-    sysBlocks.forEach((block, index) => {
-        const raw = blockText(block);
-        segs.push({
-            id: `system[${index}]`,
-            hash: sha(normalizedSystemSegment(block)),
-            bytes: Buffer.byteLength(raw),
-            breakpoint: hasCacheControl(block),
-        });
-    });
-    const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
-    messages.forEach((message, index) => {
-        segs.push({
-            id: `message[${index}](${String(message.role)})`,
-            hash: sha(normalizedMessageSegment(message)),
-            bytes: Buffer.byteLength(JSON.stringify(message)),
-            breakpoint: messageHasBreakpoint(message),
-        });
-    });
-    return segs;
+function buildSegments(body: Json, provider?: BodyProvider): { provider: BodyProvider; segments: Segment[] } {
+    const normalized = normalizeRequestBody(body, provider);
+    return {
+        provider: normalized.provider,
+        segments: normalized.messages.map((message, index) => ({
+            ...message,
+            id: `message[${index}] ${describeNormalizedMessage(message)}`,
+        })),
+    };
 }
 
 function asJson(value: unknown): Json | undefined {
     return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
-function meterUsage(value: unknown, source: string): MeterUsage | undefined {
+function meterUsage(value: unknown, source: string, provider: BodyProvider): MeterUsage | undefined {
     const usage = asJson(value);
-    if (!usage || typeof usage.input_tokens !== "number" || !Number.isFinite(usage.input_tokens)) {
+    if (!usage) return undefined;
+    if (provider === "openai") {
+        const promptTokens = usage.prompt_tokens ?? usage.input_tokens;
+        const details = asJson(usage.prompt_tokens_details) ?? asJson(usage.input_tokens_details);
+        const cachedTokens = details?.cached_tokens ?? 0;
+        if (
+            typeof promptTokens !== "number" ||
+            !Number.isFinite(promptTokens) ||
+            typeof cachedTokens !== "number" ||
+            !Number.isFinite(cachedTokens)
+        ) {
+            return undefined;
+        }
+        return {
+            cacheRead: cachedTokens,
+            cacheCreation: 0,
+            input: Math.max(0, promptTokens - cachedTokens),
+            total: promptTokens,
+            source,
+            provider,
+            rule: "OpenAI implicit-prefix cache: prompt_tokens_details.cached_tokens; no write premium",
+        };
+    }
+    if (typeof usage.input_tokens !== "number" || !Number.isFinite(usage.input_tokens)) {
         return undefined;
     }
     const cacheRead = usage.cache_read_input_tokens;
@@ -252,35 +272,44 @@ function meterUsage(value: unknown, source: string): MeterUsage | undefined {
         input: usage.input_tokens,
         total: (cacheRead ?? 0) + (cacheCreation ?? 0) + usage.input_tokens,
         source,
+        provider,
+        rule: "Anthropic explicit cache: cache_read_input_tokens + direct input versus prior read/write/input total",
     };
 }
 
 /** Collect usage from completed JSON responses and from message_start/message_delta stream events. */
-function collectUsageCandidates(value: unknown, source: string, candidates: MeterUsage[]): void {
+function collectUsageCandidates(
+    value: unknown,
+    source: string,
+    provider: BodyProvider,
+    candidates: MeterUsage[],
+): void {
     if (Array.isArray(value)) {
-        value.forEach((entry, index) => collectUsageCandidates(entry, `${source}[${index}]`, candidates));
+        value.forEach((entry, index) => {
+            collectUsageCandidates(entry, `${source}[${index}]`, provider, candidates);
+        });
         return;
     }
     const object = asJson(value);
     if (!object) return;
 
     const eventType = typeof object.type === "string" ? object.type : source;
-    const direct = meterUsage(object.usage, `${eventType}.usage`);
+    const direct = meterUsage(object.usage, `${eventType}.usage`, provider);
     if (direct) candidates.push(direct);
     const message = asJson(object.message);
-    const messageUsage = meterUsage(message?.usage, `${eventType}.message.usage`);
+    const messageUsage = meterUsage(message?.usage, `${eventType}.message.usage`, provider);
     if (messageUsage) candidates.push(messageUsage);
 
     for (const [key, child] of Object.entries(object)) {
         if (key === "usage" || key === "message") continue;
         if (typeof child === "string" && key === "data") {
             try {
-                collectUsageCandidates(JSON.parse(child), `${source}.data`, candidates);
+                collectUsageCandidates(JSON.parse(child), `${source}.data`, provider, candidates);
             } catch {
                 // A non-JSON SSE data line cannot contain the usage meter.
             }
         } else if (child && typeof child === "object") {
-            collectUsageCandidates(child, `${source}.${key}`, candidates);
+            collectUsageCandidates(child, `${source}.${key}`, provider, candidates);
         }
     }
 }
@@ -303,12 +332,15 @@ function parseResponsePayloads(raw: string): unknown[] {
     }
 }
 
-function loadMeterUsage(responsePath: string | undefined): MeterUsage | undefined {
+function loadMeterUsage(
+    responsePath: string | undefined,
+    provider: BodyProvider = "anthropic",
+): MeterUsage | undefined {
     if (!responsePath || !existsSync(responsePath)) return undefined;
     try {
         const candidates: MeterUsage[] = [];
         for (const payload of parseResponsePayloads(readFileSync(responsePath, "utf8"))) {
-            collectUsageCandidates(payload, "response", candidates);
+            collectUsageCandidates(payload, "response", provider, candidates);
         }
         return candidates.at(-1);
     } catch {
@@ -316,78 +348,148 @@ function loadMeterUsage(responsePath: string | undefined): MeterUsage | undefine
     }
 }
 
-function loadSnapshots(opts: ReturnType<typeof parseArgs>): Snapshot[] {
+function artifactPaths(source: DumpSource, metaFile: string, meta: Json): {
+    bodyPath?: string;
+    responsePath?: string;
+} {
+    const files = asJson(meta.files);
+    const referencedBodyPath = typeof files?.body === "string" ? files.body : undefined;
+    const adjacentBodyPath = join(source.dir, metaFile.replace(/\.meta\.json$/, ".body.json"));
+    const bodyPath =
+        referencedBodyPath && existsSync(referencedBodyPath)
+            ? referencedBodyPath
+            : existsSync(adjacentBodyPath)
+              ? adjacentBodyPath
+              : undefined;
+    const referencedResponsePath = typeof files?.response === "string" ? files.response : undefined;
+    const adjacentResponsePath = join(source.dir, metaFile.replace(/\.meta\.json$/, ".response.json"));
+    const responsePath =
+        referencedResponsePath && existsSync(referencedResponsePath)
+            ? referencedResponsePath
+            : existsSync(adjacentResponsePath)
+              ? adjacentResponsePath
+              : undefined;
+    return { bodyPath, responsePath };
+}
+
+function discoverDumpCandidates(opts: Args): DumpCandidate[] {
+    const candidates = new Map<string, DumpCandidate>();
     const since = resolveTimeBound(opts.since);
     const until = resolveTimeBound(opts.until);
-    const metas = readdirSync(opts.dir).filter((file) => file.endsWith(".meta.json"));
-    const snaps: Snapshot[] = [];
-    for (const metaFile of metas) {
-        const dumpName = parseDumpFilename(metaFile);
-        if (dumpName && !sessionMatches(dumpName.session, opts.sessionPrefix)) continue;
+    for (const source of opts.sources) {
+        if (!existsSync(source.dir)) continue;
+        for (const metaFile of readdirSync(source.dir).filter((file) => file.endsWith(".meta.json"))) {
+            const parsedName = parseDumpFilename(metaFile);
+            let meta: Json;
+            try {
+                meta = JSON.parse(readFileSync(join(source.dir, metaFile), "utf8")) as Json;
+            } catch {
+                continue;
+            }
+            const metadataSession = String(meta.session ?? "");
+            const session = parsedName?.session ?? metadataSession;
+            if (!session || !sessionMatches(session, opts.sessionPrefix)) continue;
+            const createdAt = parsedName?.createdAt ?? String(meta.createdAt ?? "");
+            if (since && createdAt < since) continue;
+            if (until && createdAt > until) continue;
+            const { bodyPath } = artifactPaths(source, metaFile, meta);
+            if (!bodyPath) continue;
+            let bodyStat: ReturnType<typeof statSync>;
+            try {
+                bodyStat = statSync(bodyPath);
+            } catch {
+                continue;
+            }
+            const key = `${source.dir}\0${session}`;
+            const existing = candidates.get(key) ?? {
+                source,
+                session,
+                latestMtimeMs: 0,
+                totalBytes: 0,
+                dumpCount: 0,
+            };
+            existing.latestMtimeMs = Math.max(existing.latestMtimeMs, bodyStat.mtimeMs);
+            existing.totalBytes += bodyStat.size;
+            existing.dumpCount += 1;
+            candidates.set(key, existing);
+        }
+    }
+    return [...candidates.values()].sort(
+        (left, right) =>
+            right.latestMtimeMs - left.latestMtimeMs ||
+            right.totalBytes - left.totalBytes ||
+            left.session.localeCompare(right.session),
+    );
+}
 
+function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[] {
+    const since = resolveTimeBound(opts.since);
+    const until = resolveTimeBound(opts.until);
+    const snapshots: Snapshot[] = [];
+    for (const metaFile of readdirSync(candidate.source.dir).filter((file) => file.endsWith(".meta.json"))) {
+        const dumpName = parseDumpFilename(metaFile);
+        if (dumpName && dumpName.session !== candidate.session) continue;
         let meta: Json;
         try {
-            meta = JSON.parse(readFileSync(join(opts.dir, metaFile), "utf8")) as Json;
+            meta = JSON.parse(readFileSync(join(candidate.source.dir, metaFile), "utf8")) as Json;
         } catch {
             continue;
         }
         const metadataSession = String(meta.session ?? "");
-        if (!dumpName && !sessionMatches(metadataSession, opts.sessionPrefix)) continue;
-
-        const session = dumpName?.session ?? metadataSession;
+        if (!dumpName && metadataSession !== candidate.session) continue;
         const createdAt = dumpName?.createdAt ?? String(meta.createdAt ?? "");
         if (since && createdAt < since) continue;
         if (until && createdAt > until) continue;
-
-        const files = asJson(meta.files);
-        const referencedBodyPath = typeof files?.body === "string" ? files.body : undefined;
-        const adjacentBodyPath = join(opts.dir, metaFile.replace(/\.meta\.json$/, ".body.json"));
-        const bodyPath =
-            referencedBodyPath && existsSync(referencedBodyPath)
-                ? referencedBodyPath
-                : existsSync(adjacentBodyPath)
-                  ? adjacentBodyPath
-                  : undefined;
+        const { bodyPath, responsePath } = artifactPaths(candidate.source, metaFile, meta);
         if (!bodyPath) continue;
-
-        let body: Json;
-        let bodyBytes: number;
         try {
             const rawBody = readFileSync(bodyPath);
-            bodyBytes = rawBody.byteLength;
-            body = JSON.parse(rawBody.toString("utf8")) as Json;
+            const body = JSON.parse(rawBody.toString("utf8")) as Json;
+            const normalized = buildSegments(
+                body,
+                candidate.source.label === "explicit --dir" ? undefined : candidate.source.provider,
+            );
+            snapshots.push({
+                file: metaFile,
+                bodyPath,
+                bodyBytes: rawBody.byteLength,
+                createdAt,
+                session: candidate.session,
+                messagesCount: normalized.segments.length,
+                provider: normalized.provider,
+                sourceDir: candidate.source.dir,
+                segments: normalized.segments,
+                usage: loadMeterUsage(responsePath, normalized.provider),
+                orderCreatedAt: dumpName?.createdAt ?? createdAt,
+                sequence: dumpName?.sequence ?? 0,
+            });
         } catch {
-            continue;
+            // Ignore malformed or partially written request bodies.
         }
-        const referencedResponsePath = typeof files?.response === "string" ? files.response : undefined;
-        const adjacentResponsePath = join(opts.dir, metaFile.replace(/\.meta\.json$/, ".response.json"));
-        const responsePath =
-            referencedResponsePath && existsSync(referencedResponsePath)
-                ? referencedResponsePath
-                : existsSync(adjacentResponsePath)
-                  ? adjacentResponsePath
-                  : undefined;
-        const bodyMeta = asJson(meta.body);
-        snaps.push({
-            file: metaFile,
-            bodyPath,
-            bodyBytes,
-            createdAt,
-            session,
-            messagesCount: typeof bodyMeta?.messagesCount === "number" ? bodyMeta.messagesCount : -1,
-            segments: buildSegments(body),
-            usage: loadMeterUsage(responsePath),
-            orderCreatedAt: dumpName?.createdAt ?? createdAt,
-            sequence: dumpName?.sequence ?? 0,
-        });
     }
-    snaps.sort(
-        (a, b) =>
-            a.orderCreatedAt.localeCompare(b.orderCreatedAt) ||
-            a.sequence - b.sequence ||
-            a.file.localeCompare(b.file),
+    snapshots.sort(
+        (left, right) =>
+            left.orderCreatedAt.localeCompare(right.orderCreatedAt) ||
+            left.sequence - right.sequence ||
+            left.file.localeCompare(right.file),
     );
-    return opts.limit && snaps.length > opts.limit ? snaps.slice(snaps.length - opts.limit) : snaps;
+    return opts.limit && snapshots.length > opts.limit
+        ? snapshots.slice(snapshots.length - opts.limit)
+        : snapshots;
+}
+
+function loadSnapshotSelection(opts: Args): SnapshotSelection {
+    const candidates = discoverDumpCandidates(opts);
+    const selected = candidates[0];
+    return {
+        candidates,
+        selected,
+        snapshots: selected ? loadCandidateSnapshots(selected, opts) : [],
+    };
+}
+
+function loadSnapshots(opts: Args): Snapshot[] {
+    return loadSnapshotSelection(opts).snapshots;
 }
 
 /** First wire-order segment index where prev/cur diverge (added/removed/changed). */
@@ -428,12 +530,13 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
         if (index === 0) return { current, divergenceIndex: -1, verdict: "BASE" };
         const previous = snaps[index - 1];
         const divergenceIndex = firstDivergence(previous.segments, current.segments);
-        // Only a change at or before the current tail breakpoint can rewrite the
-        // reusable prefix. Ordinary appended tail growth is attribution, not a bust.
-        const byteVerdict: ByteVerdict =
-            divergenceIndex !== -1 && divergenceIndex <= lastBreakpointIndex(current.segments)
-                ? "BUST"
-                : "STABLE";
+        // Anthropic exposes explicit breakpoints. OpenAI's cache is an implicit prefix,
+        // so an in-place change/removal busts while ordinary appended input does not.
+        const byteBust =
+            current.provider === "openai"
+                ? divergenceIndex >= 0 && divergenceIndex < previous.segments.length
+                : divergenceIndex !== -1 && divergenceIndex <= lastBreakpointIndex(current.segments);
+        const byteVerdict: ByteVerdict = byteBust ? "BUST" : "STABLE";
         if (!current.usage || !previous.usage) {
             return {
                 current,
@@ -447,9 +550,13 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
         const prevTotal = previous.usage.total;
         const epsilon = Math.max(64, previous.usage.input);
         const meterFloor = prevTotal - epsilon;
-        // input_tokens are direct, non-cacheable tokens. Add the current direct input
-        // back to cache_read before comparing it with a previous total that includes it.
-        const comparableRead = current.usage.cacheRead + current.usage.input;
+        // Anthropic separates direct input from cache writes, so it belongs in the
+        // comparable read. OpenAI's uncached prompt tokens include rewritten prefix
+        // tokens; adding them back would make every prompt look fully cached.
+        const comparableRead =
+            current.provider === "openai"
+                ? current.usage.cacheRead
+                : current.usage.cacheRead + current.usage.input;
         const shortRead = comparableRead < meterFloor;
         const verdict: MeterVerdict = shortRead
             ? byteVerdict === "BUST"
@@ -494,18 +601,7 @@ function fmtTime(iso: string): string {
 }
 
 function segmentText(snapshot: Snapshot, index: number): string | undefined {
-    if (index < 0) return undefined;
-    try {
-        const body = JSON.parse(readFileSync(snapshot.bodyPath, "utf8")) as Json;
-        const system = body.system;
-        const systemBlocks = Array.isArray(system) ? system : system != null ? [system] : [];
-        if (index < systemBlocks.length) return normalizedSystemSegment(systemBlocks[index]);
-        const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
-        const message = messages[index - systemBlocks.length];
-        return message ? normalizedMessageSegment(message) : undefined;
-    } catch {
-        return undefined;
-    }
+    return index < 0 ? undefined : snapshot.segments[index]?.canonical;
 }
 
 function clippedDiff(text: string, start: number, end: number): string {
@@ -536,28 +632,77 @@ function meterCell(row: AnalysisRow): string {
     const read = row.current.usage?.cacheRead ?? 0;
     const rewritten = row.rewrittenTokens === undefined ? "" : `; rewritten≈${row.rewrittenTokens.toLocaleString()}`;
     const directInput = row.current.usage?.input ?? 0;
-    return `read=${read.toLocaleString()} + input=${directInput.toLocaleString()} = ${row.comparableRead?.toLocaleString()}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()})${rewritten}`;
+    const comparable =
+        row.current.provider === "openai"
+            ? `cached=${read.toLocaleString()}`
+            : `read=${read.toLocaleString()} + input=${directInput.toLocaleString()} = ${row.comparableRead?.toLocaleString()}`;
+    return `${comparable}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()}, ε=${row.epsilon?.toLocaleString()})${rewritten}`;
 }
+
+const HELP = `usage: bun scripts/analyze-cache-busts.ts --session <prefix> [options]
+
+Sources (both searched by default):
+  Anthropic: <tmp>/opencode-anthropic-auth-dumps (OPENCODE_ANTHROPIC_AUTH_DUMP_DIR)
+             system + messages[] bodies; explicit read/write cache meters.
+  OpenAI:    <tmp>/opencode-openai-auth-dumps (OPENCODE_OPENAI_AUTH_DUMP_DIR)
+             Responses instructions + input[] bodies; implicit prefix cache,
+             prompt_tokens_details.cached_tokens, and no write premium.
+             WebSocket captures can have no response file and are UNMETERED.
+
+Options:
+  --dir <path>          inspect one explicit directory (legacy override)
+  --anthropic-dir <p>   override the Anthropic source
+  --openai-dir <path>   override the OpenAI source
+  --since/--until <t>   ISO timestamp or duration ago (for example 2h)
+  --limit <N>           keep the last N requests in range
+  --show-diff           print both versions of the first-diverging message
+  --all-busts           list every diverging message
+  --all-rows            also print STABLE and UNMETERED rows`;
 
 function main(): void {
     const opts = parseArgs(process.argv);
+    if (opts.help) {
+        console.log(HELP);
+        return;
+    }
     if (!opts.sessionPrefix) {
-        console.error(
-            "usage: bun scripts/analyze-cache-busts.ts <sessionIdPrefix> | --session <sessionIdPrefix> [--dir <path>] [--since ISO|duration] [--until ISO|duration] [--limit N] [--show-diff] [--all-busts]",
-        );
+        console.error(HELP);
         process.exit(1);
     }
-    const snaps = loadSnapshots(opts);
+    const selection = loadSnapshotSelection(opts);
+    const snaps = selection.snapshots;
     if (snaps.length === 0) {
-        console.error(`No dumps found for session prefix "${opts.sessionPrefix}" in ${opts.dir}`);
+        const searched = opts.sources.map((source) => source.dir).join(", ");
+        console.error(`No dumps found for session prefix "${opts.sessionPrefix}" in ${searched}`);
         process.exit(1);
+    }
+    if (selection.candidates.length > 1) {
+        console.log(`Ambiguous session prefix "${opts.sessionPrefix}"; candidates:`);
+        for (const candidate of selection.candidates) {
+            console.log(
+                `  ${candidate.session} provider=${candidate.source.provider} mtime=${new Date(candidate.latestMtimeMs).toISOString()} size=${candidate.totalBytes.toLocaleString()}B dumps=${candidate.dumpCount} dir=${candidate.source.dir}`,
+            );
+        }
+        console.log(
+            `Using newest candidate ${selection.selected?.session} from ${selection.selected?.source.dir}.`,
+        );
+        console.log("");
     }
     const rows = analyzeSnapshots(snaps);
-    console.log(`Session: ${snaps[0].session}`);
-    console.log(`Dumps:   ${snaps.length}  (dir: ${opts.dir})`);
+    const provider = snaps[0].provider;
+    const meterRule =
+        snaps.find((snapshot) => snapshot.usage)?.usage?.rule ??
+        (provider === "openai"
+            ? "OpenAI implicit-prefix cache: prompt_tokens_details.cached_tokens; no write premium"
+            : "Anthropic explicit cache: cache_read_input_tokens/cache_creation_input_tokens");
+    console.log(`Session:  ${snaps[0].session}`);
+    console.log(`Provider: ${provider} (${selection.selected?.source.label})`);
+    console.log(`Dumps:    ${snaps.length}  (dir: ${snaps[0].sourceDir})`);
     console.log("");
     console.log("Dashboard times are local (UTC+2); table times are UTC.");
-    console.log("Meter rule: shortRead when cacheRead + current input < prevTotal - ε, where ε=max(64, previous input). A short read is BUST only when bytes diverge before the current tail breakpoint; otherwise it is LATENCY.");
+    console.log(
+        `Meter rule (${provider}): ${meterRule}. Short when the provider-comparable read < prevTotal - ε, ε=max(64, previous direct/uncached input); bytes distinguish BUST from LATENCY.`,
+    );
     console.log(
         "time(UTC)          | segs | verdict          | meter                                                  | meterVsBytes | first-divergence                | prevBodyBytes → curBodyBytes | reusableNormalizedPrefix@breakpoint",
     );
@@ -601,7 +746,11 @@ function main(): void {
             `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
         );
 
-        if ((opts.showDiff || opts.allBusts) && index >= 0 && (row.verdict === "BUST" || opts.allRows)) {
+        if (
+            (opts.showDiff || opts.allBusts) &&
+            index >= 0 &&
+            (row.byteVerdict === "BUST" || opts.allRows)
+        ) {
             if (opts.allBusts) {
                 const diffs: number[] = [];
                 const count = Math.max(previous.segments.length, row.current.segments.length);

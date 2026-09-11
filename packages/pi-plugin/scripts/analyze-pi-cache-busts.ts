@@ -1,8 +1,14 @@
 #!/usr/bin/env bun
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
+import {
+	clippedBodyPairVersions,
+	describeBodyPair,
+	loadPiBodySnapshots,
+	resolvePiBodiesDirectory,
+} from "../../plugin/scripts/cache-bust-body-sources";
 import { getMagicContextStorageDir } from "../../plugin/src/shared/data-path";
 import {
 	getPiServedArrayLedgerPath,
@@ -20,7 +26,10 @@ interface Args {
 	since?: string;
 	until?: string;
 	limit?: number;
+	bodiesDir?: string;
+	showDiff: boolean;
 	allRows: boolean;
+	help: boolean;
 }
 
 interface SessionEntryMarker {
@@ -131,6 +140,7 @@ function parseArgs(argv: string[]): Args {
 		"--since",
 		"--until",
 		"--limit",
+		"--bodies-dir",
 	]);
 	let positionalSession = "";
 	for (let index = 0; index < args.length; index += 1) {
@@ -153,7 +163,10 @@ function parseArgs(argv: string[]): Args {
 		since: getOpt("--since"),
 		until: getOpt("--until"),
 		limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+		bodiesDir: getOpt("--bodies-dir"),
+		showDiff: args.includes("--show-diff"),
 		allRows: args.includes("--all-rows"),
+		help: args.includes("--help") || args.includes("-h"),
 	};
 }
 
@@ -391,12 +404,31 @@ function meterCell(row: AnalysisRow): string {
 	return `read=${row.current.usage.cacheRead.toLocaleString()} + input=${row.current.usage.input.toLocaleString()} = ${row.comparableRead?.toLocaleString()}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()})${rewritten}`;
 }
 
+const HELP = `usage: bun scripts/analyze-pi-cache-busts.ts --session <prefix> [options]
+
+Sources:
+  Sessions: Pi and OMP JSONL roots (--pi-dir / --omp-dir).
+  Bodies:   <session cwd>/.pi/pi-llm-debugging/<sessionId>/<seq>-req.json
+            OpenAI Responses input[] requests; -res.json may be absent for
+            WebSocket providers such as openai-codex. The cwd comes from the
+            JSONL session header, with its encoded --Users-…-- directory as fallback.
+
+Options:
+  --ledger-dir <path>  Magic Context data directory
+  --bodies-dir <path>  override the body session directory (or its parent)
+  --since/--until <t>  ISO timestamp or duration ago (for example 4h)
+  --limit <N>          keep the last N digest records in range
+  --show-diff          print both versions of the first-diverging real message
+  --all-rows           also print BASE and STABLE rows`;
+
 async function main(): Promise<void> {
 	const options = parseArgs(process.argv);
+	if (options.help) {
+		console.log(HELP);
+		return;
+	}
 	if (!options.sessionPrefix) {
-		console.error(
-			"usage: bun scripts/analyze-pi-cache-busts.ts <sessionIdPrefix> | --session <prefix> [--pi-dir <path>] [--omp-dir <path>] [--ledger-dir <MC data dir>] [--since ISO|duration] [--until ISO|duration] [--limit N] [--all-rows]",
-		);
+		console.error(HELP);
 		process.exit(1);
 	}
 	const roots = [
@@ -412,13 +444,30 @@ async function main(): Promise<void> {
 		);
 		process.exit(1);
 	}
-	if (sessions.length > 1) {
-		console.error(
-			`Ambiguous session prefix "${options.sessionPrefix}": ${sessions.map((session) => session.sessionId).join(", ")}`,
+	const candidates = sessions
+		.map((candidate) => {
+			const stat = statSync(candidate.path);
+			return { candidate, mtimeMs: stat.mtimeMs, size: stat.size };
+		})
+		.sort(
+			(left, right) =>
+				right.mtimeMs - left.mtimeMs ||
+				right.size - left.size ||
+				left.candidate.path.localeCompare(right.candidate.path),
 		);
-		process.exit(1);
+	if (candidates.length > 1) {
+		console.log(
+			`Ambiguous session prefix "${options.sessionPrefix}"; candidates:`,
+		);
+		for (const { candidate, mtimeMs, size } of candidates) {
+			console.log(
+				`  ${candidate.sessionId} mtime=${new Date(mtimeMs).toISOString()} size=${size.toLocaleString()}B path=${candidate.path}`,
+			);
+		}
+		console.log(`Using newest candidate ${candidates[0].candidate.path}.`);
+		console.log("");
 	}
-	const session = sessions[0];
+	const session = candidates[0].candidate;
 	const since = resolveTimeBound(options.since);
 	const until = resolveTimeBound(options.until);
 	let ledgers = loadLedger(session.sessionId, options.ledgerDir, since, until);
@@ -431,13 +480,22 @@ async function main(): Promise<void> {
 		);
 		process.exit(1);
 	}
+	const bodiesDirectory = resolvePiBodiesDirectory(
+		session.sessionId,
+		session.path,
+		options.bodiesDir,
+	);
+	const bodies = loadPiBodySnapshots(bodiesDirectory);
 	const rows = analyzeJoinedPasses(joinPasses(ledgers, session));
 	console.log(`Session: ${session.sessionId}`);
 	console.log(`JSONL:   ${session.path}`);
+	console.log(
+		`Bodies:  ${bodies.size}${bodiesDirectory ? ` (${bodiesDirectory})` : " (not found; using digest vectors)"}`,
+	);
 	console.log(`Digests: ${ledgers.length}`);
 	console.log("");
 	console.log(
-		"Meter rule: BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). The meter decides the verdict; the served-array digest attributes changed bytes.",
+		"Meter rule (Pi host): BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). The meter decides the verdict; normalized pi-llm-debugging request bodies attribute changed messages.",
 	);
 	console.log(
 		"time(UTC)            | verdict | meter                                                                  | first divergence",
@@ -449,9 +507,35 @@ async function main(): Promise<void> {
 	for (const row of rows) {
 		if (row.verdict === "BUST") busts += 1;
 		if (!options.allRows && row.verdict !== "BUST") continue;
+		let attribution = row.attribution;
+		let bodyDivergence: ReturnType<typeof describeBodyPair>;
+		if (row.previous) {
+			const previousBody = bodies.get(row.previous.ledger.sequence);
+			const currentBody = bodies.get(row.current.ledger.sequence);
+			if (previousBody && currentBody) {
+				bodyDivergence = describeBodyPair(
+					previousBody.messages,
+					currentBody.messages,
+				);
+				if (bodyDivergence) {
+					const seam = row.current.intervening.some(
+						(entry) => entry.type === "compaction",
+					)
+						? " (compaction seam)"
+						: "";
+					attribution = `${bodyDivergence.description}${seam}`;
+				}
+			}
+		}
 		console.log(
-			`${fmtTime(row.current.usage.createdAt).padEnd(21)} | ${row.verdict.padEnd(7)} | ${meterCell(row).padEnd(70)} | ${row.attribution}`,
+			`${fmtTime(row.current.usage.createdAt).padEnd(21)} | ${row.verdict.padEnd(7)} | ${meterCell(row).padEnd(70)} | ${attribution}`,
 		);
+		if (options.showDiff && bodyDivergence) {
+			const versions = clippedBodyPairVersions(bodyDivergence);
+			console.log(`          └─ message diff @char ${versions.character}:`);
+			console.log(`             prev: ${versions.previous}`);
+			console.log(`             cur:  ${versions.current}`);
+		}
 	}
 	console.log("");
 	console.log(

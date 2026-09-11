@@ -1,0 +1,17 @@
+{
+    "system": [
+        { "type": "text", "text": "stable system", "cache_control": { "type": "ephemeral" } }
+    ],
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "cached prefix after",
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ]
+        }
+    ]
+}
