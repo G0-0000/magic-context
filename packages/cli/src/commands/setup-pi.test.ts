@@ -274,7 +274,7 @@ describe("runSetup", () => {
         setConfigEnv(root, agentDir);
         mkdirSync(agentDir, { recursive: true });
         const legacyPath = join(agentDir, "magic-context.jsonc");
-        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 7 }));
+        writeFileSync(legacyPath, JSON.stringify({ protected_tokens: 7 }));
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
@@ -294,9 +294,9 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         const targetPath = join(root, ".config", "cortexkit", "magic-context.jsonc");
         const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
-            protected_tags?: number;
+            protected_tokens?: number;
         };
-        expect(config.protected_tags).toBe(7);
+        expect(config.protected_tokens).toBe(7);
         expect(existsSync(legacyPath)).toBe(false);
         expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
     });

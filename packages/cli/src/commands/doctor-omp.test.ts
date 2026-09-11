@@ -307,11 +307,11 @@ describe("OMP doctor", () => {
         mkdirSync(join(cwd, ".cortexkit"), { recursive: true });
         writeFileSync(
             join(opencodeDir, "magic-context.jsonc"),
-            JSON.stringify({ protected_tags: 7 }),
+            JSON.stringify({ protected_tokens: 7 }),
         );
         writeFileSync(
             join(piAgentDir, "magic-context.jsonc"),
-            JSON.stringify({ protected_tags: 13 }),
+            JSON.stringify({ protected_tokens: 13 }),
         );
         writeFileSync(
             join(cwd, ".cortexkit", "magic-context.jsonc"),

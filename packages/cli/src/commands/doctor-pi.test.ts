@@ -444,7 +444,7 @@ describe("Pi doctor", () => {
         const settingsPath = join(agentDir, "settings.json");
         const legacyPath = join(agentDir, "magic-context.jsonc");
         writeFileSync(settingsPath, JSON.stringify({ packages: [] }));
-        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 13 }));
+        writeFileSync(legacyPath, JSON.stringify({ protected_tokens: 13 }));
         writeFileSync(
             join(cwd, ".cortexkit", "magic-context.jsonc"),
             JSON.stringify({ enabled: true }),
@@ -459,9 +459,9 @@ describe("Pi doctor", () => {
         expect(code).toBe(0);
         const targetPath = join(root, ".config", "cortexkit", "magic-context.jsonc");
         const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
-            protected_tags?: number;
+            protected_tokens?: number;
         };
-        expect(config.protected_tags).toBe(13);
+        expect(config.protected_tokens).toBe(13);
         expect(existsSync(legacyPath)).toBe(false);
         expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
         const output = prompts.messages.join("\n");
@@ -486,11 +486,11 @@ describe("Pi doctor", () => {
         mkdirSync(opencodeDir, { recursive: true });
         writeFileSync(
             join(opencodeDir, "magic-context.jsonc"),
-            JSON.stringify({ protected_tags: 7 }),
+            JSON.stringify({ protected_tokens: 7 }),
         );
         writeFileSync(
             join(agentDir, "magic-context.jsonc"),
-            JSON.stringify({ protected_tags: 13 }),
+            JSON.stringify({ protected_tokens: 13 }),
         );
         const prompts = new MockPrompts();
 
