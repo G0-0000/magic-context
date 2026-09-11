@@ -8348,6 +8348,7 @@ impl McHandler {
             .and_then(|observed| i64::try_from(observed).ok())
             .map(|observed| now_ms().saturating_sub(observed) as f64)
             .unwrap_or(0.0);
+        let todo_verdict_probed = request.get("todo_verdict_probed").and_then(Value::as_bool);
         let mut parsed: TransformRequest = match serde_json::from_value(request) {
             Ok(req) => req,
             Err(e) => {
@@ -8965,6 +8966,18 @@ impl McHandler {
         let projection_cache_store_ms =
             projection_cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
         let mut response = result.response;
+        if unprobed_todo_bust(todo_verdict_probed, &response.decision) {
+            // A local host predictor can miss module-owned repair decisions. Report
+            // every unprobed bust, even when no todo pair was emitted, so a stale
+            // permission verdict can never be consumed without an audit signal.
+            eprintln!(
+                "mc-todo-verdict session={} unprobed_bust=1 possible_stale_mint={} decision={} reason={}",
+                parsed.session_id,
+                u8::from(parsed.todo_tool_present == Some(true)),
+                response.decision,
+                response.materialize_reason.as_deref().unwrap_or("unknown")
+            );
+        }
         if response.committed {
             self.guidance_dates
                 .lock()
@@ -34064,5 +34077,25 @@ mod provenance_form_degradation {
             ok.build_git_sha.as_deref(),
             Some("22464bf25db24c4037f5efda72c8bb02d64baf51")
         );
+    }
+}
+
+fn unprobed_todo_bust(probed: Option<bool>, decision: &str) -> bool {
+    probed == Some(false) && matches!(decision, "HARD" | "SOFT" | "MIGRATE_HARD" | "EXECUTE")
+}
+
+#[cfg(test)]
+mod todo_verdict_probe_tests {
+    use super::unprobed_todo_bust;
+
+    #[test]
+    fn unprobed_busts_are_reported_without_flagging_defer_or_legacy_clients() {
+        for decision in ["HARD", "SOFT", "MIGRATE_HARD", "EXECUTE"] {
+            assert!(unprobed_todo_bust(Some(false), decision));
+            assert!(!unprobed_todo_bust(Some(true), decision));
+            assert!(!unprobed_todo_bust(None, decision));
+        }
+        assert!(!unprobed_todo_bust(Some(false), "SOFT+"));
+        assert!(!unprobed_todo_bust(Some(false), "DEFER"));
     }
 }

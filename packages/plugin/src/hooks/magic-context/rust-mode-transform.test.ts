@@ -655,6 +655,43 @@ describe("Rust mode authority adapter", () => {
         expect(body.caveman_min_chars).toBe(240);
     });
 
+    it("serves 2048-message SOFT+, SOFT and HARD native wires with the original SHA256", async () => {
+        for (const decision of ["SOFT+", "SOFT", "HARD"]) {
+            const sessionId = `rust-native-byte-identity-${decision}`;
+            sessions.push(sessionId);
+            const db = makeDb();
+            installRawProvider(sessionId);
+            const native = Array.from({ length: 2048 }, (_, index) => ({
+                ...makeMessages(sessionId)[0],
+                info: { ...makeMessages(sessionId)[0].info, id: `native_${index}` },
+                parts: [
+                    {
+                        type: "text",
+                        text: `history ${index} Ελληνικά 🚀 ${"ballast ".repeat(128)}`,
+                    },
+                ],
+            }));
+            const serializedBefore = JSON.stringify(structuredClone(native));
+            const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method }) =>
+                    method === "transform" ? { decision, native_messages: native } : { ok: true },
+            };
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const messages = makeMessages(sessionId);
+            const output: { messages: unknown[] } = { messages: [...messages] };
+            await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+            expect(output.messages).toHaveLength(2048);
+            const beforeHash = sha(serializedBefore);
+            const afterHash = sha(JSON.stringify(output.messages));
+            console.log(
+                `native-wire-identity decision=${decision} messages=2048 before=${beforeHash} after=${afterHash}`,
+            );
+            expect(afterHash).toBe(beforeHash);
+            expect(JSON.stringify(native)).toBe(serializedBefore);
+        }
+    });
+
     it("emits discriminating pass and stage logs from ordinary Rust transforms", async () => {
         const sessionId = `rust-log-fence-${Date.now()}`;
         sessions.push(sessionId);
@@ -683,10 +720,11 @@ describe("Rust mode authority adapter", () => {
             },
         ];
         const moduleClient: RustModeModuleClient = {
-            call: async ({ method }) =>
-                method === "transform"
-                    ? { ...responses.shift(), native_messages: makeMessages(sessionId) }
-                    : { ok: true },
+            call: async ({ method, onTimings }) => {
+                if (method !== "transform") return { ok: true };
+                onTimings?.({ lane: 1, route: 2, encode: 3, issue: 4, responseWait: 5, settle: 6 });
+                return { ...responses.shift(), native_messages: makeMessages(sessionId) };
+            },
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
@@ -722,6 +760,30 @@ describe("Rust mode authority adapter", () => {
             expect(passLines[1]).toContain("decision=SOFT+");
             expect(passLines[1]).toContain("scheduler=defer defer_reason=scheduler_defer");
             expect(passLines[1]).toContain("served_from=lkg");
+            for (const line of passLines) {
+                for (const field of [
+                    "transport_lane:1.0",
+                    "transport_route:2.0",
+                    "transport_encode:3.0",
+                    "transport_issue:4.0",
+                    "transport_response_wait_decode:5.0",
+                    "transport_settle:6.0",
+                    "transport_wrapper:",
+                    "preflight:",
+                    "todo_verdict:",
+                    "todo_probe:",
+                    "todo_persist:",
+                    "todo_probe_required:",
+                    "todo_probe_reason:",
+                    "todo_unprobed_bust:",
+                    "session_directory:",
+                    "paging:",
+                    "output_clone:",
+                    "delivery:",
+                    "bookkeeping:",
+                ])
+                    expect(line).toContain(field);
+            }
             expect(passLines[0]).not.toBe(passLines[1]);
             expect(logged.some((message) => message.startsWith("rust module stages:"))).toBe(true);
         } finally {
@@ -1105,7 +1167,7 @@ describe("Rust mode authority adapter", () => {
                 moduleElapsedMs: 8.765,
             }),
         ).toBe(
-            "rust pass: decision=HARD reason=first_render served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=identity_resolve:0.0 prompt_surface:0.0 mural_resolve:0.0 prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3",
+            "rust pass: decision=HARD reason=first_render served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=identity_resolve:0.0 prompt_surface:0.0 mural_resolve:0.0 prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3 transport_lane:0.0 transport_route:0.0 transport_encode:0.0 transport_issue:0.0 transport_response_wait_decode:0.0 transport_settle:0.0 transport_wrapper:0.0 preflight:0.0 todo_verdict:0.0 todo_probe:0.0 todo_persist:0.0 todo_probe_required:0 todo_probe_reason:none todo_unprobed_bust:0 session_directory:0.0 paging:0.0 output_clone:0.0 delivery:0.0 bookkeeping:0.0",
         );
     });
 
@@ -2403,6 +2465,95 @@ describe("Rust mode authority adapter", () => {
         );
 
         expect(requestBody?.todo_tool_present).toBe(false);
+    });
+
+    it("reuses the persisted todo verdict on defer and probes a permission flip at execute pressure", async () => {
+        const sessionId = "rust-todo-bust-permission";
+        sessions.push(sessionId);
+        installAvailabilityDb(sessionId, {});
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const bodies: Record<string, unknown>[] = [];
+        let decision = "HARD";
+        let materializeReason = "first_render";
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                bodies.push(body as Record<string, unknown>);
+                return {
+                    decision,
+                    materialize_reason: materializeReason,
+                    native_messages: makeMessages(sessionId),
+                };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        let denied = false;
+        const agents = mock(async () => ({
+            data: [{ name: "build", permission: { todowrite: denied ? "deny" : "allow" } }],
+        }));
+        const get = mock(async () => ({ data: { agent: "build", directory: "/tmp/project" } }));
+        deps.client = { app: { agents }, session: { get } } as never;
+        deps.sessionDirectoryBySession!.set(sessionId, "/tmp/project");
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            messages[0]!.info.tools = {};
+            (messages[0]!.info as { agent?: string }).agent = "build";
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] },
+                makeMeta(db, sessionId),
+            );
+        };
+        await run();
+        expect(bodies.at(-1)?.todo_tool_present).toBe(true);
+        agents.mockClear();
+        get.mockClear();
+        denied = true;
+        decision = "SOFT+";
+        await run();
+        expect(agents).toHaveBeenCalledTimes(0);
+        expect(get).toHaveBeenCalledTimes(0);
+        expect(bodies.at(-1)?.todo_tool_present).toBe(true);
+        expect(bodies.at(-1)?.todo_verdict_probed).toBe(false);
+        expect(bodies.at(-1)?.verdict_stale_ok).toBe(false);
+        deps.contextUsageMap.set(sessionId, {
+            usage: { inputTokens: 100_000, percentage: 90 },
+            updatedAt: Date.now(),
+        });
+        decision = "HARD";
+        await run();
+        expect(agents).toHaveBeenCalledTimes(1);
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(bodies.at(-1)?.todo_tool_present).toBe(false);
+        expect(bodies.at(-1)?.todo_verdict_probed).toBe(true);
+        deps.contextUsageMap.set(sessionId, {
+            usage: { inputTokens: 100, percentage: 1 },
+            updatedAt: Date.now(),
+        });
+        materializeReason = "boundary_divergence_recut";
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            await run();
+            const logs = logSpy.mock.calls.map(([, message]) => message);
+            expect(
+                logs.some((line) =>
+                    line.includes(
+                        "todo_permission_probe_miss decision=HARD reason=boundary_divergence_recut",
+                    ),
+                ),
+            ).toBe(true);
+            expect(
+                logs.some(
+                    (line) =>
+                        line.startsWith("rust pass:") && line.includes("todo_unprobed_bust:1"),
+                ),
+            ).toBe(true);
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 
     it("sends the combined todowrite map and live-permission verdict", async () => {

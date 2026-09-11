@@ -434,9 +434,9 @@ export class RustTestHarness {
             db.exec("PRAGMA busy_timeout = 30000");
             const row = db
                 .prepare(
-                    "SELECT COALESCE(MAX(time_created), 0) AS latest FROM message WHERE session_id = ?",
+                    "SELECT COALESCE(MIN(time_created), 0) AS earliest FROM message WHERE session_id = ?",
                 )
-                .get(sessionId) as { latest: number };
+                .get(sessionId) as { earliest: number };
             const templateRow = db
                 .prepare(
                     "SELECT m.data AS message_data, p.data AS part_data FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user' AND json_extract(p.data, '$.type') = 'text' ORDER BY m.time_created DESC LIMIT 1",
@@ -459,7 +459,8 @@ export class RustTestHarness {
             // OpenCode orders message IDs generated from descending timestamps. Place the
             // fixture immediately before the live seed messages so a later prompt remains
             // newest while both OpenCode and the raw ordinal reader agree on history order.
-            const firstTimestamp = Math.max(1, row.latest - options.count - 1);
+            // Provider latency must not interleave history with the seeded user/assistant pair.
+            const firstTimestamp = Math.max(1, row.earliest - options.count - 1);
             const descendingId = (
                 prefix: "msg" | "prt",
                 timestamp: number,

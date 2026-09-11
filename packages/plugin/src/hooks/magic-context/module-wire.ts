@@ -865,3 +865,44 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
         };
     });
 }
+
+/**
+ * Copy the module's JSON trees without structuredClone's serialization pass.
+ * Strings are immutable and can be shared; every mutable container must remain
+ * private because host postprocessing must not mutate the next delta's basis.
+ */
+export function cloneModuleNativeOutput(messages: unknown[]): unknown[] {
+    const copies = new Map<object, unknown>();
+    const copy = (value: unknown): unknown => {
+        if (value === null || typeof value !== "object") {
+            return typeof value === "function" || typeof value === "symbol"
+                ? structuredClone(value)
+                : value;
+        }
+        const prior = copies.get(value);
+        if (prior !== undefined) return prior;
+        if (Array.isArray(value)) {
+            const result: unknown[] = new Array(value.length);
+            copies.set(value, result);
+            for (let i = 0; i < value.length; i++) if (i in value) result[i] = copy(value[i]);
+            return result;
+        }
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype !== Object.prototype && prototype !== null) return structuredClone(value);
+        const result: Record<string, unknown> = {};
+        copies.set(value, result);
+        for (const key of Object.keys(value)) {
+            const child = copy((value as Record<string, unknown>)[key]);
+            if (key === "__proto__") {
+                Object.defineProperty(result, key, {
+                    value: child,
+                    writable: true,
+                    enumerable: true,
+                    configurable: true,
+                });
+            } else result[key] = child;
+        }
+        return result;
+    };
+    return copy(messages) as unknown[];
+}

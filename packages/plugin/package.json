@@ -50,7 +50,7 @@
     "prepublishOnly": "bun run build && bun run build:tui"
   },
   "dependencies": {
-    "@cortexkit/subc-client": "0.4.1",
+    "@cortexkit/subc-client": "0.11.1",
     "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
     "@opencode-ai/plugin": "^1.17.11",
     "@opencode-ai/sdk": "^1.17.11",
