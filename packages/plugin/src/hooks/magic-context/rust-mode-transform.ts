@@ -1595,19 +1595,35 @@ export function createRustModeTransform(
 
     const callModule = async (
         args: Parameters<RustModeModuleClient["call"]>[0],
-        attemptTimeoutMs = timeoutMs,
+        attemptTimeoutMs = args.timeoutMs ?? timeoutMs,
     ): Promise<unknown> => {
         const controller = new AbortController();
-        const timer = setTimeout(
-            () => controller.abort(new Error("rust module request timed out")),
-            attemptTimeoutMs,
-        );
+        const body = isRecord(args.body) ? args.body : {};
+        const timeoutError =
+            args.method === "state_sync"
+                ? Object.assign(
+                      new Error(
+                          `state_sync timeout stage=module_ack page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
+                      ),
+                      {
+                          code: "state_sync_timeout",
+                          stage: "module_ack",
+                          page: body.seed_batch_index ?? 0,
+                          pages: body.seed_batch_total ?? 1,
+                          series: body.seed_id ?? null,
+                      },
+                  )
+                : new Error("rust module request timed out");
+        const timer = setTimeout(() => controller.abort(timeoutError), attemptTimeoutMs);
         try {
             return await options.moduleClient.call({
                 ...args,
                 signal: controller.signal,
                 timeoutMs: attemptTimeoutMs,
             });
+        } catch (error) {
+            if (controller.signal.aborted) throw timeoutError;
+            throw error;
         } finally {
             clearTimeout(timer);
         }

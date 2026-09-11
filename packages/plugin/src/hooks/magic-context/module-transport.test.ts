@@ -1292,3 +1292,144 @@ describe("beforeDeadline orphan safety", () => {
         }
     });
 });
+
+it("a per-call abort preserves the shared client for another session", async () => {
+    const transport = new SubcModuleTransport("unused");
+    const started = deferred();
+    const pending = deferred<unknown>();
+    let closed = 0;
+    const client = {
+        request: async (_route: RouteHandle, body: unknown) => {
+            if ((body as { method: string }).method === "state_sync") {
+                started.resolve();
+                return pending.promise;
+            }
+            return { ok: true };
+        },
+        close: () => {
+            closed++;
+            pending.reject(new Error("client closed"));
+        },
+    } as unknown as SubcClient;
+    const internals = transport as unknown as {
+        client: SubcClient | null;
+        ensureRoute: () => Promise<{
+            client: SubcClient;
+            route: RouteHandle;
+            routeKey: string;
+            generation: number;
+        }>;
+    };
+    internals.client = client;
+    internals.ensureRoute = async () => ({
+        client,
+        route: { channel: 7, epoch: 77 } as RouteHandle,
+        routeKey: "abort",
+        generation: 0,
+    });
+    const controller = new AbortController();
+    const reason = Object.assign(new Error("state_sync transport timeout"), {
+        code: "state_sync_timeout",
+    });
+    const call = transport.call({
+        sessionId: "slow",
+        projectRoot: "/tmp/project",
+        method: "state_sync",
+        body: { method: "state_sync" },
+        signal: controller.signal,
+    });
+    call.catch(() => {});
+    await started.promise;
+    controller.abort(reason);
+    await expect(call).rejects.toBe(reason);
+    expect(closed).toBe(0);
+    await expect(
+        transport.call({
+            sessionId: "other",
+            projectRoot: "/tmp/project",
+            method: "session.status",
+            body: { method: "session.status" },
+        }),
+    ).resolves.toEqual({ ok: true });
+    pending.resolve({ ok: true });
+});
+
+it("a state-sync deadline is typed with page progress and does not reconnect", async () => {
+    const transport = new SubcModuleTransport("unused");
+    let closed = 0;
+    const client = {
+        request: async (_route: RouteHandle, body: unknown) =>
+            (body as { method: string }).method === "state_sync"
+                ? new Promise(() => {})
+                : { ok: true },
+        close: () => {
+            closed++;
+        },
+    } as unknown as SubcClient;
+    const internals = transport as unknown as {
+        client: SubcClient | null;
+        ensureRoute: () => Promise<{
+            client: SubcClient;
+            route: RouteHandle;
+            routeKey: string;
+            generation: number;
+        }>;
+    };
+    internals.client = client;
+    internals.ensureRoute = async () => ({
+        client,
+        route: { channel: 7, epoch: 77 } as RouteHandle,
+        routeKey: "deadline",
+        generation: 0,
+    });
+    // A request below the 25ms correctness-lane floor never reaches the module.
+    await expect(
+        transport.call({
+            sessionId: "below-floor",
+            projectRoot: "/tmp/project",
+            method: "state_sync",
+            body: {
+                method: "state_sync",
+                seed_id: "series",
+                seed_batch_index: 1,
+                seed_batch_total: 3,
+            },
+            timeoutMs: 5,
+        }),
+    ).rejects.toMatchObject({
+        code: "state_sync_timeout",
+        stage: "correctness_lane",
+        page: 1,
+        pages: 3,
+        series: "series",
+    });
+    await expect(
+        transport.call({
+            sessionId: "slow",
+            projectRoot: "/tmp/project",
+            method: "state_sync",
+            body: {
+                method: "state_sync",
+                seed_id: "series",
+                seed_batch_index: 1,
+                seed_batch_total: 3,
+            },
+            timeoutMs: 50,
+        }),
+    ).rejects.toMatchObject({
+        code: "state_sync_timeout",
+        stage: "module_ack",
+        page: 1,
+        pages: 3,
+        series: "series",
+    });
+    expect(closed).toBe(0);
+    await expect(
+        transport.call({
+            sessionId: "other",
+            projectRoot: "/tmp/project",
+            method: "session.status",
+            body: { method: "session.status" },
+        }),
+    ).resolves.toEqual({ ok: true });
+});
