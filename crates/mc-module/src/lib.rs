@@ -68,15 +68,16 @@ use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, Storag
 use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
-    FacadeMutationOutcome, HistorianPhase, InsertMemoryInput, LoadedState, MappingUpdate, McStore,
-    McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow,
-    ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
-    ModuleWorkspaceRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
-    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
-    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
-    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
-    StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate,
-    WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    FacadeMutationOutcome, HistorianChunkRange, HistorianDecision, HistorianPhase,
+    HistorianRecentDecision, InsertMemoryInput, LoadedState, MappingUpdate, McStore, McStoreError,
+    McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow, ModuleStateSyncError,
+    ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow,
+    NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed,
+    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
+    RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
+    StoredChunkTranscript, StoredCompartment, StoredMemoryMutation, StoredNote,
+    TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
+    LATEST_MIGRATION_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -357,6 +358,7 @@ struct DispatchHealth {
     consecutive_error_count: AtomicU64,
     registry: OnceLock<Mutex<DispatchRegistry>>,
     last_historian_outcome: OnceLock<Mutex<Option<String>>>,
+    historian_recent_decisions_count: AtomicU64,
 }
 
 impl DispatchHealth {
@@ -369,6 +371,7 @@ impl DispatchHealth {
             consecutive_error_count: AtomicU64::new(0),
             registry: OnceLock::new(),
             last_historian_outcome: OnceLock::new(),
+            historian_recent_decisions_count: AtomicU64::new(0),
         }
     }
 
@@ -377,12 +380,14 @@ impl DispatchHealth {
             .get_or_init(|| Mutex::new(DispatchRegistry::default()))
     }
 
-    fn record_historian_outcome(&self, outcome: String) {
+    fn record_historian_outcome(&self, outcome: String, recent_decisions_count: usize) {
         *self
             .last_historian_outcome
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+        self.historian_recent_decisions_count
+            .store(recent_decisions_count as u64, Ordering::Relaxed);
     }
 
     fn route_open(&self, channel: u16) {
@@ -457,6 +462,9 @@ impl DispatchHealth {
         let in_flight = self.in_flight_count.load(Ordering::Relaxed);
         let oldest_queued = self.oldest_queued_at_ms.load(Ordering::Relaxed);
         let consecutive_errors = self.consecutive_error_count.load(Ordering::Relaxed);
+        let historian_recent_decisions_count = self
+            .historian_recent_decisions_count
+            .load(Ordering::Relaxed);
         let last_historian_outcome = self
             .last_historian_outcome
             .get_or_init(|| Mutex::new(None))
@@ -536,6 +544,7 @@ impl DispatchHealth {
                 "stale": stale,
                 "stale_age_ms": stale_age_ms,
                 "last_historian_outcome": last_historian_outcome,
+                "historian_recent_decisions_count": historian_recent_decisions_count,
             })),
         }
     }
@@ -3405,6 +3414,92 @@ enum PreparedHistorianAction {
     FireReady(Box<PreparedHistorianFiring>),
 }
 
+#[derive(Clone)]
+struct HistorianDecisionContext {
+    at_ms: i64,
+    request_observed_at_ms: i64,
+    pressure_pct: u16,
+    drain_latch: bool,
+    chunk_range: Option<HistorianChunkRange>,
+    eligible_tokens: Option<u64>,
+    bar_tokens: Option<u64>,
+}
+
+impl HistorianDecisionContext {
+    fn from_request(
+        parsed: &TransformRequest,
+        loaded: &LoadedState,
+        now: i64,
+        pressure: f64,
+    ) -> Self {
+        Self {
+            at_ms: now,
+            request_observed_at_ms: parsed
+                .request_observed_at_ms
+                .and_then(|observed| i64::try_from(observed).ok())
+                .unwrap_or(now),
+            pressure_pct: quantize_pressure_pct(pressure),
+            drain_latch: loaded.meta.emergency_drain_active,
+            chunk_range: None,
+            eligible_tokens: None,
+            bar_tokens: None,
+        }
+    }
+
+    fn recent_decision(
+        &self,
+        decision: HistorianDecision,
+        cause: String,
+        progress: Option<&transform::HistorianTriggerProgress>,
+    ) -> HistorianRecentDecision {
+        HistorianRecentDecision {
+            at_ms: self.at_ms,
+            request_observed_at_ms: self.request_observed_at_ms,
+            decision,
+            cause,
+            eligible_tokens: self.eligible_tokens.unwrap_or_else(|| {
+                progress.map_or(0, |progress| {
+                    quantize_tokens(progress.eligible_chunk_tokens)
+                })
+            }),
+            bar_tokens: self.bar_tokens.unwrap_or_else(|| {
+                progress.map_or(0, |progress| quantize_tokens(progress.tail_size_bar))
+            }),
+            pressure_pct: self.pressure_pct,
+            drain_latch: self.drain_latch,
+            chunk_range: self.chunk_range.clone(),
+            producer_model: None,
+            completed_at_ms: None,
+            apply_row_version: None,
+        }
+    }
+}
+
+fn quantize_tokens(tokens: f64) -> u64 {
+    if tokens.is_finite() && tokens > 0.0 {
+        tokens.round().min(u64::MAX as f64) as u64
+    } else {
+        0
+    }
+}
+
+fn quantize_pressure_pct(pressure: f64) -> u16 {
+    if pressure.is_finite() && pressure > 0.0 {
+        pressure.round().min(u16::MAX as f64) as u16
+    } else {
+        0
+    }
+}
+
+fn historian_trigger_rule(reason: boundary::TriggerReason) -> &'static str {
+    match reason {
+        boundary::TriggerReason::TailSize => "tail_size",
+        boundary::TriggerReason::ProjectedHeadroom => "pressure",
+        boundary::TriggerReason::CommitClusters => "commit_cluster",
+        boundary::TriggerReason::ForceBand => "emergency",
+    }
+}
+
 struct HistorianPrepareContext<'a> {
     now: i64,
     snapshot_generation: u64,
@@ -4967,6 +5062,10 @@ impl McHandler {
         };
         let state = loaded.meta.historian.state.as_str().to_string();
         let last_failure = loaded.meta.historian.last_failure.clone();
+        let (context_limit, input_tokens, usage_percentage) =
+            usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
+        let mut decision_context =
+            HistorianDecisionContext::from_request(parsed, &loaded, now, usage_percentage);
         if loaded.meta.pending_rewrite.is_some() {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "pending_rewrite".into(),
@@ -4982,10 +5081,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
@@ -5004,10 +5101,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Busy {
                 diagnostics,
@@ -5040,10 +5135,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
@@ -5100,17 +5193,13 @@ impl McHandler {
                     &store,
                     &parsed.session_id,
                     &loaded,
-                    diagnostics
-                        .no_fire_detail
-                        .as_deref()
-                        .expect("no-fire detail"),
+                    &diagnostics,
+                    &decision_context,
                 );
                 return PreparedHistorianAction::Complete(diagnostics);
             }
             Ok(_) | Err(_) => None,
         };
-        let (context_limit, input_tokens, usage_percentage) =
-            usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile)
             .expect("serializer_profile validated upstream");
         let fold_is_only_reclaim = !tail_reclaim(serializer_profile);
@@ -5165,6 +5254,14 @@ impl McHandler {
             .replace(&parsed.session_id, token_cache_snapshot);
         trigger_timer.timings.cache_store_ms +=
             cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
+        decision_context.chunk_range = trigger.progress.as_ref().and_then(|progress| {
+            (progress.protected_start_ordinal > progress.eligible_start_ordinal).then(|| {
+                HistorianChunkRange {
+                    from_ordinal: progress.eligible_start_ordinal,
+                    to_ordinal: progress.protected_start_ordinal - 1,
+                }
+            })
+        });
         let progress = trigger
             .progress
             .as_ref()
@@ -5203,14 +5300,15 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
-        let trigger_reason = trigger.reason.map(|r| r.as_str().to_string());
+        let trigger_rule = trigger
+            .reason
+            .expect("a true historian trigger carries its firing rule");
+        let trigger_reason = Some(trigger_rule.as_str().to_string());
         let model_chain = parsed
             .historian_model_chain
             .as_deref()
@@ -5233,10 +5331,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
@@ -5262,10 +5358,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
@@ -5284,10 +5378,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         };
@@ -5311,10 +5403,8 @@ impl McHandler {
                 &store,
                 &parsed.session_id,
                 &loaded,
-                diagnostics
-                    .no_fire_detail
-                    .as_deref()
-                    .expect("no-fire detail"),
+                &diagnostics,
+                &decision_context,
             );
             return PreparedHistorianAction::Complete(diagnostics);
         }
@@ -5365,7 +5455,7 @@ impl McHandler {
             },
             now,
         );
-        let firing = match assemble {
+        let mut firing = match assemble {
             Ok(AssembleHistorianFiringOutcome::Fire(firing)) => *firing,
             Ok(AssembleHistorianFiringOutcome::NoFire(reason)) => {
                 let raw_no_fire = format!("assemble:{reason:?}");
@@ -5380,14 +5470,21 @@ impl McHandler {
                     progress,
                     last_failure,
                 });
+                let mut no_fire_context = decision_context.clone();
+                if let historian_chunk::HistorianNoFireReason::BelowBudget {
+                    token_estimate,
+                    minimum,
+                } = reason
+                {
+                    no_fire_context.eligible_tokens = Some(token_estimate as u64);
+                    no_fire_context.bar_tokens = Some(minimum as u64);
+                }
                 self.record_no_fire(
                     &store,
                     &parsed.session_id,
                     &loaded,
-                    diagnostics
-                        .no_fire_detail
-                        .as_deref()
-                        .expect("no-fire detail"),
+                    &diagnostics,
+                    &no_fire_context,
                 );
                 return PreparedHistorianAction::Complete(diagnostics);
             }
@@ -5408,10 +5505,8 @@ impl McHandler {
                     &store,
                     &parsed.session_id,
                     &loaded,
-                    diagnostics
-                        .no_fire_detail
-                        .as_deref()
-                        .expect("no-fire detail"),
+                    &diagnostics,
+                    &decision_context,
                 );
                 return PreparedHistorianAction::Complete(diagnostics);
             }
@@ -5443,10 +5538,8 @@ impl McHandler {
                     &store,
                     &parsed.session_id,
                     &loaded,
-                    busy_diagnostics
-                        .no_fire_detail
-                        .as_deref()
-                        .expect("no-fire detail"),
+                    &busy_diagnostics,
+                    &decision_context,
                 );
                 return PreparedHistorianAction::Busy {
                     diagnostics: busy_diagnostics,
@@ -5454,6 +5547,18 @@ impl McHandler {
                 };
             }
         };
+        decision_context.chunk_range = Some(HistorianChunkRange {
+            from_ordinal: firing.from_ordinal,
+            to_ordinal: firing.to_ordinal,
+        });
+        let mut fire_decision = decision_context.recent_decision(
+            HistorianDecision::Fired,
+            format!("trigger_true:{}", historian_trigger_rule(trigger_rule)),
+            diagnostics.progress.as_ref(),
+        );
+        fire_decision.producer_model = model_chain.first().cloned();
+        self.record_fire_decision(&store, &parsed.session_id, &loaded, &fire_decision);
+        firing.recent_decision = Some(fire_decision);
         PreparedHistorianAction::FireReady(Box::new(PreparedHistorianFiring {
             diagnostics,
             task: HistorianFiringTask {
@@ -5630,24 +5735,67 @@ impl McHandler {
         diagnostics
     }
 
-    /// Persist structured skip detail so a supervised rig can read why the historian declined
-    /// to fire from the state dump (the transform response's diagnostics block never reaches
-    /// disk). Change-gated: steady-state passes with the same cause and quantized measurements
-    /// write nothing, so this stays off the hot path. A CAS conflict just drops the diagnostic;
-    /// it must never fail a pass.
+    /// Persist a trigger-true decision before handing the firing to an asynchronous worker.
+    /// The state transition fills in the producer model without appending the same decision again.
+    fn record_fire_decision(
+        &self,
+        store: &McStore,
+        session_id: &str,
+        loaded: &LoadedState,
+        decision: &HistorianRecentDecision,
+    ) {
+        let mut meta = loaded.meta.clone();
+        meta.historian.record_recent_decision(decision.clone());
+        if store
+            .commit(session_id, loaded.row_version, &loaded.core, &meta)
+            .is_ok()
+        {
+            DISPATCH_HEALTH.historian_recent_decisions_count.store(
+                meta.historian.recent_decisions.len() as u64,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// Persist skip evidence without changing the transform result. Equivalent quantized
+    /// no-fire observations leave the row untouched; a CAS loser simply yields to the newer pass.
     fn record_no_fire(
         &self,
         store: &McStore,
         session_id: &str,
         loaded: &mc_store::LoadedState,
-        reason: &str,
+        diagnostics: &HistorianDiagnostics,
+        context: &HistorianDecisionContext,
     ) {
-        if loaded.meta.historian.last_no_fire.as_deref() == Some(reason) {
+        let reason = diagnostics
+            .no_fire_detail
+            .as_deref()
+            .expect("no-fire diagnostics carry durable detail");
+        let cause = diagnostics
+            .canonical_cause
+            .clone()
+            .expect("no-fire diagnostics carry a canonical cause");
+        let mut meta = loaded.meta.clone();
+        let decision_changed = meta
+            .historian
+            .record_recent_decision(context.recent_decision(
+                HistorianDecision::NoFire,
+                cause,
+                diagnostics.progress.as_ref(),
+            ));
+        if !decision_changed && meta.historian.last_no_fire.as_deref() == Some(reason) {
             return;
         }
-        let mut meta = loaded.meta.clone();
         meta.historian.last_no_fire = Some(reason.to_string());
-        let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
+        if store
+            .commit(session_id, loaded.row_version, &loaded.core, &meta)
+            .is_ok()
+        {
+            DISPATCH_HEALTH.historian_recent_decisions_count.store(
+                meta.historian.recent_decisions.len() as u64,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     async fn execute_historian_firing_task(
@@ -5713,8 +5861,10 @@ impl McHandler {
             }
         };
         if let Ok(loaded) = store.load(&session_id) {
-            DISPATCH_HEALTH
-                .record_historian_outcome(historian_status_summary(&loaded.meta.historian));
+            DISPATCH_HEALTH.record_historian_outcome(
+                historian_status_summary(&loaded.meta.historian),
+                loaded.meta.historian.recent_decisions.len(),
+            );
         }
         result
     }
@@ -6772,6 +6922,7 @@ impl McHandler {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
                 "last_outcome": historian,
+                "recent_decisions": &loaded.meta.historian.recent_decisions,
             },
             // Keep the current-pass attribution separate from the explicitly historical
             // `last_divergence` field so stable status reads cannot imply a fresh bust.
@@ -16317,6 +16468,73 @@ mod tests {
         assert!((pct - (285_310.0 / 204_000.0 * 100.0)).abs() < 0.01);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn historian_decision_write_fence_records_distinct_pass_evaluations() {
+        let producer = Arc::new(ProducerState::default());
+        let mut config = default_test_config();
+        config.model_chain.clear();
+        let (handler, store, _dir, _project) = handler_with_store(producer, config);
+
+        let mut first = request_with_usage(trigger_ingress_fixture(180, 1_000), 20_000, 200_000);
+        first["request_observed_at_ms"] = json!(1_000);
+        let first_response = call_transform_request(&handler, first).await;
+        assert_eq!(first_response["status"], "ok");
+        let first_state = store.load("ses").unwrap();
+        let first_decisions = &first_state.meta.historian.recent_decisions;
+        assert_eq!(
+            first_decisions.len(),
+            1,
+            "every evaluated pass must write evidence"
+        );
+        let first_tokens = first_decisions[0].eligible_tokens;
+
+        let second_messages = trigger_ingress_fixture(300, 1_000);
+        let mut second = request_with_usage(second_messages.clone(), 140_000, 200_000);
+        second["request_observed_at_ms"] = json!(2_000);
+        let second_response = call_transform_request(&handler, second).await;
+        assert_eq!(second_response["status"], "ok");
+        let second_state = store.load("ses").unwrap();
+        let second_decisions = &second_state.meta.historian.recent_decisions;
+        assert_eq!(second_decisions.len(), 2);
+        assert_eq!(
+            second_decisions
+                .iter()
+                .map(|decision| decision.cause.as_str())
+                .collect::<Vec<_>>(),
+            ["below_proactive_floor", "no_models"]
+        );
+        assert_eq!(
+            second_decisions
+                .iter()
+                .map(|decision| decision.request_observed_at_ms)
+                .collect::<Vec<_>>(),
+            [1_000, 2_000]
+        );
+        assert_ne!(second_decisions[1].eligible_tokens, first_tokens);
+        assert!(second_decisions
+            .iter()
+            .all(|decision| decision.bar_tokens == 19_500));
+        assert!(second_decisions[1].chunk_range.is_some());
+
+        let row_version = second_state.row_version;
+        let mut steady = request_with_usage(second_messages, 140_000, 200_000);
+        steady["request_observed_at_ms"] = json!(3_000);
+        let steady_response = call_transform_request(&handler, steady).await;
+        assert_eq!(steady_response["status"], "ok");
+        let steady_state = store.load("ses").unwrap();
+        assert_eq!(steady_state.row_version, row_version);
+        assert_eq!(steady_state.meta.historian.recent_decisions.len(), 2);
+
+        let status = tool_body(handler.handle_session_status_value(
+            7,
+            &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+        ));
+        assert_eq!(
+            status["historian"]["recent_decisions"],
+            json!(second_decisions)
+        );
+    }
+
     #[test]
     fn usage_numbers_first_pass_prefers_geometry_soft_over_the_constant() {
         // First pass: geometry present, usage absent. The historian trigger
@@ -18832,6 +19050,7 @@ mod tests {
         let health = DispatchHealth::new();
         health.record_historian_outcome(
             "published seq 2; model_unresolvable:opencode/model-a: open_failed".to_string(),
+            4,
         );
 
         let report = health.report(10_000);
@@ -18839,10 +19058,12 @@ mod tests {
             detail.contains("last historian: published seq 2")
                 && detail.contains("model_unresolvable:opencode/model-a")
         }));
+        let metrics = report.metrics.unwrap();
         assert_eq!(
-            report.metrics.unwrap()["last_historian_outcome"],
+            metrics["last_historian_outcome"],
             json!("published seq 2; model_unresolvable:opencode/model-a: open_failed")
         );
+        assert_eq!(metrics["historian_recent_decisions_count"], json!(4));
     }
 
     #[test]
@@ -21798,8 +22019,16 @@ mod tests {
         let cached_state = cached_store.load("ses").unwrap();
         let full_state = control_store.load("ses").unwrap();
         assert_eq!(cached_state.core, full_state.core, "selection/core drift");
+        let normalize_decision_times = |mut historian: HistorianDurableState| {
+            for decision in &mut historian.recent_decisions {
+                decision.at_ms = 0;
+                decision.request_observed_at_ms = 0;
+            }
+            historian
+        };
         assert_eq!(
-            cached_state.meta.historian, full_state.meta.historian,
+            normalize_decision_times(cached_state.meta.historian),
+            normalize_decision_times(full_state.meta.historian),
             "historian boundary math drift"
         );
 
@@ -24115,6 +24344,7 @@ mod tests {
                 failure_backoff_at_ms: None,
                 last_failure: None,
                 last_no_fire: None,
+                recent_decisions: Vec::new(),
                 consecutive_publish_failures: 0,
             },
             ..Default::default()
@@ -28136,6 +28366,15 @@ mod tests {
         assert_eq!(compartments.len(), 1);
         assert_eq!(compartments[0].start_message, 1);
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        let fired_state = store.load("ses").unwrap();
+        assert_eq!(fired_state.meta.historian.recent_decisions.len(), 1);
+        let fired_decision = fired_state.meta.historian.recent_decisions.last().unwrap();
+        assert_eq!(fired_decision.decision, HistorianDecision::Fired);
+        assert_eq!(fired_decision.cause, "trigger_true:emergency");
+        assert_eq!(fired_decision.producer_model.as_deref(), Some("test/model"));
+        assert!(fired_decision.eligible_tokens > 0);
+        assert!(fired_decision.completed_at_ms.is_some());
+        assert_eq!(fired_decision.apply_row_version, fired_state.row_version);
 
         let second = call_transform(&handler, messages).await;
         assert_eq!(second["action"], "HARD");
@@ -31458,6 +31697,7 @@ mod tests {
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
+            recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
         };
         store
@@ -31490,6 +31730,7 @@ mod tests {
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
+            recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
         };
         store
@@ -31517,6 +31758,7 @@ mod tests {
             0,
             mc_store::CompartmentSetGeneration::default(),
             1,
+            None,
         )
         .unwrap()
         {
