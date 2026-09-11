@@ -74,6 +74,7 @@ export interface PiRunnerOptions {
   magicContextConfig?: Record<string, unknown>;
   piSettingsExtra?: Record<string, unknown>;
   modelContextLimit?: number;
+  extensionsBeforeMagicContext?: string[];
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;
 }

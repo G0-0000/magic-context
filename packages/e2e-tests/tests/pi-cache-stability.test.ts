@@ -2,6 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ interface HarnessOptions {
     magicContextConfig?: Record<string, unknown>;
     modelContextLimit?: number;
     sharedDataDir?: string;
+    extensionsBeforeMagicContext?: string[];
 }
 
 async function withPiHarness<T>(
@@ -718,9 +720,48 @@ describe("pi cache stability", () => {
     // anchor/restart sequence without interactive process control.
     it.skip("keeps sticky reminder anchored at the same message across defer passes and restart", () => {});
 
-    // FIXME(pi-cache-stability): native compaction is cancelled by session_before_compact,
-    // but the current e2e harness has no hook to force Pi's native compact event in print mode.
-    it.skip("cancels native Pi compaction and lets Magic Context own compaction", () => {});
+    it("keeps Pi history and cached m0 unchanged when the recovered fail-closed listener precedes the main compact veto", async () => {
+        await withPiHarness(
+            {
+                extensionsBeforeMagicContext: [
+                    join(import.meta.dir, "../src/pi-runner/fail-closed-compaction-extension.mjs"),
+                ],
+            },
+            async (h) => {
+                await h.invokeExtensionCommand("e2e-recover-fail-closed");
+                await h.sendPrompt(
+                    `materialize m0 before compact-hook composition ${h.ballast(10_000)}`,
+                    { timeoutMs: 60_000 },
+                );
+                const turn = await h.sendPrompt(
+                    `add a second compactable turn ${h.ballast(10_000)}`,
+                    { timeoutMs: 60_000, continueSession: true },
+                );
+                if (!turn.sessionId) throw new Error("Pi did not expose the compact fixture session id");
+                const sessionId = turn.sessionId;
+                const beforeMessages = await h.getMessages();
+                const beforeM0Sha = readDb(h, (db) => {
+                    const row = db
+                        .prepare("SELECT cached_m0_bytes AS m0 FROM session_meta WHERE session_id = ?")
+                        .get(sessionId) as { m0: Uint8Array | null } | null;
+                    expect(row?.m0).not.toBeNull();
+                    return createHash("sha256").update(row!.m0!).digest("hex");
+                });
+
+                await h.compactNowExpectCancelled();
+
+                expect(await h.getMessages()).toEqual(beforeMessages);
+                const afterM0Sha = readDb(h, (db) => {
+                    const row = db
+                        .prepare("SELECT cached_m0_bytes AS m0 FROM session_meta WHERE session_id = ?")
+                        .get(sessionId) as { m0: Uint8Array | null } | null;
+                    expect(row?.m0).not.toBeNull();
+                    return createHash("sha256").update(row!.m0!).digest("hex");
+                });
+                expect(afterM0Sha).toBe(beforeM0Sha);
+            },
+        );
+    }, 180_000);
 
     // FIXME(pi-cache-stability): requires reliable print-mode historian publication and
     // inspection of Pi's JSONL compaction entry after appendCompaction(...).

@@ -793,7 +793,7 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
-	it("SOFT pass: new v2 compartment surfaces in m[1] WITHOUT re-materializing m[0], raw messages trimmed", () => {
+	it("SOFT m[1] refresh keeps the cached m[0] sha256 unchanged while publishing a new compartment", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-soft-delta-"));
 		try {
@@ -816,6 +816,9 @@ describe("injectM0M1Pi", () => {
 			const r0 = injectM0M1Pi(state, db, firstPass as never, ["entry-0"]);
 			expect(r0.m0Materialized).toBe(true);
 			const baselineM0 = textOf(firstPass[0] as never);
+			const baselineM0Sha = createHash("sha256")
+				.update(baselineM0)
+				.digest("hex");
 			expect(baselineM0).toContain("first compartment body");
 
 			// Historian publishes a SECOND v2 compartment (the delta). This is the
@@ -853,6 +856,8 @@ describe("injectM0M1Pi", () => {
 			// (b) m[0] bytes byte-identical to the baseline (the whole point of the
 			// split: the stable prefix stays cached).
 			const m0 = textOf(secondPass[0] as never);
+			const refreshedM0Sha = createHash("sha256").update(m0).digest("hex");
+			expect(refreshedM0Sha).toBe(baselineM0Sha);
 			expect(m0).toBe(baselineM0);
 			expect(m0).not.toContain("second compartment body");
 			// (c) new compartment surfaces in m[1].

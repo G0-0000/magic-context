@@ -547,6 +547,7 @@ const piTextIdentitySourceCacheBySession = new Map<
 
 interface PiTextIdentityPlan {
 	driftedMessageIds: Set<string>;
+	legacyReminderTagNumbers: Set<number>;
 	reusableMessageIds: Set<string>;
 	sourceCache: Map<number, string>;
 }
@@ -619,6 +620,7 @@ function buildPiTextIdentityPlan(
 	}
 
 	const driftedMessageIds = new Set<string>();
+	const legacyReminderTagNumbers = new Set<number>();
 	for (const [messageId, currentSources] of currentSourcesByMessageId) {
 		const legacyRows = legacyRowsByMessageId.get(messageId) ?? [];
 		if (versionedMessageIds.has(messageId)) {
@@ -629,12 +631,27 @@ function buildPiTextIdentityPlan(
 		legacyRows.sort((left, right) => left.ordinal - right.ordinal);
 		const vectorMatches =
 			legacyRows.length === currentSources.length &&
-			legacyRows.every(
-				(row, index) =>
-					row.ordinal === index &&
-					withoutPiLeadingTemporalMarker(sourceCache.get(row.tagId) ?? "") ===
-						currentSources[index],
-			);
+			legacyRows.every((row, index) => {
+				if (row.ordinal !== index) return false;
+				const stored = withoutPiLeadingTemporalMarker(
+					sourceCache.get(row.tagId) ?? "",
+				);
+				const current = currentSources[index] ?? "";
+				if (stored === current) return true;
+				// Older Pi cleanup persisted the stripped reminder body as source.
+				// Treat that exact projection as the same text identity so deployment
+				// does not retag the message before compatibility replay can restore it.
+				const strippedCurrent = stripSystemInjection(current);
+				const storedLegacyBody = withoutPiLeadingTemporalMarker(
+					`${sourceCache.get(row.tagId) ?? ""}\n`,
+				).trimEnd();
+				const legacyReminderMatches =
+					strippedCurrent !== null &&
+					withoutPiLeadingTemporalMarker(stripTagPrefix(strippedCurrent)) ===
+						storedLegacyBody;
+				if (legacyReminderMatches) legacyReminderTagNumbers.add(row.tagId);
+				return legacyReminderMatches;
+			});
 		if (!vectorMatches) driftedMessageIds.add(messageId);
 	}
 
@@ -642,7 +659,12 @@ function buildPiTextIdentityPlan(
 	for (const messageId of reuseCandidates) {
 		if (!driftedMessageIds.has(messageId)) reusableMessageIds.add(messageId);
 	}
-	return { driftedMessageIds, reusableMessageIds, sourceCache };
+	return {
+		driftedMessageIds,
+		legacyReminderTagNumbers,
+		reusableMessageIds,
+		sourceCache,
+	};
 }
 
 interface PiBranchEntryLookup {
@@ -5833,18 +5855,62 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Caveman renders from pristine source, so frozen reminder cleanup must run
 	// after both its discovery and replay paths, including when cleanup is disabled.
 	const contentDecisions = getPiContentDecisions(args.db, args.sessionId);
-	for (const tag of activeTags) {
-		if (
-			!contentDecisions.has(
-				encodePiContentDecision("reminder-strip", tag.messageId),
-			)
+	const undecidedTagNumbers = activeTags
+		.filter(
+			(tag) =>
+				!contentDecisions.has(
+					encodePiContentDecision("reminder-strip", tag.messageId),
+				),
 		)
-			continue;
+		.map((tag) => tag.tagNumber);
+	const legacySources = new Map<number, string>();
+	for (let offset = 0; offset < undecidedTagNumbers.length; offset += 500) {
+		const loaded = getSourceContents(
+			args.db,
+			args.sessionId,
+			undecidedTagNumbers.slice(offset, offset + 500),
+		);
+		for (const [tagNumber, source] of loaded) {
+			legacySources.set(tagNumber, source);
+		}
+	}
+	for (const tag of activeTags) {
 		const target = targets.get(tag.tagNumber);
 		const content = target?.getContent?.();
 		if (!content) continue;
+		const encodedDecision = encodePiContentDecision(
+			"reminder-strip",
+			tag.messageId,
+		);
+		let frozen = contentDecisions.has(encodedDecision);
+		const legacySource = legacySources.get(tag.tagNumber) ?? "";
+		const isLegacyReminderProjection =
+			textIdentityPlan.legacyReminderTagNumbers.has(tag.tagNumber) ||
+			(legacySource.trimStart().startsWith("<!-- +") &&
+				withoutPiLeadingTemporalMarker(`${legacySource}\n`).trim().length ===
+					0);
+		if (
+			!frozen &&
+			isCacheBustingPass &&
+			isLegacyReminderProjection &&
+			freezePiContentDecision(
+				args.db,
+				args.sessionId,
+				"reminder-strip",
+				tag.messageId,
+			)
+		) {
+			contentDecisions.add(encodedDecision);
+			frozen = true;
+		}
 		const stripped = stripSystemInjection(content);
-		if (stripped !== null) target?.setContent(stripped);
+		if (stripped === null) continue;
+		// Older releases could overwrite source_contents with the stripped body.
+		// Replaying that exact legacy source on defer prevents one unpriced
+		// resurrection; the next reclaim ride freezes the normal decision.
+		const legacyStripped =
+			!frozen && stripTagPrefix(legacySource) === stripTagPrefix(stripped);
+		if (frozen || legacyStripped) target?.setContent(stripped);
 	}
 
 	// 5. Commit tagging mutations back to Pi messages BEFORE injecting

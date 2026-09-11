@@ -1,4 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -21,27 +26,48 @@ import {
 	reconcilePiCompactionMode,
 } from "./compaction-off-pi";
 import { handlePiSessionBeforeCompact } from "./index";
-import { createTestDb } from "./test-utils.test";
+import { injectM0M1Pi } from "./inject-compartments-pi";
+import { createTestDb, textOf, userMessage } from "./test-utils.test";
 
 describe("Pi compaction-off mode", () => {
-	it("preserves the frozen prefix when MC cancels a native compaction attempt", async () => {
+	it("keeps the cached m[0] sha256 unchanged from cancelled compaction through the next context injection pass", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-cancelled-native-prefix";
+		const cwd = mkdtempSync(join(tmpdir(), "pi-cancelled-m0-"));
 		const ctx = { sessionManager: { getSessionId: () => sessionId } };
-		const m0 = Buffer.from("frozen m0 before attempted compaction");
-		const m1 = Buffer.from("frozen m1 before attempted compaction");
+		const state = {
+			sessionId,
+			projectIdentity: resolveProjectIdentity(cwd),
+			projectDirectory: cwd,
+			injectionBudgetTokens: 10_000,
+		};
 		try {
-			updateSessionMeta(db, sessionId, {
-				cachedM0Bytes: m0,
-				cachedM1Bytes: m1,
-			});
+			writeFileSync(join(cwd, "AGENTS.md"), "# Cached before cancellation\n");
+			const before = [userMessage("before", 1)];
+			injectM0M1Pi(state, db, before as never);
+			const beforeM0 = textOf(before[0] as never);
+			const beforeM0Sha = createHash("sha256").update(beforeM0).digest("hex");
+
+			writeFileSync(
+				join(cwd, "AGENTS.md"),
+				"# Must wait for a real HARD fold\n",
+			);
 			expect(
 				await handlePiSessionBeforeCompact({ db, compactionOff: false, ctx }),
 			).toEqual({ cancel: true });
-			const cancelled = getOrCreateSessionMeta(db, sessionId);
-			expect(cancelled.cachedM0Bytes).toEqual(m0);
-			expect(cancelled.cachedM1Bytes).toEqual(m1);
+
+			const next = [userMessage("next context", 2)];
+			const replay = injectM0M1Pi(state, db, next as never);
+			const nextM0 = textOf(next[0] as never);
+			const nextM0Sha = createHash("sha256").update(nextM0).digest("hex");
+			expect(replay.m0Materialized).toBe(false);
+			expect(nextM0Sha).toBe(beforeM0Sha);
+			expect(nextM0).toBe(beforeM0);
+			expect(
+				getOrCreateSessionMeta(db, sessionId).cachedM0Bytes,
+			).not.toBeNull();
 		} finally {
+			rmSync(cwd, { recursive: true, force: true });
 			closeQuietly(db);
 		}
 	});

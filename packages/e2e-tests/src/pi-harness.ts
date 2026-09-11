@@ -21,6 +21,7 @@ export interface PiTestHarnessOptions {
   piSettingsExtra?: Record<string, unknown>;
   modelContextLimit?: number;
   mockDefault?: MockResponse;
+  extensionsBeforeMagicContext?: string[];
   /** Share the cortexkit DB with another harness. */
   sharedDataDir?: string;
   /** Optional working directory override before the persistent Pi process starts. */
@@ -220,6 +221,24 @@ export class PiTestHarness {
   async compactNow(): Promise<void> {
     const response = await this.rpc.sendCommand("compact");
     requireSuccessfulResponse(response);
+  }
+
+  async compactNowExpectCancelled(): Promise<void> {
+    const response = await this.rpc.sendCommand("compact");
+    if (response.success || !response.error?.includes("Compaction cancelled")) {
+      throw new Error(`Expected Pi compaction cancellation, received ${JSON.stringify(response)}`);
+    }
+  }
+
+  async invokeExtensionCommand(command: string): Promise<void> {
+    const response = await this.rpc.sendCommand("prompt", { message: `/${command}` });
+    requireSuccessfulResponse(response);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const state = await this.getState();
+      if (!state.isStreaming && !state.isCompacting) return;
+      await Bun.sleep(20);
+    }
+    throw new Error(`Pi extension command /${command} did not settle`);
   }
 
   async newSession(): Promise<void> {
