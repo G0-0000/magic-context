@@ -78,8 +78,6 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
     "user-owned model-profile definitions; deferred until the Alfonso Desktop profile editor is available",
   "system_prompt_injection.skip_signatures":
     "free-form substring array; raw JSONC (no array widget in the form yet)",
-  protected_tokens: "deprecated compatibility key; raw JSONC only",
-  debug_rpc: "developer-only RPC diagnostics; raw JSONC only",
   subc: "user-only subc daemon routing; raw JSONC because project configs cannot provide this connection",
   shadow_embedding: "developer-only shadow embedding lane; raw JSONC and never a dashboard knob",
   transform_mode:
