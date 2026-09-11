@@ -6,20 +6,24 @@ import { Database } from "bun:sqlite";
  * Classification rule table (first matching rule wins):
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
- * | unaccounted_defer_pass | no | provider-visible divergence on decision=defer |
- * | accounted_ctx_flush | yes | rewrite caused by /ctx-flush (materialize_reason=explicit_flush) |
- * | accounted_ctx_reduce | yes | rewrite landing from an agent ctx_reduce call |
- * | accounted_force_band | yes | forced emergency batch at the >=85% force band |
- * | accounted_hard_marker_drain | yes | HARD/m0 rebuild at a compaction-marker drain seam |
- * | accounted_hard_model_change | yes | HARD/m0 rebuild with materialize_reason=model_change |
- * | accounted_hard_system_hash | yes | HARD/m0 rebuild with materialize_reason=system_hash |
- * | accounted_hard_epoch | yes | HARD/m0 rebuild caused by project, render, or session epoch change |
- * | accounted_hard_pressure_refold | yes | HARD/m0 rebuild with materialize_reason=pressure_refold |
- * | accounted_soft_m1_execute | yes | SOFT m1_delta/coverage_fold refresh on decision=execute |
- * | accounted_provider_system_prompt_change | yes | user-visible provider switch or system-prompt change |
- * | unaccounted_double_bust | no | consecutive BUST at the same first-divergence/read offset |
- * | unaccounted_tail_rewrite | no | unforced rewrite in the previous request's tail |
- * | unaccounted_rewrite | no | BUST with no accounted attribution |
+ * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
+ * | no_mc_pass_row | no | no MC pass record within +/-5 s of the provider request/pass timestamp |
+ * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
+ * | accounted_force_band | yes | matched pass records a forced emergency drop batch |
+ * | accounted_hard_marker_drain | yes | matched HARD/m0 pass records marker_drain or a compaction-marker seam |
+ * | accounted_hard_model_change | yes | matched HARD/m0 pass records materialize_reason=model_change |
+ * | accounted_hard_system_hash | yes | matched HARD/m0 pass records system_hash, or a large system-prompt replacement |
+ * | accounted_hard_epoch | yes | matched HARD/m0 pass records a project, render, or session epoch change |
+ * | accounted_hard_pressure_refold | yes | matched HARD/m0 pass records materialize_reason=pressure_refold |
+ * | accounted_hard_fold | yes | matched pass records another materialized HARD/m0 fold; tiny mid-history defer/first_render seams are excluded |
+ * | accounted_ctx_reduce | yes | matched pass applies drops at an agent ctx_reduce landing |
+ * | accounted_drop_applied | yes | matched pass records applied drops |
+ * | accounted_soft_m1_execute | yes | matched canonical execute pass refreshes m1 |
+ * | unaccounted_defer_pass | no | matched canonical defer pass, including a tiny mid-history first_render seam, diverges |
+ * | accounted_provider_system_prompt_change | yes | matched non-defer pass has a user-visible provider change |
+ * | unaccounted_double_bust | no | matched otherwise-unattributed pass repeats the previous divergence offset |
+ * | unaccounted_tail_rewrite | no | matched otherwise-unattributed pass rewrites the previous request tail |
+ * | unaccounted_rewrite | no | matched pass has no accounted attribution |
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. --send is the only switch that opens subc;
@@ -59,6 +63,7 @@ export interface CacheBustSentinelOptions {
     lookbackMs: number;
     stateFile: string;
     databasePath: string;
+    rustStorePath: string;
     connectionFile: string;
     wakeModuleId: string;
     anthropicDir?: string;
@@ -268,6 +273,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         "--lookback-ms",
         "--state-file",
         "--db",
+        "--rust-store",
         "--connection-file",
         "--wake-module-id",
         "--anthropic-dir",
@@ -310,6 +316,7 @@ export function parseSentinelArgs(argv: string[]): CacheBustSentinelOptions {
         lookbackMs,
         stateFile: values.get("--state-file") ?? join(storageDir, "cache-bust-sentinel-state.json"),
         databasePath: values.get("--db") ?? join(storageDir, "context.db"),
+        rustStorePath: values.get("--rust-store") ?? join(storageDir, "store.db"),
         connectionFile:
             values.get("--connection-file") ??
             join(getDataDir(), "cortexkit", "run", "subc-connection.json"),
@@ -371,35 +378,164 @@ export function loadSessionDecisions(
     session: ActiveCacheBustSession,
     options: CacheBustSentinelOptions,
 ): CacheBustDecisionAttribution[] {
-    if (!existsSync(options.databasePath)) return [];
-    const db = new Database(options.databasePath, { readonly: true });
-    try {
-        if (!tableExists(db, "transform_decisions")) return [];
-        return (
-            db
-                .query(
-                    `SELECT message_id, ts_ms, decision, materialized, materialize_reason,
-                            emergency, dropped_tokens, dropped_count, input_tokens
-                       FROM transform_decisions
-                      WHERE session_id = ? AND harness = ?
-                      ORDER BY ts_ms, rowid`,
-                )
-                .all(session.sessionId, session.harness) as Array<Record<string, unknown>>
-        ).map((row) => ({
-            timestampMs: finiteNonnegative(row.ts_ms) ?? 0,
-            messageId: typeof row.message_id === "string" ? row.message_id : undefined,
-            decision: typeof row.decision === "string" ? row.decision : "unknown",
-            materialized: row.materialized === 1 || row.materialized === true,
-            materializeReason:
-                typeof row.materialize_reason === "string" ? row.materialize_reason : null,
-            emergency: row.emergency === 1 || row.emergency === true,
-            droppedTokens: finiteNonnegative(row.dropped_tokens) ?? 0,
-            droppedCount: finiteNonnegative(row.dropped_count) ?? 0,
-            inputTokens: finiteNonnegative(row.input_tokens) ?? 0,
-        }));
-    } finally {
-        db.close(false);
+    const records: CacheBustDecisionAttribution[] = [];
+    const stringField = (row: Record<string, unknown>, ...keys: string[]): string | undefined => {
+        for (const key of keys) {
+            if (typeof row[key] === "string" && row[key]) return row[key] as string;
+        }
+        return undefined;
+    };
+    const numberField = (row: Record<string, unknown>, ...keys: string[]): number | undefined => {
+        for (const key of keys) {
+            const value = finiteNonnegative(row[key]);
+            if (value !== undefined) return value;
+        }
+        return undefined;
+    };
+    const booleanField = (row: Record<string, unknown>, ...keys: string[]): boolean =>
+        keys.some((key) => row[key] === true || row[key] === 1 || row[key] === "true");
+    const normalize = (
+        row: Record<string, unknown>,
+        source: string,
+    ): CacheBustDecisionAttribution | undefined => {
+        if (
+            typeof row.harness === "string" &&
+            row.harness !== session.harness &&
+            !(session.harness === "pi" && row.harness === "omp")
+        ) {
+            return undefined;
+        }
+        const timestampMs = numberField(
+            row,
+            "pass_timestamp_ms",
+            "timestamp_ms",
+            "ts_ms",
+            "last_received_at_ms",
+        );
+        if (timestampMs === undefined) return undefined;
+        const materializeReason =
+            stringField(
+                row,
+                "materialize_reason",
+                "materialization_reason",
+                "fold_reason",
+                "hard_reason",
+            ) ?? null;
+        const appliedDrops = numberField(
+            row,
+            "applied_drop_count",
+            "applied_drops",
+            "applied_supersession_count",
+            "dropped_count",
+        );
+        return {
+            timestampMs,
+            requestObservedAtMs: numberField(row, "request_observed_at_ms", "request_observed_at"),
+            messageId: stringField(row, "message_id", "assistant_message_id"),
+            decision:
+                stringField(row, "decision", "scheduler_decision", "canonical_decision") ??
+                "unknown",
+            canonicalDecision: stringField(row, "canonical_decision"),
+            deferReason: stringField(row, "defer_reason") ?? null,
+            materialized:
+                booleanField(row, "materialized", "m0_materialized", "fold_applied") ||
+                materializeReason !== null,
+            materializeReason,
+            emergency: booleanField(row, "emergency", "drain_latch_active", "force_band"),
+            droppedTokens: numberField(row, "dropped_tokens", "applied_drop_tokens") ?? 0,
+            droppedCount: appliedDrops ?? 0,
+            inputTokens: numberField(row, "input_tokens", "prompt_tokens") ?? 0,
+            flush:
+                booleanField(row, "flush", "flush_applied", "explicit_flush") ||
+                materializeReason === "explicit_flush",
+            source,
+        };
+    };
+    const addRows = (rows: readonly Record<string, unknown>[], source: string): void => {
+        for (const row of rows) {
+            const normalized = normalize(row, source);
+            if (normalized) records.push(normalized);
+        }
+    };
+    const readTable = (db: Database, table: string, source: string): void => {
+        if (!tableExists(db, table)) return;
+        const columns = new Set(
+            (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>).flatMap(
+                (row) => (typeof row.name === "string" ? [row.name] : []),
+            ),
+        );
+        if (!columns.has("session_id")) return;
+        addRows(
+            db.query(`SELECT * FROM ${table} WHERE session_id = ?`).all(session.sessionId) as Array<
+                Record<string, unknown>
+            >,
+            source,
+        );
+    };
+    const readTraceHistory = (db: Database, source: string): void => {
+        if (!tableExists(db, "mc_pass_trace")) return;
+        const rows = db
+            .query("SELECT * FROM mc_pass_trace WHERE session_id = ?")
+            .all(session.sessionId) as Array<Record<string, unknown>>;
+        addRows(rows, source);
+        for (const row of rows) {
+            for (const column of ["scheduler_history", "scheduler_interesting_history"] as const) {
+                if (typeof row[column] !== "string") continue;
+                try {
+                    const history = JSON.parse(row[column] as string);
+                    if (Array.isArray(history)) {
+                        addRows(
+                            history.filter((entry): entry is Record<string, unknown> =>
+                                Boolean(recordValue(entry)),
+                            ),
+                            `${source}.${column}`,
+                        );
+                    }
+                } catch {
+                    // A malformed diagnostic history is ignored; the mirrored table can still join.
+                }
+            }
+        }
+    };
+    const readStore = (path: string, source: string, includeTrace: boolean): void => {
+        if (!existsSync(path)) return;
+        const db = new Database(path, { readonly: true });
+        try {
+            readTable(db, "transform_decisions", `${source}.transform_decisions`);
+            readTable(db, "scheduler_history", `${source}.scheduler_history`);
+            if (includeTrace) readTraceHistory(db, `${source}.mc_pass_trace`);
+        } finally {
+            db.close(false);
+        }
+    };
+
+    readStore(options.databasePath, "context.db", false);
+    if (options.rustStorePath !== options.databasePath) {
+        readStore(options.rustStorePath, "store.db", true);
     }
+
+    records.sort((left, right) => left.timestampMs - right.timestampMs);
+    const merged: CacheBustDecisionAttribution[] = [];
+    for (const record of records) {
+        const prior = merged.at(-1);
+        if (prior && Math.abs(prior.timestampMs - record.timestampMs) <= 500) {
+            prior.requestObservedAtMs ??= record.requestObservedAtMs;
+            prior.messageId ??= record.messageId;
+            prior.canonicalDecision ??= record.canonicalDecision;
+            prior.deferReason ??= record.deferReason;
+            prior.materialized ||= record.materialized;
+            prior.materializeReason ??= record.materializeReason;
+            prior.emergency ||= record.emergency;
+            prior.droppedTokens = Math.max(prior.droppedTokens, record.droppedTokens);
+            prior.droppedCount = Math.max(prior.droppedCount, record.droppedCount);
+            prior.inputTokens = Math.max(prior.inputTokens, record.inputTokens);
+            prior.flush ||= record.flush;
+            prior.source = `${prior.source}+${record.source}`;
+            continue;
+        }
+        merged.push({ ...record });
+    }
+    return merged;
 }
 
 function openCodeSessionDirectory(sessionId: string): string | undefined {

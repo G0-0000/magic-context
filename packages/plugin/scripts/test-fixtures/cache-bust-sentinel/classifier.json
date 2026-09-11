@@ -1,66 +1,106 @@
 [
     {
-        "class": "unaccounted_defer_pass",
-        "input": { "decision": { "decision": "defer" } }
+        "class": "system_row_shift",
+        "decision": { "decision": "defer" },
+        "input": {
+            "divergenceIndex": 0,
+            "firstDivergenceRole": "system",
+            "rewrittenTokens": 400,
+            "promptTokens": 10000
+        }
+    },
+    {
+        "class": "no_mc_pass_row",
+        "decisionTimestampOffsetMs": -5001,
+        "decision": { "decision": "defer" },
+        "input": {}
     },
     {
         "class": "accounted_ctx_flush",
-        "input": { "decision": { "materialized": true, "materializeReason": "explicit_flush" } }
-    },
-    {
-        "class": "accounted_ctx_reduce",
-        "input": { "contentEvidence": "assistant tool name=ctx_reduce" }
+        "decision": { "materializeReason": "explicit_flush", "flush": true },
+        "input": {}
     },
     {
         "class": "accounted_force_band",
-        "input": { "decision": { "emergency": true, "droppedCount": 3 } }
+        "decision": { "emergency": true, "droppedCount": 3 },
+        "input": {}
     },
     {
         "class": "accounted_hard_marker_drain",
-        "input": { "compactionSeam": true }
+        "decision": { "materialized": true, "materializeReason": "marker_drain" },
+        "input": {}
     },
     {
         "class": "accounted_hard_model_change",
-        "input": { "decision": { "materialized": true, "materializeReason": "model_change" } }
+        "decision": { "materialized": true, "materializeReason": "model_change" },
+        "input": {}
     },
     {
         "class": "accounted_hard_system_hash",
-        "input": { "decision": { "materialized": true, "materializeReason": "system_hash" } }
+        "decision": {
+            "decision": "defer",
+            "materialized": true,
+            "materializeReason": "system_hash"
+        },
+        "input": {}
     },
     {
         "class": "accounted_hard_epoch",
-        "input": {
-            "decision": { "materialized": true, "materializeReason": "project_memory_epoch" }
-        }
+        "decision": { "materialized": true, "materializeReason": "project_memory_epoch" },
+        "input": {}
     },
     {
         "class": "accounted_hard_pressure_refold",
-        "input": { "decision": { "materialized": true, "materializeReason": "pressure_refold" } }
+        "decision": { "materialized": true, "materializeReason": "pressure_refold" },
+        "input": {}
+    },
+    {
+        "class": "accounted_hard_fold",
+        "decision": {
+            "decision": "defer",
+            "materialized": true,
+            "materializeReason": "first_render"
+        },
+        "input": {}
+    },
+    {
+        "class": "accounted_ctx_reduce",
+        "decision": { "decision": "defer", "droppedCount": 2 },
+        "input": { "contentEvidence": "assistant tool name=ctx_reduce" }
+    },
+    {
+        "class": "accounted_drop_applied",
+        "decision": { "decision": "defer", "droppedCount": 2 },
+        "input": {}
     },
     {
         "class": "accounted_soft_m1_execute",
-        "input": {
-            "decision": {
-                "decision": "execute",
-                "materialized": false,
-                "materializeReason": "m1_delta"
-            }
-        }
+        "decision": { "decision": "execute", "canonicalDecision": "execute" },
+        "input": {}
+    },
+    {
+        "class": "unaccounted_defer_pass",
+        "decision": { "decision": "defer", "canonicalDecision": "defer" },
+        "input": {}
     },
     {
         "class": "accounted_provider_system_prompt_change",
+        "decision": { "decision": "unknown", "canonicalDecision": "unknown" },
         "input": { "previousProvider": "anthropic", "currentProvider": "openai" }
     },
     {
         "class": "unaccounted_double_bust",
+        "decision": { "decision": "unknown", "canonicalDecision": "unknown" },
         "input": { "divergenceIndex": 4, "previousBustDivergenceIndex": 4 }
     },
     {
         "class": "unaccounted_tail_rewrite",
+        "decision": { "decision": "unknown", "canonicalDecision": "unknown" },
         "input": { "divergenceIndex": 9, "previousMessageCount": 10 }
     },
     {
         "class": "unaccounted_rewrite",
+        "decision": { "decision": "unknown", "canonicalDecision": "unknown" },
         "input": { "divergenceIndex": 2, "previousMessageCount": 10 }
     }
 ]

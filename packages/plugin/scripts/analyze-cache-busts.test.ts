@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { __test } from "./analyze-cache-busts";
+import { __test, analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
 
 type UsageFixture = {
@@ -114,10 +114,68 @@ describe("analyze-cache-bust dump discovery", () => {
         });
         const rows = __test.analyzeSnapshots(snapshotsFor(dir, session));
         expect(rows.map(row => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
-        expect(rows[1]?.divergenceClass).toBe("unaccounted_tail_rewrite");
-        expect(rows[2]?.divergenceClass).toBe("unaccounted_double_bust");
+        expect(rows[1]?.divergenceClass).toBe("no_mc_pass_row");
+        expect(rows[2]?.divergenceClass).toBe("no_mc_pass_row");
         expect(rows[2]?.rewrittenTokens).toBe(173524);
     });
+    test("joins decisions by provider response/pass time rather than request-start time", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-pass-time-"));
+        tempDirs.push(dir);
+        const session = "ses_passtime123";
+        const firstStem = `2026-09-11T07-00-00-000Z-${session}`;
+        const bustStem = `2026-09-11T07-00-10-000Z-${session}`;
+        writeDump(
+            dir,
+            firstStem,
+            "2026-09-11T07:00:00Z",
+            session,
+            bodyWithBreakpointMessage("old"),
+            responseUsage({
+                input_tokens: 100,
+                cache_read_input_tokens: 900,
+                cache_creation_input_tokens: 0,
+            }),
+        );
+        writeDump(
+            dir,
+            bustStem,
+            "2026-09-11T07:00:10Z",
+            session,
+            bodyWithBreakpointMessage("new"),
+            responseUsage({
+                input_tokens: 10,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }),
+        );
+        const passTime = new Date("2026-09-11T07:00:20Z");
+        utimesSync(join(dir, `${bustStem}.response.json`), passTime, passTime);
+
+        const analysis = analyzeOpenCodeCacheBustSession({
+            sessionId: session,
+            anthropicDir: dir,
+            openaiDir: join(dir, "missing-openai"),
+            decisions: [
+                {
+                    timestampMs: passTime.getTime(),
+                    decision: "defer",
+                    materialized: true,
+                    materializeReason: "system_hash",
+                    emergency: false,
+                    droppedTokens: 0,
+                    droppedCount: 0,
+                    inputTokens: 1_000,
+                    flush: false,
+                    source: "fixture",
+                },
+            ],
+        });
+
+        expect(analysis.requests.at(-1)?.divergenceClass).toBe(
+            "accounted_hard_system_hash",
+        );
+    });
+
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-body-bytes-"));
         tempDirs.push(dir);
