@@ -1,0 +1,2 @@
+    Checking mc-module v0.1.0 (/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/pool-258/crates/mc-module)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.92s

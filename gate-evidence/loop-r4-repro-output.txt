@@ -1,0 +1,28 @@
+   Compiling mc-module v0.1.0 (/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/pool-258/crates/mc-module)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
+     Running tests/loop_r4_reasoning_repro.rs (target/debug/deps/loop_r4_reasoning_repro-867a3c4ebacb7ea9)
+
+running 1 test
+mc-module: protected_tokens session=loop-r4 floor=16000 provenance=derived usable_soft=100000
+bootstrap=HARD cutoff=5
+hard=HARD cutoff=5 target={"content":[{"kind":{"signature":"signature-old","text":"thinking-old","type":"reasoning"}},{"kind":{"text":"§2§ content-old","type":"text"}}],"meta":{"harness_id":"old"},"role":"assistant"}
+mc-module: first_divergence session=loop-r4 {"index":3,"block_id_old":"old#0","block_id_new":"old#0","kind":"content_changed","approx_token_depth":62}
+next=SOFT+ reason=None cutoff=5 divergence=Some(FirstDivergence { index: 3, block_id_old: Some("old#0"), block_id_new: Some("old#0"), kind: ContentChanged, approx_token_depth: 62 }) target={"content":[{"kind":{"text":"","type":"reasoning"}},{"kind":{"text":"§2§ content-old","type":"text"}}],"meta":{"harness_id":"old"},"role":"assistant"}
+native-hard=[{"info":{"role":"user","sessionID":"loop-r4"},"parts":[{"synthetic":true,"text":"<session-history></session-history>","type":"text"}]},{"info":{"role":"user","sessionID":"loop-r4"},"parts":[{"synthetic":true,"text":"<session-history-since>(no new content since last materialization)</session-history-since>","type":"text"}]},{"info":{"id":"user","role":"user"},"parts":[{"text":"§1§ content-user","type":"text"}]},{"info":{"id":"old","role":"assistant"},"parts":[{"metadata":{"signature":"signature-old"},"text":"thinking-old","type":"reasoning"},{"text":"§2§ content-old","type":"text"}]},{"info":{"id":"multipart-user","role":"user"},"parts":[{"text":"§3§ content-multipart-user","type":"text"},{"text":"§4§ Additional user text part 0","type":"text"},{"text":"§5§ Additional user text part 1","type":"text"},{"text":"§6§ Additional user text part 2","type":"text"},{"text":"§7§ Additional user text part 3","type":"text"},{"text":"§8§ Additional user text part 4","type":"text"},{"text":"§9§ Additional user text part 5","type":"text"},{"text":"§10§ Additional user text part 6","type":"text"},{"text":"§11§ Additional user text part 7","type":"text"},{"text":"§12§ Additional user text part 8","type":"text"},{"text":"§13§ Additional user text part 9","type":"text"},{"text":"§14§ Additional user text part 10","type":"text"},{"text":"§15§ Additional user text part 11","type":"text"}]}]
+native-defer=[{"info":{"role":"user","sessionID":"loop-r4"},"parts":[{"synthetic":true,"text":"<session-history></session-history>","type":"text"}]},{"info":{"role":"user","sessionID":"loop-r4"},"parts":[{"synthetic":true,"text":"<session-history-since>(no new content since last materialization)</session-history-since>","type":"text"}]},{"info":{"id":"user","role":"user"},"parts":[{"text":"§1§ content-user","type":"text"}]},{"info":{"id":"old","role":"assistant"},"parts":[{"text":"","type":"reasoning"},{"text":"§2§ content-old","type":"text"}]},{"info":{"id":"multipart-user","role":"user"},"parts":[{"text":"§3§ content-multipart-user","type":"text"},{"text":"§4§ Additional user text part 0","type":"text"},{"text":"§5§ Additional user text part 1","type":"text"},{"text":"§6§ Additional user text part 2","type":"text"},{"text":"§7§ Additional user text part 3","type":"text"},{"text":"§8§ Additional user text part 4","type":"text"},{"text":"§9§ Additional user text part 5","type":"text"},{"text":"§10§ Additional user text part 6","type":"text"},{"text":"§11§ Additional user text part 7","type":"text"},{"text":"§12§ Additional user text part 8","type":"text"},{"text":"§13§ Additional user text part 9","type":"text"},{"text":"§14§ Additional user text part 10","type":"text"},{"text":"§15§ Additional user text part 11","type":"text"}]},{"info":{"id":"new","role":"assistant"},"parts":[{"metadata":{"signature":"signature-new"},"text":"thinking-new","type":"reasoning"},{"text":"§16§ content-new","type":"text"}]}]
+
+thread 'exempt_reasoning_first_clears_on_defer' (44123997) panicked at crates/mc-module/tests/loop_r4_reasoning_repro.rs:49:5:
+assertion `left == right` failed: a defer must not first-clear previously exempt reasoning
+  left: Object {"content": Array [Object {"kind": Object {"signature": String("signature-old"), "text": String("thinking-old"), "type": String("reasoning")}}, Object {"kind": Object {"text": String("§2§ content-old"), "type": String("text")}}], "meta": Object {"harness_id": String("old")}, "role": String("assistant")}
+ right: Object {"content": Array [Object {"kind": Object {"text": String(""), "type": String("reasoning")}}, Object {"kind": Object {"text": String("§2§ content-old"), "type": String("text")}}], "meta": Object {"harness_id": String("old")}, "role": String("assistant")}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test exempt_reasoning_first_clears_on_defer ... FAILED
+
+failures:
+
+failures:
+    exempt_reasoning_first_clears_on_defer
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `-p mc-module --test loop_r4_reasoning_repro`
