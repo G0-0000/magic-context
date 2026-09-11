@@ -1694,6 +1694,53 @@
     "expected": {}
   },
   {
+    "label": "emergency: changed sample within latched episode → noop",
+    "items": [
+      {
+        "id": "c1#0",
+        "ordinal": 1,
+        "kind": {
+          "ToolCall": {
+            "name": "bash",
+            "input": {}
+          }
+        },
+        "provider_executed": false,
+        "byte_size": 0,
+        "token_count": null,
+        "arc_id": "c1#0"
+      },
+      {
+        "id": "c1#1",
+        "ordinal": 1,
+        "kind": {
+          "ToolResult": {
+            "tool_name": "bash"
+          }
+        },
+        "provider_executed": false,
+        "byte_size": 80000,
+        "token_count": null,
+        "arc_id": "c1#0"
+      }
+    ],
+    "ctx": {
+      "pass_class": "EmergencyForce",
+      "current_total_input_tokens": 201000,
+      "ceiling_tokens": 160000,
+      "protected_cutoff_ordinal": 1,
+      "last_execute_ordinal": 0,
+      "scheduler_pressure_execute": false,
+      "pass_already_busting": false,
+      "prior_input_sample": 200000,
+      "has_prior_drop": true,
+      "agent_drop_ids": []
+    },
+    "smart_drops": false,
+    "frozen": [],
+    "expected": {}
+  },
+  {
     "label": "emergency: reclaim below min → noop",
     "items": [
       {

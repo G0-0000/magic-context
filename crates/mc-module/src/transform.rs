@@ -4201,17 +4201,20 @@ fn apply_once(
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
     let prefix_materialization_enabled = !req.is_subagent;
+    let force_band_active = usage_percentage
+        >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
+            .force_materialize_percentage;
+    let force_episode_available = force_band_active && !loaded.meta.has_prior_emergency_drop;
     let supersession_ride_available = (prefix_materialization_enabled
         && (!loaded.meta.initialized
             || render_config_changed
             || hard_fold_requested
             || reconcile_hard_due
-            || (scheduler_outcome.pass == scheduler::PassDecision::Execute
+            || lineage_state.force_hard
+            || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != loaded.meta.m1_revision)))
-        || matches!(
-            scheduler_outcome.pass,
-            scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-        )
+        || force_episode_available
+        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
     // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
@@ -4345,7 +4348,7 @@ fn apply_once(
                 },
                 scheduler_pressure_execute: scheduler_outcome.pressure_execute,
                 prior_input_sample: loaded.meta.last_emergency_input_sample,
-                has_prior_drop: loaded.meta.has_prior_emergency_drop,
+                has_prior_drop: loaded.meta.has_prior_emergency_drop && !pass_already_busting,
                 agent_drop_ids,
                 agent_drop_command_ids,
                 first_applied_agent_drop_ids,
@@ -4400,6 +4403,46 @@ fn apply_once(
     // publications still need Execute or an independently authorized repair/force/flush.
     let independent_bust_opportunity = supersession_ride_available;
     let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
+    // Discover non-tool lanes before classification: a force batch containing only
+    // text compression or strip work must not need a tool drop to open its own gate.
+    let non_tool_bust_opportunity = bust_opportunity
+        || cached_m1_missing_due
+        || is_legacy_baseline(&loaded.core)
+        || loaded.meta.bootstrap_seed_fold_pending;
+    let planned_age_basis = tag_rows
+        .iter()
+        .filter_map(|row| u64::try_from(row.tag_number).ok())
+        .max()
+        .unwrap_or(0);
+    let planned_caveman_units = new_caveman_units(
+        &loaded.core,
+        req,
+        CavemanTagState {
+            rows: &tag_rows,
+            protection_cutoff: &protection_window.cutoff,
+        },
+        &live,
+        loaded.meta.coverage_ordinal,
+        non_tool_bust_opportunity,
+        planned_age_basis,
+    );
+    let planned_reasoning_cutoff = reasoning_clear_cutoff_with_tags(
+        req,
+        serializer_profile,
+        non_tool_bust_opportunity,
+        &tag_numbers,
+    );
+    let planned_strip_units = new_frozen_strip_units(
+        &loaded.core,
+        req,
+        &tag_numbers,
+        planned_reasoning_cutoff,
+        non_tool_bust_opportunity,
+        lineage_anchor_mid,
+    );
+    let reclaim_pending_now = reductions_pending_now
+        || !planned_caveman_units.is_empty()
+        || !planned_strip_units.is_empty();
     let mut plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
         is_legacy_baseline: is_legacy_baseline(&loaded.core),
@@ -4412,7 +4455,7 @@ fn apply_once(
         m1_revision_changed: current_m1_digest != loaded.meta.m1_revision
             || loaded.meta.soft_refresh_pending
             || todo_injection_pending,
-        reductions_pending: reductions_pending_now,
+        reductions_pending: reclaim_pending_now,
         // Todo state is deferred work, not an independent bust. It may join
         // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
@@ -4454,7 +4497,7 @@ fn apply_once(
         coverage_delta: compartment_seq_changed_since_meta,
         m1_delta: current_m1_digest != loaded.meta.m1_revision,
         explicit_flush: loaded.meta.soft_refresh_pending,
-        reductions_pending: reductions_pending_now,
+        reductions_pending: reclaim_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
         materialize_reason = Some("synthetic_todo".to_string());
@@ -4497,14 +4540,15 @@ fn apply_once(
         meta.last_upgrade_state = req.upgrade_state.clone();
         meta.last_render_config = effective_render_config.clone();
     }
-    if matches!(
-        scheduler_outcome.pass,
-        scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
-    ) {
-        // The emergency selector latches every acting input sample, including zero
-        // removals, so repeated pressure observations do not re-bust unchanged bytes.
+    // One shared opportunity admits all reclaim lanes. A changed usage sample is not
+    // a new episode; only pressure exit rearms it. Independent busts and the 95% arm
+    // bypass the latch above without granting subsequent passes another opportunity.
+    if force_band_active {
         meta.last_emergency_input_sample = usage_input_tokens;
         meta.has_prior_emergency_drop = true;
+    } else if usage_input_tokens > 0.0 {
+        meta.last_emergency_input_sample = 0.0;
+        meta.has_prior_emergency_drop = false;
     }
     let mut commit_expected = loaded.row_version;
     if clear_pending_rewrite_on_present {
@@ -4616,39 +4660,26 @@ fn apply_once(
         meta.reasoning_cleared_through_ordinal = meta.reasoning_cleared_through_ordinal.max(cutoff);
     }
     let unit_mint_started_at = Instant::now();
-    let new_strip_units = new_frozen_strip_units(
-        &loaded.core,
-        req,
-        &tag_numbers,
-        reasoning_clear_cutoff,
-        is_bust_pass,
-        lineage_anchor_mid,
-    );
+    let new_strip_units = if is_bust_pass {
+        planned_strip_units
+    } else {
+        Vec::new()
+    };
     timings.unit_mint = elapsed_ms(unit_mint_started_at);
     let caveman_started_at = Instant::now();
-    let caveman_age_basis_tag = if is_bust_pass && req.caveman_enabled {
+    if is_bust_pass && req.caveman_enabled {
         let basis = tag_rows
             .iter()
             .filter_map(|row| u64::try_from(row.tag_number).ok())
             .max()
             .unwrap_or(0);
         meta.caveman_age_basis_tag = basis;
-        basis
+    }
+    let new_caveman_units = if is_bust_pass {
+        planned_caveman_units
     } else {
-        loaded.meta.caveman_age_basis_tag
+        Vec::new()
     };
-    let new_caveman_units = new_caveman_units(
-        &loaded.core,
-        req,
-        CavemanTagState {
-            rows: &tag_rows,
-            protection_cutoff: &protection_window.cutoff,
-        },
-        &live,
-        loaded.meta.coverage_ordinal,
-        is_bust_pass,
-        caveman_age_basis_tag,
-    );
     timings.caveman = elapsed_ms(caveman_started_at);
     if loaded.meta.soft_refresh_pending && is_bust_pass {
         meta.soft_refresh_pending = false;
@@ -5416,13 +5447,6 @@ fn apply_once(
             .max()
             .unwrap_or(0)
             .max(meta.last_execute_ordinal);
-    }
-    if is_bust_pass && selection_class == PassClass::EmergencyForce {
-        // An emergency selector pass consumes the current provider sample even when
-        // protection filtered every candidate; otherwise the same stale sample would
-        // repeatedly re-arm and re-bust the session.
-        meta.last_emergency_input_sample = usage_input_tokens;
-        meta.has_prior_emergency_drop = true;
     }
 
     if tail_reclaim_enabled {
@@ -17905,6 +17929,196 @@ pub(crate) mod tests {
             s.load_pending_agent_drops("ses").unwrap().is_empty(),
             "a cached-m1 repair HARD must consume the queued drop"
         );
+    }
+
+    #[test]
+    fn force_episode_coalesces_lanes_and_defers_late_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let mut context = smart_pctx();
+        context.protected_tokens_floor = 0;
+        let mut messages = vec![
+            item("a", 1, "raw"),
+            item("m3", 3, &caveman_test_source("old user")),
+        ];
+        let named_call = |mid: &str, ordinal, name: &str| {
+            let mut message = assistant_tool_call(mid, ordinal, name);
+            if let ck_wire::CkKind::ToolCall {
+                name: tool_name,
+                input,
+                ..
+            } = &mut message.ck.content[0].kind
+            {
+                *tool_name = name.to_string();
+                *input = json!({"content": "input payload ".repeat(1000)});
+            }
+            message
+        };
+        messages.push(named_call("m8", 8, "aft_grep"));
+        messages.push(tool_result("m9", 9, "aft_grep", &"g".repeat(20_000)));
+        messages.push(named_call("m111", 111, "write"));
+        messages.push(tool_result("m112", 112, "write", &"w".repeat(20_000)));
+        messages.push(assistant_tool_call("reserved", 113, "reserved"));
+        messages.push(tool_result(
+            "reserved-result",
+            114,
+            "reserved",
+            &"r".repeat(20_000),
+        ));
+        messages.extend((115..140).map(|n| item(&format!("tail-{n}"), n, "tail")));
+        let mut request = with_usage(req("ses", "cfg0", messages), 90_000, 100_000);
+        request.serializer_profile = "claude-code-anthropic".to_string();
+        request.caveman_enabled = true;
+        request.caveman_min_chars = 1;
+        request.protected_tags = 0;
+        request.protected_tokens_effective = Some(0);
+        let mut bootstrap = with_usage(request.clone(), 50_000, 100_000);
+        bootstrap.messages.truncate(1);
+        bootstrap.caveman_enabled = false;
+        transform(&s, &bootstrap, &context).unwrap();
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.last_execute_ordinal = 112;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let first = transform(&s, &request, &context).unwrap();
+        assert_eq!(first.action, "SOFT");
+        let loaded = s.load("ses").unwrap();
+        assert!(loaded.meta.has_prior_emergency_drop);
+        assert!(loaded.meta.emergency_drain_active);
+        for key in ["red:m8#0", "red:m111#0", "cav:m3#0"] {
+            assert!(
+                loaded.core.frozen_units.iter().any(|u| u.key == key),
+                "missing {key}"
+            );
+        }
+        let bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+        for usage in [90_100, 90_200] {
+            request = with_usage(request, usage, 100_000);
+            let next = transform(&s, &request, &context).unwrap();
+            assert!(
+                serde_json::to_vec(&next.ck_messages).unwrap() == bytes,
+                "force follow-up changed served bytes"
+            );
+        }
+        request
+            .messages
+            .push(assistant_tool_call("late", 141, "late"));
+        request
+            .messages
+            .push(tool_result("late-result", 142, "late", &"l".repeat(20_000)));
+        request = with_usage(request, 91_000, 100_000);
+        transform(&s, &request, &context).unwrap();
+        assert!(!s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:late#0"));
+        let mut loaded = s.load("ses").unwrap();
+        loaded.meta.soft_refresh_pending = true;
+        loaded.meta.last_execute_ordinal = 142;
+        s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        transform(&s, &request, &context).unwrap();
+        assert!(s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:late#0"));
+    }
+
+    #[test]
+    fn force_episode_empty_tool_lane_and_pressure_escape_controls() {
+        for escape in ["exit", "refresh", "hard", "fold", "emergency"] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            bootstrap_covering_a(&s);
+            let context = smart_pctx();
+            let mut request = with_usage(
+                req(
+                    "ses",
+                    "cfg0",
+                    vec![
+                        item("a", 1, "raw"),
+                        item("old", 3, &caveman_test_source("old")),
+                    ],
+                ),
+                90_000,
+                100_000,
+            );
+            request.caveman_enabled = true;
+            request.caveman_min_chars = 1;
+            request.protected_tokens_effective = Some(0);
+            let first = transform(&s, &request, &context).unwrap();
+            assert!(
+                s.load("ses")
+                    .unwrap()
+                    .core
+                    .frozen_units
+                    .iter()
+                    .any(|u| u.key == "cav:old#0"),
+                "empty tool lane must not block text"
+            );
+            let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+            request = with_usage(request, 90_100, 100_000);
+            assert!(
+                serde_json::to_vec(&transform(&s, &request, &context).unwrap().ck_messages)
+                    .unwrap()
+                    == first_bytes
+            );
+            request
+                .messages
+                .push(assistant_tool_call("late", 4, "late"));
+            request
+                .messages
+                .push(tool_result("late-result", 5, "late", &"x".repeat(20_000)));
+            for usage in [90_200, 90_300] {
+                request = with_usage(request, usage, 100_000);
+                transform(&s, &request, &context).unwrap();
+                assert!(!s
+                    .load("ses")
+                    .unwrap()
+                    .core
+                    .frozen_units
+                    .iter()
+                    .any(|u| u.key == "red:late#0"));
+            }
+            let mut loaded = s.load("ses").unwrap();
+            loaded.meta.last_execute_ordinal = 5;
+            if escape == "refresh" {
+                loaded.meta.soft_refresh_pending = true;
+            }
+            s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+            match escape {
+                "exit" => {
+                    request = with_usage(request, 50_000, 100_000);
+                    transform(&s, &request, &context).unwrap();
+                    assert!(!s.load("ses").unwrap().meta.has_prior_emergency_drop);
+                    request = with_usage(request, 90_000, 100_000);
+                }
+                "hard" => request.render_config = "cfg-changed".to_string(),
+                "fold" => s
+                    .append_compartments("ses", &[comp(2, 2, 3, "old#0", "published fold")])
+                    .unwrap(),
+                "emergency" => request = with_usage(request, 96_000, 100_000),
+                _ => {}
+            }
+            transform(&s, &request, &context).unwrap();
+            assert!(
+                s.load("ses")
+                    .unwrap()
+                    .core
+                    .frozen_units
+                    .iter()
+                    .any(|u| u.key == "red:late#0"),
+                "escape {escape} must reclaim"
+            );
+        }
     }
 
     #[test]
@@ -36548,6 +36762,38 @@ pub(crate) mod tests {
         assert_eq!(mismatch_response.action, "PASSTHROUGH");
         assert_eq!(mismatch_response.lineage_switch_consumed_id, None);
         assert!(store.load("resolved-target").unwrap().row_version.is_none());
+    }
+
+    #[test]
+    fn force_episode_latch_does_not_block_d5_descent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        seed_fake_compaction_prior(&s, "A");
+        let mut loaded = s.load("B").unwrap();
+        loaded.meta.has_prior_emergency_drop = true;
+        loaded.meta.last_emergency_input_sample = 90_000.0;
+        loaded.meta.emergency_drain_active = true;
+        s.commit("B", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let request = with_usage(
+            fake_compaction_request(
+                "B",
+                "A",
+                2,
+                701,
+                true,
+                fake_compaction_messages("2026-08-06", &continuation_summary("force")),
+            ),
+            90_100,
+            100_000,
+        );
+        let response = run(&s, &request, &spine());
+        assert_eq!(
+            response.lineage_descent_disposition.as_deref(),
+            Some("descended")
+        );
+        assert_eq!(response.action, "HARD");
+        assert_eq!(response.lineage_switch_consumed_id, Some(701));
     }
 
     #[test]
