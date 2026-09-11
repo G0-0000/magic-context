@@ -3157,6 +3157,55 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(bust[1])).not.toContain("Updated but not resident.");
     });
 
+    it("renders the recategorize category on <updated> in memory-updates", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const memory = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONFIG_VALUES",
+            content: "old category fact",
+        });
+        const state = readStateFromMeta();
+        const hard = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            injectDocs: false,
+            memoryInjectionBudgetTokens: 8_000,
+        });
+        expect(hard.renderedMemoryIds).toEqual([memory.id]);
+
+        db.prepare(
+            "UPDATE memories SET content = ?, category = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+        ).run("new category fact", "CONSTRAINTS", "new-category-fact", Date.now(), memory.id);
+        queueMemoryMutation(db, {
+            projectPath: PROJECT_PATH,
+            mutationType: "update",
+            targetMemoryId: memory.id,
+            category: "CONSTRAINTS",
+            newContent: "new category fact",
+            queuedAt: 10,
+        });
+
+        const m1 = renderM1(
+            {
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                memoryInjectionBudgetTokens: 8_000,
+            },
+            hard.snapshotMarkers,
+            hard.renderedMemoryIds,
+        );
+        const updates = m1.match(/<memory-updates>[\s\S]*?<\/memory-updates>/)?.[0];
+        expect(updates).toContain(
+            `<updated id="${memory.id}" category="CONSTRAINTS">new category fact</updated>`,
+        );
+    });
+
     it("reconcile rematerialization advances the memory mutation cursor and omits memory-updates", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();

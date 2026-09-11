@@ -37,6 +37,7 @@ import { isNoContentCompartment } from "@magic-context/core/features/magic-conte
 import {
 	type ContextDatabase,
 	clearCachedM0M1,
+	escapeXmlAttr,
 	escapeXmlContent,
 	GLOBAL_USER_PROFILE_PROJECT_PATH,
 	getCompartments,
@@ -1892,8 +1893,12 @@ function renderMemoryUpdatesBlockPi(args: {
 		}
 		if (mutation.visibilityChanged && mutation.newContent === null) continue;
 		if (mutation.mutationType === "update") {
+			const categoryAttr =
+				mutation.category && mutation.category !== "__mc_visibility__"
+					? ` category="${escapeXmlAttr(mutation.category)}"`
+					: "";
 			lines.push(
-				`  <updated id="${mutation.targetMemoryId}">${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
+				`  <updated id="${mutation.targetMemoryId}"${categoryAttr}>${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
 			);
 			continue;
 		}

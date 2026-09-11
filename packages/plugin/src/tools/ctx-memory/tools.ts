@@ -389,6 +389,20 @@ function inactiveMemoryError(id: number, action: "updating" | "merging" | "archi
     return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
 
+function isUniqueConstraintError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+        return false;
+    }
+    const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+    if (typeof code === "string" && code.startsWith("SQLITE_CONSTRAINT")) {
+        return true;
+    }
+    return error.message.includes("UNIQUE constraint failed");
+}
+
+const DUPLICATE_MEMORY_ERROR = (id: number): string =>
+    `Error: Memory content already exists as ID ${id}; merge or archive duplicates instead.`;
+
 function updateMemoryContentInCurrentTransaction(
     db: CtxMemoryToolDeps["db"],
     memory: Memory,
@@ -764,33 +778,55 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 // stored path, which UPDATE leaves unchanged (legacy raw paths
                 // stay raw). Lookup with that same identity so a recategorize
                 // collision returns the duplicate error instead of throwing.
-                const duplicate = getMemoryByHash(
-                    deps.db,
-                    rawProjectPath,
-                    targetCategory,
-                    normalizedHash,
-                );
-                if (duplicate && duplicate.id !== memory.id) {
-                    return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
-                }
-
+                // Probe + write share one BEGIN IMMEDIATE so a concurrent insert
+                // cannot slip in between; UNIQUE remains the friendly fallback.
                 const projectIdentity = targetIdentityForStoredPath(rawProjectPath);
-                runImmediateTransaction(deps.db, () => {
-                    updateMemoryContentInCurrentTransaction(
-                        deps.db,
-                        memory,
-                        content,
-                        normalizedHash,
-                        targetCategory,
-                    );
-                    queueMemoryMutation(deps.db, {
-                        projectPath: projectIdentity,
-                        mutationType: "update",
-                        targetMemoryId: memory.id,
-                        category: targetCategory,
-                        newContent: content,
+                let duplicateId: number | null = null;
+                try {
+                    runImmediateTransaction(deps.db, () => {
+                        const duplicate = getMemoryByHash(
+                            deps.db,
+                            rawProjectPath,
+                            targetCategory,
+                            normalizedHash,
+                        );
+                        if (duplicate && duplicate.id !== memory.id) {
+                            duplicateId = duplicate.id;
+                            return;
+                        }
+                        updateMemoryContentInCurrentTransaction(
+                            deps.db,
+                            memory,
+                            content,
+                            normalizedHash,
+                            targetCategory,
+                        );
+                        queueMemoryMutation(deps.db, {
+                            projectPath: projectIdentity,
+                            mutationType: "update",
+                            targetMemoryId: memory.id,
+                            category: targetCategory,
+                            newContent: content,
+                        });
                     });
-                });
+                } catch (error) {
+                    if (!isUniqueConstraintError(error)) {
+                        throw error;
+                    }
+                    const raced = getMemoryByHash(
+                        deps.db,
+                        rawProjectPath,
+                        targetCategory,
+                        normalizedHash,
+                    );
+                    if (raced && raced.id !== memory.id) {
+                        return DUPLICATE_MEMORY_ERROR(raced.id);
+                    }
+                    throw error;
+                }
+                if (duplicateId !== null) {
+                    return DUPLICATE_MEMORY_ERROR(duplicateId);
+                }
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,

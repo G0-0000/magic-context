@@ -1887,6 +1887,102 @@ describe("createCtxMemoryTools", () => {
             });
         });
 
+        it("rejects recategorizing onto an existing duplicate without throwing a constraint", async () => {
+            const existing = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "timeout=5s",
+            });
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "timeout=5s",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    category: "CONSTRAINTS",
+                    content: "timeout=5s",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(
+                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
+            );
+            expect(String(result)).not.toContain("UNIQUE constraint failed");
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONFIG_VALUES",
+                content: "timeout=5s",
+            });
+        });
+
+        it("returns a friendly duplicate error after a unique-constraint fallback", async () => {
+            const originalPrepare = db.prepare.bind(db);
+            const originalExec = db.exec.bind(db);
+            let inTx = false;
+            (db as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+                const text = String(sql);
+                if (/\bBEGIN\b/i.test(text)) inTx = true;
+                try {
+                    return originalExec(sql);
+                } catch (error) {
+                    inTx = false;
+                    throw error;
+                } finally {
+                    if (/\bCOMMIT\b/i.test(text) || /\bROLLBACK\b/i.test(text)) inTx = false;
+                }
+            };
+            (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+                const stmt = originalPrepare(sql);
+                if (
+                    sql.includes(
+                        "FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?",
+                    )
+                ) {
+                    const originalGet = stmt.get.bind(stmt);
+                    stmt.get = (...args: unknown[]) => (inTx ? undefined : originalGet(...args));
+                }
+                return stmt;
+            };
+
+            try {
+                const existing = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONSTRAINTS",
+                    content: "timeout=5s",
+                });
+                const memory = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONFIG_VALUES",
+                    content: "cache_ttl=5m",
+                });
+                const result = await tools.ctx_memory.execute(
+                    {
+                        action: "update",
+                        ids: [memory.id],
+                        category: "CONSTRAINTS",
+                        content: "timeout=5s",
+                    },
+                    toolContext("ses-primary", "general"),
+                );
+
+                expect(result).toBe(
+                    `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
+                );
+                expect(String(result)).not.toContain("UNIQUE constraint failed");
+                expect(getMemoryById(db, memory.id)).toMatchObject({
+                    category: "CONFIG_VALUES",
+                    content: "cache_ttl=5m",
+                });
+            } finally {
+                (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+                (db as { exec: typeof originalExec }).exec = originalExec;
+            }
+        });
+
         it("rolls back content updates when queueing the mutation fails", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",

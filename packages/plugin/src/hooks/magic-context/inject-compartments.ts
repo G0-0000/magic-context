@@ -2570,8 +2570,12 @@ function renderMemoryUpdatesBlock(args: {
         }
         if (mutation.visibilityChanged && mutation.newContent === null) continue;
         if (mutation.mutationType === "update") {
+            const categoryAttr =
+                mutation.category && mutation.category !== "__mc_visibility__"
+                    ? ` category="${escapeXmlAttr(mutation.category)}"`
+                    : "";
             lines.push(
-                `  <updated id="${mutation.targetMemoryId}">${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
+                `  <updated id="${mutation.targetMemoryId}"${categoryAttr}>${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
             );
             continue;
         }

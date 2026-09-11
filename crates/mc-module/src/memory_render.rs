@@ -325,11 +325,20 @@ pub fn render_memory_updates(
         vec!["These memories changed since the snapshot below — trust these:".to_string()];
     for m in mutations {
         match m.mutation_type.as_str() {
-            "update" => lines.push(format!(
-                "  <updated id=\"{}\">{}</updated>",
-                m.target_memory_id,
-                escape_xml_content(m.new_content.as_deref().unwrap_or(""))
-            )),
+            "update" => {
+                let category_attr = match &m.category {
+                    Some(category) if category != "__mc_visibility__" && !category.is_empty() => {
+                        format!(" category=\"{}\"", escape_xml_attr(category))
+                    }
+                    _ => String::new(),
+                };
+                lines.push(format!(
+                    "  <updated id=\"{}\"{}>{}</updated>",
+                    m.target_memory_id,
+                    category_attr,
+                    escape_xml_content(m.new_content.as_deref().unwrap_or(""))
+                ));
+            }
             "superseded" => match m.superseded_by_id {
                 Some(by) if resolvable_ids.contains(&by) => lines.push(format!(
                     "  <superseded id=\"{}\" by=\"{by}\"/>",

@@ -336,7 +336,7 @@ Example: ctx_note(action="write", content="Re-run the perf benchmark once the bo
 }
 ```
 
-### ctx_memory — description ~234 tokens, params ~201 tokens (total ~435)
+### ctx_memory — description ~234 tokens, params ~216 tokens (total ~450)
 
 **Description:**
 
