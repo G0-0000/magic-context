@@ -1,3 +1,4 @@
+import { formatSynapseLaneDescriptor } from "../../features/magic-context/memory/embedding-synapse";
 import type { EmbeddingCoverageStatus } from "../../features/magic-context/project-embedding-registry";
 import { describeShadowBackfillWriteRefusal } from "../../features/magic-context/shadow-backfill-state";
 import type { EmbedDrainUiStatus } from "./embed-session-state";
@@ -12,6 +13,9 @@ export function formatEmbedStatusText(
 
     const lines: string[] = [];
     lines.push(`Embedding — model: ${coverage.model} (${coverage.provider})`);
+    if (coverage.synapseDescriptor) {
+        lines.push(`Synapse — ${formatSynapseLaneDescriptor(coverage.synapseDescriptor)}`);
+    }
     lines.push(
         `This session:  ${coverage.session.embedded} / ${coverage.session.total} compartments embedded`,
     );

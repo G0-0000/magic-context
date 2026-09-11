@@ -39,9 +39,10 @@ import { OpenAICompatibleEmbeddingProvider } from "./memory/embedding-openai";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import {
     getSynapseBatchRequestKey,
+    isSynapseEmbeddingTruncated,
     SYNAPSE_DEFAULT_MODEL,
-    SYNAPSE_MAX_INPUT_TOKENS,
     SynapseEmbeddingProvider,
+    type SynapseLaneDescriptor,
 } from "./memory/embedding-synapse";
 import {
     getMemoryEmbedCoverage,
@@ -146,6 +147,8 @@ export interface ProjectEmbeddingRegistrationSnapshot {
     model: string;
     /** Configured provider kind (e.g. "openai-compatible", "local", "ollama"). */
     provider: string;
+    /** Live Synapse lane capabilities, when this registration uses Synapse. */
+    synapseDescriptor?: SynapseLaneDescriptor;
 }
 
 interface ProjectEmbeddingRegistration {
@@ -276,14 +279,51 @@ export class TestProviderFactoryRequiredError extends Error {
     }
 }
 
+function synapseDescriptorFromConfig(config: EmbeddingConfig): SynapseLaneDescriptor | undefined {
+    const raw = config as unknown as Record<string, unknown>;
+    const candidate = raw.synapse_descriptor;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+    const descriptor = candidate as Partial<SynapseLaneDescriptor>;
+    if (
+        typeof descriptor.lane !== "string" ||
+        descriptor.lane.length === 0 ||
+        typeof descriptor.max_tokens !== "number" ||
+        !Number.isInteger(descriptor.max_tokens) ||
+        descriptor.max_tokens <= 0 ||
+        (descriptor.max_tokens_source !== "runtime_bucket" &&
+            descriptor.max_tokens_source !== "worker_bucket" &&
+            descriptor.max_tokens_source !== "catalog" &&
+            descriptor.max_tokens_source !== "catalog_unloaded") ||
+        typeof descriptor.warm !== "boolean"
+    ) {
+        return undefined;
+    }
+    return descriptor as SynapseLaneDescriptor;
+}
+
 function synapseConfigFields(config: EmbeddingConfig): {
     model?: string;
     fingerprint?: string;
     tableEpoch?: number;
     dims?: number;
     provenance?: unknown;
+    descriptor?: SynapseLaneDescriptor;
 } {
     const raw = config as unknown as Record<string, unknown>;
+    const descriptor = synapseDescriptorFromConfig(config);
+    const rawProvenance = raw.synapse_provenance;
+    const provenance = descriptor
+        ? {
+              ...(rawProvenance &&
+              typeof rawProvenance === "object" &&
+              !Array.isArray(rawProvenance)
+                  ? (rawProvenance as Record<string, unknown>)
+                  : rawProvenance === undefined
+                    ? {}
+                    : { synapse_provenance: rawProvenance }),
+              capability_descriptor: descriptor,
+          }
+        : rawProvenance;
     return {
         ...(typeof raw.model === "string" ? { model: raw.model } : {}),
         ...(typeof raw.synapse_fingerprint === "string"
@@ -293,7 +333,8 @@ function synapseConfigFields(config: EmbeddingConfig): {
             ? { tableEpoch: raw.synapse_table_epoch }
             : {}),
         ...(typeof raw.synapse_dims === "number" ? { dims: raw.synapse_dims } : {}),
-        ...(raw.synapse_provenance !== undefined ? { provenance: raw.synapse_provenance } : {}),
+        ...(provenance !== undefined ? { provenance } : {}),
+        ...(descriptor ? { descriptor } : {}),
     };
 }
 
@@ -571,17 +612,23 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
     if (config.provider === "synapse") {
         const synapse = config as EmbeddingConfig & {
             model?: string;
+            max_input_tokens?: number;
             synapse_connection_file?: string;
             synapse_fingerprint?: string;
             synapse_table_epoch?: number;
             synapse_dims?: number;
             synapse_recommended_batch?: number;
+            synapse_recommended_token_budget?: number;
+            synapse_descriptor?: SynapseLaneDescriptor;
             synapse_provenance?: unknown;
         };
+        const descriptor = synapseDescriptorFromConfig(config);
         return {
             provider: "synapse",
             model: synapse.model?.trim() || "gte-modernbert-base-f16",
-            max_input_tokens: SYNAPSE_MAX_INPUT_TOKENS,
+            max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
+                descriptor?.max_tokens ?? synapse.max_input_tokens,
+            ),
             ...(synapse.synapse_connection_file
                 ? { synapse_connection_file: synapse.synapse_connection_file }
                 : {}),
@@ -597,6 +644,12 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             ...(typeof synapse.synapse_recommended_batch === "number"
                 ? { synapse_recommended_batch: synapse.synapse_recommended_batch }
                 : {}),
+            ...(typeof synapse.synapse_recommended_token_budget === "number"
+                ? {
+                      synapse_recommended_token_budget: synapse.synapse_recommended_token_budget,
+                  }
+                : {}),
+            ...(descriptor ? { synapse_descriptor: descriptor } : {}),
             ...(synapse.synapse_provenance !== undefined
                 ? { synapse_provenance: synapse.synapse_provenance }
                 : {}),
@@ -650,11 +703,14 @@ function createProvider(
     if (config.provider === "synapse") {
         const synapse = config as EmbeddingConfig & {
             model?: string;
+            max_input_tokens?: number;
             synapse_connection_file?: string;
             synapse_fingerprint?: string;
             synapse_table_epoch?: number;
             synapse_dims?: number;
             synapse_recommended_batch?: number;
+            synapse_recommended_token_budget?: number;
+            synapse_descriptor?: SynapseLaneDescriptor;
             synapse_provenance?: unknown;
         };
         return new SynapseEmbeddingProvider({
@@ -666,6 +722,8 @@ function createProvider(
             tableEpoch: synapse.synapse_table_epoch,
             dims: synapse.synapse_dims,
             recommendedBatch: synapse.synapse_recommended_batch,
+            recommendedTokenBudget: synapse.synapse_recommended_token_budget,
+            descriptor: synapse.synapse_descriptor,
             provenance: synapse.synapse_provenance,
         });
     }
@@ -737,6 +795,10 @@ function snapshotFor(
         "model" in registration.config && typeof registration.config.model === "string"
             ? registration.config.model.trim()
             : "";
+    const synapseDescriptor =
+        !registration.observationMode && registration.config.provider === "synapse"
+            ? synapseDescriptorFromConfig(registration.config)
+            : undefined;
     return {
         projectIdentity: registration.projectIdentity,
         sourceDirectory: registration.sourceDirectory,
@@ -759,6 +821,7 @@ function snapshotFor(
             registration.observationMode || !providerIsOn
                 ? "off"
                 : (registration.config.provider ?? "local"),
+        ...(synapseDescriptor ? { synapseDescriptor } : {}),
     };
 }
 
@@ -1279,6 +1342,9 @@ export function registerProjectShadowEmbedding(
                 ? resolvedConfig.model
                 : registration.modelId,
         provider: "synapse",
+        ...(synapseDescriptorFromConfig(resolvedConfig)
+            ? { synapseDescriptor: synapseDescriptorFromConfig(resolvedConfig) }
+            : {}),
     };
 }
 
@@ -1336,7 +1402,8 @@ export async function embedShadowTextForProject(
     const registration = shadowRegistrations.get(projectIdentity);
     if (!registration) return null;
     try {
-        return await registration.provider.embed(text, signal, "query");
+        const vector = await registration.provider.embed(text, signal, "query");
+        return vector && !isSynapseEmbeddingTruncated(vector) ? vector : null;
     } catch (error) {
         log("[magic-context] Synapse shadow query failed:", error);
         return null;
@@ -1826,7 +1893,10 @@ async function embedShadowItems(
     );
     try {
         if (registration.provider.embedItems) {
-            const vectors = await registration.provider.embedItems(items);
+            const returned = await registration.provider.embedItems(items);
+            const vectors = new Map(
+                [...returned].filter(([, vector]) => !isSynapseEmbeddingTruncated(vector)),
+            );
             finishSynapseBatchLedger(
                 db,
                 sessionId,
@@ -1845,7 +1915,9 @@ async function embedShadowItems(
         const vectors = new Map(
             items.flatMap((item, index) => {
                 const vector = positional[index];
-                return vector ? [[item.id, vector] as const] : [];
+                return vector && !isSynapseEmbeddingTruncated(vector)
+                    ? [[item.id, vector] as const]
+                    : [];
             }),
         );
         finishSynapseBatchLedger(
@@ -2218,7 +2290,7 @@ export async function embedTextForProject(
     if (!provider) return null;
 
     const vector = await provider.embed(text, signal, purpose);
-    if (!vector) return null;
+    if (!vector || isSynapseEmbeddingTruncated(vector)) return null;
 
     const current = projectRegistrations.get(projectIdentity);
     if (
@@ -2252,7 +2324,9 @@ export async function embedBatchForProject(
     const provider = getOrCreateProjectProvider(registration);
     if (!provider) return null;
 
-    const vectors = await provider.embedBatch(texts, signal, purpose);
+    const vectors = (await provider.embedBatch(texts, signal, purpose)).map((vector) =>
+        vector && !isSynapseEmbeddingTruncated(vector) ? vector : null,
+    );
     const current = projectRegistrations.get(projectIdentity);
     if (
         !current ||
@@ -2312,7 +2386,10 @@ export async function embedItemsForProject(
     let vectors: Map<string, Float32Array>;
     try {
         if (provider.embedItems) {
-            vectors = await provider.embedItems(items, signal);
+            const returned = await provider.embedItems(items, signal);
+            vectors = new Map(
+                [...returned].filter(([, vector]) => !isSynapseEmbeddingTruncated(vector)),
+            );
         } else {
             const positional = await provider.embedBatch(
                 items.map((item) => item.text),
@@ -2322,7 +2399,9 @@ export async function embedItemsForProject(
             vectors = new Map(
                 items.flatMap((item, index) => {
                     const vector = positional[index];
-                    return vector ? [[item.id, vector] as const] : [];
+                    return vector && !isSynapseEmbeddingTruncated(vector)
+                        ? [[item.id, vector] as const]
+                        : [];
                 }),
             );
         }
@@ -3073,6 +3152,8 @@ export interface EmbeddingCoverageStatus {
     model: string;
     /** Configured provider kind ("local" / "openai-compatible" / "ollama" / "off"). */
     provider: string;
+    /** Live Synapse lane capabilities, when Synapse is active. */
+    synapseDescriptor?: SynapseLaneDescriptor;
     /** This session's compartment-chunk coverage. */
     session: { embedded: number; total: number };
     /** Project-wide active-memory coverage. */
@@ -3099,6 +3180,9 @@ export function getEmbeddingCoverageStatus(
             enabled: false,
             model: snapshot?.model ?? "off",
             provider: snapshot?.provider ?? "off",
+            ...(snapshot?.synapseDescriptor
+                ? { synapseDescriptor: snapshot.synapseDescriptor }
+                : {}),
             session: { embedded: 0, total: 0 },
             memories: { embedded: 0, total: 0 },
             commits: { embedded: 0, total: 0, gitEnabled: false },
@@ -3125,6 +3209,7 @@ export function getEmbeddingCoverageStatus(
         enabled: true,
         model: snapshot.model,
         provider: snapshot.provider,
+        ...(snapshot.synapseDescriptor ? { synapseDescriptor: snapshot.synapseDescriptor } : {}),
         session,
         memories,
         commits,

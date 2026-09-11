@@ -7,6 +7,7 @@ import type {
     DreamTaskBacklogMap,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
+import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
 import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
 
@@ -239,6 +240,7 @@ export interface EmbedDetail {
     enabled: boolean;
     model: string;
     provider: string;
+    synapseDescriptor?: SynapseLaneDescriptor;
     session: { embedded: number; total: number };
     memories: { embedded: number; total: number };
     commits: { embedded: number; total: number; gitEnabled: boolean };

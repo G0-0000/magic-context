@@ -16,6 +16,12 @@ import {
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
 import {
+    formatSynapseLaneDescriptor,
+    SYNAPSE_DEFAULT_MODEL,
+    SynapseEmbeddingProvider,
+    toSynapseLaneDescriptor,
+} from "@magic-context/core/features/magic-context/memory/embedding-synapse";
+import {
     formatShadowBackfillStall,
     listShadowBackfillStalls,
 } from "@magic-context/core/features/magic-context/shadow-backfill-state";
@@ -765,7 +771,40 @@ async function runHealthChecks(options: {
             userRaw ?? undefined,
         );
     }
-    if (mergedEmbedding.provider === "openai-compatible") {
+    if (mergedEmbedding.provider === "synapse") {
+        const subc = loadedConfig.config.subc;
+        const model =
+            typeof mergedEmbedding.model === "string" && mergedEmbedding.model.trim().length > 0
+                ? mergedEmbedding.model.trim()
+                : SYNAPSE_DEFAULT_MODEL;
+        if (!subc) {
+            add(results, "fail", "Embedding provider is synapse but the subc block is missing");
+        } else {
+            try {
+                const metadata = await SynapseEmbeddingProvider.discover({
+                    connectionFile: subc.connection_file,
+                    projectRoot: options.cwd,
+                    session: "doctor:pi",
+                    model,
+                });
+                add(
+                    results,
+                    "pass",
+                    `Embedding provider: synapse — ${sanitizeDiagnosticText(
+                        formatSynapseLaneDescriptor(toSynapseLaneDescriptor(metadata)),
+                    )}`,
+                );
+            } catch (error) {
+                add(
+                    results,
+                    "fail",
+                    `Synapse embedding lane unavailable: ${sanitizeDiagnosticText(
+                        error instanceof Error ? error.message : String(error),
+                    )}`,
+                );
+            }
+        }
+    } else if (mergedEmbedding.provider === "openai-compatible") {
         const endpoint =
             typeof mergedEmbedding.endpoint === "string" ? mergedEmbedding.endpoint.trim() : "";
         const model = typeof mergedEmbedding.model === "string" ? mergedEmbedding.model.trim() : "";

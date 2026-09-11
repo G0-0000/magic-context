@@ -8,14 +8,16 @@ import {
     getSynapseLaneIdentity,
     SYNAPSE_DEFAULT_MODEL,
     SynapseEmbeddingProvider,
+    type SynapseLaneDescriptor,
     type SynapseLaneMetadata,
+    toSynapseLaneDescriptor,
 } from "../features/magic-context/memory/embedding-synapse";
 import { log } from "../shared/logger";
 
 export interface ResolvedSynapseEmbeddingConfig {
     provider: "synapse";
     model: string;
-    max_input_tokens: 8192;
+    max_input_tokens: number;
     synapse_connection_file: string;
     synapse_fingerprint: string;
     synapse_table_epoch: number;
@@ -23,6 +25,8 @@ export interface ResolvedSynapseEmbeddingConfig {
     // treats a missing value as adopt-on-first-write.
     synapse_dims?: number;
     synapse_recommended_batch?: number;
+    synapse_recommended_token_budget?: number;
+    synapse_descriptor: SynapseLaneDescriptor;
     synapse_provenance?: unknown;
 }
 
@@ -97,11 +101,7 @@ function synapseOptions(
             SYNAPSE_DEFAULT_MODEL,
         ...(metadata
             ? {
-                  fingerprint: metadata.fingerprint,
-                  tableEpoch: metadata.table_epoch,
-                  dims: metadata.dims,
-                  recommendedBatch: metadata.recommended_batch,
-                  provenance: metadata.provenance,
+                  metadata,
               }
             : {}),
     };
@@ -141,7 +141,7 @@ function resolvedSynapseConfig(
     return {
         provider: "synapse",
         model: metadata.model,
-        max_input_tokens: 8192,
+        max_input_tokens: metadata.max_tokens,
         synapse_connection_file: subc.connection_file,
         synapse_fingerprint: metadata.fingerprint,
         synapse_table_epoch: metadata.table_epoch,
@@ -149,6 +149,10 @@ function resolvedSynapseConfig(
         ...(metadata.recommended_batch
             ? { synapse_recommended_batch: metadata.recommended_batch }
             : {}),
+        ...(metadata.recommended_token_budget
+            ? { synapse_recommended_token_budget: metadata.recommended_token_budget }
+            : {}),
+        synapse_descriptor: toSynapseLaneDescriptor(metadata),
         ...(metadata.provenance !== undefined ? { synapse_provenance: metadata.provenance } : {}),
     };
 }

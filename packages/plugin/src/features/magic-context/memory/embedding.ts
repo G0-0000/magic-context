@@ -7,7 +7,11 @@ import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 import type { EmbeddingProvider } from "./embedding-provider";
-import { SynapseEmbeddingProvider } from "./embedding-synapse";
+import {
+    isSynapseEmbeddingTruncated,
+    SynapseEmbeddingProvider,
+    type SynapseLaneDescriptor,
+} from "./embedding-synapse";
 
 export type {
     EmbeddingFeatures,
@@ -97,7 +101,18 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
     }
 
     if (config.provider === "synapse") {
-        return { ...config, max_input_tokens: 8192 };
+        const raw = config as EmbeddingConfig & {
+            synapse_descriptor?: SynapseLaneDescriptor;
+        };
+        const maxInputTokens = raw.synapse_descriptor?.max_tokens ?? config.max_input_tokens;
+        return {
+            ...config,
+            ...(maxInputTokens
+                ? {
+                      max_input_tokens: normalizeCompartmentChunkMaxInputTokens(maxInputTokens),
+                  }
+                : {}),
+        };
     }
 
     throw new Error("Unknown embedding provider");
@@ -141,6 +156,8 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             synapse_table_epoch?: number;
             synapse_dims?: number;
             synapse_recommended_batch?: number;
+            synapse_recommended_token_budget?: number;
+            synapse_descriptor?: SynapseLaneDescriptor;
             synapse_provenance?: unknown;
         };
         return new SynapseEmbeddingProvider({
@@ -152,6 +169,8 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             tableEpoch: synapse.synapse_table_epoch,
             dims: synapse.synapse_dims,
             recommendedBatch: synapse.synapse_recommended_batch,
+            recommendedTokenBudget: synapse.synapse_recommended_token_budget,
+            descriptor: synapse.synapse_descriptor,
             provenance: synapse.synapse_provenance,
         });
     }
@@ -213,7 +232,8 @@ export async function embedText(text: string, signal?: AbortSignal): Promise<Flo
         return null;
     }
 
-    return currentProvider.embed(text, signal);
+    const vector = await currentProvider.embed(text, signal);
+    return vector && !isSynapseEmbeddingTruncated(vector) ? vector : null;
 }
 
 export function getEmbeddingModelId(): string {

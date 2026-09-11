@@ -13,6 +13,12 @@ import {
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
 import {
+    formatSynapseLaneDescriptor,
+    SYNAPSE_DEFAULT_MODEL,
+    SynapseEmbeddingProvider,
+    toSynapseLaneDescriptor,
+} from "@magic-context/core/features/magic-context/memory/embedding-synapse";
+import {
     formatShadowBackfillStall,
     listShadowBackfillStalls,
 } from "@magic-context/core/features/magic-context/shadow-backfill-state";
@@ -509,9 +515,46 @@ async function checkEmbeddingConfig(
         return checkLocalEmbeddingRuntimeForDoctor(runtimePreference);
     }
 
+    if (provider === "synapse") {
+        const loaded = loadPluginConfig(process.cwd());
+        if (!loaded.subc) {
+            log.error("Embedding provider is synapse but the subc connection block is missing");
+            return { issues: 1 };
+        }
+        const model =
+            typeof embedding?.model === "string" && embedding.model.trim().length > 0
+                ? embedding.model.trim()
+                : SYNAPSE_DEFAULT_MODEL;
+        const probeSpinner = spinner();
+        probeSpinner.start(`Testing Synapse embedding lane ${sanitizeDiagnosticText(model)}`);
+        try {
+            const metadata = await SynapseEmbeddingProvider.discover({
+                connectionFile: loaded.subc.connection_file,
+                projectRoot: process.cwd(),
+                session: "doctor:opencode",
+                model,
+            });
+            probeSpinner.stop("Synapse embedding lane probed");
+            log.success(
+                `Embedding provider: synapse — ${sanitizeDiagnosticText(
+                    formatSynapseLaneDescriptor(toSynapseLaneDescriptor(metadata)),
+                )}`,
+            );
+            return { issues: 0 };
+        } catch (error) {
+            probeSpinner.stop("Synapse embedding probe failed");
+            log.error(
+                `Synapse embedding lane unavailable: ${sanitizeDiagnosticText(
+                    error instanceof Error ? error.message : String(error),
+                )}`,
+            );
+            return { issues: 1 };
+        }
+    }
+
     if (provider !== "openai-compatible") {
         log.warn(
-            `Unknown embedding provider: ${String(provider)} (expected local | openai-compatible | off)`,
+            `Unknown embedding provider: ${String(provider)} (expected local | openai-compatible | synapse | off)`,
         );
         return { issues: 1 };
     }

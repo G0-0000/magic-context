@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { connectionFileExists, SubcCallError, SubcClient } from "@cortexkit/subc-client";
+import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
 import { getHarness } from "../../../shared/harness";
 import { log } from "../../../shared/logger";
 import type { EmbeddingFailure } from "./embedding-failure";
 import type { EmbeddingProvider } from "./embedding-provider";
 
 export const SYNAPSE_DEFAULT_MODEL = "gte-modernbert-base-f16";
-export const SYNAPSE_MAX_INPUT_TOKENS = 8192;
 export const SYNAPSE_DEFAULT_QUERY_TIMEOUT_MS = 3_000;
 export const SYNAPSE_DEFAULT_BATCH_TIMEOUT_MS = 120_000;
 
@@ -56,24 +56,107 @@ const SYNAPSE_CERTIFICATION_REFUSAL_REASONS = new Set([
     "migration_required",
 ]);
 
+export type SynapseMaxTokensSource =
+    | "runtime_bucket"
+    | "worker_bucket"
+    | "catalog"
+    | "catalog_unloaded";
+
 export interface SynapseCatalogEntry {
     model: string;
     fingerprint: string;
     table_epoch: number;
-    // The live catalog omits dims; it is adopted from the first embed response
-    // envelope and pinned for the provider's lifetime.
+    /** Per-row ceiling advertised by this lane. */
+    max_tokens: number;
+    max_tokens_source: SynapseMaxTokensSource;
+    bucket_ladder?: number[];
     dims?: number;
+    dtype?: string;
+    device_class?: string;
     /** Rows per embed.batch call, from the service's measured per-lane policy. */
     recommended_batch?: number;
-    /** Token ceiling per embed.batch call; pages split on whichever limit hits first. */
+    /** Aggregate token budget from the service's measured batch policy. */
     recommended_token_budget?: number;
     provenance?: unknown;
     certified?: boolean;
     status?: string;
+    warm_load_cost_hint_ms?: number;
 }
 
 export interface SynapseLaneMetadata extends SynapseCatalogEntry {
     laneIdentity: string;
+}
+
+export interface SynapseLaneDescriptor {
+    lane: string;
+    device_class?: string;
+    max_tokens: number;
+    max_tokens_source: SynapseMaxTokensSource;
+    bucket_ladder?: number[];
+    dims?: number;
+    dtype?: string;
+    certified?: boolean;
+    warm_load_cost_hint_ms?: number;
+    recommended_batch?: { rows: number; token_budget?: number };
+    /** True only when the ceiling came from a loaded runtime or worker bucket. */
+    warm: boolean;
+}
+
+export interface SynapseEmbeddingRowMetadata {
+    truncated: boolean;
+    submittedSha256: string;
+    contentSha256: string;
+    effectiveTokens?: number;
+}
+
+const embeddingRowMetadata = new WeakMap<Float32Array, SynapseEmbeddingRowMetadata>();
+
+export function getSynapseEmbeddingRowMetadata(
+    vector: Float32Array,
+): SynapseEmbeddingRowMetadata | undefined {
+    return embeddingRowMetadata.get(vector);
+}
+
+export function isSynapseEmbeddingTruncated(vector: Float32Array): boolean {
+    return embeddingRowMetadata.get(vector)?.truncated === true;
+}
+
+export function toSynapseLaneDescriptor(metadata: SynapseCatalogEntry): SynapseLaneDescriptor {
+    const tokenBudget = metadata.recommended_token_budget;
+    return {
+        lane: metadata.model,
+        ...(metadata.device_class ? { device_class: metadata.device_class } : {}),
+        max_tokens: metadata.max_tokens,
+        max_tokens_source: metadata.max_tokens_source,
+        ...(metadata.bucket_ladder ? { bucket_ladder: [...metadata.bucket_ladder] } : {}),
+        ...(metadata.dims ? { dims: metadata.dims } : {}),
+        ...(metadata.dtype ? { dtype: metadata.dtype } : {}),
+        ...(typeof metadata.certified === "boolean" ? { certified: metadata.certified } : {}),
+        ...(metadata.warm_load_cost_hint_ms !== undefined
+            ? { warm_load_cost_hint_ms: metadata.warm_load_cost_hint_ms }
+            : {}),
+        ...(metadata.recommended_batch
+            ? {
+                  recommended_batch: {
+                      rows: metadata.recommended_batch,
+                      ...(tokenBudget !== undefined ? { token_budget: tokenBudget } : {}),
+                  },
+              }
+            : {}),
+        warm:
+            metadata.max_tokens_source === "runtime_bucket" ||
+            metadata.max_tokens_source === "worker_bucket",
+    };
+}
+
+export function formatSynapseLaneDescriptor(descriptor: SynapseLaneDescriptor): string {
+    const certified = descriptor.certified === undefined ? "unknown" : String(descriptor.certified);
+    return (
+        `lane=${descriptor.lane}; device_class=${descriptor.device_class ?? "unknown"}; ` +
+        `max_tokens=${descriptor.max_tokens} (${descriptor.max_tokens_source}); ` +
+        `certified=${certified}; warm=${descriptor.warm ? "yes" : "no"}; ` +
+        `warm_load_cost_hint_ms=${descriptor.warm_load_cost_hint_ms ?? "unknown"}`
+    );
 }
 
 export interface SynapseClientLike {
@@ -99,6 +182,9 @@ export interface SynapseEmbeddingProviderOptions {
     tableEpoch?: number;
     dims?: number;
     recommendedBatch?: number;
+    recommendedTokenBudget?: number;
+    descriptor?: SynapseLaneDescriptor;
+    metadata?: SynapseLaneMetadata;
     provenance?: unknown;
     moduleId?: string;
     queryTimeoutMs?: number;
@@ -152,7 +238,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function responseBody(value: unknown): Record<string, unknown> {
     const record = asRecord(value);
     const result = asRecord(record?.result);
-    return result ? { ...record, ...result } : (record ?? {});
+    const payload = asRecord(result?.payload ?? record?.payload);
+    return {
+        ...(record ?? {}),
+        ...(result ?? {}),
+        ...(payload ?? {}),
+    };
 }
 
 function readRetryAfter(value: unknown): number | undefined {
@@ -305,14 +396,17 @@ function extractCatalogEntries(value: unknown): SynapseCatalogEntry[] {
           : Array.isArray(value)
             ? value
             : [];
-    // The live catalog serves {model_id, fingerprints[], state} per entry with
-    // table_epoch on the envelope; dims and recommended_batch arrive only on
-    // embed responses. Accept both that shape and the field-per-entry form so a
-    // future catalog enrichment does not need a parser change.
     const envelopeEpoch =
         typeof body.table_epoch === "number" && Number.isInteger(body.table_epoch)
             ? body.table_epoch
             : undefined;
+    const maxTokenSources = new Set<SynapseMaxTokensSource>([
+        "runtime_bucket",
+        "worker_bucket",
+        "catalog",
+        "catalog_unloaded",
+    ]);
+
     return raw.flatMap((entry) => {
         const record = asRecord(entry);
         if (!record) return [];
@@ -333,30 +427,54 @@ function extractCatalogEntries(value: unknown): SynapseCatalogEntry[] {
             typeof entryEpoch === "number" && Number.isInteger(entryEpoch)
                 ? entryEpoch
                 : envelopeEpoch;
-        const dims = record.dims ?? record.dimensions;
+        const maxTokens = record.max_tokens;
+        const maxTokensSource = record.max_tokens_source;
         if (
             model.length === 0 ||
             fingerprint.length === 0 ||
             typeof tableEpoch !== "number" ||
-            !Number.isInteger(tableEpoch)
+            !Number.isInteger(tableEpoch) ||
+            typeof maxTokens !== "number" ||
+            !Number.isInteger(maxTokens) ||
+            maxTokens <= 0 ||
+            typeof maxTokensSource !== "string" ||
+            !maxTokenSources.has(maxTokensSource as SynapseMaxTokensSource)
         ) {
             return [];
         }
-        // recommended_batch arrives either as a bare row count (early servers) or as
-        // the measured policy object {rows, token_budget}. Accept both; a lane
-        // without a measured policy omits the field and keeps client defaults.
+
+        const dims = record.dims ?? record.dimensions;
         const rawBatch = record.recommended_batch ?? record.recommendedBatch;
         const batchRecord = asRecord(rawBatch);
         const recommendedBatch =
             typeof rawBatch === "number" ? rawBatch : batchRecord ? batchRecord.rows : undefined;
         const recommendedTokenBudget = batchRecord ? batchRecord.token_budget : undefined;
+        const bucketLadder = Array.isArray(record.bucket_ladder)
+            ? record.bucket_ladder.filter(
+                  (bucket): bucket is number =>
+                      typeof bucket === "number" && Number.isInteger(bucket) && bucket > 0,
+              )
+            : undefined;
         const state = typeof record.state === "string" ? record.state : undefined;
+        const warmLoadCostHint = record.warm_load_cost_hint_ms;
+
         return [
             {
                 model,
                 fingerprint,
                 table_epoch: tableEpoch,
+                max_tokens: maxTokens,
+                max_tokens_source: maxTokensSource as SynapseMaxTokensSource,
+                ...(bucketLadder && bucketLadder.length > 0
+                    ? { bucket_ladder: [...new Set(bucketLadder)].sort((a, b) => a - b) }
+                    : {}),
                 ...(typeof dims === "number" && Number.isInteger(dims) && dims > 0 ? { dims } : {}),
+                ...(typeof record.dtype === "string" && record.dtype.length > 0
+                    ? { dtype: record.dtype }
+                    : {}),
+                ...(typeof record.device_class === "string" && record.device_class.length > 0
+                    ? { device_class: record.device_class }
+                    : {}),
                 ...(typeof recommendedBatch === "number" && recommendedBatch > 0
                     ? { recommended_batch: Math.floor(recommendedBatch) }
                     : {}),
@@ -365,6 +483,11 @@ function extractCatalogEntries(value: unknown): SynapseCatalogEntry[] {
                     : {}),
                 ...(record.provenance !== undefined ? { provenance: record.provenance } : {}),
                 ...(typeof record.certified === "boolean" ? { certified: record.certified } : {}),
+                ...(typeof warmLoadCostHint === "number" &&
+                Number.isFinite(warmLoadCostHint) &&
+                warmLoadCostHint >= 0
+                    ? { warm_load_cost_hint_ms: warmLoadCostHint }
+                    : {}),
                 ...(typeof record.status === "string"
                     ? { status: record.status }
                     : state
@@ -375,22 +498,26 @@ function extractCatalogEntries(value: unknown): SynapseCatalogEntry[] {
     });
 }
 
-function extractVector(
-    value: unknown,
-): { vector: Float32Array; metadata: Record<string, unknown> } | null {
+function extractVector(value: unknown): {
+    vector: Float32Array;
+    item: Record<string, unknown>;
+    disclosure: Record<string, unknown> | null;
+    metadata: Record<string, unknown>;
+} | null {
     const body = responseBody(value);
-    // The live envelope carries vectors: [{id, vector, content_sha256}] for
-    // every embed op, including single-text queries; older sketches used a
-    // top-level vector/embedding field, kept as a fallback.
-    const fromVectors = Array.isArray(body.vectors) ? asRecord(body.vectors[0])?.vector : undefined;
-    const raw = fromVectors ?? body.vector ?? body.embedding;
+    const item = Array.isArray(body.vectors) ? asRecord(body.vectors[0]) : null;
+    const raw = item?.vector;
     if (
+        !item ||
         !Array.isArray(raw) ||
-        raw.some((item) => typeof item !== "number" || !Number.isFinite(item))
+        raw.some((component) => typeof component !== "number" || !Number.isFinite(component))
     ) {
         return null;
     }
-    return { vector: Float32Array.from(raw), metadata: body };
+    const disclosure = Array.isArray(body.truncation_disclosures)
+        ? asRecord(body.truncation_disclosures[0])
+        : null;
+    return { vector: Float32Array.from(raw), item, disclosure, metadata: body };
 }
 
 function extractBatchItems(value: unknown): Array<Record<string, unknown>> {
@@ -406,6 +533,85 @@ function extractBatchItems(value: unknown): Array<Record<string, unknown>> {
         const record = asRecord(item);
         return record ? [record] : [];
     });
+}
+
+function extractTruncationDisclosures(value: unknown): Array<Record<string, unknown> | null> {
+    const body = responseBody(value);
+    if (!Array.isArray(body.truncation_disclosures)) return [];
+    return body.truncation_disclosures.map((disclosure) => asRecord(disclosure));
+}
+
+function validateWireRow(
+    item: Record<string, unknown>,
+    disclosure: Record<string, unknown> | null,
+    expected: { id: string; text: string },
+): SynapseEmbeddingRowMetadata {
+    const submittedSha256 = item.submitted_sha256;
+    const contentSha256 = item.content_sha256;
+    const expectedSubmittedSha256 = hashContent(expected.text);
+    if (typeof submittedSha256 !== "string") {
+        throw new SynapseEmbeddingError(
+            "schema_violation",
+            `Synapse item ${expected.id} omitted submitted_sha256`,
+        );
+    }
+    if (submittedSha256 !== expectedSubmittedSha256) {
+        throw new SynapseEmbeddingError(
+            "schema_violation",
+            `Synapse submitted hash mismatch for item ${expected.id}`,
+        );
+    }
+    if (typeof contentSha256 !== "string") {
+        throw new SynapseEmbeddingError(
+            "schema_violation",
+            `Synapse item ${expected.id} omitted content_sha256`,
+        );
+    }
+
+    const hashesDiffer = contentSha256 !== submittedSha256;
+    const disclosedTruncation = disclosure?.truncated === true;
+    const effectiveTokens = disclosure?.effective_tokens;
+    if (
+        disclosure &&
+        (typeof disclosure.truncated !== "boolean" ||
+            typeof effectiveTokens !== "number" ||
+            !Number.isInteger(effectiveTokens) ||
+            effectiveTokens < 0)
+    ) {
+        throw new SynapseEmbeddingError(
+            "schema_violation",
+            `Synapse item ${expected.id} returned an invalid truncation disclosure`,
+        );
+    }
+    if (hashesDiffer) {
+        if (
+            !disclosedTruncation ||
+            typeof effectiveTokens !== "number" ||
+            !Number.isInteger(effectiveTokens) ||
+            effectiveTokens < 0
+        ) {
+            throw new SynapseEmbeddingError(
+                "schema_violation",
+                `Synapse item ${expected.id} changed content without a valid truncation disclosure`,
+            );
+        }
+    } else if (disclosedTruncation) {
+        throw new SynapseEmbeddingError(
+            "schema_violation",
+            `Synapse item ${expected.id} disclosed truncation but returned matching hashes`,
+        );
+    }
+
+    return {
+        truncated: hashesDiffer,
+        submittedSha256,
+        contentSha256,
+        ...(typeof effectiveTokens === "number" &&
+        Number.isInteger(effectiveTokens) &&
+        effectiveTokens >= 0
+            ? { effectiveTokens }
+            : {}),
+    };
 }
 
 let sharedClient: SynapseClientLike | null = null;
@@ -444,8 +650,11 @@ async function getSharedClient(
 
 export class SynapseEmbeddingProvider implements EmbeddingProvider {
     modelId: string;
-    readonly maxInputTokens = SYNAPSE_MAX_INPUT_TOKENS;
     metadata: SynapseLaneMetadata | null;
+
+    get maxInputTokens(): number | undefined {
+        return this.metadata?.max_tokens;
+    }
 
     private readonly options: SynapseEmbeddingProviderOptions;
     private client: SynapseClientLike | null = null;
@@ -460,38 +669,71 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
         this.options = options;
         const model = options.model || SYNAPSE_DEFAULT_MODEL;
         const fingerprint = options.fingerprint ?? "";
-        this.metadata =
-            fingerprint &&
-            Number.isInteger(options.tableEpoch) &&
-            Number.isInteger(options.dims) &&
-            (options.dims ?? 0) > 0
-                ? {
-                      model,
-                      fingerprint,
-                      table_epoch: options.tableEpoch as number,
-                      dims: options.dims as number,
-                      ...(options.recommendedBatch
-                          ? { recommended_batch: Math.max(1, Math.floor(options.recommendedBatch)) }
-                          : {}),
-                      ...(options.provenance !== undefined
-                          ? { provenance: options.provenance }
-                          : {}),
-                      laneIdentity: getSynapseLaneIdentity(model, fingerprint),
-                  }
-                : null;
+        const descriptor = options.descriptor;
+        this.metadata = options.metadata
+            ? {
+                  ...options.metadata,
+                  bucket_ladder: options.metadata.bucket_ladder
+                      ? [...options.metadata.bucket_ladder]
+                      : undefined,
+              }
+            : fingerprint && Number.isInteger(options.tableEpoch) && descriptor
+              ? {
+                    model,
+                    fingerprint,
+                    table_epoch: options.tableEpoch as number,
+                    max_tokens: descriptor.max_tokens,
+                    max_tokens_source: descriptor.max_tokens_source,
+                    ...(descriptor.bucket_ladder
+                        ? { bucket_ladder: [...descriptor.bucket_ladder] }
+                        : {}),
+                    ...((options.dims ?? descriptor.dims)
+                        ? { dims: (options.dims ?? descriptor.dims) as number }
+                        : {}),
+                    ...(descriptor.dtype ? { dtype: descriptor.dtype } : {}),
+                    ...(descriptor.device_class ? { device_class: descriptor.device_class } : {}),
+                    ...((options.recommendedBatch ?? descriptor.recommended_batch?.rows)
+                        ? {
+                              recommended_batch: Math.max(
+                                  1,
+                                  Math.floor(
+                                      (options.recommendedBatch ??
+                                          descriptor.recommended_batch?.rows) as number,
+                                  ),
+                              ),
+                          }
+                        : {}),
+                    ...((options.recommendedTokenBudget ??
+                    descriptor.recommended_batch?.token_budget)
+                        ? {
+                              recommended_token_budget: Math.max(
+                                  1,
+                                  Math.floor(
+                                      (options.recommendedTokenBudget ??
+                                          descriptor.recommended_batch?.token_budget) as number,
+                                  ),
+                              ),
+                          }
+                        : {}),
+                    ...(options.provenance !== undefined ? { provenance: options.provenance } : {}),
+                    ...(typeof descriptor.certified === "boolean"
+                        ? { certified: descriptor.certified }
+                        : {}),
+                    ...(descriptor.warm_load_cost_hint_ms !== undefined
+                        ? { warm_load_cost_hint_ms: descriptor.warm_load_cost_hint_ms }
+                        : {}),
+                    laneIdentity: getSynapseLaneIdentity(model, fingerprint),
+                }
+              : null;
         this.modelId = this.metadata?.laneIdentity ?? "synapse:v1:pending";
         this.batchLimit = this.metadata?.recommended_batch ?? 16;
         this.tokenBudget = this.metadata?.recommended_token_budget ?? null;
     }
 
     /**
-     * Page split honors both halves of the service's measured policy: at most
-     * batchLimit rows AND (when the lane publishes one) at most the token budget
-     * per call, estimated at 4 chars/token. Splitting on whichever limit hits
-     * first keeps a page's GPU/ANE occupancy inside the measured knee, so one
-     * oversized page cannot recreate the uninterruptible-latency regression the
-     * budget exists to bound. A single item over budget still ships alone: the
-     * service truncates per its own contract, the client never drops work.
+     * Page split honors both halves of the service's measured policy: the row
+     * count and aggregate token budget. Per-row eligibility is checked against
+     * the lane's separately advertised max_tokens before this method runs.
      */
     private nextPage(
         items: readonly { id: string; text: string; contentSha256: string }[],
@@ -502,7 +744,7 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
         let end = start;
         let tokens = 0;
         while (end < hardEnd) {
-            tokens += Math.ceil(items[end].text.length / 4);
+            tokens += estimateTokens(items[end].text);
             if (tokens > this.tokenBudget && end > start) break;
             end += 1;
         }
@@ -589,10 +831,13 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
 
     async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
         if (!(await this.initialize()) || signal?.aborted || !this.metadata) return null;
+        if (estimateTokens(text) > this.metadata.max_tokens) return null;
         try {
+            const id = "query";
             const value = await this.callWithRetry(
                 "embed.query",
                 this.requestConstraints({
+                    id,
                     text,
                     deadline_ms: this.options.queryTimeoutMs ?? SYNAPSE_DEFAULT_QUERY_TIMEOUT_MS,
                 }),
@@ -601,12 +846,21 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
                 signal,
             );
             const extracted = extractVector(value);
-            if (!extracted)
+            if (!extracted) {
                 throw new SynapseEmbeddingError(
                     "schema_violation",
-                    "Synapse query returned no vector",
+                    "Synapse query returned no vector row",
                 );
+            }
+            if (extracted.item.id !== id) {
+                throw new SynapseEmbeddingError(
+                    "schema_violation",
+                    `Synapse query returned unexpected item ${String(extracted.item.id)}`,
+                );
+            }
+            const rowMetadata = validateWireRow(extracted.item, extracted.disclosure, { id, text });
             this.validateResponse(extracted.metadata, extracted.vector.length);
+            embeddingRowMetadata.set(extracted.vector, rowMetadata);
             this.recordSuccess();
             return extracted.vector;
         } catch (error) {
@@ -634,9 +888,13 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
         if (items.length === 0 || !(await this.initialize()) || !this.metadata || signal?.aborted) {
             return output;
         }
-        for (let start = 0; start < items.length; ) {
+        const maxTokens = this.metadata.max_tokens;
+        const eligibleItems = items
+            .filter((item) => estimateTokens(item.text) <= maxTokens)
+            .map((item) => ({ ...item, contentSha256: hashContent(item.text) }));
+        for (let start = 0; start < eligibleItems.length; ) {
             if (signal?.aborted || this.permanentFailure) break;
-            const page = this.nextPage(items, start);
+            const page = this.nextPage(eligibleItems, start);
             start += page.length;
             try {
                 const requestKey = this.requestKey(page);
@@ -662,10 +920,18 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
                     }
                 }
                 const batchEnvelope = responseBody(body);
-                for (const item of extractBatchItems(body)) {
+                const disclosures = extractTruncationDisclosures(body);
+                for (const [index, item] of extractBatchItems(body).entries()) {
                     const id = typeof item.id === "string" ? item.id : "";
                     const vector = item.vector ?? item.embedding;
-                    if (!id || !Array.isArray(vector)) {
+                    if (
+                        !id ||
+                        !Array.isArray(vector) ||
+                        vector.some(
+                            (component) =>
+                                typeof component !== "number" || !Number.isFinite(component),
+                        )
+                    ) {
                         throw new SynapseEmbeddingError(
                             "schema_violation",
                             "Synapse batch item is malformed",
@@ -678,24 +944,22 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
                             `Synapse returned unknown item ${id}`,
                         );
                     }
-                    if (
-                        typeof item.content_sha256 === "string" &&
-                        item.content_sha256 !== expected.contentSha256
-                    ) {
-                        throw new SynapseEmbeddingError(
-                            "artifact_invalid",
-                            `Synapse content hash mismatch for item ${id}`,
-                        );
-                    }
-                    const vectorArray = Float32Array.from(vector as number[]);
+                    const rowMetadata = validateWireRow(item, disclosures[index] ?? null, expected);
+                    const vectorArray = Float32Array.from(vector);
                     this.validateResponse({ ...batchEnvelope, ...item }, vectorArray.length);
+                    embeddingRowMetadata.set(vectorArray, rowMetadata);
                     output.set(id, vectorArray);
                     this.recordSuccess();
                 }
             } catch (error) {
                 const classified = classifyError(error);
                 this.logCallFailure(classified, "embed.batch");
-                if (classified.code === "idempotency_conflict") throw classified;
+                if (
+                    classified.code === "idempotency_conflict" ||
+                    classified.code === "schema_violation"
+                ) {
+                    throw classified;
+                }
                 if (classified.permanent) {
                     this.permanentFailure = true;
                     this.initialized = false;
@@ -766,6 +1030,7 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
     ): Promise<unknown> {
         let cursor: unknown = null;
         const allItems: Array<Record<string, unknown>> = [];
+        const allDisclosures: Array<Record<string, unknown> | null> = [];
         for (;;) {
             if (signal?.aborted) return {};
             const body = await this.callWithRetry(
@@ -781,14 +1046,22 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
             );
             const parsed = responseBody(body);
             const items = extractBatchItems(body);
+            const disclosures = extractTruncationDisclosures(body);
             allItems.push(...items);
+            allDisclosures.push(...items.map((_, index) => disclosures[index] ?? null));
             const nextCursor = parsed.next_cursor ?? parsed.cursor;
             const done =
                 parsed.done === true ||
                 parsed.complete === true ||
                 nextCursor === undefined ||
                 nextCursor === null;
-            if (done) return { ...parsed, items: allItems };
+            if (done) {
+                return {
+                    ...parsed,
+                    vectors: allItems,
+                    truncation_disclosures: allDisclosures,
+                };
+            }
             cursor = nextCursor;
         }
     }

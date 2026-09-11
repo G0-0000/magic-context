@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
+import { formatEmbedStatusText } from "../../hooks/magic-context/format-embed-status";
 import {
     chunkCanonicalText,
     loadCompartmentChunkEmbeddingsForSearch,
@@ -18,6 +20,11 @@ import {
 import { upsertCommits } from "./git-commits/storage-git-commits";
 import { acquireGitSweepLease, releaseGitSweepLease } from "./git-commits/sweep-coordinator";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
+import {
+    getSynapseLaneIdentity,
+    SynapseEmbeddingProvider,
+    type SynapseLaneMetadata,
+} from "./memory/embedding-synapse";
 import { insertMemory } from "./memory/storage-memory";
 import {
     getStoredModelId,
@@ -35,6 +42,7 @@ import {
     embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     flushShadowEmbeddingBacklog,
+    getEmbeddingCoverageStatus,
     getProjectEmbeddingSnapshot,
     getShadowBackfillStopReason,
     markProjectLoadUntrusted,
@@ -258,6 +266,131 @@ describe("project embedding registry", () => {
             }
         }
         tempDirs.length = 0;
+    });
+
+    it("keeps a disclosed truncated chunk incomplete while persisting sibling rows", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:synapse-truncated-row";
+        const sessionId = "session-synapse-truncated-row";
+        const fingerprint = "fp-synapse-wire";
+        const metadata: SynapseLaneMetadata = {
+            model: "gte-modernbert-base-f16",
+            fingerprint,
+            table_epoch: 4,
+            max_tokens: 512,
+            max_tokens_source: "worker_bucket",
+            bucket_ladder: [128, 256, 512],
+            dims: 2,
+            dtype: "f16",
+            device_class: "ane",
+            certified: true,
+            warm_load_cost_hint_ms: 9,
+            laneIdentity: getSynapseLaneIdentity("gte-modernbert-base-f16", fingerprint),
+        };
+        _setTestProviderFactoryForProject(
+            () =>
+                new SynapseEmbeddingProvider({
+                    connectionFile: "fixture",
+                    projectRoot: "/repo",
+                    session: "test:truncated-row",
+                    metadata,
+                    clientFactory: async () => ({
+                        async call(_module: string, method: string, params?: unknown) {
+                            if (method !== "embed.batch") {
+                                throw new Error(`unexpected method ${method}`);
+                            }
+                            const items = (params as { items: Array<{ id: string; text: string }> })
+                                .items;
+                            return {
+                                result: {
+                                    fingerprint,
+                                    table_epoch: 4,
+                                    dims: 2,
+                                    payload: {
+                                        vectors: items.map((item, index) => ({
+                                            id: item.id,
+                                            vector: [item.text.length, 1],
+                                            submitted_sha256: createHash("sha256")
+                                                .update(item.text)
+                                                .digest("hex"),
+                                            content_sha256: createHash("sha256")
+                                                .update(
+                                                    index === 0 ? item.text.slice(0, 8) : item.text,
+                                                )
+                                                .digest("hex"),
+                                        })),
+                                        truncation_disclosures: items.map((_item, index) => ({
+                                            submitted_tokens: 16,
+                                            effective_tokens: index === 0 ? 8 : 16,
+                                            truncated: index === 0,
+                                        })),
+                                    },
+                                },
+                            };
+                        },
+                        close() {},
+                    }),
+                }),
+        );
+        const descriptor = {
+            lane: metadata.model,
+            device_class: "ane",
+            max_tokens: 512,
+            max_tokens_source: "worker_bucket" as const,
+            bucket_ladder: [128, 256, 512],
+            dims: 2,
+            dtype: "f16",
+            certified: true,
+            warm_load_cost_hint_ms: 9,
+            warm: true,
+        };
+        registerProjectEmbedding(
+            db,
+            projectIdentity,
+            {
+                provider: "synapse",
+                model: metadata.model,
+                max_input_tokens: 512,
+                synapse_connection_file: "fixture",
+                synapse_fingerprint: fingerprint,
+                synapse_table_epoch: 4,
+                synapse_dims: 2,
+                synapse_descriptor: descriptor,
+            } as unknown as EmbeddingConfig,
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/repo",
+        );
+        seedManyCompartmentsWithFts(db, sessionId, 2);
+        const compartments = getCompartments(db, sessionId);
+
+        const outcome = await embedSessionCompartmentChunks(db, projectIdentity, sessionId, {
+            batchSize: 2,
+        });
+
+        expect(outcome).toMatchObject({ status: "stalled", embedded: 1, failed: 1 });
+        const rows = loadCompartmentChunkEmbeddingsForSearch(
+            db,
+            sessionId,
+            projectIdentity,
+            currentChunkModelId(projectIdentity),
+        );
+        expect(rows.map((row) => row.compartmentId)).toEqual([compartments[1].id]);
+        const coverage = getEmbeddingCoverageStatus(db, projectIdentity, sessionId);
+        expect(coverage).toMatchObject({
+            session: { embedded: 1, total: 2 },
+            synapseDescriptor: descriptor,
+        });
+        expect(formatEmbedStatusText(coverage, { status: "idle" })).toContain(
+            "Synapse — lane=gte-modernbert-base-f16; device_class=ane; max_tokens=512 (worker_bucket); certified=true; warm=yes; warm_load_cost_hint_ms=9",
+        );
+        const persisted = db
+            .prepare(
+                "SELECT provenance_json AS provenanceJson FROM embedding_registrations WHERE project_path = ?",
+            )
+            .get(projectIdentity) as { provenanceJson: string };
+        expect(JSON.parse(persisted.provenanceJson)).toMatchObject({
+            capability_descriptor: descriptor,
+        });
     });
 
     it("preserves existing provider and runtime identity goldens", () => {
