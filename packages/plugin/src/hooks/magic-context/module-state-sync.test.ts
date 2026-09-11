@@ -1,8 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { flushLogger, getLogFilePath } from "../../shared/logger";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -23,6 +22,7 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
+import { flushLogger, getLogFilePath } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -34,13 +34,13 @@ import {
     resetCompartmentMirrorCursorsForTest,
     syncModuleState,
 } from "./module-state-sync";
+import { StateSyncTiming } from "./module-state-sync-timing";
 import {
     MODULE_PAGE_MAX_BYTES,
     moduleWireBodyBytes,
     resolveOrdinalsForModule,
 } from "./module-wire";
 import { closeReadOnlySessionDb } from "./read-session-db";
-import { StateSyncTiming } from "./module-state-sync-timing";
 
 const databases: Database[] = [];
 const tempDirs: string[] = [];

@@ -19,12 +19,12 @@ import {
     type SessionChunkLine,
 } from "./read-session-formatting";
 import {
+    countRawSessionMessageOrdinalsFromDb,
+    countStoredRawSessionMessagesFromDb,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
-    countRawSessionMessageOrdinalsFromDb,
-    countStoredRawSessionMessagesFromDb,
     readRawSeedTailFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,

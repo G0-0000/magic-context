@@ -49,8 +49,8 @@ import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { resolveTodowriteAvailability } from "./ctx-reduce-availability";
-import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import { StateSyncTiming, timedStateSyncDatabase } from "./module-state-sync-timing";
+import { isModuleTransportGenerationChangedResult } from "./module-transport";
 import { MODULE_PAGE_MAX_BYTES, moduleRawBlockMappings, moduleWireBodyBytes } from "./module-wire";
 import {
     readRawSessionMessageOrdinalById,
@@ -1936,7 +1936,7 @@ export async function syncModuleState(args: {
                 const rawInventory = await probe({ state_sync_inventory: true });
                 if (isModuleTransportGenerationChangedResult(rawInventory)) {
                     stateSyncDeltas = await resolveStateSyncDeltas(true);
-                    continue syncLoop;
+                    continue;
                 }
                 const inventoryEnvelope =
                     isRecord(rawInventory) && isRecord(rawInventory.result)
@@ -2025,7 +2025,7 @@ export async function syncModuleState(args: {
                     const raw = await probe({ state_sync_seed_id: seedId });
                     if (isModuleTransportGenerationChangedResult(raw)) {
                         stateSyncDeltas = await resolveStateSyncDeltas(true);
-                        continue syncLoop;
+                        continue;
                     }
                     const envelope = isRecord(raw) && isRecord(raw.result) ? raw.result : raw;
                     const receipt =

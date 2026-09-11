@@ -2138,6 +2138,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
 		const sourceLine =
+			// The literal `${VERSION2}` imitates minified source text quoted by a
+			// stack trace; it is data, not an interpolation.
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture reproduces raw source text
 			`263 | ${"FROM cacheInterceptorV${VERSION2} ".repeat(100)}`.slice(
 				0,
 				3_000,
