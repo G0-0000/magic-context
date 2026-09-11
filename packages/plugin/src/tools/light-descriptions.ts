@@ -2,7 +2,7 @@ export const CTX_REDUCE_LIGHT_DESCRIPTION = `For ctx_reduce users, mark spent §
 
 export const CTX_EXPAND_LIGHT_DESCRIPTION = `For ctx_expand users, recover compacted conversation by passing a session-history heading's inclusive start/end ordinals. Results are raw [N] U:/A: transcript capped near 15K tokens; oversized ranges return the head and a continuation. Use verbose=true to list each message ordinal, part previews, and tool-output sizes; use message=N for one complete stored message and its tool exchanges. NEVER expand ranges after the last compartment because that live tail is already visible.`;
 
-export const CTX_NOTE_LIGHT_DESCRIPTION = `For ctx_note users, write saves, read lists, update changes, and dismiss retires future session notes; surface_condition creates a smart note. For smart notes, NEVER use a condition tied to this conversation or an unobservable future action because the background checker can inspect only external GitHub, disk, git, or web signals.`;
+export const CTX_NOTE_LIGHT_DESCRIPTION = `For ctx_note: write saves, read lists, update changes, dismiss retires one note_id or 1–50 note_ids (choose one); surface_condition makes a smart note. Smart-note conditions must be externally verifiable via GitHub, disk, git, or web—not this conversation or future actions.`;
 
 export const CTX_MEMORY_LIGHT_DESCRIPTION = `For ctx_memory users, write one standalone durable fact with category and content; update one ID, archive one or more IDs, merge two or more IDs, or get one to twenty numeric IDs. get reads memories in every status; list remains dreamer-only, so primary agents must NEVER assume bulk-list access.`;
 

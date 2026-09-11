@@ -60,6 +60,29 @@ async function callNote(args: {
 }
 
 describe("Pi ctx_note smart notes", () => {
+	it("pins the multi-dismiss schema fields", () => {
+		const tool = createCtxNoteTool({ db: createTestDb() });
+		const properties = (
+			tool.parameters as { properties: Record<string, unknown> }
+		).properties;
+		expect(properties.note_id).toEqual({
+			type: "number",
+			description: "Note ID (required for 'dismiss' and 'update' actions).",
+		});
+		expect(properties.note_ids).toEqual({
+			type: "array",
+			items: {
+				type: "integer",
+				minimum: 1,
+				maximum: Number.MAX_SAFE_INTEGER,
+			},
+			minItems: 1,
+			maxItems: 50,
+			description:
+				"One to fifty note ids for 'dismiss' only; do not combine with note_id.",
+		});
+	});
+
 	it("matches OpenCode's default empty-read string", async () => {
 		const db = createTestDb();
 		const { isError, text } = await callNote({
@@ -302,6 +325,75 @@ describe("Pi ctx_note smart notes", () => {
 		expect(sessionNotes[0].content).toBe(
 			"Don't forget to update CHANGELOG before release",
 		);
+	});
+
+	it("dismisses note_ids in one transaction and reports each outcome", async () => {
+		const db = createTestDb();
+		addNote(db, "session", {
+			sessionId: "ses-a",
+			content: "Owned note one",
+		});
+		addNote(db, "session", {
+			sessionId: "ses-b",
+			content: "Foreign note",
+		});
+		addNote(db, "session", {
+			sessionId: "ses-a",
+			content: "Owned note two",
+		});
+		await callNote({
+			db,
+			sessionId: "ses-a",
+			params: { action: "dismiss", note_id: 3 },
+		});
+
+		const result = await callNote({
+			db,
+			sessionId: "ses-a",
+			params: { action: "dismiss", note_ids: [1, 2, 3, 999] },
+		});
+
+		expect(result.isError).toBe(false);
+		expect(result.text).toBe(
+			"Dismissed 1 of 4 notes.\n" +
+				"- Note #1: dismissed\n" +
+				"- Note #2: not_owned\n" +
+				"- Note #3: already_dismissed\n" +
+				"- Note #999: not_found",
+		);
+		expect(
+			getNotes(db, { type: "session" }).map((note) => ({
+				id: note.id,
+				status: note.status,
+			})),
+		).toEqual([
+			{ id: 1, status: "dismissed" },
+			{ id: 2, status: "active" },
+			{ id: 3, status: "dismissed" },
+		]);
+	});
+
+	it("rejects note_ids outside dismiss and rejects note_id conflicts", async () => {
+		const db = createTestDb();
+		const outsideDismiss = await callNote({
+			db,
+			params: { action: "update", note_ids: [1], content: "not allowed" },
+		});
+		const conflict = await callNote({
+			db,
+			params: { action: "dismiss", note_id: 1, note_ids: [1] },
+		});
+		const nonDismissConflict = await callNote({
+			db,
+			params: { action: "update", note_id: 1, note_ids: [1] },
+		});
+
+		expect(outsideDismiss.isError).toBe(true);
+		expect(outsideDismiss.text).toContain("'note_ids' is only valid");
+		expect(conflict.isError).toBe(true);
+		expect(conflict.text).toContain("'note_id' and 'note_ids'");
+		expect(nonDismissConflict.isError).toBe(true);
+		expect(nonDismissConflict.text).toContain("'note_id' and 'note_ids'");
 	});
 
 	it("read with filter='active' is STRICTER than default — does not include pending smart notes", async () => {

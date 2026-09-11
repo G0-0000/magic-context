@@ -11,6 +11,7 @@ import { wakePlaneStatus } from "../../features/magic-context/smart-notes/wake-p
 import {
     addNote,
     dismissNote,
+    dismissNotes,
     getNotes,
     getReadySmartNotes,
     getSessionNotes,
@@ -259,11 +260,36 @@ const ctxNoteArgsShape = {
         .number()
         .optional()
         .describe("Note ID (required for 'dismiss' and 'update' actions)."),
+    note_ids: tool.schema
+        .array(tool.schema.number().int().min(1))
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("One to fifty note ids for 'dismiss' only; do not combine with note_id."),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
 // passthrough so execute() can receive those fields without advertising them.
 const ctxNoteArgsSchema = tool.schema.object(ctxNoteArgsShape).passthrough();
+
+function formatDismissResults(results: Array<{ noteId: number; outcome: string }>): string {
+    const dismissedCount = results.filter((result) => result.outcome === "dismissed").length;
+    return `Dismissed ${dismissedCount} of ${results.length} notes.\n${results
+        .map((result) => `- Note #${result.noteId}: ${result.outcome}`)
+        .join("\n")}`;
+}
+
+function parseDismissNoteIds(value: unknown): number[] | string {
+    if (
+        !Array.isArray(value) ||
+        value.length < 1 ||
+        value.length > 50 ||
+        value.some((id) => typeof id !== "number" || !Number.isInteger(id) || id <= 0)
+    ) {
+        return "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.";
+    }
+    return value;
+}
 
 function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
     return tool({
@@ -283,12 +309,24 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 limit: "number",
                 offset: "number",
                 note_id: "number",
+                note_ids: { type: "array", items: "number", maxItems: 50 },
             });
             const sessionId = toolContext.sessionID;
             // Infer write only on NON-EMPTY content. GPT-family models fill every
             // optional param (content:"" for a read), so a bare `typeof === "string"`
             // check would mis-infer `write` and then reject the empty content.
             const action = args.action ?? (args.content?.trim() ? "write" : "read");
+            const hasNoteId = args.note_id !== undefined;
+            const hasNoteIds = args.note_ids !== undefined;
+            if (hasNoteId && hasNoteIds) {
+                return "Error: 'note_id' and 'note_ids' cannot be used together; provide one or the other.";
+            }
+            if (hasNoteIds && action !== "dismiss") {
+                return "Error: 'note_ids' is only valid when action is 'dismiss'.";
+            }
+            const dismissNoteIds =
+                action === "dismiss" && hasNoteIds ? parseDismissNoteIds(args.note_ids) : undefined;
+            if (typeof dismissNoteIds === "string") return dismissNoteIds;
             const wakePlaneActive =
                 action === "write" &&
                 Boolean(args.surface_condition?.trim()) &&
@@ -349,6 +387,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     limit: args.limit,
                     offset: args.offset,
                     noteId: args.note_id,
+                    noteIds: dismissNoteIds,
                 };
                 try {
                     const text = moduleNoteText(await rustNote(request), args, action);
@@ -422,6 +461,17 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             }
 
             if (action === "dismiss") {
+                if (dismissNoteIds) {
+                    if (!projectIdentity) {
+                        return "Error: Could not resolve project identity for note dismiss.";
+                    }
+                    return formatDismissResults(
+                        dismissNotes(deps.db, dismissNoteIds, {
+                            projectPath: projectIdentity,
+                            sessionId,
+                        }),
+                    );
+                }
                 const noteId = args.note_id;
                 if (typeof noteId !== "number") {
                     return "Error: 'note_id' is required when action is 'dismiss'.";

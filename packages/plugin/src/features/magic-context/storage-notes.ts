@@ -57,6 +57,13 @@ export interface NoteMutationScope {
     projectPath: string;
 }
 
+export type DismissNoteOutcome = "dismissed" | "not_found" | "not_owned" | "already_dismissed";
+
+export interface DismissNoteResult {
+    noteId: number;
+    outcome: DismissNoteOutcome;
+}
+
 export interface UpdateNoteOptions {
     content?: string;
     sessionId?: string | null;
@@ -460,18 +467,38 @@ export function updateNote(
     return isNoteRow(result) ? toNote(result) : null;
 }
 
-export function dismissNote(db: Database, noteId: number, scope: NoteMutationScope): boolean {
-    const existing = getNoteById(db, noteId);
-    if (!existing || !noteBelongsToScope(existing, scope)) {
-        return false;
-    }
+export function dismissNotes(
+    db: Database,
+    noteIds: readonly number[],
+    scope: NoteMutationScope,
+): DismissNoteResult[] {
+    const now = Date.now();
+    return db.transaction(() =>
+        noteIds.map((noteId): DismissNoteResult => {
+            const existing = getNoteById(db, noteId);
+            if (!existing) return { noteId, outcome: "not_found" };
+            if (!noteBelongsToScope(existing, scope)) {
+                return { noteId, outcome: "not_owned" };
+            }
+            if (existing.status === "dismissed") {
+                return { noteId, outcome: "already_dismissed" };
+            }
 
-    const result = db
-        .prepare(
-            "UPDATE notes SET status = 'dismissed', updated_at = ? WHERE id = ? AND status != 'dismissed'",
-        )
-        .run(Date.now(), noteId);
-    return result.changes > 0;
+            const result = db
+                .prepare(
+                    "UPDATE notes SET status = 'dismissed', updated_at = ? WHERE id = ? AND status != 'dismissed'",
+                )
+                .run(now, noteId);
+            return {
+                noteId,
+                outcome: result.changes > 0 ? "dismissed" : "already_dismissed",
+            };
+        }),
+    )();
+}
+
+export function dismissNote(db: Database, noteId: number, scope: NoteMutationScope): boolean {
+    return dismissNotes(db, [noteId], scope)[0]?.outcome === "dismissed";
 }
 
 export function markNoteReady(db: Database, noteId: number, reason?: string): void {

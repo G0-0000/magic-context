@@ -126,6 +126,7 @@ describe("registerMagicContextTools", () => {
 					"content",
 					"surface_condition",
 					"note_id",
+					"note_ids",
 					"filter",
 					"limit",
 					"offset",

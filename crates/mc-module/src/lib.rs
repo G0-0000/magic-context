@@ -71,12 +71,12 @@ use mc_store::{
     FacadeMutationOutcome, HistorianPhase, InsertMemoryInput, LoadedState, MappingUpdate, McStore,
     McStoreError, McTagRow, ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow,
     ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow,
-    ModuleWorkspaceRow, NoteCasOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed,
-    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
-    RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
-    StoredChunkTranscript, StoredCompartment, StoredMemoryMutation, StoredNote,
-    TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
-    LATEST_MIGRATION_VERSION,
+    ModuleWorkspaceRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
+    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
+    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
+    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
+    StoredMemoryMutation, StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate,
+    WrapupCommandRecord, LATEST_MIGRATION_VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -11950,6 +11950,40 @@ impl McHandler {
         let action = string_arg(args, "action")
             .or_else(|| non_empty_string_arg(args, "content").map(|_| "write"))
             .unwrap_or("read");
+        let has_note_id = args.contains_key("note_id");
+        let has_note_ids = args.contains_key("note_ids");
+        if has_note_id && has_note_ids {
+            return tool_error_result(
+                "Error: 'note_id' and 'note_ids' cannot be used together; provide one or the other.",
+            );
+        }
+        if has_note_ids && action != "dismiss" {
+            return tool_error_result("Error: 'note_ids' is only valid when action is 'dismiss'.");
+        }
+        let note_ids = if action == "dismiss" && has_note_ids {
+            let Some(values) = args.get("note_ids").and_then(Value::as_array) else {
+                return tool_error_result(
+                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
+                );
+            };
+            if !(1..=50).contains(&values.len()) {
+                return tool_error_result(
+                    "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
+                );
+            }
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                let Some(note_id) = value.as_i64().filter(|id| *id > 0) else {
+                    return tool_error_result(
+                        "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
+                    );
+                };
+                parsed.push(note_id);
+            }
+            Some(parsed)
+        } else {
+            None
+        };
         let is_mutation = matches!(action, "write" | "update" | "dismiss");
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(args), "notes", is_mutation)
@@ -12228,12 +12262,54 @@ impl McHandler {
                 )
             }
             "dismiss" => {
+                let resolution = string_arg(args, "content");
+                if let Some(note_ids) = note_ids.as_deref() {
+                    return facade_command_outcome(
+                        store.with_facade_command(
+                            facade_scope.route_project_root.as_str(),
+                            project,
+                            "notes",
+                            session,
+                            "ctx_note",
+                            action,
+                            command_id.as_deref(),
+                            |tx| {
+                                let outcomes = tx
+                                    .dismiss_notes(project, session, note_ids, resolution, now)
+                                    .map_err(|error| error.to_string())?;
+                                let dismissed_count = outcomes
+                                    .iter()
+                                    .filter(|(_, outcome)| {
+                                        *outcome == NoteDismissOutcome::Dismissed
+                                    })
+                                    .count();
+                                let details = outcomes
+                                    .iter()
+                                    .map(|(note_id, outcome)| {
+                                        format!(
+                                            "- Note #{note_id}: {}",
+                                            note_dismiss_outcome_text(*outcome)
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                facade_text_response(
+                                    format!(
+                                        "Dismissed {dismissed_count} of {} notes.\n{details}",
+                                        outcomes.len()
+                                    ),
+                                    false,
+                                )
+                            },
+                        ),
+                        "notes",
+                    );
+                }
                 let Some(note_id) = i64_arg(args, "note_id").filter(|id| *id > 0) else {
                     return tool_error_result(
                         "Error: 'note_id' is required when action is 'dismiss'.",
                     );
                 };
-                let resolution = string_arg(args, "content");
                 facade_command_outcome(
                     store.with_facade_command(
                         facade_scope.route_project_root.as_str(),
@@ -15559,6 +15635,15 @@ fn plural_word(count: usize, singular: &'static str) -> String {
     }
 }
 
+fn note_dismiss_outcome_text(outcome: NoteDismissOutcome) -> &'static str {
+    match outcome {
+        NoteDismissOutcome::Dismissed => "dismissed",
+        NoteDismissOutcome::NotFound => "not_found",
+        NoteDismissOutcome::NotOwned => "not_owned",
+        NoteDismissOutcome::AlreadyDismissed => "already_dismissed",
+    }
+}
+
 fn format_traffic_age(observed_at_ms: i64, now: i64) -> String {
     if observed_at_ms <= 0 {
         return "unknown".to_string();
@@ -15959,7 +16044,7 @@ fn ctx_expand_description() -> String {
 }
 
 fn ctx_note_description() -> String {
-    "Save or inspect durable session notes for future follow-ups. surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
+    "Save or inspect durable session notes for future follow-ups. Dismiss one note with note_id or 1–50 with note_ids, never both. surface_condition is accepted and recorded, but condition evaluation arrives later on this leg.".to_string()
 }
 
 fn ctx_memory_schema() -> Value {
@@ -16058,6 +16143,7 @@ fn ctx_note_schema() -> Value {
             "action": { "type": "string", "enum": ["write", "read", "update", "dismiss"], "description": "Operation to perform. Defaults to write when content is provided, otherwise read." },
             "content": { "type": "string", "maxLength": 65536, "description": "Note text for write/update, or optional dismissal resolution when action is dismiss." },
             "note_id": { "type": "integer", "minimum": 1, "description": "Note id for update or dismiss." },
+            "note_ids": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 }, "description": "One to fifty note ids for 'dismiss' only; do not combine with note_id." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25, "description": "Maximum active notes to return." },
             "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Skip this many newest notes in each section." },
             "filter": { "type": "string", "enum": ["all", "active", "pending", "ready", "dismissed"], "description": "Optional read filter. Defaults to active session notes plus ready smart notes." },
@@ -23969,6 +24055,29 @@ mod tests {
         assert!(!tool_is_error(plain_with_capability));
     }
 
+    #[test]
+    fn ctx_note_schema_pins_the_multi_dismiss_contract() {
+        let properties = ctx_note_schema()["properties"].clone();
+        assert_eq!(
+            properties["note_id"],
+            json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Note id for update or dismiss."
+            })
+        );
+        assert_eq!(
+            properties["note_ids"],
+            json!({
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991_i64 },
+                "description": "One to fifty note ids for 'dismiss' only; do not combine with note_id."
+            })
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn ctx_expand_and_ctx_note_facades_are_session_scoped() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
@@ -24210,6 +24319,67 @@ mod tests {
             .search_notes_like("/different/project", "ses", "lattice")
             .unwrap()
             .is_empty());
+
+        let _ = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "write", "content": "bulk one"}),
+        )
+        .await;
+        let _ = call_facade(
+            &handler,
+            "ctx_note",
+            json!({"action": "write", "content": "bulk two"}),
+        )
+        .await;
+        store
+            .insert_note(NoteInput {
+                project_path: project.to_str().unwrap(),
+                route_project_root: Some(project.to_str().unwrap()),
+                session_id: "other-session",
+                content: "foreign bulk note",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        let already = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "dismiss", "note_id": 3}),
+            )
+            .await,
+        );
+        assert_eq!(already, "Note #3 dismissed.");
+        let bulk = tool_text(
+            call_facade(
+                &handler,
+                "ctx_note",
+                json!({"action": "dismiss", "note_ids": [3, 4, 5, 999]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            bulk,
+            "Dismissed 1 of 4 notes.\n- Note #3: already_dismissed\n- Note #4: dismissed\n- Note #5: not_owned\n- Note #999: not_found"
+        );
+        assert_eq!(
+            store
+                .get_note_by_id(project.to_str().unwrap(), "ses", 4)
+                .unwrap()
+                .unwrap()
+                .status,
+            "dismissed"
+        );
+        assert_eq!(
+            store
+                .get_note_by_id(project.to_str().unwrap(), "other-session", 5)
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25445,6 +25615,7 @@ mod tests {
                     "action",
                     "content",
                     "note_id",
+                    "note_ids",
                     "limit",
                     "offset",
                     "filter",

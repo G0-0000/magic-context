@@ -20,6 +20,7 @@ export interface RustNoteToolRequest {
     limit?: number;
     offset?: number;
     noteId?: number;
+    noteIds?: number[];
 }
 
 export interface RustMemoryToolRequest {

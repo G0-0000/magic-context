@@ -12,4 +12,5 @@ export interface CtxNoteArgs extends ImitatedReducedArgs {
     /** Skip this many newest notes for read — pages older ones (default 0). */
     offset?: number;
     note_id?: number;
+    note_ids?: number[];
 }

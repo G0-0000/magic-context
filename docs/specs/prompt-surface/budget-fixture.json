@@ -50,21 +50,21 @@
     "toolDescriptions": {
       "ctx_reduce": { "chars": 1335, "tokens": 318 },
       "ctx_expand": { "chars": 1586, "tokens": 395 },
-      "ctx_note": { "chars": 1608, "tokens": 391 },
+      "ctx_note": { "chars": 1569, "tokens": 392 },
       "ctx_memory": { "chars": 980, "tokens": 234 },
       "ctx_search": { "chars": 1663, "tokens": 402 }
     },
     "serializedParameterSchemas": {
       "ctx_reduce": { "chars": 91, "tokens": 31 },
       "ctx_expand": { "chars": 791, "tokens": 177 },
-      "ctx_note": { "chars": 1366, "tokens": 317 },
+      "ctx_note": { "chars": 1574, "tokens": 378 },
       "ctx_memory": { "chars": 840, "tokens": 201 },
       "ctx_search": { "chars": 777, "tokens": 184 },
-      "totalTokens": 910
+      "totalTokens": 971
     },
-    "builtInProviderVisibleTotal": 4658
+    "builtInProviderVisibleTotal": 4720
   },
-  "mutableProseBaseline": 3748,
+  "mutableProseBaseline": 3749,
   "integerLightCeiling": 1825,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

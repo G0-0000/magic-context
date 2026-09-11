@@ -117,7 +117,7 @@
       "statusByVariant": { "primary-full-reduce-memory-on": "not-present", "primary-full-reduce-memory-off": "not-present", "primary-full-no-reduce-memory-on": "not-present", "primary-full-no-reduce-memory-off": "not-present", "primary-full-reduce-dreamer-off": "not-present", "primary-full-reduce-temporal-off": "not-present", "primary-full-reduce-caveman-on": "not-present", "primary-full-reduce-language-on": "not-present", "subagent-reduce": "not-present", "tool-all-active": "compressed", "tool-memory-disabled": "compressed" }
     },
     "tool-ctx-note": {
-      "source": { "file": "packages/plugin/src/tools/ctx-note/constants.ts", "symbol": "CTX_NOTE_DESCRIPTION", "lines": "1-16", "evidence": "Don't use notes for active multi-step work" },
+      "source": { "file": "packages/plugin/src/tools/ctx-note/constants.ts", "symbol": "CTX_NOTE_DESCRIPTION", "lines": "1-16", "evidence": "Don't use notes for active work (use todos)" },
       "sharedAcrossPresets": false,
       "composedIn": ["tool-all-active", "tool-memory-disabled"],
       "statusByVariant": { "primary-full-reduce-memory-on": "not-present", "primary-full-reduce-memory-off": "not-present", "primary-full-no-reduce-memory-on": "not-present", "primary-full-no-reduce-memory-off": "not-present", "primary-full-reduce-dreamer-off": "not-present", "primary-full-reduce-temporal-off": "not-present", "primary-full-reduce-caveman-on": "not-present", "primary-full-reduce-language-on": "not-present", "subagent-reduce": "not-present", "tool-all-active": "compressed", "tool-memory-disabled": "compressed" }
