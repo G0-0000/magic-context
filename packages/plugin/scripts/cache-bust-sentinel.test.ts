@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import {
     type CacheBustDivergenceClass,
     classifyCacheBust,
     isUnaccountedCacheBustClass,
+    nearestCacheBustDecision,
 } from "./cache-bust-attribution";
 import {
     __test,
@@ -22,6 +24,7 @@ import {
     eventForWindow,
     groupBustWindows,
     loadSentinelState,
+    loadSessionDecisions,
     parseWakeEventRecordReply,
     runSentinelOnce,
     type WakeEventRecordReply,
@@ -67,6 +70,7 @@ function options(stateFile: string): CacheBustSentinelOptions {
         lookbackMs: 500,
         stateFile,
         databasePath: join(stateFile, "missing-context.db"),
+        rustStorePath: join(stateFile, "missing-store.db"),
         connectionFile: join(stateFile, "missing-subc.json"),
         wakeModuleId: "prefrontal",
     };
@@ -90,12 +94,14 @@ function decision(partial: Partial<CacheBustDecisionAttribution>): CacheBustDeci
         droppedTokens: 0,
         droppedCount: 0,
         inputTokens: 10_000,
+        flush: false,
+        source: "fixture",
         ...partial,
     };
 }
 
 describe("cache-bust attribution contract", () => {
-    test("covers every accounted and unaccounted rule with one fixture row", () => {
+    test("joins one fixture decision row for every accounted and unaccounted class", () => {
         const fixture = JSON.parse(
             readFileSync(
                 join(import.meta.dir, "test-fixtures", "cache-bust-sentinel", "classifier.json"),
@@ -103,27 +109,79 @@ describe("cache-bust attribution contract", () => {
             ),
         ) as Array<{
             class: CacheBustDivergenceClass;
-            input: Omit<Partial<CacheBustAttributionInput>, "decision"> & {
-                decision?: Partial<CacheBustDecisionAttribution>;
-            };
+            decisionTimestampOffsetMs?: number;
+            decision: Partial<CacheBustDecisionAttribution>;
+            input: Omit<Partial<CacheBustAttributionInput>, "decision">;
         }>;
         expect(fixture.map((row) => row.class)).toEqual(
             CACHE_BUST_RULE_TABLE.map((row) => row.divergenceClass),
         );
 
         for (const row of fixture) {
-            const { decision: partialDecision, ...partialInput } = row.input;
+            const passTimestampMs = 10_000;
+            const joinedDecision = nearestCacheBustDecision(
+                [
+                    decision({
+                        ...row.decision,
+                        timestampMs: passTimestampMs + (row.decisionTimestampOffsetMs ?? 0),
+                    }),
+                ],
+                passTimestampMs,
+            );
             const input: CacheBustAttributionInput = {
-                ...partialInput,
-                divergenceIndex: partialInput.divergenceIndex ?? 2,
-                previousMessageCount: partialInput.previousMessageCount ?? 10,
-                ...(partialDecision ? { decision: decision(partialDecision) } : {}),
+                ...row.input,
+                divergenceIndex: row.input.divergenceIndex ?? 2,
+                previousMessageCount: row.input.previousMessageCount ?? 10,
+                decision: joinedDecision,
             };
             expect(classifyCacheBust(input)).toBe(row.class);
             expect(isUnaccountedCacheBustClass(row.class)).toBe(
-                row.class.startsWith("unaccounted_"),
+                !CACHE_BUST_RULE_TABLE.find((rule) => rule.divergenceClass === row.class)
+                    ?.accounted,
             );
         }
+    });
+
+    test("keeps a tiny mid-history first_render seam unaccounted on a defer pass", () => {
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 268,
+                previousMessageCount: 2_400,
+                firstDivergenceRole: "user",
+                firstDivergenceSize: 24,
+                rewrittenTokens: 239_000,
+                promptTokens: 256_000,
+                decision: decision({
+                    decision: "defer",
+                    materialized: true,
+                    materializeReason: "first_render",
+                }),
+            }),
+        ).toBe("unaccounted_defer_pass");
+    });
+
+    test("uses a matched MC pass to distinguish a restart-sized system rewrite from effort-row noise", () => {
+        const matchedDefer = decision({ decision: "defer", timestampMs: 10_000 });
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 0,
+                previousMessageCount: 100,
+                firstDivergenceRole: "system",
+                rewrittenTokens: 536_000,
+                promptTokens: 350_000,
+                decision: nearestCacheBustDecision([matchedDefer], 10_100),
+            }),
+        ).toBe("accounted_hard_system_hash");
+        expect(
+            classifyCacheBust({
+                divergenceIndex: 0,
+                previousMessageCount: 100,
+                firstDivergenceRole: "system",
+                rewrittenTokens: 2_000,
+                promptTokens: 350_000,
+                decision: nearestCacheBustDecision([matchedDefer], 10_100),
+            }),
+        ).toBe("system_row_shift");
     });
 });
 
@@ -142,6 +200,18 @@ describe("cache-bust windows and ids", () => {
             [122_000],
             [242_001],
         ]);
+    });
+
+    test("does not hide a later unaccounted BUST inside an accounted window", () => {
+        const state = __test.defaultState();
+        const [window] = groupBustWindows([
+            request(50_000, "BUST", "accounted_hard_fold"),
+            request(60_000, "BUST", "unaccounted_defer_pass"),
+        ]);
+
+        expect(eventForWindow(window, "/project", state)?.payload.divergence_class).toBe(
+            "unaccounted_defer_pass",
+        );
     });
 
     test("keeps the base id stable and never emits the same window id twice", () => {
@@ -169,6 +239,61 @@ describe("cache-bust windows and ids", () => {
 
         expect(changed?.vendor_event_id).not.toBe(first.vendor_event_id);
         expect(changed?.supersedes).toBe(first.vendor_event_id);
+    });
+});
+
+describe("MC decision store joins", () => {
+    test("loads TS decision rows and rust scheduler-history mirrors read-only", () => {
+        const directory = temporaryDirectory("cache-bust-sentinel-decisions-");
+        const contextPath = join(directory, "context.db");
+        const storePath = join(directory, "store.db");
+        const context = new Database(contextPath);
+        context.exec(`
+            CREATE TABLE transform_decisions (
+                session_id TEXT, harness TEXT, message_id TEXT, ts_ms INTEGER,
+                decision TEXT, materialized INTEGER, materialize_reason TEXT,
+                emergency INTEGER, dropped_tokens INTEGER, dropped_count INTEGER,
+                input_tokens INTEGER
+            );
+            INSERT INTO transform_decisions VALUES
+                ('ses_sentinel', 'opencode', 'msg-fold', 10000, 'defer', 1,
+                 'system_hash', 0, 0, 4, 100000);
+        `);
+        context.close(false);
+        const store = new Database(storePath);
+        store.exec(`
+            CREATE TABLE mc_pass_trace (
+                session_id TEXT PRIMARY KEY,
+                scheduler_history TEXT,
+                scheduler_interesting_history TEXT
+            );
+        `);
+        store.query("INSERT INTO mc_pass_trace VALUES (?, ?, ?)").run(
+            "ses_sentinel",
+            JSON.stringify([
+                {
+                    timestamp_ms: 20_200,
+                    request_observed_at_ms: 20_100,
+                    scheduler_decision: "Execute",
+                    canonical_decision: "execute",
+                    applied_drop_count: 2,
+                },
+            ]),
+            "[]",
+        );
+        store.close(false);
+
+        const loaded = loadSessionDecisions(activeSession, {
+            ...options(join(directory, "state.json")),
+            databasePath: contextPath,
+            rustStorePath: storePath,
+        });
+
+        expect(nearestCacheBustDecision(loaded, 10_100)?.materializeReason).toBe("system_hash");
+        expect(nearestCacheBustDecision(loaded, 20_100)).toMatchObject({
+            canonicalDecision: "execute",
+            droppedCount: 2,
+        });
     });
 });
 

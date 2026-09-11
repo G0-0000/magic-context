@@ -85,6 +85,7 @@ interface Snapshot {
     bodyPath: string;
     bodyBytes: number;
     createdAt: string;
+    passTimestampMs: number;
     session: string;
     messagesCount: number;
     provider: BodyProvider;
@@ -494,6 +495,10 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[
                 bodyPath,
                 bodyBytes: rawBody.byteLength,
                 createdAt,
+                passTimestampMs:
+                    responsePath && existsSync(responsePath)
+                        ? statSync(responsePath).mtimeMs
+                        : Date.parse(createdAt),
                 session: candidate.session,
                 messagesCount: normalized.segments.length,
                 provider: normalized.provider,
@@ -749,8 +754,18 @@ export function analyzeSnapshots(
                 : verdict === "STABLE" && byteVerdict === "BUST"
                   ? "BYTES-ONLY"
                   : "AGREE";
-        const timestampMs = Date.parse(current.createdAt);
-        const decision = nearestCacheBustDecision(decisions, timestampMs);
+        const rewrittenTokens =
+            verdict === "BUST" || verdict === "LATENCY"
+                ? rebust
+                    ? current.usage.input
+                    : prevTotal - current.usage.cacheRead
+                : undefined;
+        const decision = nearestCacheBustDecision(decisions, current.passTimestampMs);
+        const previousDecision = nearestCacheBustDecision(decisions, previous.passTimestampMs);
+        const attributionDecision =
+            rebust && byteVerdict === "STABLE" && previousDecision?.materialized
+                ? previousDecision
+                : decision;
         const divergentSegment =
             divergenceIndex < 0
                 ? undefined
@@ -764,6 +779,10 @@ export function analyzeSnapshots(
                       previousProvider: previous.provider,
                       currentProvider: current.provider,
                       firstDivergenceRole: divergentSegment?.role,
+                      firstDivergenceSize: divergentSegment?.bytes,
+                      rewrittenTokens,
+                      promptTokens: prevTotal,
+                      inheritedFold: attributionDecision !== decision,
                       contentEvidence: [previous, current]
                           .flatMap((snapshot) =>
                               snapshot.segments.slice(
@@ -773,7 +792,7 @@ export function analyzeSnapshots(
                           )
                           .map((segment) => segment.canonical)
                           .join("\n"),
-                      decision,
+                      decision: attributionDecision,
                   })
                 : undefined;
         previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;
@@ -789,14 +808,9 @@ export function analyzeSnapshots(
             meterFloor,
             comparableRead,
             shortRead,
-            rewrittenTokens:
-                verdict === "BUST" || verdict === "LATENCY"
-                    ? rebust
-                        ? current.usage.input
-                        : prevTotal - current.usage.cacheRead
-                    : undefined,
+            rewrittenTokens,
             divergenceClass,
-            decision,
+            decision: attributionDecision,
         });
     }
     return rows;

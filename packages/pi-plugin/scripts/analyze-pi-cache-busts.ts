@@ -462,6 +462,19 @@ export function analyzeJoinedPasses(
 			current.usage.timestamp,
 			current.usage.messageId,
 		);
+		const previousDecision = nearestCacheBustDecision(
+			options.decisions ?? [],
+			previous.usage.timestamp,
+			previous.usage.messageId,
+		);
+		const attributionDecision = previousDecision?.materialized
+			? previousDecision
+			: decision;
+		const rewrittenTokens = rebust
+			? current.usage.input
+			: bust
+				? prevTotal - current.usage.cacheRead
+				: undefined;
 		const firstDivergenceRole = bodyDivergence
 			? (
 					currentBody?.messages[bodyDivergence.index] ??
@@ -490,9 +503,18 @@ export function analyzeJoinedPasses(
 					currentProvider: "pi",
 					previousProvider: "pi",
 					firstDivergenceRole,
+					firstDivergenceSize: bodyDivergence
+						? (
+								currentBody?.messages[bodyDivergence.index] ??
+								previousBody?.messages[bodyDivergence.index]
+							)?.bytes
+						: undefined,
+					rewrittenTokens,
+					promptTokens: prevTotal,
 					contentEvidence,
 					compactionSeam,
-					decision,
+					inheritedFold: attributionDecision !== decision,
+					decision: attributionDecision,
 				})
 			: undefined;
 		previousBustDivergenceIndex = bust ? divergenceIndex : undefined;
@@ -503,15 +525,11 @@ export function analyzeJoinedPasses(
 			prevTotal,
 			meterFloor,
 			comparableRead,
-			rewrittenTokens: rebust
-				? current.usage.input
-				: bust
-					? prevTotal - current.usage.cacheRead
-					: undefined,
+			rewrittenTokens,
 			attribution,
 			divergenceIndex,
 			divergenceClass,
-			decision,
+			decision: attributionDecision,
 		};
 	});
 }

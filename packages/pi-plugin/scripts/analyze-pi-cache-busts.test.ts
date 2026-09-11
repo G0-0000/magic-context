@@ -309,7 +309,7 @@ describe("Pi cache-bust analyzer meter", () => {
 		expect(rows[1].verdict).toBe("BUST");
 		expect(rows[1].current.ledger.first_divergence_message_index).toBe(2);
 		expect(rows[1].attribution).toContain("message[2] (compaction seam)");
-		expect(rows[1].divergenceClass).toBe("accounted_hard_marker_drain");
+		expect(rows[1].divergenceClass).toBe("no_mc_pass_row");
 		expect(rows[1].rewrittenTokens).toBe(170_884);
 	});
 
