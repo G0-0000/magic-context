@@ -10,6 +10,7 @@ import { getDirtyIndexFloor } from "./message-index";
 import {
     __resetMessageIndexAsyncForTests,
     clearSessionTracking,
+    getMessageIndexQueueHeapStats,
     isSessionReconciled,
     scheduleClearAndReindex,
     scheduleIncrementalIndex,
@@ -303,10 +304,19 @@ describe("message-index-async", () => {
         // An assertion inside the reader would abort reconciliation and surface as
         // an unrelated timeout, so the check happens after the run.
         let timerPage: number | null = null;
+        let observedBufferBytes = 0;
+        let observedBufferMessages = 0;
         let pageCount = 0;
         const reader = pagedReader(messages, () => {
             pageCount += 1;
-            if (pageCount === 1) setTimeout(() => (timerPage = pageCount), 0);
+            if (pageCount === 1) {
+                setTimeout(() => {
+                    timerPage = pageCount;
+                    const stats = getMessageIndexQueueHeapStats();
+                    observedBufferBytes = stats.activeBufferBytes;
+                    observedBufferMessages = stats.activeBufferMessages;
+                }, 0);
+            }
         });
 
         scheduleReconciliation(db, "ses-pages", reader);
@@ -315,6 +325,10 @@ describe("message-index-async", () => {
         expect(pageCount).toBe(3);
         expect(timerPage).not.toBeNull();
         expect(timerPage as number).toBeLessThan(3);
+        expect(observedBufferBytes).toBeGreaterThan(0);
+        expect(observedBufferMessages).toBeGreaterThan(0);
+        expect(observedBufferMessages).toBeLessThanOrEqual(100);
+        expect(getMessageIndexQueueHeapStats().activeBufferBytes).toBe(0);
         expect(countRows(db, "ses-pages")).toBe(201);
         expect(isSessionReconciled("ses-pages")).toBe(true);
     });

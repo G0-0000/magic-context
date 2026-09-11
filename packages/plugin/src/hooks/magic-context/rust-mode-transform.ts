@@ -297,12 +297,44 @@ class MagicContextRustHeapHolder {
 export interface RustWireCacheHeapStats {
     snapshots: number;
     rawContentSnapshots: number;
+    estimatedBytes: number;
     sessions: Array<{
         sessionId: string;
         rawMessages: number;
         wireMessages: number;
         rawContentSnapshots: number;
+        estimatedBytes: number;
     }>;
+}
+
+function rustWireCacheEstimatedBytes(cache: RustWireCache): number {
+    let bytes = 0;
+    for (const value of [
+        cache.rawLastId,
+        cache.rawLastSignature,
+        cache.ckFingerprint,
+        cache.ckPrefixFingerprintBeforeLast,
+        cache.nativeFingerprint,
+        cache.nativePrefixFingerprintBeforeLast,
+        cache.fingerprint,
+    ]) {
+        if (value) bytes += value.length * 2;
+    }
+    for (const snapshot of cache.rawContentSnapshots) {
+        for (const field of snapshot.fields) {
+            if (typeof field === "string") bytes += field.length * 2;
+            else if (typeof field === "number" || typeof field === "boolean") bytes += 8;
+            else bytes += String(field).length * 2;
+        }
+    }
+    if (cache.nativeOutput) {
+        try {
+            bytes += Buffer.byteLength(JSON.stringify(cache.nativeOutput));
+        } catch {
+            // Cyclic host extensions are excluded from the serialized estimate.
+        }
+    }
+    return bytes;
 }
 
 interface RustSessionState extends ModuleStateSyncState {
@@ -3614,6 +3646,7 @@ export function createRustModeTransform(
                 rawMessages: cache.rawCount,
                 wireMessages: cache.wireCount,
                 rawContentSnapshots: cache.rawContentSnapshots.length,
+                estimatedBytes: rustWireCacheEstimatedBytes(cache),
             }));
             return {
                 snapshots: heapHolder.wireCaches.size,
@@ -3621,6 +3654,7 @@ export function createRustModeTransform(
                     (sum, session) => sum + session.rawContentSnapshots,
                     0,
                 ),
+                estimatedBytes: sessions.reduce((sum, session) => sum + session.estimatedBytes, 0),
                 sessions,
             };
         },

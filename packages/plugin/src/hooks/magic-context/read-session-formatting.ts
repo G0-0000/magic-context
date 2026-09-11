@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -131,6 +131,8 @@ let tokenizer: TokenizerLike | undefined;
 let tokenizerLoadAttempted = false;
 let tokenizerLoadPromise: Promise<boolean> | undefined;
 let tokenizerWarningSent = false;
+let tokenizerEncodingPath: string | undefined;
+let tokenizerSerializedTableBytes: number | null | undefined;
 
 function tokenizerPackageRoots(): string[] {
     const cwd = process.cwd();
@@ -208,9 +210,12 @@ function loadTokenizer(): TokenizerLike {
     // Non-literal specifiers keep Bun's bundler static analysis from folding the
     // Claude vocabulary into the eager chunk.
     const requireFromThisModule = createRequire(import.meta.url);
+    const encodingSpecifier = "ai-tokenizer/encoding/" + "claude";
+    tokenizerEncodingPath = requireFromThisModule.resolve(encodingSpecifier);
+    tokenizerSerializedTableBytes = undefined;
     return constructTokenizer(
         requireFromThisModule("ai-" + "tokenizer"),
-        requireFromThisModule("ai-tokenizer/encoding/" + "claude"),
+        requireFromThisModule(encodingSpecifier),
     );
 }
 
@@ -225,7 +230,61 @@ async function loadTokenizerFromInstalledPackage(): Promise<TokenizerLike> {
         import(pathToFileURL(installedPaths.tokenizerPath).href),
         import(pathToFileURL(installedPaths.encodingPath).href),
     ]);
+    tokenizerEncodingPath = installedPaths.encodingPath;
+    tokenizerSerializedTableBytes = undefined;
     return constructTokenizer(tokenizerModule, claudeEncoding);
+}
+
+export interface TokenizerNativeMemoryStats {
+    loaded: boolean;
+    loadAttempted: boolean;
+    tableBytes: number | null;
+    tablePath: string | null;
+}
+
+function serializedTokenizerTableBytes(entryPath: string): number | null {
+    const root = dirname(entryPath);
+    const pending = [entryPath];
+    const visited = new Set<string>();
+    let total = 0;
+    try {
+        while (pending.length > 0) {
+            const nextPath = pending.pop();
+            if (!nextPath) break;
+            const path = realpathSync(nextPath);
+            if (visited.has(path)) continue;
+            visited.add(path);
+            total += statSync(path).size;
+            const source = readFileSync(path, "utf8");
+            const localImports = source.matchAll(
+                /(?:require\(|\bfrom\s+|\bimport\()\s*["'](\.\.?\/[^"']+)["']/g,
+            );
+            for (const match of localImports) {
+                const specifier = match[1];
+                if (!specifier) continue;
+                const dependency = resolve(dirname(path), specifier);
+                if (dependency.startsWith(root)) pending.push(dependency);
+            }
+        }
+        return total;
+    } catch {
+        return null;
+    }
+}
+
+/** Serialized vocabulary bytes are the only tokenizer size exposed by ai-tokenizer. */
+export function getTokenizerNativeMemoryStats(): TokenizerNativeMemoryStats {
+    if (tokenizerSerializedTableBytes === undefined) {
+        tokenizerSerializedTableBytes = tokenizerEncodingPath
+            ? serializedTokenizerTableBytes(tokenizerEncodingPath)
+            : null;
+    }
+    return {
+        loaded: tokenizer !== undefined,
+        loadAttempted: tokenizerLoadAttempted || tokenizerLoadPromise !== undefined,
+        tableBytes: tokenizerSerializedTableBytes,
+        tablePath: tokenizerEncodingPath ?? null,
+    };
 }
 
 function warnTokenizerFallback(error: unknown): void {

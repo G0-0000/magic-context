@@ -8,6 +8,7 @@ import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import {
     __resetLocalEmbeddingForTests,
     __setLocalEmbeddingTestHooks,
+    getLocalEmbeddingNativeMemoryStats,
     isNativeRuntimeMissingError,
     type LocalEmbeddingDtype,
     LocalEmbeddingProvider,
@@ -211,6 +212,30 @@ describe("LocalEmbeddingProvider dtype threading (#259)", () => {
 });
 
 describe("local embedding runtime selection", () => {
+    test("reports loaded provider count and clears it on dispose", async () => {
+        const cacheDir = mkdtempSync(join(tmpdir(), "mc-embedding-memory-stats-"));
+        try {
+            __setLocalEmbeddingTestHooks({
+                host: () => ({ isElectron: false, isBun: false }),
+                importTransformers: async () => fakeTransformersModule(),
+                modelCacheDir: () => cacheDir,
+            });
+            const provider = new LocalEmbeddingProvider();
+            expect(await provider.initialize()).toBe(true);
+            expect(getLocalEmbeddingNativeMemoryStats()).toMatchObject({
+                loaded: true,
+                providerCount: 1,
+                models: ["Xenova/all-MiniLM-L6-v2"],
+                runtimes: ["native"],
+                modelCacheBytes: 0,
+            });
+            await provider.dispose();
+            expect(getLocalEmbeddingNativeMemoryStats().loaded).toBe(false);
+        } finally {
+            rmSync(cacheDir, { recursive: true, force: true });
+        }
+    });
+
     test("auto selects WASM for Bun before the NAPI teardown fix and native at 1.4.0", () => {
         expect(
             resolveLocalEmbeddingRuntime("auto", {

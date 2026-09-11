@@ -2679,6 +2679,7 @@ export function createTransform(deps: TransformDeps) {
                 rustModeTransform?.getHeapStats() ?? {
                     snapshots: 0,
                     rawContentSnapshots: 0,
+                    estimatedBytes: 0,
                     sessions: [],
                 }
             );

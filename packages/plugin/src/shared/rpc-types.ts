@@ -261,6 +261,7 @@ export interface DebugSessionHolderCount {
     wireRawMessages: number;
     wireMessages: number;
     wireContentSnapshots: number;
+    wireEstimatedBytes: number;
 }
 
 export interface DebugMemoryHolders {
@@ -277,6 +278,7 @@ export interface DebugMemoryHolders {
     wireCache: {
         snapshots: number;
         rawContentSnapshots: number;
+        estimatedBytes: number;
     };
     compartmentMirrors: {
         entries: number;
@@ -288,14 +290,66 @@ export interface DebugMemoryHolders {
         pendingIncremental: number;
         activeSessionLocks: number;
         completedIncrementalKeys: number;
+        activeBufferMessages: number;
+        activeBufferBytes: number;
     };
     sessions: DebugSessionHolderCount[];
+}
+
+export interface DebugSqliteConnectionMemoryStats {
+    sequence: number;
+    filename: string;
+    readonly: boolean;
+    pageSize: number | null;
+    pageCount: number | null;
+    freelistCount: number | null;
+    cacheSize: number | null;
+    cacheSizeUnit: "pages" | "kib" | null;
+    cacheUpperBoundBytes: number | null;
+    mmapSizeBytes: number | null;
+    walFileBytes: number | null;
+    shmFileBytes: number | null;
+    fts5TableCount: number | null;
+    journalMode: string | null;
+}
+
+export interface DebugNativeMemoryUsage {
+    sqlite: {
+        connectionCount: number;
+        cacheUpperBoundBytes: number;
+        mmapUpperBoundBytes: number;
+        walFileBytes: number;
+        shmFileBytes: number;
+        sqliteStatusApi: "unavailable";
+        connections: DebugSqliteConnectionMemoryStats[];
+    };
+    tokenizer: {
+        loaded: boolean;
+        loadAttempted: boolean;
+        tableBytes: number | null;
+        tablePath: string | null;
+    };
+    localEmbedding: {
+        loaded: boolean;
+        providerCount: number;
+        models: string[];
+        runtimes: Array<"native" | "wasm">;
+        modelCacheBytes: number | null;
+        rssDeltaAtLoad: number;
+        externalDeltaAtLoad: number;
+        arrayBuffersDeltaAtLoad: number;
+    };
+    quickJs: {
+        loadAttempted: boolean;
+        loaded: boolean;
+    };
 }
 
 export interface DebugMemoryUsageResponse {
     pid: number;
     bunVersion: string;
     memoryUsage: DebugProcessMemoryUsage;
+    native: DebugNativeMemoryUsage;
     holders: DebugMemoryHolders;
 }
 
