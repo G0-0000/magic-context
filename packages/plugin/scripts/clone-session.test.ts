@@ -253,6 +253,7 @@ function makeFixture(): { opencodePath: string; contextPath: string; sourceSessi
             stripped_placeholder_ids TEXT,
             stale_reduce_stripped_ids TEXT,
             processed_image_stripped_ids TEXT,
+            merged_reasoning_stripped_ids TEXT,
             pending_pi_compaction_marker_state TEXT,
             last_todo_state TEXT,
             todo_synthetic_call_id TEXT,
