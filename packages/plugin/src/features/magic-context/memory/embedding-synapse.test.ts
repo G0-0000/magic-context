@@ -3,12 +3,20 @@ import { createHash } from "node:crypto";
 import { SubcCallError } from "@cortexkit/subc-client";
 import {
     _resetSynapseClientForTests,
+    formatSynapseLaneDescriptor,
+    getSynapseEmbeddingRowMetadata,
     getSynapseLaneIdentity,
     SYNAPSE_ERROR_VOCABULARY,
-    SYNAPSE_MAX_INPUT_TOKENS,
     type SynapseClientLike,
+    SynapseEmbeddingError,
     SynapseEmbeddingProvider,
+    type SynapseMaxTokensSource,
+    toSynapseLaneDescriptor,
 } from "./embedding-synapse";
+
+function sha256(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+}
 
 class MockSynapseClient implements SynapseClientLike {
     readonly requests: Array<{ method: string; params: unknown }> = [];
@@ -28,7 +36,14 @@ class MockSynapseClient implements SynapseClientLike {
                         model: "gte-modernbert-base-f16",
                         fingerprint: "fp-live",
                         table_epoch: 0,
+                        max_tokens: 512,
+                        max_tokens_source: "worker_bucket",
+                        bucket_ladder: [128, 256, 512],
                         dims: 3,
+                        dtype: "f16",
+                        device_class: "ane",
+                        certified: true,
+                        warm_load_cost_hint_ms: 12.5,
                         recommended_batch: this.batchSize,
                         provenance: { source: "fixture" },
                     },
@@ -36,10 +51,25 @@ class MockSynapseClient implements SynapseClientLike {
             } as Response;
         }
         if (method === "embed.query") {
+            const request = params as { id: string; text: string };
+            const digest = sha256(request.text);
             return {
-                vector: [1, 2, 3],
                 fingerprint: "fp-live",
                 table_epoch: 0,
+                dims: 3,
+                payload: {
+                    vectors: [
+                        {
+                            id: request.id,
+                            vector: [1, 2, 3],
+                            content_sha256: digest,
+                            submitted_sha256: digest,
+                        },
+                    ],
+                    truncation_disclosures: [
+                        { submitted_tokens: 1, effective_tokens: 1, truncated: false },
+                    ],
+                },
             } as Response;
         }
         if (method === "embed.batch") {
@@ -53,15 +83,26 @@ class MockSynapseClient implements SynapseClientLike {
                 error.retry_after_ms = 0;
                 throw error;
             }
-            const request = params as { items: Array<{ id: string; content_sha256: string }> };
+            const request = params as {
+                items: Array<{ id: string; text: string; content_sha256: string }>;
+            };
             return {
-                items: request.items.map((item) => ({
-                    id: item.id,
-                    embedding: [1, 2, 3],
-                    content_sha256: item.content_sha256,
-                    fingerprint: "fp-live",
-                    table_epoch: 0,
-                })),
+                fingerprint: "fp-live",
+                table_epoch: 0,
+                dims: 3,
+                payload: {
+                    vectors: request.items.map((item) => ({
+                        id: item.id,
+                        vector: [1, 2, 3],
+                        content_sha256: sha256(item.text),
+                        submitted_sha256: sha256(item.text),
+                    })),
+                    truncation_disclosures: request.items.map(() => ({
+                        submitted_tokens: 1,
+                        effective_tokens: 1,
+                        truncated: false,
+                    })),
+                },
             } as Response;
         }
         throw new Error(`unexpected method ${method}`);
@@ -85,7 +126,7 @@ describe("SynapseEmbeddingProvider", () => {
         });
 
         expect(await provider.initialize()).toBe(true);
-        expect(provider.maxInputTokens).toBe(SYNAPSE_MAX_INPUT_TOKENS);
+        expect(provider.maxInputTokens).toBe(512);
         expect(provider.modelId).toBe(getSynapseLaneIdentity("gte-modernbert-base-f16", "fp-live"));
 
         const vector = await provider.embed("hello");
@@ -110,8 +151,8 @@ describe("SynapseEmbeddingProvider", () => {
         });
 
         const vectors = await provider.embedItems([
-            { id: "memory:1", text: "one", contentSha256: "a" },
-            { id: "memory:2", text: "two", contentSha256: "b" },
+            { id: "memory:1", text: "one", contentSha256: sha256("one") },
+            { id: "memory:2", text: "two", contentSha256: sha256("two") },
         ]);
 
         expect(vectors.size).toBe(2);
@@ -137,12 +178,33 @@ describe("SynapseEmbeddingProvider", () => {
                             model: "gte-modernbert-base-f16",
                             fingerprint: "fp-live",
                             table_epoch: 0,
+                            max_tokens: 512,
+                            max_tokens_source: "worker_bucket",
                             dims: 3,
                         },
                     ],
                 } as Response;
             }
-            return { vector: [1, 2, 3], fingerprint: "fp-other", table_epoch: 0 } as Response;
+            const text = (params as { text: string }).text;
+            const digest = sha256(text);
+            return {
+                fingerprint: "fp-other",
+                table_epoch: 0,
+                dims: 3,
+                payload: {
+                    vectors: [
+                        {
+                            id: "query",
+                            vector: [1, 2, 3],
+                            content_sha256: digest,
+                            submitted_sha256: digest,
+                        },
+                    ],
+                    truncation_disclosures: [
+                        { submitted_tokens: 1, effective_tokens: 1, truncated: false },
+                    ],
+                },
+            } as Response;
         };
         const provider = new SynapseEmbeddingProvider({
             connectionFile: "fixture",
@@ -205,6 +267,8 @@ describe("SYNAPSE certification refusals", () => {
                             model: "gte-modernbert-base-f16",
                             fingerprint: "fp-live",
                             table_epoch: 0,
+                            max_tokens: 512,
+                            max_tokens_source: "worker_bucket",
                             dims: 3,
                         },
                     ],
@@ -278,6 +342,8 @@ describe("recommended batch policy", () => {
                                             model_id: "gte-modernbert-base-f16",
                                             fingerprints: ["fp1"],
                                             state: "ready",
+                                            max_tokens: 512,
+                                            max_tokens_source: "worker_bucket",
                                             recommended_batch: { rows: 3, token_budget: 100 },
                                         },
                                     ],
@@ -290,9 +356,8 @@ describe("recommended batch policy", () => {
                             items: items.map((item) => ({
                                 id: item.id,
                                 embedding: [0.5, 0.5],
-                                content_sha256: createHash("sha256")
-                                    .update(item.text)
-                                    .digest("hex"),
+                                content_sha256: sha256(item.text),
+                                submitted_sha256: sha256(item.text),
                                 fingerprint: "fp1",
                                 table_epoch: 0,
                             })),
@@ -301,9 +366,9 @@ describe("recommended batch policy", () => {
                     close() {},
                 }) as SynapseClientLike,
         });
-        // 4 items of ~200 chars = ~50 estimated tokens each against a 100-token
-        // budget: pages must split at 2 items even though the row limit is 3.
-        const text = "x".repeat(200);
+        // Forty repeated words per row exceed the 100-token aggregate budget at
+        // three rows, so pages split at two even though the row limit is three.
+        const text = "token ".repeat(40);
         const items = ["a", "b", "c", "d"].map((id) => ({
             id,
             text,
@@ -332,6 +397,8 @@ describe("recommended batch policy", () => {
                                             model_id: "gte-modernbert-base-f16",
                                             fingerprints: ["fp1"],
                                             state: "ready",
+                                            max_tokens: 512,
+                                            max_tokens_source: "worker_bucket",
                                             recommended_batch: 2,
                                         },
                                     ],
@@ -344,9 +411,8 @@ describe("recommended batch policy", () => {
                             items: items.map((item) => ({
                                 id: item.id,
                                 embedding: [0.5, 0.5],
-                                content_sha256: createHash("sha256")
-                                    .update(item.text)
-                                    .digest("hex"),
+                                content_sha256: sha256(item.text),
+                                submitted_sha256: sha256(item.text),
                                 fingerprint: "fp1",
                                 table_epoch: 0,
                             })),
@@ -383,6 +449,8 @@ describe("recommended batch policy", () => {
                                             model_id: "gte-modernbert-base-f16",
                                             fingerprints: ["fp1"],
                                             state: "ready",
+                                            max_tokens: 512,
+                                            max_tokens_source: "worker_bucket",
                                             recommended_batch: { rows: 8, token_budget: 10 },
                                         },
                                     ],
@@ -395,9 +463,8 @@ describe("recommended batch policy", () => {
                             items: items.map((item) => ({
                                 id: item.id,
                                 embedding: [0.5, 0.5],
-                                content_sha256: createHash("sha256")
-                                    .update(item.text)
-                                    .digest("hex"),
+                                content_sha256: sha256(item.text),
+                                submitted_sha256: sha256(item.text),
                                 fingerprint: "fp1",
                                 table_epoch: 0,
                             })),
@@ -422,5 +489,236 @@ describe("recommended batch policy", () => {
         const vectors = await provider.embedItems(items);
         expect(vectors.size).toBe(2);
         expect(calls).toEqual([1, 1]);
+    });
+});
+
+type WireItem = { id: string; text: string; content_sha256: string };
+type WireRow = {
+    id: string;
+    vector: number[];
+    content_sha256: string;
+    submitted_sha256: string;
+};
+
+function providerWithWireRows(options: {
+    row: (item: WireItem) => WireRow;
+    disclosure: (item: WireItem) => Record<string, unknown> | null;
+    maxTokens?: number;
+    onBatch?: (items: WireItem[]) => void;
+}): SynapseEmbeddingProvider {
+    const maxTokens = options.maxTokens ?? 512;
+    return new SynapseEmbeddingProvider({
+        connectionFile: "fixture",
+        projectRoot: "/repo",
+        session: "wire-contract",
+        clientFactory: async () => ({
+            async call(_module: string, method: string, params?: unknown) {
+                if (method === "models.list") {
+                    return {
+                        result: {
+                            module_generation: 92,
+                            table_epoch: 7,
+                            models: [
+                                {
+                                    model_id: "gte-modernbert-base-f16",
+                                    fingerprints: ["fp-wire"],
+                                    state: "ready",
+                                    max_tokens: maxTokens,
+                                    max_tokens_source: "worker_bucket",
+                                    bucket_ladder: [128, 256, maxTokens],
+                                    dims: 3,
+                                    dtype: "f16",
+                                    device_class: "ane",
+                                    certified: true,
+                                    warm_load_cost_hint_ms: 8.5,
+                                    recommended_batch: { rows: 8, token_budget: 2048 },
+                                },
+                            ],
+                        },
+                    };
+                }
+                if (method !== "embed.batch") throw new Error(`unexpected method ${method}`);
+                const items = (params as { items: WireItem[] }).items;
+                options.onBatch?.(items);
+                return {
+                    result: {
+                        fingerprint: "fp-wire",
+                        table_epoch: 7,
+                        dims: 3,
+                        payload: {
+                            vectors: items.map(options.row),
+                            truncation_disclosures: items
+                                .map(options.disclosure)
+                                .filter(
+                                    (value): value is Record<string, unknown> => value !== null,
+                                ),
+                        },
+                    },
+                };
+            },
+            close() {},
+        }),
+    });
+}
+
+describe("Synapse embed row integrity", () => {
+    const input = { id: "memory:1", text: "whole input", contentSha256: sha256("whole input") };
+
+    it("accepts an untruncated row whose submitted and content hashes equal the submitted bytes", async () => {
+        const provider = providerWithWireRows({
+            row: (item) => ({
+                id: item.id,
+                vector: [1, 2, 3],
+                content_sha256: sha256(item.text),
+                submitted_sha256: sha256(item.text),
+            }),
+            disclosure: () => ({ submitted_tokens: 2, effective_tokens: 2, truncated: false }),
+        });
+
+        const vector = (await provider.embedItems([input])).get(input.id);
+        expect(vector).toEqual(new Float32Array([1, 2, 3]));
+        expect(getSynapseEmbeddingRowMetadata(vector!)).toEqual({
+            truncated: false,
+            submittedSha256: sha256(input.text),
+            contentSha256: sha256(input.text),
+            effectiveTokens: 2,
+        });
+    });
+
+    it("accepts a disclosed truncated row and marks it incomplete", async () => {
+        const provider = providerWithWireRows({
+            row: (item) => ({
+                id: item.id,
+                vector: [1, 2, 3],
+                content_sha256: sha256("whole"),
+                submitted_sha256: sha256(item.text),
+            }),
+            disclosure: () => ({ submitted_tokens: 2, effective_tokens: 1, truncated: true }),
+        });
+
+        const vector = (await provider.embedItems([input])).get(input.id);
+        expect(vector).toBeDefined();
+        expect(getSynapseEmbeddingRowMetadata(vector!)).toMatchObject({
+            truncated: true,
+            effectiveTokens: 1,
+        });
+    });
+
+    it("refuses a row whose hashes differ without truncation disclosure", async () => {
+        const provider = providerWithWireRows({
+            row: (item) => ({
+                id: item.id,
+                vector: [1, 2, 3],
+                content_sha256: sha256("whole"),
+                submitted_sha256: sha256(item.text),
+            }),
+            disclosure: () => null,
+        });
+
+        const refusal = provider.embedItems([input]);
+        await expect(refusal).rejects.toBeInstanceOf(SynapseEmbeddingError);
+        await expect(refusal).rejects.toMatchObject({ code: "schema_violation" });
+    });
+
+    it("refuses a truncation disclosure when the hashes match", async () => {
+        const provider = providerWithWireRows({
+            row: (item) => ({
+                id: item.id,
+                vector: [1, 2, 3],
+                content_sha256: sha256(item.text),
+                submitted_sha256: sha256(item.text),
+            }),
+            disclosure: () => ({ submitted_tokens: 2, effective_tokens: 1, truncated: true }),
+        });
+
+        await expect(provider.embedItems([input])).rejects.toMatchObject({
+            name: "SynapseEmbeddingError",
+            code: "schema_violation",
+        });
+    });
+
+    it("does not send a row over a 512-token lane ceiling", async () => {
+        const sentIds: string[] = [];
+        const provider = providerWithWireRows({
+            maxTokens: 512,
+            onBatch: (items) => sentIds.push(...items.map((item) => item.id)),
+            row: (item) => ({
+                id: item.id,
+                vector: [1, 2, 3],
+                content_sha256: sha256(item.text),
+                submitted_sha256: sha256(item.text),
+            }),
+            disclosure: () => ({ submitted_tokens: 1, effective_tokens: 1, truncated: false }),
+        });
+        const overCeiling = "token ".repeat(10_000);
+        const vectors = await provider.embedItems([
+            { id: "too-large", text: overCeiling, contentSha256: sha256(overCeiling) },
+            { id: "fits", text: "small", contentSha256: sha256("small") },
+        ]);
+
+        expect(sentIds).toEqual(["fits"]);
+        expect(vectors.has("too-large")).toBe(false);
+        expect(vectors.has("fits")).toBe(true);
+    });
+});
+
+describe("Synapse models.list capability descriptor", () => {
+    it.each([
+        "runtime_bucket",
+        "worker_bucket",
+        "catalog",
+        "catalog_unloaded",
+    ] satisfies SynapseMaxTokensSource[])("parses max_tokens_source=%s", async (source) => {
+        const provider = new SynapseEmbeddingProvider({
+            connectionFile: "fixture",
+            projectRoot: "/repo",
+            session: `descriptor:${source}`,
+            clientFactory: async () => ({
+                async call(_module: string, method: string) {
+                    if (method !== "models.list") throw new Error(`unexpected method ${method}`);
+                    return {
+                        result: {
+                            module_generation: 92,
+                            table_epoch: 3,
+                            models: [
+                                {
+                                    model_id: "gte-modernbert-base-f16",
+                                    fingerprints: ["fp-descriptor"],
+                                    state: "ready",
+                                    max_tokens: 512,
+                                    max_tokens_source: source,
+                                    bucket_ladder: [128, 256, 512],
+                                    dims: 768,
+                                    dtype: "f16",
+                                    device_class: "ane",
+                                    certified: true,
+                                    warm_load_cost_hint_ms: 14.25,
+                                    recommended_batch: { rows: 4, token_budget: 1024 },
+                                },
+                            ],
+                        },
+                    };
+                },
+                close() {},
+            }),
+        });
+
+        expect(await provider.initialize()).toBe(true);
+        expect(provider.maxInputTokens).toBe(512);
+        expect(provider.metadata).toMatchObject({
+            max_tokens: 512,
+            max_tokens_source: source,
+            bucket_ladder: [128, 256, 512],
+            dims: 768,
+            dtype: "f16",
+            device_class: "ane",
+            certified: true,
+            warm_load_cost_hint_ms: 14.25,
+            recommended_batch: 4,
+            recommended_token_budget: 1024,
+        });
+        const descriptor = toSynapseLaneDescriptor(provider.metadata!);
+        expect(descriptor.warm).toBe(source === "runtime_bucket" || source === "worker_bucket");
+        expect(formatSynapseLaneDescriptor(descriptor)).toContain(`max_tokens=512 (${source})`);
     });
 });

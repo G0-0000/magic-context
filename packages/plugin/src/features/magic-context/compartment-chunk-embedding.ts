@@ -4,6 +4,7 @@ import { estimateTokens } from "../../hooks/magic-context/read-session-formattin
 import { getHarness } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { isSynapseEmbeddingTruncated } from "./memory/embedding-synapse";
 import { messageFtsOrdinalRangeIsMapped } from "./message-fts-rowid-map";
 import { recursiveCharacterSplit } from "./recursive-text-splitter";
 
@@ -795,7 +796,7 @@ export function replaceCompartmentChunkEmbeddings(
     db: Database,
     rows: readonly SaveCompartmentChunkEmbeddingInput[],
 ): void {
-    if (rows.length === 0) return;
+    if (rows.length === 0 || rows.some((row) => isSynapseEmbeddingTruncated(row.vector))) return;
     const compartmentId = rows[0].compartmentId;
     const modelId = rows[0].modelId;
     const now = Date.now();

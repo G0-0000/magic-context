@@ -947,6 +947,7 @@ function buildEmbedDetail(
         enabled: coverage.enabled,
         model: coverage.model,
         provider: coverage.provider,
+        ...(coverage.synapseDescriptor ? { synapseDescriptor: coverage.synapseDescriptor } : {}),
         session: coverage.session,
         memories: coverage.memories,
         commits: coverage.commits,
