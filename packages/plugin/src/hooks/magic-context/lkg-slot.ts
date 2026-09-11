@@ -29,7 +29,11 @@ const LKG_TOTAL_BYTES = 64 * 1024 * 1024;
 const LKG_SINGLE_SLOT_BYTES = 24 * 1024 * 1024;
 const LKG_METADATA_BYTES = 256;
 
-const slots = new Map<string, { slot: LkgSlot; bytes: number }>();
+class MagicContextLkgHeapHolder {
+    readonly entries = new Map<string, { slot: LkgSlot; bytes: number }>();
+}
+
+const lkgHeapHolder = new MagicContextLkgHeapHolder();
 let totalBytes = 0;
 const hydrationPassBySession = new BoundedSessionMap<number>(1_000);
 const hydrationAttemptBySession = new BoundedSessionMap<number>(1_000);
@@ -334,8 +338,8 @@ export function lkgContentDigest(message: MessageLike): string | null {
 }
 
 function touch(sessionId: string, entry: { slot: LkgSlot; bytes: number }): void {
-    slots.delete(sessionId);
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.delete(sessionId);
+    lkgHeapHolder.entries.set(sessionId, entry);
 }
 
 export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
@@ -350,7 +354,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
     }
     const bytes = slotBytes(slot);
     if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
-    const prior = slots.get(sessionId);
+    const prior = lkgHeapHolder.entries.get(sessionId);
     if (
         prior?.slot.rowVersion !== undefined &&
         slot.rowVersion !== undefined &&
@@ -361,17 +365,17 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
         return false;
     }
     if (prior) totalBytes -= prior.bytes;
-    slots.delete(sessionId);
+    lkgHeapHolder.entries.delete(sessionId);
     while (totalBytes + bytes > LKG_TOTAL_BYTES) {
-        const oldest = slots.keys().next().value as string | undefined;
+        const oldest = lkgHeapHolder.entries.keys().next().value as string | undefined;
         if (oldest === undefined) break;
-        const evicted = slots.get(oldest);
-        slots.delete(oldest);
+        const evicted = lkgHeapHolder.entries.get(oldest);
+        lkgHeapHolder.entries.delete(oldest);
         if (evicted) totalBytes -= evicted.bytes;
     }
     if (totalBytes + bytes > LKG_TOTAL_BYTES) {
         if (prior) {
-            slots.set(sessionId, prior);
+            lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
         return false;
@@ -387,7 +391,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
         },
         bytes,
     };
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.set(sessionId, entry);
     totalBytes += bytes;
     hydrationAttemptBySession.delete(sessionId);
     return true;
@@ -397,19 +401,19 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
 function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
     const bytes = slotBytes(slot);
     if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
-    const prior = slots.get(sessionId);
+    const prior = lkgHeapHolder.entries.get(sessionId);
     if (prior) totalBytes -= prior.bytes;
-    slots.delete(sessionId);
+    lkgHeapHolder.entries.delete(sessionId);
     while (totalBytes + bytes > LKG_TOTAL_BYTES) {
-        const oldest = slots.keys().next().value as string | undefined;
+        const oldest = lkgHeapHolder.entries.keys().next().value as string | undefined;
         if (oldest === undefined) break;
-        const evicted = slots.get(oldest);
-        slots.delete(oldest);
+        const evicted = lkgHeapHolder.entries.get(oldest);
+        lkgHeapHolder.entries.delete(oldest);
         if (evicted) totalBytes -= evicted.bytes;
     }
     if (totalBytes + bytes > LKG_TOTAL_BYTES) {
         if (prior) {
-            slots.set(sessionId, prior);
+            lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
         return false;
@@ -425,7 +429,7 @@ function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
         },
         bytes,
     };
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.set(sessionId, entry);
     totalBytes += bytes;
     return true;
 }
@@ -446,7 +450,7 @@ function hydrateSlotFromPersistence(sessionId: string): LkgSlot | undefined {
     // exactly like stale in-memory bytes.
     if (!installHydratedSlot(sessionId, loaded)) return undefined;
     sessionLog(sessionId, "lkg_hydrated_from_disk");
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     return entry ? copySlotForRead(entry.slot) : undefined;
 }
 
@@ -462,12 +466,12 @@ function copySlotForRead(slot: LkgSlot): LkgSlot {
 }
 
 export function getInMemorySlot(sessionId: string): LkgSlot | undefined {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     return entry ? copySlotForRead(entry.slot) : undefined;
 }
 
 export function getSlot(sessionId: string): LkgSlot | undefined {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     if (!entry) {
         const pass = hydrationPassBySession.peek(sessionId);
         if (pass !== undefined) {
@@ -482,9 +486,9 @@ export function getSlot(sessionId: string): LkgSlot | undefined {
 }
 
 export function dropSlot(sessionId: string, _reason?: string): void {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     if (entry) {
-        slots.delete(sessionId);
+        lkgHeapHolder.entries.delete(sessionId);
         totalBytes -= entry.bytes;
     }
     // The durable row must follow the drop: a slot invalidated in memory
@@ -524,15 +528,34 @@ export function noteEntry(sessionId: string, messages: MessageLike[]): LkgEntryN
 }
 
 export function resetLkgSlotsForTest(): void {
-    slots.clear();
+    lkgHeapHolder.entries.clear();
     totalBytes = 0;
     persistenceBackend = undefined;
     hydrationPassBySession.clear();
     hydrationAttemptBySession.clear();
 }
 
+export interface LkgSlotHeapStats {
+    count: number;
+    totalBytes: number;
+    sessions: Array<{ sessionId: string; bytes: number }>;
+}
+
+/** Live process-resident LKG ownership used by the opt-in heap diagnostic RPC. */
+export function getLkgSlotHeapStats(): LkgSlotHeapStats {
+    return {
+        count: lkgHeapHolder.entries.size,
+        totalBytes,
+        sessions: [...lkgHeapHolder.entries].map(([sessionId, entry]) => ({
+            sessionId,
+            bytes: entry.bytes,
+        })),
+    };
+}
+
 export function getLkgSlotStatsForTest(): { totalBytes: number; count: number } {
-    return { totalBytes, count: slots.size };
+    const { totalBytes: bytes, count } = getLkgSlotHeapStats();
+    return { totalBytes: bytes, count };
 }
 
 export const __resetLkgSlotStoreForTest = resetLkgSlotsForTest;

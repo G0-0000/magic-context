@@ -106,6 +106,7 @@ describe("MagicContextConfigSchema", () => {
                 },
                 temporal_awareness: false,
                 keep_subagents: false,
+                debug_rpc: false,
                 todowrite: {
                     enabled: false,
                     overlay: false,

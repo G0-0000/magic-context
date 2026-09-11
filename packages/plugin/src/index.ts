@@ -558,6 +558,9 @@ const server: Plugin = async (ctx) => {
             client: ctx.client,
             liveSessionState,
             rustModeModuleClient,
+            storageDir,
+            getDebugMemoryHolders: () =>
+                magicContextRuntime.magicContext?.getDebugMemoryHolders?.(),
         });
         const rpcScheduledAt = performance.now();
         // MagicContextRpcServer.start() is async but its Bun.serve + discovery-file

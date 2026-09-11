@@ -72,17 +72,21 @@ function isDatabaseLockedError(error: unknown): boolean {
 const INCREMENTAL_DEBOUNCE_MS = 100;
 const RECONCILIATION_BATCH_SIZE = 100;
 
-const reconciledSessions = new Set<string>();
-const reconciliationScheduledSessions = new Set<string>();
-const sessionLocks = new Map<string, Promise<void>>();
-const incrementalTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const pendingIncrementalKeys = new Set<string>();
-const completedIncrementalKeys = new Set<string>();
+class MagicContextMessageIndexHeapHolder {
+    readonly reconciledSessions = new Set<string>();
+    readonly reconciliationScheduledSessions = new Set<string>();
+    readonly sessionLocks = new Map<string, Promise<void>>();
+    readonly incrementalTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    readonly pendingIncrementalKeys = new Set<string>();
+    readonly completedIncrementalKeys = new Set<string>();
+}
+
+const heapHolder = new MagicContextMessageIndexHeapHolder();
 
 function clearCompletedIncrementalKeys(sessionId: string): void {
     const prefix = `${sessionId}\u0000`;
-    for (const key of completedIncrementalKeys) {
-        if (key.startsWith(prefix)) completedIncrementalKeys.delete(key);
+    for (const key of heapHolder.completedIncrementalKeys) {
+        if (key.startsWith(prefix)) heapHolder.completedIncrementalKeys.delete(key);
     }
 }
 
@@ -116,17 +120,17 @@ function runWithSessionLock(
     sessionId: string,
     operation: () => Promise<void> | void,
 ): Promise<void> {
-    const previous = sessionLocks.get(sessionId) ?? Promise.resolve();
+    const previous = heapHolder.sessionLocks.get(sessionId) ?? Promise.resolve();
     const run = previous
         .catch(() => undefined)
         .then(async () => {
             await operation();
         });
 
-    sessionLocks.set(sessionId, run);
+    heapHolder.sessionLocks.set(sessionId, run);
     run.finally(() => {
-        if (sessionLocks.get(sessionId) === run) {
-            sessionLocks.delete(sessionId);
+        if (heapHolder.sessionLocks.get(sessionId) === run) {
+            heapHolder.sessionLocks.delete(sessionId);
         }
     }).catch(() => undefined);
 
@@ -155,7 +159,7 @@ async function reconcileSessionIndex(
     readMessages: ReadMessages,
 ): Promise<void> {
     await runWithSessionLock(sessionId, async () => {
-        if (reconciledSessions.has(sessionId)) return;
+        if (heapHolder.reconciledSessions.has(sessionId)) return;
 
         let fallbackSnapshot: RawMessage[] | null = null;
         const finalWatermark = readMessages.getCount
@@ -190,7 +194,7 @@ async function reconcileSessionIndex(
         }
 
         if (isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
-            reconciledSessions.add(sessionId);
+            heapHolder.reconciledSessions.add(sessionId);
         }
     });
 }
@@ -200,10 +204,13 @@ export function scheduleReconciliation(
     sessionId: string,
     readMessages: ReadMessages,
 ): void {
-    if (reconciledSessions.has(sessionId) || reconciliationScheduledSessions.has(sessionId)) {
+    if (
+        heapHolder.reconciledSessions.has(sessionId) ||
+        heapHolder.reconciliationScheduledSessions.has(sessionId)
+    ) {
         return;
     }
-    reconciliationScheduledSessions.add(sessionId);
+    heapHolder.reconciliationScheduledSessions.add(sessionId);
 
     scheduleAfterBootQuiet(() => {
         defer(() => {
@@ -212,7 +219,7 @@ export function scheduleReconciliation(
                     logIndexingError(sessionId, "reconciliation", error);
                 })
                 .finally(() => {
-                    reconciliationScheduledSessions.delete(sessionId);
+                    heapHolder.reconciliationScheduledSessions.delete(sessionId);
                 });
         });
     });
@@ -225,13 +232,16 @@ export function scheduleIncrementalIndex(
     messageSource: IncrementalMessageSource,
 ): void {
     const schedulingKey = `${sessionId}\u0000${messageId}`;
-    if (incrementalTimers.has(schedulingKey) || pendingIncrementalKeys.has(schedulingKey)) {
+    if (
+        heapHolder.incrementalTimers.has(schedulingKey) ||
+        heapHolder.pendingIncrementalKeys.has(schedulingKey)
+    ) {
         return;
     }
 
     const timer = setTimeout(() => {
-        incrementalTimers.delete(schedulingKey);
-        pendingIncrementalKeys.add(schedulingKey);
+        heapHolder.incrementalTimers.delete(schedulingKey);
+        heapHolder.pendingIncrementalKeys.add(schedulingKey);
         void runWithSessionLock(sessionId, () => {
             const message =
                 typeof messageSource === "function"
@@ -240,35 +250,35 @@ export function scheduleIncrementalIndex(
             if (!message) return;
 
             const revisionKey = `${schedulingKey}\u0000${getMessageIndexSourceIdentity(message)}`;
-            if (completedIncrementalKeys.has(revisionKey)) return;
+            if (heapHolder.completedIncrementalKeys.has(revisionKey)) return;
 
             const currentWatermark = getLastIndexedOrdinal(db, sessionId);
             if (
                 message.ordinal <= currentWatermark &&
                 isMessageIndexSourceCurrent(db, sessionId, message)
             ) {
-                completedIncrementalKeys.add(revisionKey);
+                heapHolder.completedIncrementalKeys.add(revisionKey);
                 return;
             }
 
-            const wasReconciled = reconciledSessions.delete(sessionId);
+            const wasReconciled = heapHolder.reconciledSessions.delete(sessionId);
             indexSingleMessage(db, sessionId, message);
             const finalWatermark = getLastIndexedOrdinal(db, sessionId);
             if (wasReconciled && isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
-                reconciledSessions.add(sessionId);
+                heapHolder.reconciledSessions.add(sessionId);
             }
-            completedIncrementalKeys.add(revisionKey);
+            heapHolder.completedIncrementalKeys.add(revisionKey);
         })
             .catch((error) => {
-                reconciledSessions.delete(sessionId);
+                heapHolder.reconciledSessions.delete(sessionId);
                 logIndexingError(sessionId, `incremental index for ${messageId}`, error);
             })
             .finally(() => {
-                pendingIncrementalKeys.delete(schedulingKey);
+                heapHolder.pendingIncrementalKeys.delete(schedulingKey);
             });
     }, INCREMENTAL_DEBOUNCE_MS);
 
-    incrementalTimers.set(schedulingKey, timer);
+    heapHolder.incrementalTimers.set(schedulingKey, timer);
 }
 
 export function scheduleClearAndReindex(
@@ -276,8 +286,8 @@ export function scheduleClearAndReindex(
     sessionId: string,
     readMessages: ReadMessages,
 ): void {
-    reconciledSessions.delete(sessionId);
-    reconciliationScheduledSessions.delete(sessionId);
+    heapHolder.reconciledSessions.delete(sessionId);
+    heapHolder.reconciliationScheduledSessions.delete(sessionId);
     clearCompletedIncrementalKeys(sessionId);
 
     scheduleAfterBootQuiet(() => {
@@ -286,54 +296,78 @@ export function scheduleClearAndReindex(
                 // An older boot-quiet reconciliation can finish after this clear was
                 // scheduled, so invalidate process state under the same session lock
                 // that clears the durable index.
-                reconciledSessions.delete(sessionId);
+                heapHolder.reconciledSessions.delete(sessionId);
                 clearCompletedIncrementalKeys(sessionId);
                 clearIndexedMessages(db, sessionId);
             })
                 .then(() => reconcileSessionIndex(db, sessionId, readMessages))
                 .catch((error) => {
-                    reconciledSessions.delete(sessionId);
+                    heapHolder.reconciledSessions.delete(sessionId);
                     logIndexingError(sessionId, "clear and reindex", error);
                 });
         });
     });
 }
 
+export interface MessageIndexQueueHeapStats {
+    queueLength: number;
+    reconciliationScheduled: number;
+    incrementalTimers: number;
+    pendingIncremental: number;
+    activeSessionLocks: number;
+    completedIncrementalKeys: number;
+}
+
+/** Live async-index holder counts used by the opt-in heap diagnostic RPC. */
+export function getMessageIndexQueueHeapStats(): MessageIndexQueueHeapStats {
+    return {
+        queueLength:
+            heapHolder.reconciliationScheduledSessions.size +
+            heapHolder.incrementalTimers.size +
+            heapHolder.pendingIncrementalKeys.size,
+        reconciliationScheduled: heapHolder.reconciliationScheduledSessions.size,
+        incrementalTimers: heapHolder.incrementalTimers.size,
+        pendingIncremental: heapHolder.pendingIncrementalKeys.size,
+        activeSessionLocks: heapHolder.sessionLocks.size,
+        completedIncrementalKeys: heapHolder.completedIncrementalKeys.size,
+    };
+}
+
 export function isSessionReconciled(sessionId: string): boolean {
-    return reconciledSessions.has(sessionId);
+    return heapHolder.reconciledSessions.has(sessionId);
 }
 
 export function clearSessionTracking(sessionId: string): void {
-    reconciledSessions.delete(sessionId);
-    reconciliationScheduledSessions.delete(sessionId);
-    sessionLocks.delete(sessionId);
+    heapHolder.reconciledSessions.delete(sessionId);
+    heapHolder.reconciliationScheduledSessions.delete(sessionId);
+    heapHolder.sessionLocks.delete(sessionId);
 
     const prefix = `${sessionId}\u0000`;
-    for (const [key, timer] of incrementalTimers) {
+    for (const [key, timer] of heapHolder.incrementalTimers) {
         if (key.startsWith(prefix)) {
             clearTimeout(timer);
-            incrementalTimers.delete(key);
+            heapHolder.incrementalTimers.delete(key);
         }
     }
 
-    for (const key of pendingIncrementalKeys) {
+    for (const key of heapHolder.pendingIncrementalKeys) {
         if (key.startsWith(prefix)) {
-            pendingIncrementalKeys.delete(key);
+            heapHolder.pendingIncrementalKeys.delete(key);
         }
     }
-    for (const key of completedIncrementalKeys) {
-        if (key.startsWith(prefix)) completedIncrementalKeys.delete(key);
+    for (const key of heapHolder.completedIncrementalKeys) {
+        if (key.startsWith(prefix)) heapHolder.completedIncrementalKeys.delete(key);
     }
 }
 
 export function __resetMessageIndexAsyncForTests(): void {
-    for (const timer of incrementalTimers.values()) {
+    for (const timer of heapHolder.incrementalTimers.values()) {
         clearTimeout(timer);
     }
-    reconciledSessions.clear();
-    reconciliationScheduledSessions.clear();
-    sessionLocks.clear();
-    incrementalTimers.clear();
-    pendingIncrementalKeys.clear();
-    completedIncrementalKeys.clear();
+    heapHolder.reconciledSessions.clear();
+    heapHolder.reconciliationScheduledSessions.clear();
+    heapHolder.sessionLocks.clear();
+    heapHolder.incrementalTimers.clear();
+    heapHolder.pendingIncrementalKeys.clear();
+    heapHolder.completedIncrementalKeys.clear();
 }

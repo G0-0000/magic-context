@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
 
+import { MagicContextConfigSchema } from "../config/schema/magic-context";
 import { replaceAllCompartmentState } from "../features/magic-context/compartment-storage";
 import { insertMemory } from "../features/magic-context/memory";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
@@ -20,6 +21,7 @@ import { createLiveSessionState } from "../hooks/magic-context/live-session-stat
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../shared/models-dev-cache";
+import type { MagicContextRpcServer } from "../shared/rpc-server";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import {
@@ -28,7 +30,9 @@ import {
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
     executeRustRecompRpc,
+    isDebugRpcEnabled,
     loadRustSessionStatus,
+    registerRpcHandlers,
 } from "./rpc-handlers";
 import { resetSidebarSnapshotCache } from "./sidebar-snapshot-cache";
 
@@ -39,9 +43,58 @@ function createTestDb(): Database {
     return db;
 }
 
+type TestRpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+function registeredRpcMethods(debugRpc: boolean): Map<string, TestRpcHandler> {
+    const handlers = new Map<string, TestRpcHandler>();
+    const rpcServer = {
+        handle(method: string, handler: TestRpcHandler) {
+            handlers.set(method, handler);
+        },
+    } as unknown as MagicContextRpcServer;
+    registerRpcHandlers(rpcServer, {
+        directory: process.cwd(),
+        config: MagicContextConfigSchema.parse({ debug_rpc: debugRpc }),
+        client: {},
+        liveSessionState: createLiveSessionState(),
+    });
+    return handlers;
+}
+
 afterEach(() => {
     resetSidebarSnapshotCache();
     clearModelsDevCache();
+});
+
+describe("debug RPC guard", () => {
+    test("does not register heap diagnostics when the flag is off by default", () => {
+        const previous = process.env.MAGIC_CONTEXT_DEBUG_RPC;
+        delete process.env.MAGIC_CONTEXT_DEBUG_RPC;
+        try {
+            const handlers = registeredRpcMethods(false);
+            expect(handlers.has("debug.memoryUsage")).toBe(false);
+            expect(handlers.has("debug.heapSnapshot")).toBe(false);
+        } finally {
+            if (previous === undefined) delete process.env.MAGIC_CONTEXT_DEBUG_RPC;
+            else process.env.MAGIC_CONTEXT_DEBUG_RPC = previous;
+        }
+    });
+
+    test("registers diagnostics only for an explicit config or environment opt-in", () => {
+        const previous = process.env.MAGIC_CONTEXT_DEBUG_RPC;
+        delete process.env.MAGIC_CONTEXT_DEBUG_RPC;
+        try {
+            expect(isDebugRpcEnabled({ debug_rpc: true }, {})).toBe(true);
+            expect(isDebugRpcEnabled({ debug_rpc: false }, { MAGIC_CONTEXT_DEBUG_RPC: "1" })).toBe(
+                true,
+            );
+            expect(isDebugRpcEnabled({ debug_rpc: false }, {})).toBe(false);
+            expect(registeredRpcMethods(true).has("debug.heapSnapshot")).toBe(true);
+        } finally {
+            if (previous === undefined) delete process.env.MAGIC_CONTEXT_DEBUG_RPC;
+            else process.env.MAGIC_CONTEXT_DEBUG_RPC = previous;
+        }
+    });
 });
 
 describe("Rust maintenance RPC routing", () => {

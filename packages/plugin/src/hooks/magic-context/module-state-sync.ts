@@ -259,14 +259,29 @@ interface CompartmentMirrorCursor {
     lastRevertEpoch?: number;
 }
 
-const compartmentMirrorCursors = new Map<string, CompartmentMirrorCursor>();
+class MagicContextCompartmentMirrorHeapHolder {
+    readonly cursors = new Map<string, CompartmentMirrorCursor>();
+}
+
+const compartmentMirrorHeapHolder = new MagicContextCompartmentMirrorHeapHolder();
 
 export function clearCompartmentMirrorCursor(sessionId: string): void {
-    compartmentMirrorCursors.delete(sessionId);
+    compartmentMirrorHeapHolder.cursors.delete(sessionId);
 }
 
 export function resetCompartmentMirrorCursorsForTest(): void {
-    compartmentMirrorCursors.clear();
+    compartmentMirrorHeapHolder.cursors.clear();
+}
+
+/** Live compartment-mirror holder count used by the opt-in heap diagnostic RPC. */
+export function getCompartmentMirrorHeapStats(): {
+    entries: number;
+    sessionIds: string[];
+} {
+    return {
+        entries: compartmentMirrorHeapHolder.cursors.size,
+        sessionIds: [...compartmentMirrorHeapHolder.cursors.keys()],
+    };
 }
 
 function validateMirrorRow(
@@ -340,7 +355,7 @@ function rememberCompartmentMirrorCursor(
     published: ModuleCompartmentMirrorResponse,
     authoritativeCount: number,
 ): void {
-    compartmentMirrorCursors.set(sessionId, {
+    compartmentMirrorHeapHolder.cursors.set(sessionId, {
         lastMaxSequence: maxSequence,
         lastCompartmentCount: published.compartment_count ?? authoritativeCount,
         lastRevertEpoch: published.revert_epoch,
@@ -468,7 +483,7 @@ export async function mirrorModuleCompartments(args: {
     // A process-local cursor avoids re-reading the full authoritative set on every
     // pass. The first call, a max_sequence regression, a sequence gap, or a set
     // change the cursor cannot express still walks from -1.
-    const cursor = compartmentMirrorCursors.get(args.sessionId);
+    const cursor = compartmentMirrorHeapHolder.cursors.get(args.sessionId);
     if (cursor !== undefined) {
         const published = await args.reader.getCompartmentsAfter(
             args.sessionId,

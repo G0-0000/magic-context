@@ -52,6 +52,18 @@ export interface ToolTagAccounting {
     inputTokenCount: number | null;
 }
 
+export interface TaggerHeapStats {
+    sessionCount: number;
+    assignmentEntries: number;
+    toolAccountingEntries: number;
+    loadSignatureEntries: number;
+    sessions: Array<{
+        sessionId: string;
+        assignments: number;
+        toolAccounting: number;
+    }>;
+}
+
 export interface Tagger {
     /**
      * Assign a tag for a non-tool entity (message text or file part).
@@ -153,6 +165,8 @@ export interface Tagger {
     getCounter(sessionId: string): number;
     initFromDb(sessionId: string, db: Database, floor?: number): void;
     cleanup(sessionId: string): void;
+    /** Present on the production tagger; optional keeps lightweight test doubles source-compatible. */
+    getHeapStats?(): TaggerHeapStats;
 }
 
 const GET_COUNTER_SQL = `SELECT counter FROM session_meta WHERE session_id = ?`;
@@ -305,14 +319,17 @@ function getResetCounterStatement(db: Database): PreparedStatement {
  */
 const MAX_TAG_ALLOC_RETRIES = 5;
 
+class MagicContextTaggerHeapHolder {
+    readonly counters = new Map<string, number>();
+    readonly assignments = new Map<string, Map<string, number>>();
+    readonly toolAccountingBySession = new Map<string, Map<number, ToolTagAccounting>>();
+    readonly loadSignatures = new Map<string, LoadSignature>();
+}
+
 export function createTagger(): Tagger {
-    // per-session monotonic counter
-    const counters = new Map<string, number>();
-    // per-session tag assignments: messageId → tag number
-    const assignments = new Map<string, Map<string, number>>();
-    // Persisted tool accounting is loaded with assignments, avoiding a point query
-    // for every reused result while retaining an authoritative growth baseline.
-    const toolAccountingBySession = new Map<string, Map<number, ToolTagAccounting>>();
+    // Keep durable caches under one named owner because JSC snapshots expose
+    // constructor names but no module/source paths.
+    const heapHolder = new MagicContextTaggerHeapHolder();
     // per-session load signatures: tracks the DB state at the last
     // successful initFromDb() reload. A subsequent initFromDb() call can
     // skip the full DB scan when (a) the signature exists for this session,
@@ -324,22 +341,21 @@ export function createTagger(): Tagger {
     //
     // Absence of a signature entry means "first load" (or post-cleanup /
     // post-resetCounter) so the next initFromDb is always a full reload.
-    const loadSignatures = new Map<string, LoadSignature>();
 
     function getSessionAssignments(sessionId: string): Map<string, number> {
-        let map = assignments.get(sessionId);
+        let map = heapHolder.assignments.get(sessionId);
         if (!map) {
             map = new Map();
-            assignments.set(sessionId, map);
+            heapHolder.assignments.set(sessionId, map);
         }
         return map;
     }
 
     function getSessionToolAccounting(sessionId: string): Map<number, ToolTagAccounting> {
-        let map = toolAccountingBySession.get(sessionId);
+        let map = heapHolder.toolAccountingBySession.get(sessionId);
         if (!map) {
             map = new Map();
-            toolAccountingBySession.set(sessionId, map);
+            heapHolder.toolAccountingBySession.set(sessionId, map);
         }
         return map;
     }
@@ -360,8 +376,8 @@ export function createTagger(): Tagger {
      */
     function syncCounterAtLeast(sessionId: string, db: Database, value: number): void {
         if (value <= 0) return;
-        const next = Math.max(counters.get(sessionId) ?? 0, value);
-        counters.set(sessionId, next);
+        const next = Math.max(heapHolder.counters.get(sessionId) ?? 0, value);
+        heapHolder.counters.set(sessionId, next);
         getUpsertCounterStatement(db).run(sessionId, next, getHarness());
     }
 
@@ -429,7 +445,7 @@ export function createTagger(): Tagger {
 
         // Allocation loop (see assignTag pre-Layer-C comment for rationale).
         for (let attempt = 0; attempt < MAX_TAG_ALLOC_RETRIES; attempt += 1) {
-            const memCounter = counters.get(sessionId) ?? 0;
+            const memCounter = heapHolder.counters.get(sessionId) ?? 0;
             const dbMax = getMaxTagNumberBySession(db, sessionId);
             const next = Math.max(memCounter, dbMax) + 1;
 
@@ -469,11 +485,11 @@ export function createTagger(): Tagger {
                 }
 
                 const advancedDbMax = getMaxTagNumberBySession(db, sessionId);
-                counters.set(sessionId, Math.max(memCounter, advancedDbMax));
+                heapHolder.counters.set(sessionId, Math.max(memCounter, advancedDbMax));
                 continue;
             }
 
-            counters.set(sessionId, next);
+            heapHolder.counters.set(sessionId, next);
             sessionAssignments.set(mapKey, next);
             if (type === "tool") {
                 getSessionToolAccounting(sessionId).set(next, {
@@ -648,11 +664,11 @@ export function createTagger(): Tagger {
         // _type is unused at runtime — the parameter exists for compile-
         // time enforcement of the non-tool contract. Any caller passing
         // "tool" gets a TS error before this body runs.
-        return assignments.get(sessionId)?.get(messageId);
+        return heapHolder.assignments.get(sessionId)?.get(messageId);
     }
 
     function getToolTag(sessionId: string, callId: string, ownerMsgId: string): number | undefined {
-        return assignments.get(sessionId)?.get(makeToolCompositeKey(ownerMsgId, callId));
+        return heapHolder.assignments.get(sessionId)?.get(makeToolCompositeKey(ownerMsgId, callId));
     }
 
     function getToolTagAccounting(
@@ -663,7 +679,7 @@ export function createTagger(): Tagger {
         const tagNumber = getToolTag(sessionId, callId, ownerMsgId);
         return tagNumber === undefined
             ? undefined
-            : toolAccountingBySession.get(sessionId)?.get(tagNumber);
+            : heapHolder.toolAccountingBySession.get(sessionId)?.get(tagNumber);
     }
 
     function setToolTagAccounting(
@@ -703,17 +719,17 @@ export function createTagger(): Tagger {
         // Force-reset uses a non-monotonic UPDATE so callers can rebuild a
         // session from scratch (e.g. /ctx-recomp full rebuild). Bypass the
         // monotonic upsert by using a dedicated statement.
-        counters.set(sessionId, 0);
-        assignments.delete(sessionId);
-        toolAccountingBySession.delete(sessionId);
+        heapHolder.counters.set(sessionId, 0);
+        heapHolder.assignments.delete(sessionId);
+        heapHolder.toolAccountingBySession.delete(sessionId);
         // Drop the load signature so the next initFromDb forces a full
         // reload rather than cache-hitting against pre-reset state.
-        loadSignatures.delete(sessionId);
+        heapHolder.loadSignatures.delete(sessionId);
         getResetCounterStatement(db).run(sessionId, getHarness());
     }
 
     function getCounter(sessionId: string): number {
-        return counters.get(sessionId) ?? 0;
+        return heapHolder.counters.get(sessionId) ?? 0;
     }
 
     /**
@@ -746,7 +762,7 @@ export function createTagger(): Tagger {
      * counts, source content, pending ops, etc.) do not affect what this loader
      * reads, so forcing a reload for them only burns hot-path latency.
      *
-     * The previous `if (counters.has(sessionId)) return` short-circuit had a
+     * The previous `if (heapHolder.counters.has(sessionId)) return` short-circuit had a
      * subtle bug: once the in-memory counter drifted behind the DB max
      * (stale process or concurrent writer), it could never self-heal — every
      * `assignTag` would keep proposing already-claimed tag numbers and either
@@ -760,7 +776,7 @@ export function createTagger(): Tagger {
      */
     function initFromDb(sessionId: string, db: Database, floor = 0): void {
         const probe = probeSignature(db);
-        const cached = loadSignatures.get(sessionId);
+        const cached = heapHolder.loadSignatures.get(sessionId);
         if (
             cached !== undefined &&
             cached.db === db &&
@@ -831,13 +847,17 @@ export function createTagger(): Tagger {
         // claimed), and current in-memory counter (what we already allocated
         // in this process). Taking the max of all three guarantees we never
         // hand out a number some other writer has already taken.
-        const counter = Math.max(row?.counter ?? 0, maxTagNumber, counters.get(sessionId) ?? 0);
-        counters.set(sessionId, counter);
+        const counter = Math.max(
+            row?.counter ?? 0,
+            maxTagNumber,
+            heapHolder.counters.get(sessionId) ?? 0,
+        );
+        heapHolder.counters.set(sessionId, counter);
 
         // Record the signature AFTER the full reload completes successfully
         // so a thrown query never leaves us with a fresh signature pointing
         // at stale in-memory state.
-        loadSignatures.set(sessionId, {
+        heapHolder.loadSignatures.set(sessionId, {
             db,
             dataVersion: probe.dataVersion,
             floor,
@@ -845,12 +865,36 @@ export function createTagger(): Tagger {
     }
 
     function cleanup(sessionId: string): void {
-        counters.delete(sessionId);
-        assignments.delete(sessionId);
-        toolAccountingBySession.delete(sessionId);
+        heapHolder.counters.delete(sessionId);
+        heapHolder.assignments.delete(sessionId);
+        heapHolder.toolAccountingBySession.delete(sessionId);
         // Drop the load signature so the next initFromDb forces a full
         // reload rather than cache-hitting against pre-cleanup state.
-        loadSignatures.delete(sessionId);
+        heapHolder.loadSignatures.delete(sessionId);
+    }
+
+    function getHeapStats(): TaggerHeapStats {
+        const sessionIds = new Set([
+            ...heapHolder.counters.keys(),
+            ...heapHolder.assignments.keys(),
+            ...heapHolder.toolAccountingBySession.keys(),
+            ...heapHolder.loadSignatures.keys(),
+        ]);
+        const sessions = [...sessionIds].map((sessionId) => ({
+            sessionId,
+            assignments: heapHolder.assignments.get(sessionId)?.size ?? 0,
+            toolAccounting: heapHolder.toolAccountingBySession.get(sessionId)?.size ?? 0,
+        }));
+        return {
+            sessionCount: sessionIds.size,
+            assignmentEntries: sessions.reduce((sum, session) => sum + session.assignments, 0),
+            toolAccountingEntries: sessions.reduce(
+                (sum, session) => sum + session.toolAccounting,
+                0,
+            ),
+            loadSignatureEntries: heapHolder.loadSignatures.size,
+            sessions,
+        };
     }
 
     return {
@@ -869,5 +913,6 @@ export function createTagger(): Tagger {
         getCounter,
         initFromDb,
         cleanup,
+        getHeapStats,
     };
 }

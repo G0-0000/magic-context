@@ -245,6 +245,66 @@ export interface EmbedDetail {
     statusText: string;
 }
 
+export interface DebugProcessMemoryUsage {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external: number;
+    arrayBuffers: number;
+}
+
+export interface DebugSessionHolderCount {
+    sessionId: string;
+    lkgBytes: number;
+    taggerAssignments: number;
+    taggerToolAccounting: number;
+    wireRawMessages: number;
+    wireMessages: number;
+    wireContentSnapshots: number;
+}
+
+export interface DebugMemoryHolders {
+    lkgSlots: {
+        count: number;
+        totalBytes: number;
+    };
+    taggerCache: {
+        sessionCount: number;
+        assignmentEntries: number;
+        toolAccountingEntries: number;
+        loadSignatureEntries: number;
+    };
+    wireCache: {
+        snapshots: number;
+        rawContentSnapshots: number;
+    };
+    compartmentMirrors: {
+        entries: number;
+    };
+    messageIndexQueue: {
+        queueLength: number;
+        reconciliationScheduled: number;
+        incrementalTimers: number;
+        pendingIncremental: number;
+        activeSessionLocks: number;
+        completedIncrementalKeys: number;
+    };
+    sessions: DebugSessionHolderCount[];
+}
+
+export interface DebugMemoryUsageResponse {
+    pid: number;
+    bunVersion: string;
+    memoryUsage: DebugProcessMemoryUsage;
+    holders: DebugMemoryHolders;
+}
+
+export interface DebugHeapSnapshotResponse extends DebugMemoryUsageResponse {
+    path: string;
+    format: "jsc" | "v8";
+    snapshotVersion?: number;
+}
+
 export interface RpcNotificationMessage {
     id: number;
     type: string;
