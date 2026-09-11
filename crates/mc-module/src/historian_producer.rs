@@ -66,6 +66,16 @@ pub const ERROR_CLASS_WIRE_SET: [&str; 4] = [
     "context_overflow",
 ];
 
+/// Broca route-open contract used to distinguish a model/provider resolution refusal from
+/// transport failures that happen to share the same outer `open_failed` code.
+pub const MODEL_UNRESOLVABLE_OPEN_CODES: [&str; 1] = ["open_failed"];
+pub const MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS: [&str; 4] = [
+    "run resolution failed",
+    "no apikey credential for provider",
+    "unknown provider",
+    "unknown model",
+];
+
 static DEPRECATED_HEURISTIC_USES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +373,22 @@ impl HistorianProducerError {
             self,
             HistorianProducerError::Subc(body) if body.code == "unknown_module"
         )
+    }
+
+    /// Return the structured route-open body only when Broca says the selected model or
+    /// provider cannot be resolved. Other `open_failed` bodies remain transport failures.
+    pub fn model_unresolvable_open_body(&self) -> Option<&ProducerErrorBody> {
+        let HistorianProducerError::Subc(body) = self else {
+            return None;
+        };
+        if !MODEL_UNRESOLVABLE_OPEN_CODES.contains(&body.code.as_str()) {
+            return None;
+        }
+        let message = body.message.to_ascii_lowercase();
+        MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS
+            .iter()
+            .any(|literal| message.contains(literal))
+            .then_some(body)
     }
 
     fn heuristic_decision(&self) -> DeprecatedHeuristicDecision {
@@ -1272,6 +1298,36 @@ mod tests {
     };
     use tempfile::TempDir;
     use tokio::{net::TcpListener, sync::Mutex};
+
+    #[test]
+    fn model_unresolvable_open_literals_match_pinned_broca_contract() {
+        assert_eq!(MODEL_UNRESOLVABLE_OPEN_CODES, ["open_failed"]);
+        assert_eq!(
+            MODEL_UNRESOLVABLE_OPEN_MESSAGE_LITERALS,
+            [
+                "run resolution failed",
+                "no apikey credential for provider",
+                "unknown provider",
+                "unknown model",
+            ]
+        );
+
+        let live = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+            "open_failed",
+            "open failed: run resolution failed: no apikey credential for provider 'opencode' (credential id 'apikey:opencode')",
+        ));
+        assert!(live.model_unresolvable_open_body().is_some());
+        let wrong_outer_code = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+            "route_rejected",
+            "run resolution failed: unknown provider 'opencode'",
+        ));
+        assert!(wrong_outer_code.model_unresolvable_open_body().is_none());
+        let transport_open = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+            "open_failed",
+            "open failed: route closed before bind completed",
+        ));
+        assert!(transport_open.model_unresolvable_open_body().is_none());
+    }
 
     #[test]
     fn error_class_wire_strings_match_pinned_contract_set() {
