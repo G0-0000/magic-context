@@ -70,11 +70,15 @@ export interface ResolvedWindowOverlayFacts {
     facts: Record<string, WindowOverlayFact>;
 }
 
+export type WindowLimitSource = "catalog" | "overlay" | "provider" | "detected";
+
 export interface WindowDerivation {
     window: number;
     reserve: number;
     reserveSource: WindowReserveSource;
     geometry: WindowGeometry;
+    windowSource: WindowLimitSource;
+    absoluteWall: number;
 }
 
 export interface WindowGeometryResult {
@@ -446,20 +450,22 @@ export function deriveWindowGeometry(
     const catalogContext = isFinitePositive(catalogLimit?.context)
         ? catalogLimit.context
         : undefined;
+    const providerContext = isFinitePositive(providerLimit?.context)
+        ? providerLimit.context
+        : undefined;
     const advertised = numericOverlayFact(options.overlay, "window.advertised");
     const enforced = numericOverlayFact(options.overlay, "window.enforced");
-    let softContext = mergePositive(
-        enforced ?? advertised ?? catalogContext,
-        providerLimit?.context,
-    );
-    let hardContext = mergePositive(enforced ?? softContext, providerLimit?.context);
-    if (isFinitePositive(options.contextCap)) {
+    let softContext = mergePositive(enforced ?? advertised ?? catalogContext, providerContext);
+    let hardContext = mergePositive(enforced ?? softContext, providerContext);
+    const contextCap = isFinitePositive(options.contextCap) ? options.contextCap : undefined;
+    const hasContextCap = contextCap !== undefined;
+    if (contextCap !== undefined) {
         softContext = isFinitePositive(softContext)
-            ? Math.min(softContext, options.contextCap)
-            : options.contextCap;
+            ? Math.min(softContext, contextCap)
+            : contextCap;
         hardContext = isFinitePositive(hardContext)
-            ? Math.min(hardContext, options.contextCap)
-            : options.contextCap;
+            ? Math.min(hardContext, contextCap)
+            : contextCap;
     }
     const input = mergePositive(
         isFinitePositive(catalogLimit?.input) ? catalogLimit.input : undefined,
@@ -573,6 +579,13 @@ export function deriveWindowGeometry(
 
     const hardWindow = hardContext ?? softContext ?? input;
     if (!isFinitePositive(hardWindow)) return undefined;
+    const windowSource: WindowLimitSource = hasContextCap
+        ? "detected"
+        : providerContext !== undefined
+          ? "provider"
+          : enforced !== undefined || advertised !== undefined
+            ? "overlay"
+            : "catalog";
     let usableHard: number;
     if (geometry === "separate") {
         usableHard = hardWindow;
@@ -606,6 +619,66 @@ export function deriveWindowGeometry(
             reserve: Math.floor(Math.max(0, resolvedWindow - usableSoft)),
             reserveSource,
             geometry,
+            windowSource,
+            absoluteWall: Math.floor(hardWindow),
+        },
+    };
+}
+
+export interface ProvenInputFloorResult {
+    geometry: WindowGeometryResult;
+    refused?: { reading: number; absoluteWall: number };
+}
+
+export function hasTrustedAbsoluteWall(geometry: WindowGeometryResult): boolean {
+    return geometry.derivation.windowSource !== "catalog";
+}
+
+/**
+ * Successful requests can disprove static catalog metadata, but cannot
+ * disprove a provider, overlay, or observed-overflow wall. A reading beyond
+ * that wall is malformed usage accounting and must not enlarge the geometry.
+ */
+export function applyProvenInputFloor(
+    geometry: WindowGeometryResult,
+    provenInputTokens: number | undefined,
+): ProvenInputFloorResult {
+    if (
+        !isFinitePositive(provenInputTokens) ||
+        provenInputTokens < MIN_PLAUSIBLE_CONTEXT_LIMIT ||
+        provenInputTokens <= geometry.usableSoft
+    ) {
+        return { geometry };
+    }
+    if (hasTrustedAbsoluteWall(geometry) && provenInputTokens > geometry.derivation.absoluteWall) {
+        return {
+            geometry,
+            refused: {
+                reading: provenInputTokens,
+                absoluteWall: geometry.derivation.absoluteWall,
+            },
+        };
+    }
+
+    const trustedAbsoluteWall = hasTrustedAbsoluteWall(geometry);
+    const window = trustedAbsoluteWall
+        ? geometry.derivation.window
+        : Math.max(geometry.derivation.window, provenInputTokens);
+    return {
+        geometry: {
+            ...geometry,
+            usableSoft: provenInputTokens,
+            usableHard: trustedAbsoluteWall
+                ? geometry.usableHard
+                : Math.max(geometry.usableHard, provenInputTokens),
+            derivation: {
+                ...geometry.derivation,
+                window,
+                reserve: Math.max(0, window - provenInputTokens),
+                absoluteWall: trustedAbsoluteWall
+                    ? geometry.derivation.absoluteWall
+                    : Math.max(geometry.derivation.absoluteWall, provenInputTokens),
+            },
         },
     };
 }

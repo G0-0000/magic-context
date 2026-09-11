@@ -19,7 +19,7 @@
  * message's `usage` field, exactly the way OpenCode's
  * `event-handler.ts` does:
  *
- *     inputTokens = usage.input + usage.cacheRead + usage.cacheWrite
+ *     inputTokens = min(input + cacheRead + cacheWrite, totalTokens - output)
  *     percentage  = (inputTokens / contextLimit) * 100
  *
  * The contextLimit MUST already be the output-reserved safe window, with any
@@ -28,7 +28,7 @@
  * OpenCode's `resolveContextLimit()` path.
  */
 
-interface PiAssistantUsage {
+export interface PiAssistantUsage {
 	input?: number;
 	output?: number;
 	cacheRead?: number;
@@ -77,17 +77,42 @@ export function extractAssistantUsage(
  * exactly:
  *
  *     totalInputTokens = info.tokens.input + info.tokens.cache.read + info.tokens.cache.write
+ *
+ * OpenAI reports cached input as a subset of input tokens. Pi versions before
+ * its cached-input normalization exposed both the inclusive input value and
+ * cacheRead. `totalTokens - output` is therefore a second prompt-only reading:
+ * taking the smaller value handles either representation without adding output.
  */
 export function computePiPressure(
 	usage: PiAssistantUsage | null,
 	contextLimit: number,
+	absoluteWall?: number,
 ): PiPressure | null {
 	if (!usage) return null;
 	const input = usage.input ?? 0;
 	const cacheRead = usage.cacheRead ?? 0;
 	const cacheWrite = usage.cacheWrite ?? 0;
-	const inputTokens = input + cacheRead + cacheWrite;
-	if (inputTokens === 0) return null;
+	const componentPromptTokens = input + cacheRead + cacheWrite;
+	const totalPromptTokens =
+		typeof usage.totalTokens === "number" &&
+		Number.isFinite(usage.totalTokens) &&
+		typeof usage.output === "number" &&
+		Number.isFinite(usage.output)
+			? Math.max(0, usage.totalTokens - usage.output)
+			: undefined;
+	const inputTokens =
+		totalPromptTokens !== undefined && totalPromptTokens > 0
+			? Math.min(componentPromptTokens, totalPromptTokens)
+			: componentPromptTokens;
+	if (inputTokens <= 0 || !Number.isFinite(inputTokens)) return null;
+	if (
+		typeof absoluteWall === "number" &&
+		Number.isFinite(absoluteWall) &&
+		absoluteWall > 0 &&
+		inputTokens > absoluteWall
+	) {
+		return null;
+	}
 	const percentage = contextLimit > 0 ? (inputTokens / contextLimit) * 100 : 0;
 	return { inputTokens, percentage };
 }

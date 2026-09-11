@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveLimit, resolveOutputReserve } from "./models-dev-cache";
 import {
+    applyProvenInputFloor,
     deriveWindowGeometry,
     formatWindowDerivationLine,
     parseWindowOverlay,
@@ -296,6 +297,49 @@ describe("window geometry", () => {
         expect(overlayOnly?.derivation.window).toBe(300_000);
         expect(hooked?.derivation.window).toBe(400_000);
         expect(hooked?.derivation.reserve).toBe(30_000);
+    });
+
+    test("keeps shared-upfront emergency headroom below the separate absolute wall", () => {
+        const result = deriveWindowGeometry(
+            "openai-codex",
+            "gpt-5.6-sol",
+            { context: 272_000, output: 128_000 },
+            { providerLimit: { context: 272_000 }, harness: "pi" },
+        );
+
+        expect(result?.usableSoft).toBe(204_000);
+        expect(result?.usableHard).toBe(204_000);
+        expect(result?.usableHard).toBeLessThan(result?.derivation.absoluteWall ?? 0);
+        expect(result?.derivation.absoluteWall).toBe(272_000);
+        expect((result?.derivation.absoluteWall ?? 0) - (result?.usableHard ?? 0)).toBe(
+            result?.derivation.reserve,
+        );
+        expect(result?.derivation.windowSource).toBe("provider");
+    });
+
+    test("bounds proof at trusted absolute walls but retains the static-catalog escape hatch", () => {
+        const trusted = deriveWindowGeometry(
+            "openai-codex",
+            "gpt-5.6-sol",
+            { context: 272_000, output: 128_000 },
+            { providerLimit: { context: 272_000 }, harness: "pi" },
+        );
+        expect(trusted).toBeDefined();
+        const raisedWithinWall = applyProvenInputFloor(trusted!, 255_834);
+        expect(raisedWithinWall.geometry.usableSoft).toBe(255_834);
+        expect(raisedWithinWall.geometry.usableHard).toBe(204_000);
+        const refused = applyProvenInputFloor(trusted!, 593_717);
+        expect(refused.refused).toEqual({ reading: 593_717, absoluteWall: 272_000 });
+        expect(refused.geometry.usableSoft).toBe(204_000);
+        expect(refused.geometry.usableHard).toBe(204_000);
+
+        const staticFallback = deriveWindowGeometry("custom", "model", { context: 30_000 });
+        expect(staticFallback).toBeDefined();
+        const escaped = applyProvenInputFloor(staticFallback!, 90_000);
+        expect(escaped.refused).toBeUndefined();
+        expect(escaped.geometry.usableSoft).toBe(90_000);
+        expect(escaped.geometry.usableHard).toBe(90_000);
+        expect(escaped.geometry.derivation.absoluteWall).toBe(90_000);
     });
 
     test("clamps an inversion and logs it", () => {

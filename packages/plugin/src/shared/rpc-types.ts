@@ -170,6 +170,8 @@ export interface StatusDetail extends SidebarSnapshot {
             reserve: number;
             reserveSource: "output_catalog" | "output_config" | "wall_margin" | "none";
             geometry: "shared_upfront" | "shared_truncating" | "separate";
+            windowSource: "catalog" | "overlay" | "provider" | "detected";
+            absoluteWall: number;
         };
     };
     /**

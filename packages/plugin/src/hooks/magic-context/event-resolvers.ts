@@ -1,4 +1,4 @@
-import type { ContextDatabase } from "../../features/magic-context/storage";
+import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import {
     getOverflowState,
     loadPersistedUsage,
@@ -12,6 +12,7 @@ import {
     isSaneLimit,
 } from "../../shared/models-dev-cache";
 import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
+import { applyProvenInputFloor, hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 200_000;
@@ -48,22 +49,32 @@ function modelMatchedProvenContextLimit(
         : undefined;
 }
 
-function applyProvenFloor(
+function applySessionProvenFloor(
     geometry: NonNullable<ReturnType<typeof getSdkWindowGeometry>>,
-    provenLimit: number | undefined,
+    persisted: NonNullable<ReturnType<typeof modelMatchedPersistedUsage>> | undefined,
+    ctx?: { db?: ContextDatabase; sessionID?: string },
 ) {
-    if (!isSaneLimit(provenLimit) || provenLimit <= geometry.usableSoft) return geometry;
-    const window = Math.max(geometry.derivation.window, provenLimit);
-    return {
-        ...geometry,
-        usableSoft: provenLimit,
-        usableHard: Math.max(geometry.usableHard, provenLimit),
-        derivation: {
-            ...geometry.derivation,
-            window,
-            reserve: Math.max(0, window - provenLimit),
-        },
-    };
+    const provenLimit = isSaneLimit(persisted?.observedSafeInputTokens)
+        ? persisted.observedSafeInputTokens
+        : undefined;
+    const result = applyProvenInputFloor(geometry, provenLimit);
+    if (result.refused && ctx?.db && ctx.sessionID) {
+        const impossiblePressure = persisted?.usage.inputTokens
+            ? persisted.usage.inputTokens > result.refused.absoluteWall
+            : false;
+        updateSessionMeta(ctx.db, ctx.sessionID, {
+            observedSafeInputTokens: 0,
+            cacheAlertSent: false,
+            lastUsageContextLimit: geometry.usableSoft,
+            lastInputTokens: impossiblePressure ? 0 : persisted?.usage.inputTokens,
+            lastContextPercentage: impossiblePressure ? 0 : persisted?.usage.percentage,
+        });
+        sessionLog(
+            ctx.sessionID,
+            `persisted proven floor ${result.refused.reading} exceeds trusted absolute wall ${result.refused.absoluteWall}; cleared and re-resolved to ${geometry.usableSoft}`,
+        );
+    }
+    return result.geometry;
 }
 
 export function resolveContextWindowGeometry(
@@ -91,9 +102,10 @@ export function resolveContextWindowGeometry(
         harness: "opencode",
     });
     if (!geometry || detected !== undefined) return geometry;
-    return applyProvenFloor(
+    return applySessionProvenFloor(
         geometry,
-        modelMatchedProvenContextLimit(ctx?.db, ctx?.sessionID, modelKey),
+        modelMatchedPersistedUsage(ctx?.db, ctx?.sessionID, modelKey),
+        ctx,
     );
 }
 
@@ -141,7 +153,17 @@ export function resolveContextLimit(
     const resolved = fromModelsDev ?? detected ?? DEFAULT_CONTEXT_LIMIT;
     if (detected !== undefined) return resolved;
     const provenLimit = modelMatchedProvenContextLimit(ctx?.db, ctx?.sessionID, modelKey);
-    return isSaneLimit(provenLimit) ? Math.max(resolved, provenLimit) : resolved;
+    if (!isSaneLimit(provenLimit)) return resolved;
+    const geometry = resolveContextWindowGeometry(providerID, modelID, ctx);
+    if (ctx?.reservation !== "none" && geometry) return geometry.usableSoft;
+    if (
+        geometry &&
+        hasTrustedAbsoluteWall(geometry) &&
+        provenLimit > geometry.derivation.absoluteWall
+    ) {
+        return resolved;
+    }
+    return Math.max(resolved, provenLimit);
 }
 
 /**

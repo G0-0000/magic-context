@@ -1,0 +1,35 @@
+{
+	"session_id": "019de471-4fdc-762d-9286-624dfad0b5fe",
+	"wire_request": {
+		"source": "~\/Work\/Projects\/CortexKit\/anthropic-auth\/.pi\/pi-llm-debugging\/019de471-4fdc-762d-9286-624dfad0b5fe\/212-req.json",
+		"timestamp": "2026-09-11T10:54:40.860Z",
+		"model": "gpt-5.6-sol",
+		"byte_size": 1437396
+	},
+	"assistant_message": {
+		"source": "~\/.pi\/agent\/sessions\/--Users-ufukaltinok-Work-Projects-CortexKit-anthropic-auth--\/2026-09-10T16-25-30-322Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl:48439",
+		"timestamp": "2026-09-11T10:55:09.579Z",
+		"provider": "openai-codex",
+		"model": "gpt-5.6-sol",
+		"usage": {
+			"input": 585397,
+			"output": 151,
+			"cacheRead": 8320,
+			"cacheWrite": 0,
+			"totalTokens": 593868
+		}
+	},
+	"next_assistant_message": {
+		"source": "~\/.pi\/agent\/sessions\/--Users-ufukaltinok-Work-Projects-CortexKit-anthropic-auth--\/2026-09-10T16-25-30-322Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl:48478",
+		"timestamp": "2026-09-11T11:00:05.254Z",
+		"provider": "openai-codex",
+		"model": "gpt-5.6-sol",
+		"usage": {
+			"input": 123758,
+			"output": 1427,
+			"cacheRead": 16896,
+			"cacheWrite": 0,
+			"totalTokens": 142081
+		}
+	}
+}

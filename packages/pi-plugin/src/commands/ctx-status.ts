@@ -130,6 +130,8 @@ export function registerCtxStatusCommand(
 				const meta = getOrCreateSessionMeta(currentDeps.db, sessionId);
 				const windowGeometry = resolvePiWindowGeometry({
 					rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+					rawContextWindowSource:
+						usage?.contextWindow === undefined ? "catalog" : "observed",
 					model: ctx.model,
 					detectedContextLimit,
 					persistedInputTokens: meta.lastInputTokens,

@@ -99,6 +99,8 @@ export function renderStatusText(
 			: undefined;
 	const windowGeometry = resolvePiWindowGeometry({
 		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+		rawContextWindowSource:
+			usage?.contextWindow === undefined ? "catalog" : "observed",
 		model: ctx.model,
 		detectedContextLimit:
 			typeof meta?.detected_context_limit === "number" &&

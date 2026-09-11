@@ -1036,6 +1036,7 @@ function passUsage(usage: ContextUsage, limit: number): Record<string, number> {
 interface TransformGeometryWire {
     usable_soft: number;
     usable_hard: number;
+    absolute_wall: number;
     derivation: string;
 }
 
@@ -1057,6 +1058,7 @@ function transformGeometryForWire(
     return {
         usable_soft: geometry.usableSoft,
         usable_hard: geometry.usableHard,
+        absolute_wall: geometry.derivation.absoluteWall,
         derivation,
     };
 }

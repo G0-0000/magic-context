@@ -15674,6 +15674,12 @@ fn usage_numbers(
     let limit = usage
         .map(|u| u.context_limit_tokens as f64)
         .filter(|limit| *limit >= MIN_PLAUSIBLE_CONTEXT_LIMIT as f64)
+        .filter(|limit| {
+            geometry.is_none_or(|geometry| {
+                geometry.absolute_wall < MIN_PLAUSIBLE_CONTEXT_LIMIT
+                    || *limit <= geometry.absolute_wall as f64
+            })
+        })
         .or_else(|| {
             geometry
                 .map(|geometry| geometry.usable_soft as f64)
@@ -16095,6 +16101,31 @@ mod tests {
         let (limit, _, pct) = usage_numbers(Some(&one_m), None);
         assert_eq!(limit, 1_000_000.0);
         assert!((pct - 80.0).abs() < 0.01, "pct={pct}");
+
+        let poisoned = ModuleUsage {
+            current_total_input_tokens: 285_310,
+            context_limit_tokens: 593_717,
+            final_wire_input_tokens: 0,
+            final_wire_trusted: false,
+        };
+        let geometry = crate::transform::TransformGeometry {
+            usable_soft: 204_000,
+            usable_hard: 204_000,
+            absolute_wall: 272_000,
+            derivation: "provider-observed".to_string(),
+        };
+        let proof_above_emergency_wall = ModuleUsage {
+            current_total_input_tokens: 255_834,
+            context_limit_tokens: 255_834,
+            final_wire_input_tokens: 0,
+            final_wire_trusted: false,
+        };
+        let (limit, _, _) = usage_numbers(Some(&proof_above_emergency_wall), Some(&geometry));
+        assert_eq!(limit, 255_834.0);
+
+        let (limit, _, pct) = usage_numbers(Some(&poisoned), Some(&geometry));
+        assert_eq!(limit, 204_000.0);
+        assert!((pct - (285_310.0 / 204_000.0 * 100.0)).abs() < 0.01);
     }
 
     #[test]
@@ -16108,6 +16139,7 @@ mod tests {
         let geometry = crate::transform::TransformGeometry {
             usable_soft: 167_000,
             usable_hard: 200_000,
+            absolute_wall: 200_000,
             derivation: "drive".to_string(),
         };
         let (limit, _, _) = usage_numbers(None, Some(&geometry));
@@ -16127,6 +16159,7 @@ mod tests {
         let implausible = crate::transform::TransformGeometry {
             usable_soft: 12,
             usable_hard: 200_000,
+            absolute_wall: 200_000,
             derivation: String::new(),
         };
         let (limit, _, _) = usage_numbers(None, Some(&implausible));

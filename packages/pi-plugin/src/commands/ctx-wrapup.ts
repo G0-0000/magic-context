@@ -522,6 +522,8 @@ function resolvePiContextLimit(
 	return (
 		resolvePiUsableContextLimit({
 			rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+			rawContextWindowSource:
+				usage?.contextWindow === undefined ? "catalog" : "observed",
 			model: ctx.model,
 			detectedContextLimit,
 		}) ?? 128_000
