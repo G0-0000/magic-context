@@ -548,3 +548,120 @@ fn reasoning_clear_legacy_reexemption_prices_restoration_before_unit_adoption() 
         assert_eq!(native_mid_bytes(&native, "already"), bytes);
     }
 }
+
+#[test]
+fn reasoning_clear_subset_ingress_cannot_retire_an_omitted_legacy_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, mut request, _) = load_pre_fix_reasoning_fixture(dir.path());
+    append_native_reasoning(&mut request, "new");
+    let old = request
+        .messages
+        .iter()
+        .find(|message| message.mid == "old")
+        .unwrap();
+    let (reasoning_index, mut cleared_block) = old
+        .ck
+        .content
+        .iter()
+        .enumerate()
+        .find(|(_, block)| is_reasoning_block(block))
+        .map(|(index, block)| (index, block.clone()))
+        .unwrap();
+    cleared_block.kind = ck_wire::CkKind::Reasoning {
+        text: String::new(),
+        signature: None,
+    };
+    cleared_block.mark_modified();
+    let cleared_ck = ServedMessage::from_message(CkWireMessage::from_parts(
+        "assistant",
+        vec![cleared_block],
+        None,
+        ck_wire::ProviderExtras::new(),
+        ck_wire::HarnessMeta::default(),
+    ));
+
+    let mut loaded = db.load(&request.session_id).unwrap();
+    let served = loaded
+        .meta
+        .served_output_fingerprint
+        .iter_mut()
+        .find(|fingerprint| fingerprint.block_id == ck_wire::block_id("old", reasoning_index))
+        .unwrap();
+    served.content_hash = cleared_ck.block_fingerprints[0].0.clone();
+    served.serialized_len = cleared_ck.block_fingerprints[0].1;
+    let tag_numbers = tag_number_by_message(&db.load_tags_for_session(&request.session_id).unwrap());
+    let old_tag = tag_numbers["old"];
+    loaded.meta.reasoning_cleared_through_tag = old_tag;
+    loaded.meta.reasoning_cleared_through_ordinal = old_tag;
+    loaded
+        .core
+        .frozen_units
+        .retain(|unit| unit.key != "strip:native_reasoning_keep:old");
+    loaded
+        .core
+        .frozen_units
+        .push(strip_unit("reasoning_clear", "unrelated", ""));
+    db.commit(
+        &request.session_id,
+        loaded.row_version,
+        &loaded.core,
+        &loaded.meta,
+    )
+    .unwrap();
+
+    let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
+    ctx.temporal_awareness = false;
+    let mut native = ReasoningNativeHarness::new();
+    let mut first = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(first.response.action, "SOFT+");
+    assert!(first
+        .reasoning_clear_units
+        .iter()
+        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    native.attach(&db, &mut first, &request);
+    let cleared_bytes = native_mid_bytes(&native, "old");
+
+    let mut subset = request.clone();
+    subset.native_messages.as_mut().unwrap().retain(|message| {
+        !matches!(message["info"]["id"].as_str(), Some("old" | "already"))
+    });
+    subset.messages =
+        crate::codec::decode_opencode(subset.native_messages.as_ref().unwrap()).messages;
+    let mut contracted = transform_with_projection(&db, &subset, &ctx).unwrap();
+    assert_eq!(contracted.response.action, "SOFT+");
+    native.attach(&db, &mut contracted, &subset);
+
+    let mut expanded = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(expanded.response.action, "SOFT+");
+    assert!(expanded
+        .reasoning_clear_units
+        .iter()
+        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    native.attach(&db, &mut expanded, &request);
+    assert_eq!(native_mid_bytes(&native, "old"), cleared_bytes);
+    assert!(!db
+        .load(&request.session_id)
+        .unwrap()
+        .meta
+        .reasoning_clear_initialized);
+}
+
+#[test]
+fn reasoning_clear_legacy_arm_cannot_mint_for_just_demoted_exempt_assistant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, mut request, _) = load_pre_fix_reasoning_fixture(dir.path());
+    append_native_reasoning(&mut request, "new");
+    let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
+    ctx.temporal_awareness = false;
+
+    let mut held = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(held.response.action, "SOFT+");
+    assert!(!held
+        .reasoning_clear_units
+        .iter()
+        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    let mut native = ReasoningNativeHarness::new();
+    native.attach(&db, &mut held, &request);
+    assert!(String::from_utf8_lossy(&native_mid_bytes(&native, "old"))
+        .contains("thinking-old"));
+}

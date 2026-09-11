@@ -131,10 +131,16 @@ fn new_reasoning_clear_units(
         .meta
         .served_output_generation
         .map_or(generation == (0, 0, 0), |served| served == generation);
+    // Native evidence retains the fingerprint set that observed the legacy clears. A
+    // transient subset may replace the current served set without invalidating those clears.
     let previous = if legacy_allowed {
         snapshot
             .meta
-            .served_output_fingerprint
+            .reasoning_replay_evidence
+            .as_ref()
+            .filter(|proof| proof.generation == generation)
+            .map(|proof| &proof.ck_fingerprints)
+            .unwrap_or(&snapshot.meta.served_output_fingerprint)
             .iter()
             .map(|block| (block.block_id.as_str(), block.content_hash.as_str()))
             .collect::<HashMap<_, _>>()
@@ -246,6 +252,34 @@ pub(crate) fn reasoning_native_clear_mids(units: &[FrozenUnit]) -> HashSet<&str>
                 .or_else(|| unit.key.strip_prefix(LEGACY_REASONING_CLEAR_PREFIX))
         })
         .collect()
+}
+
+/// Retire legacy replay only after every mid in its retained native evidence has a durable clear.
+fn legacy_reasoning_adoption_complete(meta: &ModuleMeta, units: &[FrozenUnit]) -> bool {
+    let durable = reasoning_clear_mids(units);
+    if durable.is_empty()
+        || units
+            .iter()
+            .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX))
+    {
+        return false;
+    }
+    let Some(proof) = meta
+        .reasoning_replay_evidence
+        .as_ref()
+        .filter(|proof| proof.generation == reasoning_generation(meta))
+    else {
+        return false;
+    };
+    let known_mids = proof.native.keys().chain(proof.unit_native.keys());
+    let mut any_known = false;
+    for mid in known_mids {
+        any_known = true;
+        if !durable.contains(mid.as_str()) {
+            return false;
+        }
+    }
+    any_known
 }
 
 /// Restoring a legacy cleared assistant that becomes exempt also needs a priced

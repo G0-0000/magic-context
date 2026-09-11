@@ -5547,14 +5547,8 @@ fn apply_once(
             projection: &projection,
         },
     ));
-    let legacy_adoption_complete = core
-        .frozen_units
-        .iter()
-        .any(|unit| unit.key.starts_with("strip:reasoning_clear:"))
-        && !core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX));
+    let legacy_adoption_complete =
+        legacy_reasoning_adoption_complete(&loaded.meta, &core.frozen_units);
     if (is_bust_pass || legacy_adoption_complete)
         && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
         && req.serve_native

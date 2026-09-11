@@ -2802,4 +2802,79 @@ mod tests {
         );
         assert_eq!(parts[3]["callID"], "toolu_019MxMREqQYT875aJy8Q5w6W");
     }
+
+    #[test]
+    fn cleared_ck_reasoning_encodes_to_pre_fix_native_bytes_whole_and_chunked() {
+        let expected: Vec<Value> = serde_json::from_slice(include_bytes!(
+            "../../gen/reasoning-clear-legacy/pre-fix.native.json"
+        ))
+        .unwrap();
+        let expected = expected
+            .into_iter()
+            .find(|message| message["info"]["id"] == "already")
+            .unwrap();
+        let mut source = expected.clone();
+        source["parts"][0]["text"] = Value::String("pre-clear answer".to_string());
+        source["parts"].as_array_mut().unwrap().insert(
+            0,
+            json!({
+                "id": "a0",
+                "type": "reasoning",
+                "text": "thinking-already",
+                "metadata": {
+                    "custom": "retained",
+                    "signature": "signature-already"
+                }
+            }),
+        );
+        let decoded = decode_opencode_with_sidecar(std::slice::from_ref(&source), None);
+        let ck: Vec<CkWireMessage> = serde_json::from_slice(include_bytes!(
+            "../../gen/reasoning-clear-legacy/pre-fix.ck.json"
+        ))
+        .unwrap();
+        let mut cleared = ck
+            .into_iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("already"))
+            .unwrap();
+        let cleared_reasoning = cleared
+            .content
+            .iter_mut()
+            .find(|block| matches!(&block.kind, CkKind::Reasoning { .. }))
+            .unwrap();
+        assert!(matches!(
+            &cleared_reasoning.kind,
+            CkKind::Reasoning { text, signature } if text.is_empty() && signature.is_none()
+        ));
+        cleared_reasoning.mark_modified();
+        cleared.mark_modified();
+        let expected_bytes = serde_json::to_vec(&expected).unwrap();
+
+        let whole = encode_opencode_with_transition_state_and_reasoning_exemption(
+            std::slice::from_ref(&cleared),
+            &decoded.sidecar,
+            None,
+            &[],
+            Some("new"),
+            true,
+        );
+        assert_eq!(serde_json::to_vec(&whole[0]).unwrap(), expected_bytes);
+
+        let chunks = encode_opencode_chunks_with_transition_state(
+            &[cleared],
+            &decoded.sidecar,
+            None,
+            true,
+            NativeEncodeExemptions {
+                mutation_mids: &[],
+                reasoning_mid: Some("new"),
+            },
+            true,
+            0,
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            serde_json::to_vec(&chunks[0].value).unwrap(),
+            expected_bytes
+        );
+    }
 }
