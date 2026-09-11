@@ -390,11 +390,16 @@ function inactiveMemoryError(id: number, action: "updating" | "merging" | "archi
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
-    return (
-        error instanceof Error &&
-        "code" in error &&
-        (error as { code?: unknown }).code === "SQLITE_CONSTRAINT_UNIQUE"
-    );
+    if (!(error instanceof Error)) {
+        return false;
+    }
+    const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+    if (code === "SQLITE_CONSTRAINT_UNIQUE") {
+        return true;
+    }
+    // bun:sqlite sets SQLITE_CONSTRAINT_UNIQUE; node:sqlite may omit or remap
+    // the code. sqlite3_errmsg text is stable across adapters.
+    return /UNIQUE constraint failed/i.test(error.message);
 }
 
 const DUPLICATE_MEMORY_ERROR = (id: number): string =>

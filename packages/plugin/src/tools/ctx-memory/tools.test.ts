@@ -1983,6 +1983,129 @@ describe("createCtxMemoryTools", () => {
             }
         });
 
+        it("returns a friendly duplicate error when the constraint code is remapped but the message matches", async () => {
+            const originalPrepare = db.prepare.bind(db);
+            const originalExec = db.exec.bind(db);
+            let inTx = false;
+            (db as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+                const text = String(sql);
+                if (/\bBEGIN\b/i.test(text)) inTx = true;
+                try {
+                    return originalExec(sql);
+                } catch (error) {
+                    inTx = false;
+                    throw error;
+                } finally {
+                    if (/\bCOMMIT\b/i.test(text) || /\bROLLBACK\b/i.test(text)) inTx = false;
+                }
+            };
+            (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+                const stmt = originalPrepare(sql);
+                if (
+                    sql.includes(
+                        "FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?",
+                    )
+                ) {
+                    const originalGet = stmt.get.bind(stmt);
+                    stmt.get = (...args: unknown[]) => (inTx ? undefined : originalGet(...args));
+                }
+                if (sql.includes("UPDATE memories SET content = ?")) {
+                    return {
+                        run: () => {
+                            const error = new Error(
+                                "UNIQUE constraint failed: memories.project_path, memories.category, memories.normalized_hash",
+                            ) as Error & { code?: string };
+                            error.code = "SQLITE_ERROR";
+                            throw error;
+                        },
+                    };
+                }
+                return stmt;
+            };
+
+            try {
+                const existing = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONSTRAINTS",
+                    content: "timeout=5s",
+                });
+                const memory = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "CONFIG_VALUES",
+                    content: "cache_ttl=5m",
+                });
+                const result = await tools.ctx_memory.execute(
+                    {
+                        action: "update",
+                        ids: [memory.id],
+                        category: "CONSTRAINTS",
+                        content: "timeout=5s",
+                    },
+                    toolContext("ses-primary", "general"),
+                );
+
+                expect(result).toBe(
+                    `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
+                );
+                expect(String(result)).not.toContain("UNIQUE constraint failed");
+                expect(getMemoryById(db, memory.id)).toMatchObject({
+                    category: "CONFIG_VALUES",
+                    content: "cache_ttl=5m",
+                });
+            } finally {
+                (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+                (db as { exec: typeof originalExec }).exec = originalExec;
+            }
+        });
+
+        it("rethrows authority errors instead of treating them as duplicates", async () => {
+            const originalPrepare = db.prepare.bind(db);
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=5m",
+            });
+            (db as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+                const stmt = originalPrepare(sql);
+                if (sql.includes("UPDATE memories SET content = ?")) {
+                    return {
+                        run: () => {
+                            const error = new Error("authority is draining") as Error & {
+                                code: string;
+                            };
+                            error.code = "authority_draining";
+                            throw error;
+                        },
+                    };
+                }
+                return stmt;
+            };
+
+            let thrown: unknown;
+            try {
+                await tools.ctx_memory.execute(
+                    {
+                        action: "update",
+                        ids: [memory.id],
+                        content: "cache_ttl=10m",
+                    },
+                    toolContext("ses-primary", "general"),
+                );
+            } catch (error) {
+                thrown = error;
+            } finally {
+                (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
+            }
+
+            expect(thrown).toBeInstanceOf(Error);
+            expect(String(thrown)).toContain("authority is draining");
+            expect(String(thrown)).not.toContain("already exists as ID");
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                category: "CONFIG_VALUES",
+                content: "cache_ttl=5m",
+            });
+        });
+
         it("rolls back content updates when queueing the mutation fails", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
