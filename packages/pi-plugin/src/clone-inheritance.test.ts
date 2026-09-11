@@ -224,19 +224,17 @@ describe("Pi clone state inheritance", () => {
 			database.exec(
 				"CREATE TABLE mc_cache_state (session_id TEXT PRIMARY KEY, core_state TEXT, meta TEXT)",
 			);
-			database
-				.prepare("INSERT INTO mc_cache_state VALUES (?, ?, ?)")
-				.run(
-					"source",
-					JSON.stringify({
-						frozen_units: [
-							{ key: "strip:reasoning_clear:kept", frozen_payload: "" },
-						],
-					}),
-					JSON.stringify({
-						reasoning_replay_evidence: { source_hash: "source-only" },
-					}),
-				);
+			database.prepare("INSERT INTO mc_cache_state VALUES (?, ?, ?)").run(
+				"source",
+				JSON.stringify({
+					frozen_units: [
+						{ key: "strip:reasoning_clear:kept", frozen_payload: "" },
+					],
+				}),
+				JSON.stringify({
+					reasoning_replay_evidence: { source_hash: "source-only" },
+				}),
+			);
 			const result = copyWithEntries(database, branch);
 			expect(result.kind).toBe("migrated");
 			expect(
