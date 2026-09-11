@@ -190,8 +190,8 @@ pub struct SelectionContext {
     pub last_execute_ordinal: u64,
     /// True only for a scheduler execute caused by a context-pressure threshold crossing.
     pub scheduler_pressure_execute: bool,
-    /// Emergency idempotence latch: the input-token reading at the prior emergency
-    /// drop (0 if never), and whether any emergency drop has happened.
+    /// Shared force-episode latch. The sample is diagnostic, not an equality gate:
+    /// changing usage cannot grant another batch before exit or an independent bust.
     pub prior_input_sample: f64,
     pub has_prior_drop: bool,
     /// Agent-marked drop ids (the ctx_reduce §N§ signal), a caller-owned side input.
@@ -926,7 +926,7 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
 fn reclaim_ride_available(ctx: &SelectionContext) -> bool {
     ctx.pass_already_busting
         || ctx.supersession_ride_available
-        || ctx.pass_class == PassClass::EmergencyForce
+        || (ctx.pass_class == PassClass::EmergencyForce && !ctx.has_prior_drop)
 }
 
 fn two_pass_batch_can_apply(ctx: &SelectionContext) -> bool {
@@ -1069,7 +1069,7 @@ fn select_emergency(
     if !ctx.current_total_input_tokens.is_finite() || ctx.current_total_input_tokens <= 0.0 {
         return HashSet::new();
     }
-    if ctx.has_prior_drop && ctx.current_total_input_tokens == ctx.prior_input_sample {
+    if ctx.has_prior_drop && !ctx.pass_already_busting && !ctx.emergency_window_yields {
         return HashSet::new();
     }
 
@@ -1286,7 +1286,10 @@ pub(crate) fn select_reductions_with_outcome(
             // remain outside that population. Only active client tool arcs can be selected below.
             let all_active_floor_tokens = active_floor_tokens(items, frozen_keys);
             let emergency_arc_ids = select_emergency(&active_arcs, ctx, all_active_floor_tokens);
-            if !emergency_arc_ids.is_empty() || !two_pass_arc_ids.is_empty() {
+            if ctx.pass_already_busting
+                || !emergency_arc_ids.is_empty()
+                || !two_pass_arc_ids.is_empty()
+            {
                 for arc_id in &dedup_arc_ids {
                     arc_shapes.insert(arc_id.clone(), ArcShape::DedupFullDrop);
                 }
@@ -1303,11 +1306,13 @@ pub(crate) fn select_reductions_with_outcome(
                     .entry(arc_id.clone())
                     .or_insert(ArcShape::FullDrop);
             }
-            // Apply supersession only when this pass selected concrete reclaim work: an
-            // emergency eviction or a two-pass reclaim batch. If emergency mode has met
-            // its headroom target but selected nothing, defer supersession so it cannot
-            // create a cache bust by itself.
-            if cfg.smart_drops && (!emergency_arc_ids.is_empty() || !two_pass_arc_ids.is_empty()) {
+            // Supersession joins a priced batch, including the shared force-episode
+            // opportunity. A held latch without independent work grants no new ride.
+            if cfg.smart_drops
+                && (ctx.pass_already_busting
+                    || !emergency_arc_ids.is_empty()
+                    || !two_pass_arc_ids.is_empty())
+            {
                 // A superseded arc remains eligible while the ride gate is shut, so the count
                 // observed when it next opens summarizes everything accumulated between rides.
                 let intents = select_supersession(&active_arcs, &supersession_recent_message_ids);
@@ -2517,7 +2522,7 @@ mod tests {
         let mut emergency_ctx = base_ctx(PassClass::EmergencyForce);
         emergency_ctx.current_total_input_tokens = 90_000.0;
         emergency_ctx.ceiling_tokens = 100_000.0;
-        emergency_ctx.pass_already_busting = true;
+        emergency_ctx.has_prior_drop = true;
         let emergency = select_reductions(&items, &HashSet::new(), &emergency_ctx, &cfg);
 
         assert!(
@@ -2573,7 +2578,7 @@ mod tests {
             let mut ctx = base_ctx(PassClass::EmergencyForce);
             ctx.current_total_input_tokens = 90_000.0;
             ctx.ceiling_tokens = 100_000.0;
-            ctx.pass_already_busting = true;
+            ctx.has_prior_drop = true;
             if !select_reductions(&items, &HashSet::new(), &ctx, &cfg).is_empty() {
                 self_caused_busts += 1;
             }
@@ -2660,7 +2665,7 @@ mod tests {
             let mut ctx = base_ctx(PassClass::EmergencyForce);
             ctx.current_total_input_tokens = 70_000.0;
             ctx.ceiling_tokens = 100_000.0;
-            ctx.pass_already_busting = true;
+            ctx.has_prior_drop = true;
             let reductions = select_reductions(&items, &HashSet::new(), &ctx, &cfg);
             applied_reclaims += usize::from(!reductions.is_empty());
             let served = served_block_bytes(&items, &reductions);

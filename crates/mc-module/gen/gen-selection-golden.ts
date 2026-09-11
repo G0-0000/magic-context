@@ -98,7 +98,7 @@ interface CaseSpec {
 interface SelItemJson {
     id: string;
     ordinal: number;
-    kind: Record<string, unknown>;
+    kind: Record<string, unknown> | "Reasoning";
     provider_executed: boolean;
     byte_size: number;
     token_count: number | null;
@@ -249,7 +249,7 @@ function runTsSelector(spec: CaseSpec): Record<string, string> {
             tags,
             floorTags: tags,
             maxTag,
-            protectedTags: em.protectedTags,
+            protectedCutoff: em.protectedTags > 0 ? maxTag - em.protectedTags + 1 : null,
             currentTotalInputTokens: em.currentTotalInputTokens,
             ceilingTokens: em.ceilingTokens,
             priorInputSample: em.priorInputSample ?? 0,
@@ -516,6 +516,14 @@ const cases: CaseSpec[] = [
         smartDrops: false,
         passClass: "EmergencyForce",
         emergency: { currentTotalInputTokens: 200000, ceilingTokens: 160000, protectedTags: 0, priorInputSample: 200000, hasPriorDrop: true },
+        tags: [{ id: "c1", toolName: "bash", n: 1, byteSize: 80000 }],
+    },
+    {
+        label: "emergency: changed sample within latched episode → noop",
+        selector: "emergency",
+        smartDrops: false,
+        passClass: "EmergencyForce",
+        emergency: { currentTotalInputTokens: 201000, ceilingTokens: 160000, protectedTags: 0, priorInputSample: 200000, hasPriorDrop: true },
         tags: [{ id: "c1", toolName: "bash", n: 1, byteSize: 80000 }],
     },
     {

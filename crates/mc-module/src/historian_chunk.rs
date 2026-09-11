@@ -2199,6 +2199,43 @@ mod tests {
     }
 
     #[test]
+    fn substance_is_formatted_content_not_scan_saturation() {
+        let messages = vec![
+            msg("u1", 1, "user", vec![text("short")]),
+            msg(
+                "noise2",
+                2,
+                "user",
+                vec![text("<!-- OMO_INTERNAL_INITIATOR -->")],
+            ),
+            msg(
+                "a3",
+                3,
+                "assistant",
+                vec![text(&"long narrative ".repeat(1000))],
+            ),
+        ];
+        let stopped = project_and_build(&messages, 1, 6, 4);
+        assert!(stopped.has_more);
+        assert!(
+            stopped.token_estimate < 512,
+            "a saturated scan is not 512 tokens of substance"
+        );
+        assert!(!stopped.text.contains("OMO_INTERNAL"));
+        let filtered = project_and_build(&messages[..2], 1, 32_000, 3);
+        assert_eq!(stopped.text, filtered.text);
+        assert_eq!(stopped.token_estimate, filtered.token_estimate);
+        assert!(matches!(
+            tiny_chunk_assemble(false),
+            AssembleHistorianFiringOutcome::NoFire(HistorianNoFireReason::BelowBudget { .. })
+        ));
+        let AssembleHistorianFiringOutcome::Fire(firing) = tiny_chunk_assemble(true) else {
+            panic!("emergency escape must still fire")
+        };
+        assert!(firing.chunk.text.contains("tiny prompt"));
+    }
+
+    #[test]
     fn pending_noise_does_not_leak_when_budget_stops_before_next_block() {
         let messages = vec![
             msg("u1", 1, "user", vec![text("short")]),
