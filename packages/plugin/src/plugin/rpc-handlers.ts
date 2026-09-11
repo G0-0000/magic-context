@@ -1153,12 +1153,34 @@ async function writeSnapshotJson(
     }
 }
 
+const DEFAULT_HEAP_SNAPSHOT_MAX_RSS_MB = 2048;
+
+function resolveHeapSnapshotMaxRssBytes(): number {
+    const raw = process.env.MAGIC_CONTEXT_DEBUG_HEAP_SNAPSHOT_MAX_RSS_MB;
+    const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+    const megabytes =
+        Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_HEAP_SNAPSHOT_MAX_RSS_MB;
+    return megabytes * 1024 * 1024;
+}
+
 async function generateDebugHeapSnapshot(
     storageDir: string,
     memory: DebugMemoryUsageResponse,
 ): Promise<DebugHeapSnapshotResponse> {
     if (typeof Bun === "undefined" || typeof Bun.generateHeapSnapshot !== "function") {
         throw new Error("Bun.generateHeapSnapshot is unavailable in this runtime");
+    }
+    // Bun walks the whole JSC heap synchronously to build the snapshot. On a
+    // long-running serve (6.5 GB RSS, 2026-09-11) that walk tripped an
+    // EXC_BREAKPOINT inside Bun and took the host down, so the endpoint refuses
+    // above a resident-size ceiling instead of risking the process; the cheap
+    // debug.memoryUsage counters remain available at any size.
+    const rssBytes = memory.process.rss;
+    const maxRssBytes = resolveHeapSnapshotMaxRssBytes();
+    if (rssBytes > maxRssBytes) {
+        throw new Error(
+            `heap snapshot refused: process rss ${Math.round(rssBytes / (1024 * 1024))} MiB exceeds the ${Math.round(maxRssBytes / (1024 * 1024))} MiB ceiling (MAGIC_CONTEXT_DEBUG_HEAP_SNAPSHOT_MAX_RSS_MB); use debug.memoryUsage instead`,
+        );
     }
 
     const directory = join(storageDir, "heap-snapshots");
