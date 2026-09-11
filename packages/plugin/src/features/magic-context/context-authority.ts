@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { log } from "../../shared/logger";
 import type { Database, Statement } from "../../shared/sqlite";
 import { withPrivilegedWriter } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export const AUTHORITY_DOMAINS = ["memories", "notes"] as const;
 export type AuthorityDomain = (typeof AUTHORITY_DOMAINS)[number];
@@ -438,6 +439,7 @@ function installMarkerAndCaptureBounds(args: {
     contextStoreUuid: string;
     domains: readonly AuthorityDomain[];
 }): void {
+    const transactionStartedAt = performance.now();
     args.db.exec("BEGIN IMMEDIATE");
     try {
         withPrivilegedWriter(args.db, () => {
@@ -460,6 +462,7 @@ function installMarkerAndCaptureBounds(args: {
             }
         });
         args.db.exec("COMMIT");
+        logSlowWriteTransaction("authority_marker_capture", transactionStartedAt);
     } catch (error) {
         try {
             args.db.exec("ROLLBACK");
@@ -475,6 +478,7 @@ function capturedBoundsUnchanged(
     projectPath: string,
     domains: readonly AuthorityDomain[],
 ): boolean {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         const read = db.prepare(
@@ -491,6 +495,7 @@ function capturedBoundsUnchanged(
             );
         });
         db.exec("COMMIT");
+        logSlowWriteTransaction("authority_capture_check", transactionStartedAt);
         return unchanged;
     } catch (error) {
         try {

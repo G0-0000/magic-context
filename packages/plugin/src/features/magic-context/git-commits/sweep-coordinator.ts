@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../../shared/write-transaction-timing";
 
 export const GIT_SWEEP_COOLDOWN_MS = 10 * 60 * 1000;
 // Commit indexing can include two embedding drains (the indexer drain plus the
@@ -66,12 +67,14 @@ export interface AcquireGitSweepLeaseOptions {
 }
 
 function runImmediate<T>(db: Database, body: () => T): T {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
         const result = body();
         db.exec("COMMIT");
         committed = true;
+        logSlowWriteTransaction("git_sweep_lease", transactionStartedAt);
         return result;
     } finally {
         if (!committed) {

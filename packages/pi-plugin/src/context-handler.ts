@@ -187,6 +187,7 @@ import {
 	tagTranscript,
 } from "@magic-context/core/shared/tag-transcript";
 import { hasTrustedAbsoluteWall } from "@magic-context/core/shared/window-geometry";
+import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
 
 import {
 	clearAutoSearchForPiSession,
@@ -1996,10 +1997,12 @@ function runImmediateTransaction<T>(db: ContextDatabase, fn: () => T): T {
 	if (databaseIsInTransaction(db)) {
 		return db.transaction(fn)();
 	}
+	const transactionStartedAt = performance.now();
 	db.exec("BEGIN IMMEDIATE");
 	try {
 		const result = fn();
 		db.exec("COMMIT");
+		logSlowWriteTransaction("pi_compaction_queue", transactionStartedAt);
 		return result;
 	} catch (error) {
 		db.exec("ROLLBACK");

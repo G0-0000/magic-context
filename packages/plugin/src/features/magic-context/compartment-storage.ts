@@ -1,5 +1,6 @@
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { isCompartmentLeaseHeld } from "./compartment-lease";
 import { getIncrementDepthStatement } from "./compression-depth-storage";
 import { isNoContentCompartment } from "./no-content-compartment";
@@ -380,6 +381,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
     depthEndOrdinal: number,
 ): boolean {
     const now = Date.now();
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -406,6 +408,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
 
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("compartment_state_replace", transactionStartedAt);
         return true;
     } finally {
         if (!finished) {
@@ -589,6 +592,7 @@ export function promoteRecompStaging(
         })();
     }
 
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -619,6 +623,7 @@ export function promoteRecompStaging(
 
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("recomp_staging_promote", transactionStartedAt);
         return { compartments: staging.compartments, facts: staging.facts };
     } finally {
         if (!finished) {

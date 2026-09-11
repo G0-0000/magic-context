@@ -1,5 +1,6 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../../shared/write-transaction-timing";
 import { getPendingSmartNotes, type Note, type NoteCheckStatus } from "../storage-notes";
 import {
     SMART_NOTE_CHECK_LIVENESS_RECHECK_MS,
@@ -51,6 +52,7 @@ export function commitSmartNoteState(
     // does not apply to upgrades, so concurrent processes produced spurious
     // "database is locked" failures here. Taking the write lock at BEGIN time
     // waits under busy_timeout like every other writer.
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let leaseLost = false;
     let committed = false;
@@ -65,6 +67,7 @@ export function commitSmartNoteState(
             committed = true;
         }
         db.exec("COMMIT");
+        logSlowWriteTransaction("smart_note_commit", transactionStartedAt);
     } catch (error) {
         try {
             db.exec("ROLLBACK");

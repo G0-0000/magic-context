@@ -1,5 +1,6 @@
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 
 export interface CloneCompartmentRow {
@@ -122,12 +123,14 @@ function clonePiContentDecisions(
 }
 
 function runImmediate<T>(db: Database, body: () => T): T {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
         const result = body();
         db.exec("COMMIT");
         committed = true;
+        logSlowWriteTransaction("storage_clone_copy", transactionStartedAt);
         return result;
     } finally {
         if (!committed) {

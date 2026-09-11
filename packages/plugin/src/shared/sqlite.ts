@@ -45,6 +45,7 @@ import { statSync } from "node:fs";
 // we use, so calls typed against BetterSqlite3 work under bun:sqlite and
 // node:sqlite at runtime (both expose prepare/run/get/all/exec/close).
 import type BetterSqlite3 from "better-sqlite3";
+import { logSlowWriteTransaction } from "./write-transaction-timing";
 
 export type SqliteRuntime = "Bun" | "Node.js";
 
@@ -482,6 +483,7 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
     const previousDepth = privilegeDepth.get(db) ?? 0;
     const nested = isInTransaction(db);
     const savepoint = "mc_privilege_scope";
+    const transactionStartedAt = nested ? undefined : performance.now();
     if (nested) {
         db.exec(`SAVEPOINT ${savepoint}`);
     } else {
@@ -500,6 +502,9 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
             db.exec(`RELEASE ${savepoint}`);
         } else {
             db.exec("COMMIT");
+            if (transactionStartedAt !== undefined) {
+                logSlowWriteTransaction("privileged_writer", transactionStartedAt);
+            }
         }
         if (previousDepth > 0) privilegeDepth.set(db, previousDepth);
         else privilegeDepth.delete(db);

@@ -87,6 +87,7 @@ import {
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
+import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 /**
@@ -1663,6 +1664,7 @@ export function materializeM0Pi(
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the
 	// caller retry. m[1] is rendered and persisted INSIDE the same transaction as
 	// m[0] so cached_m0_bytes/cached_m1_bytes/markers/memory_block_ids stay paired.
+	const transactionStartedAt = performance.now();
 	try {
 		db.exec("BEGIN IMMEDIATE");
 	} catch (error) {
@@ -1765,6 +1767,7 @@ export function materializeM0Pi(
 		);
 
 		db.exec("COMMIT");
+		logSlowWriteTransaction("pi_materialize_cache", transactionStartedAt);
 		rememberPiMuralPayload(
 			state.sessionId,
 			frozenMuralDataUrl,
@@ -2342,6 +2345,7 @@ function softRefreshCachedM1Pi(args: {
 	memoryUpdateCount: number;
 	recomputed: boolean;
 } {
+	const transactionStartedAt = performance.now();
 	args.db.exec("BEGIN IMMEDIATE");
 	try {
 		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
@@ -2418,6 +2422,7 @@ function softRefreshCachedM1Pi(args: {
 			)
 			.run(m1Bytes, advancedBoundary, args.state.sessionId);
 		args.db.exec("COMMIT");
+		logSlowWriteTransaction("pi_soft_refresh_cache", transactionStartedAt);
 		return {
 			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
 			m1: rendered.text,

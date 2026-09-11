@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { V2_MEMORY_CATEGORIES } from "./memory/constants";
 import { normalizeStoredProjectPath, storedPathBelongsToIdentity } from "./project-identity";
 
@@ -378,10 +379,12 @@ export function bumpEpochsForWorkspaceMembers(
         run();
         return;
     }
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         run();
         db.exec("COMMIT");
+        logSlowWriteTransaction("workspace_epoch_bump", transactionStartedAt);
     } catch (error) {
         try {
             db.exec("ROLLBACK");
@@ -402,10 +405,12 @@ export function bumpEpochsForWorkspaceMemberSet(
         run();
         return;
     }
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         run();
         db.exec("COMMIT");
+        logSlowWriteTransaction("workspace_epoch_bump", transactionStartedAt);
     } catch (error) {
         try {
             db.exec("ROLLBACK");

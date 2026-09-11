@@ -9,6 +9,7 @@ import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { removeSystemReminders } from "../../shared/system-directive";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { clearCompressionDepth } from "./compression-depth-storage";
 import { messageFtsOrdinalRangeIsMapped, recordMessageFtsRowid } from "./message-fts-rowid-map";
 import { deleteSessionScopedRows, SESSION_SCOPED_TABLES } from "./storage-session-tables";
@@ -458,6 +459,7 @@ export function deleteIndexedMessage(db: Database, sessionId: string, messageId:
 }
 
 export function clearIndexedMessages(db: Database, sessionId: string): void {
+    const transactionStartedAt = performance.now();
     db.transaction(() => {
         getDeleteFtsStatement(db).run(sessionId);
         getDeleteFtsMapStatement(db).run(sessionId);
@@ -465,6 +467,7 @@ export function clearIndexedMessages(db: Database, sessionId: string): void {
         getDeleteIndexStatement(db).run(sessionId);
         clearCompressionDepth(db, sessionId);
     })();
+    logSlowWriteTransaction("message_index_clear", transactionStartedAt);
 }
 
 export function getIndexableContent(role: string, parts: unknown[]): string {
@@ -580,6 +583,7 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
     // plain FTS5 table with NO UNIQUE constraint, and the dedup is checked inside
     // the body. Taking the writer lock up front serializes concurrent terminal
     // updates so the second transaction sees the first transaction's source state.
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
@@ -592,6 +596,7 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
         );
         db.exec("COMMIT");
         committed = true;
+        logSlowWriteTransaction("message_index_incremental", transactionStartedAt);
         return result;
     } finally {
         if (!committed) {
@@ -617,6 +622,7 @@ export function indexMessagesAfterOrdinal(
     // The writer lock protects both duplicate checks and the progress row. Each
     // caller supplies only one bounded source page, so lock hold time is bounded
     // by that page rather than the full session history.
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
@@ -641,6 +647,7 @@ export function indexMessagesAfterOrdinal(
         ) {
             db.exec("COMMIT");
             committed = true;
+            logSlowWriteTransaction("message_index_reconcile", transactionStartedAt);
             return 0;
         }
 
@@ -695,6 +702,7 @@ export function indexMessagesAfterOrdinal(
         setIndexProgress(db, sessionId, coveredWatermark, nextDirtyFloor, now);
         db.exec("COMMIT");
         committed = true;
+        logSlowWriteTransaction("message_index_reconcile", transactionStartedAt);
     } finally {
         if (!committed) {
             try {
@@ -715,13 +723,13 @@ export function ensureMessagesIndexed(
     const messages = readMessages(sessionId);
 
     if (messages.length === 0) {
-        db.transaction(() => clearIndexedMessages(db, sessionId))();
+        clearIndexedMessages(db, sessionId);
         return;
     }
 
     let lastIndexedOrdinal = getLastIndexedOrdinal(db, sessionId);
     if (lastIndexedOrdinal > messages.length) {
-        db.transaction(() => clearIndexedMessages(db, sessionId))();
+        clearIndexedMessages(db, sessionId);
         lastIndexedOrdinal = 0;
     }
 
@@ -840,6 +848,7 @@ export function sweepOrphanedOpenCodeMessageIndexes(
                 : (candidates[candidates.length - 1]?.session_id ?? cursor);
         const completedAt = candidates.length < batchSize ? now : null;
 
+        const transactionStartedAt = performance.now();
         db.exec("BEGIN IMMEDIATE");
         let committed = false;
         let deleted = 0;
@@ -864,6 +873,7 @@ export function sweepOrphanedOpenCodeMessageIndexes(
             persistMessageHistoryOrphanSweepState(db, nextCursor, completedAt);
             db.exec("COMMIT");
             committed = true;
+            logSlowWriteTransaction("message_index_orphan_sweep", transactionStartedAt);
         } finally {
             if (!committed) {
                 try {

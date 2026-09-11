@@ -47,6 +47,7 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { reconcileForkOrphanedCompactionMarkers } from "./compaction-marker-manager";
 import {
     COMPARTMENT_RENDER_EPOCH,
@@ -2330,6 +2331,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
     let m1Text = M1_EMPTY_PLACEHOLDER;
     let m1Bytes = Buffer.from(m1Text, "utf8");
+    const transactionStartedAt = performance.now();
     options.db.exec("BEGIN IMMEDIATE");
     try {
         const currentWorkspace = resolveWorkspaceRenderContext({
@@ -2473,6 +2475,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             .run(baselineEndMessageId, options.sessionId);
 
         options.db.exec("COMMIT");
+        logSlowWriteTransaction("opencode_materialize_cache", transactionStartedAt);
         options.state.cachedM0MuralDataUrl = frozenMuralDataUrl;
         options.state.cachedM0MuralHash = frozenMuralHash;
     } catch (error) {
@@ -2916,6 +2919,7 @@ function replayCachedM1(state: M0M1State): string {
 }
 
 function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
+    const transactionStartedAt = performance.now();
     options.db.exec("BEGIN IMMEDIATE");
     try {
         const row = readCachedM0M1Row(options.db, options.sessionId);
@@ -2970,6 +2974,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
                 options.sessionId,
             );
         options.db.exec("COMMIT");
+        logSlowWriteTransaction("opencode_soft_refresh_cache", transactionStartedAt);
         options.state.cachedM1Bytes = m1Bytes;
         options.state.snapshotMarkers = markers;
         return rendered;

@@ -8,6 +8,7 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { stableStringify } from "../../shared/stable-json";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import {
     decodeMergedReasoningParts,
     readFrozenMergedReasoningParts,
@@ -525,6 +526,7 @@ export function getWrapupInProgressState(
     const state = readRawWrapupState(db, sessionId);
     if (!state) return null;
     if (state.expiresAt > now) return state;
+    const transactionStartedAt = performance.now();
     try {
         db.exec("BEGIN IMMEDIATE");
     } catch {
@@ -543,6 +545,7 @@ export function getWrapupInProgressState(
         }
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("storage_meta_wrapup_expiry_cleanup", transactionStartedAt);
     } finally {
         if (!finished) {
             try {
@@ -572,6 +575,7 @@ export function acquireWrapupInProgress(
         expiresAt: acquiredAt + WRAPUP_IN_PROGRESS_TTL_MS,
         updatedAt: acquiredAt,
     };
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -580,6 +584,7 @@ export function acquireWrapupInProgress(
         if (current && current.expiresAt > now && current.holderId !== state.holderId) {
             db.exec("COMMIT");
             finished = true;
+            logSlowWriteTransaction("storage_meta_wrapup_acquire", transactionStartedAt);
             return { ok: false, state: current };
         }
         db.prepare("UPDATE session_meta SET wrapup_in_progress_state = ? WHERE session_id = ?").run(
@@ -588,6 +593,7 @@ export function acquireWrapupInProgress(
         );
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("storage_meta_wrapup_acquire", transactionStartedAt);
         return { ok: true, state: next };
     } finally {
         if (!finished) {
@@ -607,6 +613,7 @@ export function updateWrapupInProgress(
     updates: Partial<Omit<WrapupInProgressState, "holderId" | "acquiredAt">>,
     now = Date.now(),
 ): WrapupInProgressState | null {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -629,6 +636,7 @@ export function updateWrapupInProgress(
         );
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("storage_meta_wrapup_update", transactionStartedAt);
         return next;
     } finally {
         if (!finished) {
@@ -642,6 +650,7 @@ export function updateWrapupInProgress(
 }
 
 export function releaseWrapupInProgress(db: Database, sessionId: string, holderId: string): void {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -653,6 +662,7 @@ export function releaseWrapupInProgress(db: Database, sessionId: string, holderI
         }
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("storage_meta_wrapup_release", transactionStartedAt);
     } finally {
         if (!finished) {
             try {

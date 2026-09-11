@@ -127,6 +127,7 @@ import type {
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
+import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
 
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
@@ -1241,6 +1242,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 			let published = false;
+			const transactionStartedAt = performance.now();
 			db.exec("BEGIN IMMEDIATE");
 			try {
 				if (!isCompartmentLeaseHeld(db, sessionId, compartmentLeaseHolderId)) {
@@ -1321,6 +1323,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 				db.exec("COMMIT");
 				published = true;
+				logSlowWriteTransaction("pi_historian_publish", transactionStartedAt);
 			} finally {
 				if (!published) {
 					try {

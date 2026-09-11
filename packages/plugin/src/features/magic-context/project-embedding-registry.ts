@@ -5,6 +5,7 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import {
     buildCanonicalChunkTextFromFts,
     buildCompartmentSummaryFallbackText,
@@ -912,6 +913,7 @@ function recordActiveEmbeddingIdentity(
     }
 
     const now = Date.now();
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         if (features.memoryEnabled) {
@@ -927,6 +929,7 @@ function recordActiveEmbeddingIdentity(
             recordScopeActiveIdentity(db, projectIdentity, "chunk", currentChunkIdentity, now);
         }
         db.exec("COMMIT");
+        logSlowWriteTransaction("embedding_identity_record", transactionStartedAt);
     } catch (error) {
         try {
             db.exec("ROLLBACK");
@@ -1138,6 +1141,7 @@ export function sweepStaleEmbeddingIdentitiesForProject(
     // identity marker until its final vector is gone makes later timer ticks
     // resume safely without holding a writer lock across the whole backlog.
     let remainingBudget = STALE_EMBEDDING_GC_BATCH_SIZE;
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         for (const { scope, enabled, currentModelId } of scopes) {
@@ -1176,6 +1180,7 @@ export function sweepStaleEmbeddingIdentitiesForProject(
             }
         }
         db.exec("COMMIT");
+        logSlowWriteTransaction("embedding_stale_gc", transactionStartedAt);
     } catch (error) {
         try {
             db.exec("ROLLBACK");

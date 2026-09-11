@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { getHarness } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { resolveProjectIdentity } from "./memory/project-identity";
 import { recordSessionProjectIdentity } from "./session-project-storage";
 
@@ -77,10 +78,12 @@ function ensureBackfillStateTable(db: Database): void {
 }
 
 function withImmediateTransaction<T>(db: Database, fn: () => T): T {
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     try {
         const result = fn();
         db.exec("COMMIT");
+        logSlowWriteTransaction("session_project_backfill", transactionStartedAt);
         return result;
     } catch (error) {
         try {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export const MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE = 500;
 
@@ -90,6 +91,7 @@ export function backfillMessageFtsRowidMapBatch(
         completed: false,
     };
 
+    const transactionStartedAt = performance.now();
     db.transaction(() => {
         const state = getBackfillState(db);
         if (state.completed) {
@@ -139,6 +141,7 @@ export function backfillMessageFtsRowidMapBatch(
             completed,
         };
     })();
+    logSlowWriteTransaction("message_fts_rowid_backfill", transactionStartedAt);
 
     return progress;
 }

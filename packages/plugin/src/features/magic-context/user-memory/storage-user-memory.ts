@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../../shared/write-transaction-timing";
 
 /**
  * Default candidate decay TTL (30 days). review-user-memories runs daily with a
@@ -51,6 +52,7 @@ export function insertUserMemoryCandidates(
     const stmt = db.prepare(
         "INSERT INTO user_memory_candidates (content, session_id, source_compartment_start, source_compartment_end, created_at) VALUES (?, ?, ?, ?, ?)",
     );
+    const transactionStartedAt = performance.now();
     db.transaction(() => {
         for (const c of candidates) {
             stmt.run(
@@ -62,6 +64,7 @@ export function insertUserMemoryCandidates(
             );
         }
     })();
+    logSlowWriteTransaction("user_memory_candidate_insert", transactionStartedAt);
 }
 
 export function getUserMemoryCandidates(db: Database): UserMemoryCandidate[] {

@@ -28,6 +28,7 @@ import {
 } from "../../features/magic-context/storage-notes";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
 
@@ -49,7 +50,9 @@ export function recordNoteNudgeDeliveryTime(sessionId: string): void {
  * Signal that a trigger event occurred. Call from hook layer when any of the 3 triggers fire.
  */
 export function onNoteTrigger(db: Database, sessionId: string, trigger: NoteNudgeTrigger): void {
+    const transactionStartedAt = performance.now();
     setPersistedNoteNudgeTrigger(db, sessionId);
+    logSlowWriteTransaction("note_nudge_trigger", transactionStartedAt);
     sessionLog(sessionId, `note-nudge: trigger fired (${trigger}), triggerPending=true`);
 }
 
