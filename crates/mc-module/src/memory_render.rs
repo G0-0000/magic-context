@@ -15,7 +15,9 @@
 //! is the slice-4d integration decision, already ruled; the byte render here is pure.
 
 use crate::decay_render::{render_decayed_compartments, DecayRenderCompartment};
-use mc_store::{StoredMemory, StoredMemoryMutation, WorkspaceMembership};
+use mc_store::{
+    StoredMemory, StoredMemoryMutation, WorkspaceMembership, MEMORY_VISIBILITY_MUTATION_CATEGORY,
+};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -327,7 +329,10 @@ pub fn render_memory_updates(
         match m.mutation_type.as_str() {
             "update" => {
                 let category_attr = match &m.category {
-                    Some(category) if category != "__mc_visibility__" && !category.is_empty() => {
+                    Some(category)
+                        if category != MEMORY_VISIBILITY_MUTATION_CATEGORY
+                            && !category.is_empty() =>
+                    {
                         format!(" category=\"{}\"", escape_xml_attr(category))
                     }
                     _ => String::new(),

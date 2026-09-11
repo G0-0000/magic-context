@@ -113,6 +113,7 @@ export {
     getMemoryMutation,
     getMemoryMutationsForRender,
     getMemoryMutationsForRenderByProjects,
+    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     type MemoryMutationLogRow,
     type MemoryMutationType,
     queueMemoryMutation,

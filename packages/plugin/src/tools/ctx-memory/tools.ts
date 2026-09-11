@@ -390,14 +390,11 @@ function inactiveMemoryError(id: number, action: "updating" | "merging" | "archi
 }
 
 function isUniqueConstraintError(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-        return false;
-    }
-    const code = "code" in error ? (error as { code?: unknown }).code : undefined;
-    if (typeof code === "string" && code.startsWith("SQLITE_CONSTRAINT")) {
-        return true;
-    }
-    return error.message.includes("UNIQUE constraint failed");
+    return (
+        error instanceof Error &&
+        "code" in error &&
+        (error as { code?: unknown }).code === "SQLITE_CONSTRAINT_UNIQUE"
+    );
 }
 
 const DUPLICATE_MEMORY_ERROR = (id: number): string =>

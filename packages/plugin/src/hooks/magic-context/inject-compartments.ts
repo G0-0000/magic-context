@@ -21,6 +21,7 @@ import type { MuralWireOptions } from "../../features/magic-context/mural/resolv
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
+    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
     getMaxMemoryMutationIdForProjects,
@@ -2571,7 +2572,7 @@ function renderMemoryUpdatesBlock(args: {
         if (mutation.visibilityChanged && mutation.newContent === null) continue;
         if (mutation.mutationType === "update") {
             const categoryAttr =
-                mutation.category && mutation.category !== "__mc_visibility__"
+                mutation.category && mutation.category !== MEMORY_VISIBILITY_MUTATION_CATEGORY
                     ? ` category="${escapeXmlAttr(mutation.category)}"`
                     : "";
             lines.push(

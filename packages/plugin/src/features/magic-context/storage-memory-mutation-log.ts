@@ -3,7 +3,7 @@ import type { Database } from "../../shared/sqlite";
 export type MemoryMutationType = "archive" | "delete" | "update" | "superseded";
 
 const MEMORY_MUTATION_TYPES = new Set<string>(["archive", "delete", "update", "superseded"]);
-const MEMORY_VISIBILITY_MUTATION_CATEGORY = "__mc_visibility__";
+export const MEMORY_VISIBILITY_MUTATION_CATEGORY = "__mc_visibility__";
 const MAX_MEMORY_REPLACEMENT_DEPTH = 8;
 
 // Terminal mutations mean the memory LEFT the active set (renders as
