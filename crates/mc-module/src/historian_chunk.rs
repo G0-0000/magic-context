@@ -547,6 +547,8 @@ pub struct AssembledHistorianFiring {
     pub to_ordinal: u64,
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
+    /// Trigger evidence carried into the firing transition so it can attach the producer model.
+    pub recent_decision: Option<mc_store::HistorianRecentDecision>,
     /// Native message ids mapped to local YYYY-MM-DD dates for temporal headings.
     pub boundary_dates: BTreeMap<String, String>,
 }
@@ -595,6 +597,7 @@ impl AssembledHistorianFiring {
             validate_options: self.validate_options,
             now_ms: self.now_ms,
             failure_backoff_at_ms: self.failure_backoff_at_ms,
+            recent_decision: self.recent_decision.clone(),
             completion_now_ms: crate::now_ms,
             publication_fence: None,
         }
@@ -854,6 +857,7 @@ pub fn assemble_historian_firing(
             },
             now_ms,
             failure_backoff_at_ms: config.failure_backoff_at_ms,
+            recent_decision: None,
             boundary_dates,
             chunk,
         },

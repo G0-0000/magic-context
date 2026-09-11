@@ -2779,6 +2779,46 @@ pub struct HistorianChunkRange {
     pub to_ordinal: u64,
 }
 
+/// Outcome of one historian trigger evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorianDecision {
+    Fired,
+    NoFire,
+}
+
+/// Bounded, durable evidence for one historian trigger decision. Measurement fields are
+/// quantized before construction so repeated equivalent no-fire observations stay write-free.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorianRecentDecision {
+    pub at_ms: i64,
+    pub request_observed_at_ms: i64,
+    pub decision: HistorianDecision,
+    pub cause: String,
+    pub eligible_tokens: u64,
+    pub bar_tokens: u64,
+    pub pressure_pct: u16,
+    pub drain_latch: bool,
+    pub chunk_range: Option<HistorianChunkRange>,
+    pub producer_model: Option<String>,
+    pub completed_at_ms: Option<i64>,
+    pub apply_row_version: Option<u64>,
+}
+
+impl HistorianRecentDecision {
+    fn same_observation(&self, other: &Self) -> bool {
+        self.decision == other.decision
+            && self.cause == other.cause
+            && self.eligible_tokens == other.eligible_tokens
+            && self.bar_tokens == other.bar_tokens
+            && self.pressure_pct == other.pressure_pct
+            && self.drain_latch == other.drain_latch
+            && self.chunk_range == other.chunk_range
+    }
+}
+
+pub const HISTORIAN_RECENT_DECISION_LIMIT: usize = 16;
+
 /// Content-sensitive identity for one message selected into a historian firing.
 /// The outer firing vector preserves message order; each block vector preserves
 /// the canonical block order already tracked by [`ModuleMeta::block_identity_by_mid`].
@@ -2837,6 +2877,10 @@ pub struct HistorianDurableState {
     /// diagnostics block, so the skip branch must be readable from the state dump. Cleared on fire.
     #[serde(default)]
     pub last_no_fire: Option<String>,
+    /// Newest-last trigger decisions retained for incident diagnosis. Fire decisions are always
+    /// appended; identical quantized no-fire observations are change-gated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_decisions: Vec<HistorianRecentDecision>,
     /// Consecutive failures on the historian publication path. This is diagnostic-only
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
     #[serde(default)]
@@ -2859,7 +2903,54 @@ impl Default for HistorianDurableState {
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
+            recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
+        }
+    }
+}
+
+impl HistorianDurableState {
+    /// Append one decision while suppressing only equivalent no-fire observations.
+    pub fn record_recent_decision(&mut self, decision: HistorianRecentDecision) -> bool {
+        if decision.decision == HistorianDecision::NoFire
+            && self
+                .recent_decisions
+                .last()
+                .is_some_and(|previous| previous.same_observation(&decision))
+        {
+            return false;
+        }
+        if self.recent_decisions.len() >= HISTORIAN_RECENT_DECISION_LIMIT {
+            let remove_through = self.recent_decisions.len() - HISTORIAN_RECENT_DECISION_LIMIT;
+            self.recent_decisions.drain(..=remove_through);
+        }
+        self.recent_decisions.push(decision);
+        true
+    }
+
+    /// Fill the model on a fire decision already persisted by trigger preparation. If the
+    /// preparation write lost its CAS race, append the decision here with the model attached.
+    pub fn start_recent_fire(&mut self, decision: HistorianRecentDecision) {
+        if let Some(previous) = self.recent_decisions.last_mut().filter(|previous| {
+            previous.decision == HistorianDecision::Fired
+                && previous.completed_at_ms.is_none()
+                && previous.at_ms == decision.at_ms
+                && previous.request_observed_at_ms == decision.request_observed_at_ms
+                && previous.same_observation(&decision)
+        }) {
+            previous.producer_model = decision.producer_model;
+            return;
+        }
+        self.record_recent_decision(decision);
+    }
+
+    /// Attach the atomic publication outcome to the newest unresolved fire record.
+    fn complete_latest_fire(&mut self, completed_at_ms: i64, apply_row_version: u64) {
+        if let Some(decision) = self.recent_decisions.iter_mut().rev().find(|decision| {
+            decision.decision == HistorianDecision::Fired && decision.completed_at_ms.is_none()
+        }) {
+            decision.completed_at_ms = Some(completed_at_ms);
+            decision.apply_row_version = Some(apply_row_version);
         }
     }
 }
@@ -12165,6 +12256,7 @@ impl McStore {
                 firing_seq: historian.firing_seq,
                 failure_backoff_at_ms,
                 last_failure,
+                recent_decisions: historian.recent_decisions.clone(),
                 consecutive_publish_failures: if count_publish_failure {
                     historian.consecutive_publish_failures.saturating_add(1)
                 } else {
@@ -12417,9 +12509,9 @@ impl McStore {
                     .unwrap_or(1)
                     .max(request.publication_floor_ordinal.max(1)),
             );
-            meta.historian = idle_historian_after_success(meta.historian.firing_seq);
-
             let next = current as u64 + 1;
+            meta.historian = idle_historian_after_success(&meta.historian);
+            meta.historian.complete_latest_fire(current_time_ms(), next);
             let meta_json = match serde_json::to_string(&meta) {
                 Ok(json) => json,
                 Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
@@ -17697,9 +17789,10 @@ fn stable_content_hash(content: &str) -> u64 {
     hash
 }
 
-fn idle_historian_after_success(firing_seq: u64) -> HistorianDurableState {
+fn idle_historian_after_success(current: &HistorianDurableState) -> HistorianDurableState {
     HistorianDurableState {
-        firing_seq,
+        firing_seq: current.firing_seq,
+        recent_decisions: current.recent_decisions.clone(),
         ..HistorianDurableState::default()
     }
 }
@@ -23077,10 +23170,81 @@ mod tests {
                 failure_backoff_at_ms: Some(456),
                 last_failure: None,
                 last_no_fire: None,
+                recent_decisions: vec![HistorianRecentDecision {
+                    at_ms: 123,
+                    request_observed_at_ms: 120,
+                    decision: HistorianDecision::Fired,
+                    cause: "trigger_true:pressure".to_string(),
+                    eligible_tokens: 12_000,
+                    bar_tokens: 19_500,
+                    pressure_pct: 60,
+                    drain_latch: false,
+                    chunk_range: Some(HistorianChunkRange {
+                        from_ordinal: 10,
+                        to_ordinal: 20,
+                    }),
+                    producer_model: Some("test/model".to_string()),
+                    completed_at_ms: None,
+                    apply_row_version: None,
+                }],
                 consecutive_publish_failures: 0,
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn historian_recent_decisions_are_change_gated_and_bounded() {
+        let mut historian = HistorianDurableState::default();
+        let decision = |at_ms, eligible_tokens| HistorianRecentDecision {
+            at_ms,
+            request_observed_at_ms: at_ms - 1,
+            decision: HistorianDecision::NoFire,
+            cause: "below_proactive_floor".to_string(),
+            eligible_tokens,
+            bar_tokens: 19_500,
+            pressure_pct: 40,
+            drain_latch: false,
+            chunk_range: Some(HistorianChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 10,
+            }),
+            producer_model: None,
+            completed_at_ms: None,
+            apply_row_version: None,
+        };
+
+        assert!(historian.record_recent_decision(decision(10, 100)));
+        assert!(!historian.record_recent_decision(decision(20, 100)));
+        assert_eq!(historian.recent_decisions.len(), 1);
+
+        for index in 1..=HISTORIAN_RECENT_DECISION_LIMIT {
+            assert!(
+                historian.record_recent_decision(decision(20 + index as i64, 100 + index as u64,))
+            );
+        }
+        assert_eq!(
+            historian.recent_decisions.len(),
+            HISTORIAN_RECENT_DECISION_LIMIT
+        );
+        assert_eq!(
+            historian.recent_decisions.first().unwrap().eligible_tokens,
+            101
+        );
+        assert_eq!(
+            historian.recent_decisions.last().unwrap().eligible_tokens,
+            116
+        );
+
+        let mut fired = decision(50, 116);
+        fired.decision = HistorianDecision::Fired;
+        fired.cause = "trigger_true:tail_size".to_string();
+        assert!(historian.record_recent_decision(fired.clone()));
+        assert!(historian.record_recent_decision(fired));
+        assert_eq!(
+            historian.recent_decisions.len(),
+            HISTORIAN_RECENT_DECISION_LIMIT
+        );
     }
 
     #[test]
@@ -23121,7 +23285,7 @@ mod tests {
             );
         }
 
-        let successful = idle_historian_after_success(predicate.firing_seq);
+        let successful = idle_historian_after_success(&meta.historian);
         assert_eq!(successful.consecutive_publish_failures, 0);
     }
 
@@ -23299,6 +23463,10 @@ mod tests {
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.historian.state, HistorianPhase::Idle);
         assert_eq!(loaded.meta.historian.firing_seq, 7);
+        let decision = loaded.meta.historian.recent_decisions.last().unwrap();
+        assert_eq!(decision.producer_model.as_deref(), Some("test/model"));
+        assert!(decision.completed_at_ms.is_some());
+        assert_eq!(decision.apply_row_version, Some(first.row_version));
         assert_eq!(loaded.meta.publication_floor_ordinal, Some(21));
         assert_eq!(store.max_memory_id(&["git:proj".to_string()]).unwrap(), 1);
     }

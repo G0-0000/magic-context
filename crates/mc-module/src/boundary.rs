@@ -327,6 +327,8 @@ pub struct TriggerDecision {
 /// (eligible content vs the bar, and how much tail the protected boundary is holding back).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriggerProgress {
+    /// First ordinal in the eligible head measured by this evaluation.
+    pub eligible_start_ordinal: u64,
     /// TC-chunked tokens in the eligible head (what tail_size compares against the bar).
     pub eligible_chunk_tokens: f64,
     /// The tail_size fire bar (trigger_budget x multiplier).
@@ -796,6 +798,7 @@ fn check_compartment_trigger_with_index(
         }
     };
     let progress = TriggerProgress {
+        eligible_start_ordinal: boundary.eligible_head.start,
         eligible_chunk_tokens: chunk.tokens,
         tail_size_bar: trigger_budget * TAIL_SIZE_TRIGGER_MULTIPLIER,
         n_tokens: boundary.n_tokens,

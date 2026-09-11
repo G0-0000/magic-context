@@ -11,12 +11,14 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(test)]
+use mc_store::HistorianDecision;
 use mc_store::{
     CompartmentSetGeneration, FactCandidate, HistorianChunkRange, HistorianDurableState,
     HistorianEventCandidate, HistorianPhase, HistorianPrimerCandidate, HistorianPublishError,
     HistorianPublishPredicate, HistorianPublishRequest, HistorianPublishResult,
-    HistorianSelectedMessageIdentity, HistorianUserMemoryCandidate, McStore, McStoreError,
-    StoredCompartment,
+    HistorianRecentDecision, HistorianSelectedMessageIdentity, HistorianUserMemoryCandidate,
+    McStore, McStoreError, StoredCompartment,
 };
 
 use crate::historian_producer::{
@@ -428,6 +430,7 @@ pub fn fire(
     expected_revert_epoch: u64,
     compartment_set_generation: CompartmentSetGeneration,
     fired_at_ms: i64,
+    recent_decision: Option<HistorianRecentDecision>,
 ) -> Result<FireOutcome, HistorianStateError> {
     if from_ordinal > to_ordinal {
         return Err(HistorianStateError::InvalidRange {
@@ -437,6 +440,16 @@ pub fn fire(
     }
     if current.state != HistorianPhase::Idle {
         return Ok(FireOutcome::Busy(current.clone()));
+    }
+
+    let mut recent_decisions = current.recent_decisions.clone();
+    if let Some(decision) = recent_decision {
+        let mut decision_state = HistorianDurableState {
+            recent_decisions,
+            ..HistorianDurableState::default()
+        };
+        decision_state.start_recent_fire(decision);
+        recent_decisions = decision_state.recent_decisions;
     }
 
     Ok(FireOutcome::Fired(HistorianDurableState {
@@ -457,6 +470,7 @@ pub fn fire(
         last_failure: current.last_failure.clone(),
         // A fire resolves whatever skip reason preceded it.
         last_no_fire: None,
+        recent_decisions,
         consecutive_publish_failures: current.consecutive_publish_failures,
     }))
 }
@@ -501,7 +515,7 @@ pub fn tx_committed(
     current: &HistorianDurableState,
 ) -> Result<HistorianDurableState, HistorianStateError> {
     require_phase(current, HistorianPhase::Publishing, "tx_committed")?;
-    let mut next = idle_after_success(current.firing_seq);
+    let mut next = idle_after_success(current);
     next.consecutive_publish_failures = 0;
     Ok(next)
 }
@@ -537,6 +551,7 @@ pub fn abandon_with_detail(
         firing_seq: current.firing_seq,
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail.or_else(|| current.last_failure.clone()),
+        recent_decisions: current.recent_decisions.clone(),
         consecutive_publish_failures: current.consecutive_publish_failures,
         ..HistorianDurableState::default()
     }
@@ -1128,6 +1143,7 @@ pub struct HistorianFireRequest<'a> {
     pub validate_options: ValidateOptions,
     pub now_ms: i64,
     pub failure_backoff_at_ms: i64,
+    pub recent_decision: Option<HistorianRecentDecision>,
     pub completion_now_ms: fn() -> i64,
     pub publication_fence: Option<&'a dyn HistorianPublicationFence>,
 }
@@ -1575,6 +1591,10 @@ where
             request.observed_chunk_fingerprint,
         )?;
         let loaded = request.store.load(request.session_id)?;
+        let mut recent_decision = request.recent_decision.clone();
+        if let Some(decision) = recent_decision.as_mut() {
+            decision.producer_model = Some(model.clone());
+        }
         let mut fired = match fire(
             &loaded.meta.historian,
             request.from_ordinal,
@@ -1584,6 +1604,7 @@ where
             request.expected_revert_epoch,
             request.compartment_set_generation,
             request.now_ms,
+            recent_decision,
         )? {
             FireOutcome::Busy(state) => return Ok(HistorianDriveOutcome::Busy(state)),
             FireOutcome::Fired(state) => state,
@@ -2134,9 +2155,10 @@ fn require_phase(
     }
 }
 
-fn idle_after_success(firing_seq: u64) -> HistorianDurableState {
+fn idle_after_success(current: &HistorianDurableState) -> HistorianDurableState {
     HistorianDurableState {
-        firing_seq,
+        firing_seq: current.firing_seq,
+        recent_decisions: current.recent_decisions.clone(),
         ..HistorianDurableState::default()
     }
 }
@@ -2693,6 +2715,7 @@ mod tests {
             validate_options: validate_options(),
             now_ms: 123,
             failure_backoff_at_ms: 999,
+            recent_decision: None,
             completion_now_ms: || 123,
             publication_fence: None,
         }
@@ -2740,6 +2763,7 @@ mod tests {
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
+            recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
         }
     }
@@ -3558,6 +3582,7 @@ mod tests {
                 count: 1,
             },
             1,
+            None,
         )
         .unwrap()
         {
@@ -3613,6 +3638,7 @@ mod tests {
                 count: 1,
             },
             1,
+            None,
         )
         .unwrap()
         {
@@ -3688,6 +3714,7 @@ mod tests {
                     count: 1,
                 },
                 1,
+                None,
             )
             .unwrap()
             {
@@ -3798,6 +3825,7 @@ mod tests {
                 count: 1,
             },
             1,
+            None,
         )
         .unwrap()
         {
@@ -3845,6 +3873,7 @@ mod tests {
             0,
             CompartmentSetGeneration::default(),
             1,
+            None,
         )
         .unwrap()
         {
@@ -3886,6 +3915,7 @@ mod tests {
                 0,
                 CompartmentSetGeneration::default(),
                 2,
+                None,
             )
             .unwrap(),
             FireOutcome::Fired(_)
@@ -4150,6 +4180,7 @@ mod tests {
                 0,
                 CompartmentSetGeneration::default(),
                 124,
+                None,
             )
             .unwrap(),
             FireOutcome::Fired(_)
@@ -4179,6 +4210,7 @@ mod tests {
                 count: 1,
             },
             1,
+            None,
         )
         .unwrap()
         {
@@ -4542,6 +4574,7 @@ mod tests {
             failure_backoff_at_ms: None,
             last_failure: None,
             last_no_fire: None,
+            recent_decisions: Vec::new(),
             consecutive_publish_failures: 0,
         };
         let rv = store
@@ -4713,6 +4746,7 @@ mod tests {
             0,
             CompartmentSetGeneration::default(),
             100,
+            None,
         )
         .unwrap()
         {
@@ -4731,6 +4765,7 @@ mod tests {
                 0,
                 CompartmentSetGeneration::default(),
                 101,
+                None,
             )
             .unwrap(),
             FireOutcome::Busy(_)
@@ -4760,6 +4795,7 @@ mod tests {
             0,
             CompartmentSetGeneration::default(),
             100,
+            None,
         )
         .unwrap()
         {
@@ -4832,6 +4868,7 @@ mod tests {
                 0,
                 CompartmentSetGeneration::default(),
                 1000,
+                None,
             )
             .unwrap(),
             FireOutcome::Fired(_)
@@ -4849,6 +4886,7 @@ mod tests {
             42,
             CompartmentSetGeneration::default(),
             100,
+            None,
         )
         .unwrap()
         {
@@ -5010,6 +5048,7 @@ mod tests {
             7,
             CompartmentSetGeneration::default(),
             1,
+            None,
         )
         .unwrap()
         {
@@ -5065,6 +5104,7 @@ mod tests {
                 0,
                 CompartmentSetGeneration::default(),
                 10,
+                None,
             )
             .unwrap()
             {
@@ -5137,7 +5177,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_floor_only_between_defers_is_byte_invisible_to_transform() {
+    fn historian_fire_and_no_fire_meta_are_byte_invisible_to_transform() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
@@ -5149,6 +5189,36 @@ mod tests {
         let request = req(vec![item("m1", 1, "raw"), item("t2", 2, "tail")]);
         run_transform(&store, &request);
         let before = run_transform(&store, &request);
+        let wire_sha =
+            |messages: &[CkWireMessage]| crate::sha256_hex(&serde_json::to_vec(messages).unwrap());
+        let before_sha = wire_sha(&before);
+
+        let loaded = store.load("ses").unwrap();
+        let mut no_fire_meta = loaded.meta.clone();
+        no_fire_meta
+            .historian
+            .record_recent_decision(HistorianRecentDecision {
+                at_ms: 10,
+                request_observed_at_ms: 9,
+                decision: HistorianDecision::NoFire,
+                cause: "below_proactive_floor".to_string(),
+                eligible_tokens: 200,
+                bar_tokens: 19_500,
+                pressure_pct: 40,
+                drain_latch: false,
+                chunk_range: Some(HistorianChunkRange {
+                    from_ordinal: 2,
+                    to_ordinal: 2,
+                }),
+                producer_model: None,
+                completed_at_ms: None,
+                apply_row_version: None,
+            });
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &no_fire_meta)
+            .unwrap();
+        let after_no_fire = run_transform(&store, &request);
+        assert_eq!(wire_sha(&after_no_fire), before_sha);
 
         let mut meta = store.load("ses").unwrap().meta;
         let selected_range_identities = vec![HistorianSelectedMessageIdentity {
@@ -5168,6 +5238,21 @@ mod tests {
         state.chunk_fingerprint = "tail-fp".into();
         state.selected_range_identities = selected_range_identities.clone();
         state.producer_run_id = Some("run-3".into());
+        state.recent_decisions = meta.historian.recent_decisions.clone();
+        state.record_recent_decision(HistorianRecentDecision {
+            at_ms: 20,
+            request_observed_at_ms: 19,
+            decision: HistorianDecision::Fired,
+            cause: "trigger_true:pressure".to_string(),
+            eligible_tokens: 20_000,
+            bar_tokens: 19_500,
+            pressure_pct: 60,
+            drain_latch: false,
+            chunk_range: state.chunk_range.clone(),
+            producer_model: Some("test/model".to_string()),
+            completed_at_ms: None,
+            apply_row_version: None,
+        });
         meta.historian = state;
         let row_version = store
             .commit(
@@ -5208,12 +5293,17 @@ mod tests {
             .unwrap();
 
         let after = run_transform(&store, &request);
+        assert_eq!(wire_sha(&after), before_sha);
         assert_eq!(
             after, before,
-            "publication floor and deduped facts never render"
+            "historian decision metadata, publication floor, and deduped facts never render"
         );
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.publication_floor_ordinal, Some(3));
         assert_eq!(loaded.meta.coverage_ordinal, Some(1));
+        let fire_decision = loaded.meta.historian.recent_decisions.last().unwrap();
+        assert_eq!(fire_decision.decision, HistorianDecision::Fired);
+        assert!(fire_decision.completed_at_ms.is_some());
+        assert_eq!(fire_decision.apply_row_version, loaded.row_version);
     }
 }
