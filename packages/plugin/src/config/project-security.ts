@@ -300,6 +300,7 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    carry security fixes).
  *  - `fail_closed_blocking` — a repo must not un-block (or force-block) the
  *    loud inoperability gate; only the user may restore silent degrade.
+ *  - `debug_rpc` — a repo must not enable process heap capture or memory diagnostics.
  *  - `allow_home_project` — only the user may opt a home-directory session
  *    into a durable project identity.
  *  - `output_reserve` / `models.window_overlay_path` — only the user may change
@@ -358,6 +359,13 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         delete projectRaw.fail_closed_blocking;
         warnings.push(
             "Ignoring fail_closed_blocking from project config (security: only user-level config may disable or force the loud inoperability gate).",
+        );
+    }
+
+    if ("debug_rpc" in projectRaw) {
+        delete projectRaw.debug_rpc;
+        warnings.push(
+            "Ignoring debug_rpc from project config (security: only user-level config may enable process heap diagnostics).",
         );
     }
 

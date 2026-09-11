@@ -3,6 +3,9 @@
  * and returns typed responses for TUI consumption.
  */
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { chmodSync, createWriteStream, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import { isCompactionEnabled } from "../config/agent-disable";
 import type { MagicContextConfig } from "../config/schema/magic-context";
@@ -13,6 +16,7 @@ import {
     type DreamTaskBacklogMap,
 } from "../features/magic-context/dreamer/task-registry";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import { getMessageIndexQueueHeapStats } from "../features/magic-context/message-index-async";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
 import { getProtectionWindowForSession } from "../features/magic-context/protection-window";
@@ -42,8 +46,10 @@ import {
 import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-status";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
+import { getLkgSlotHeapStats } from "../hooks/magic-context/lkg-slot";
 import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
 import { RUST_SESSION_UPGRADE_REFUSAL } from "../hooks/magic-context/maintenance-authority";
+import { getCompartmentMirrorHeapStats } from "../hooks/magic-context/module-state-sync";
 import {
     findLastAssistantModelFromOpenCodeDb,
     openCodeDbExists,
@@ -64,9 +70,18 @@ import {
 } from "../shared/announcement";
 import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
 import type { ConfigParseFailure } from "../shared/config-diagnostics";
+import { getMagicContextStorageDir } from "../shared/data-path";
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
-import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
+import type {
+    DebugHeapSnapshotResponse,
+    DebugMemoryHolders,
+    DebugMemoryUsageResponse,
+    EmbedDetail,
+    SidebarSnapshot,
+    StatusDetail,
+} from "../shared/rpc-types";
+import { shouldEnforcePrivateStoragePermissions } from "../shared/storage-permissions";
 import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
@@ -959,6 +974,227 @@ export function buildCompartmentCount(
     }
 }
 
+interface RuntimeDebugMemoryHolders {
+    taggerCache?: {
+        sessionCount: number;
+        assignmentEntries: number;
+        toolAccountingEntries: number;
+        loadSignatureEntries: number;
+        sessions: Array<{
+            sessionId: string;
+            assignments: number;
+            toolAccounting: number;
+        }>;
+    };
+    wireCache?: {
+        snapshots: number;
+        rawContentSnapshots: number;
+        sessions: Array<{
+            sessionId: string;
+            rawMessages: number;
+            wireMessages: number;
+            rawContentSnapshots: number;
+        }>;
+    };
+}
+
+const EMPTY_TAGGER_HEAP_STATS = {
+    sessionCount: 0,
+    assignmentEntries: 0,
+    toolAccountingEntries: 0,
+    loadSignatureEntries: 0,
+    sessions: [],
+} satisfies NonNullable<RuntimeDebugMemoryHolders["taggerCache"]>;
+
+const EMPTY_WIRE_HEAP_STATS = {
+    snapshots: 0,
+    rawContentSnapshots: 0,
+    sessions: [],
+} satisfies NonNullable<RuntimeDebugMemoryHolders["wireCache"]>;
+
+export function isDebugRpcEnabled(
+    config: Pick<MagicContextConfig, "debug_rpc">,
+    env: NodeJS.ProcessEnv = process.env,
+): boolean {
+    return config.debug_rpc === true || env.MAGIC_CONTEXT_DEBUG_RPC === "1";
+}
+
+export function buildDebugMemoryUsage(
+    runtimeHolders: RuntimeDebugMemoryHolders = {},
+): DebugMemoryUsageResponse {
+    const usage = process.memoryUsage();
+    const lkg = getLkgSlotHeapStats();
+    const tagger = runtimeHolders.taggerCache ?? EMPTY_TAGGER_HEAP_STATS;
+    const wire = runtimeHolders.wireCache ?? EMPTY_WIRE_HEAP_STATS;
+    const mirrors = getCompartmentMirrorHeapStats();
+    const messageIndexQueue = getMessageIndexQueueHeapStats();
+    const sessions = new Map<string, DebugMemoryHolders["sessions"][number]>();
+    const session = (sessionId: string) => {
+        let current = sessions.get(sessionId);
+        if (!current) {
+            current = {
+                sessionId,
+                lkgBytes: 0,
+                taggerAssignments: 0,
+                taggerToolAccounting: 0,
+                wireRawMessages: 0,
+                wireMessages: 0,
+                wireContentSnapshots: 0,
+            };
+            sessions.set(sessionId, current);
+        }
+        return current;
+    };
+    for (const slot of lkg.sessions) session(slot.sessionId).lkgBytes += slot.bytes;
+    for (const entry of tagger.sessions) {
+        const target = session(entry.sessionId);
+        target.taggerAssignments += entry.assignments;
+        target.taggerToolAccounting += entry.toolAccounting;
+    }
+    for (const entry of wire.sessions) {
+        const target = session(entry.sessionId);
+        target.wireRawMessages += entry.rawMessages;
+        target.wireMessages += entry.wireMessages;
+        target.wireContentSnapshots += entry.rawContentSnapshots;
+    }
+
+    return {
+        pid: process.pid,
+        bunVersion:
+            typeof Bun !== "undefined" && typeof Bun.version === "string"
+                ? Bun.version
+                : "unavailable",
+        memoryUsage: {
+            rss: usage.rss,
+            heapTotal: usage.heapTotal,
+            heapUsed: usage.heapUsed,
+            external: usage.external,
+            arrayBuffers: usage.arrayBuffers,
+        },
+        holders: {
+            lkgSlots: { count: lkg.count, totalBytes: lkg.totalBytes },
+            taggerCache: {
+                sessionCount: tagger.sessionCount,
+                assignmentEntries: tagger.assignmentEntries,
+                toolAccountingEntries: tagger.toolAccountingEntries,
+                loadSignatureEntries: tagger.loadSignatureEntries,
+            },
+            wireCache: {
+                snapshots: wire.snapshots,
+                rawContentSnapshots: wire.rawContentSnapshots,
+            },
+            compartmentMirrors: { entries: mirrors.entries },
+            messageIndexQueue,
+            sessions: [...sessions.values()].sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
+        },
+    };
+}
+
+async function writeSnapshotJson(
+    path: string,
+    snapshot: Record<string, unknown>,
+    enforcePrivatePermissions: boolean,
+): Promise<void> {
+    const writer = createWriteStream(path, enforcePrivatePermissions ? { mode: 0o600 } : undefined);
+    const writeChunk = async (chunk: string): Promise<void> => {
+        if (!writer.write(chunk)) await once(writer, "drain");
+    };
+    const writeNumberArray = async (values: number[]): Promise<void> => {
+        await writeChunk("[");
+        const chunkSize = 50_000;
+        for (let offset = 0; offset < values.length; offset += chunkSize) {
+            if (offset > 0) await writeChunk(",");
+            await writeChunk(values.slice(offset, offset + chunkSize).join(","));
+        }
+        await writeChunk("]");
+    };
+
+    try {
+        await writeChunk("{");
+        let first = true;
+        for (const [key, value] of Object.entries(snapshot)) {
+            if (!first) await writeChunk(",");
+            first = false;
+            await writeChunk(`${JSON.stringify(key)}:`);
+            if ((key === "nodes" || key === "edges") && Array.isArray(value)) {
+                await writeNumberArray(value as number[]);
+            } else {
+                await writeChunk(JSON.stringify(value));
+            }
+        }
+        await writeChunk("}");
+        writer.end();
+        await once(writer, "finish");
+    } catch (error) {
+        writer.destroy();
+        try {
+            rmSync(path, { force: true });
+        } catch {
+            // Keep the original write failure when the best-effort partial-file cleanup also fails.
+        }
+        throw error;
+    }
+}
+
+async function generateDebugHeapSnapshot(
+    storageDir: string,
+    memory: DebugMemoryUsageResponse,
+): Promise<DebugHeapSnapshotResponse> {
+    if (typeof Bun === "undefined" || typeof Bun.generateHeapSnapshot !== "function") {
+        throw new Error("Bun.generateHeapSnapshot is unavailable in this runtime");
+    }
+
+    const directory = join(storageDir, "heap-snapshots");
+    const enforcePrivatePermissions = shouldEnforcePrivateStoragePermissions();
+    mkdirSync(
+        directory,
+        enforcePrivatePermissions ? { recursive: true, mode: 0o700 } : { recursive: true },
+    );
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const path = join(directory, `${timestamp}-${process.pid}.heapsnapshot`);
+
+    let format: "jsc" | "v8" = "jsc";
+    let snapshotVersion: number | undefined;
+    let snapshot: Bun.HeapSnapshot | string;
+    try {
+        snapshot = Bun.generateHeapSnapshot();
+        snapshotVersion = snapshot.version;
+    } catch (jscError) {
+        try {
+            format = "v8";
+            snapshot = Bun.generateHeapSnapshot("v8");
+        } catch (v8Error) {
+            throw new Error(
+                `Heap snapshot generation failed (jsc=${String(jscError)}; v8=${String(v8Error)})`,
+            );
+        }
+    }
+
+    if (typeof snapshot === "string") {
+        await Bun.write(path, snapshot);
+    } else {
+        await writeSnapshotJson(
+            path,
+            {
+                ...snapshot,
+                magicContext: {
+                    capturedAt: Date.now(),
+                    memory,
+                },
+            },
+            enforcePrivatePermissions,
+        );
+    }
+    if (enforcePrivatePermissions) {
+        try {
+            chmodSync(path, 0o600);
+        } catch {
+            // A tightening failure does not invalidate the completed diagnostic capture.
+        }
+    }
+    return { ...memory, path, format, snapshotVersion };
+}
+
 /**
  * Register all RPC handlers on the server.
  */
@@ -970,6 +1206,8 @@ export function registerRpcHandlers(
         client: unknown;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
+        storageDir?: string;
+        getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
@@ -989,6 +1227,17 @@ export function registerRpcHandlers(
         );
 
     const injectionBudgetTokens = config.memory?.injection_budget_tokens;
+
+    if (isDebugRpcEnabled(config)) {
+        const readMemory = () => buildDebugMemoryUsage(args.getDebugMemoryHolders?.());
+        rpcServer.handle("debug.memoryUsage", async () => ({ ...readMemory() }));
+        rpcServer.handle("debug.heapSnapshot", async () => ({
+            ...(await generateDebugHeapSnapshot(
+                args.storageDir ?? getMagicContextStorageDir(),
+                readMemory(),
+            )),
+        }));
+    }
 
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");

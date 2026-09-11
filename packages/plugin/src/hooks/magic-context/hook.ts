@@ -1620,10 +1620,29 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends?: RustToolBackends;
+        getDebugMemoryHolders?: () => {
+            taggerCache: ReturnType<NonNullable<Tagger["getHeapStats"]>>;
+            wireCache: ReturnType<typeof transform.getRustWireCacheHeapStats>;
+        };
     };
-    Object.defineProperty(hooksWithBackends, "rustToolBackends", {
-        value: rustToolBackends,
-        enumerable: false,
+    Object.defineProperties(hooksWithBackends, {
+        rustToolBackends: {
+            value: rustToolBackends,
+            enumerable: false,
+        },
+        getDebugMemoryHolders: {
+            value: () => ({
+                taggerCache: deps.tagger.getHeapStats?.() ?? {
+                    sessionCount: 0,
+                    assignmentEntries: 0,
+                    toolAccountingEntries: 0,
+                    loadSignatureEntries: 0,
+                    sessions: [],
+                },
+                wireCache: transform.getRustWireCacheHeapStats(),
+            }),
+            enumerable: false,
+        },
     });
     return hooksWithBackends;
 }

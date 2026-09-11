@@ -290,6 +290,21 @@ interface RustWireCache {
     nativeOutput?: unknown[];
 }
 
+class MagicContextRustHeapHolder {
+    readonly wireCaches = new Map<string, RustWireCache>();
+}
+
+export interface RustWireCacheHeapStats {
+    snapshots: number;
+    rawContentSnapshots: number;
+    sessions: Array<{
+        sessionId: string;
+        rawMessages: number;
+        wireMessages: number;
+        rawContentSnapshots: number;
+    }>;
+}
+
 interface RustSessionState extends ModuleStateSyncState {
     initialized: boolean;
     consecutiveFailures: number;
@@ -1531,9 +1546,10 @@ export function createRustModeTransform(
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
+    getHeapStats: () => RustWireCacheHeapStats;
 } {
     const states = new Map<string, RustSessionState>();
-    const wireCaches = new Map<string, RustWireCache>();
+    const heapHolder = new MagicContextRustHeapHolder();
     const promptSurfaceGuidanceEpochs = deps.promptSurfaceRuntime
         ? createPromptSurfaceGuidanceEpochCache(deps.promptSurfaceRuntime)
         : undefined;
@@ -1640,7 +1656,7 @@ export function createRustModeTransform(
     };
 
     const invalidateWireState = (sessionId: string): void => {
-        wireCaches.delete(sessionId);
+        heapHolder.wireCaches.delete(sessionId);
         const state = states.get(sessionId);
         if (!state) return;
         resetOrdinalMemo(state);
@@ -2353,7 +2369,7 @@ export function createRustModeTransform(
                 detected_context_limit: overflowState.detectedContextLimit,
                 detected_context_limit_model_key: overflowState.detectedContextLimitModelKey,
             };
-            const previousWireCache = wireCaches.get(sessionId);
+            const previousWireCache = heapHolder.wireCaches.get(sessionId);
             let wireDelta:
                 | {
                       rawStart: number;
@@ -3397,7 +3413,7 @@ export function createRustModeTransform(
                     // Best-effort: a later pass with current recovery evidence retries the clear.
                 }
             }
-            wireCaches.set(sessionId, pendingWireCache);
+            heapHolder.wireCaches.set(sessionId, pendingWireCache);
             appliedAt = performance.now();
             // Stable transform projections cannot have new module-owned mirror rows. A changed
             // row/boundary/manifest marker schedules one ordered background pull; old modules that
@@ -3549,7 +3565,7 @@ export function createRustModeTransform(
             const clearLocalState = () => {
                 dropSlot(sessionId, "session-deleted");
                 states.delete(sessionId);
-                wireCaches.delete(sessionId);
+                heapHolder.wireCaches.delete(sessionId);
                 promptSurfaceGuidanceEpochs?.clear(sessionId);
                 clearCompartmentMirrorCursor(sessionId);
             };
@@ -3574,6 +3590,22 @@ export function createRustModeTransform(
             return {
                 ...ensureState(states, sessionId),
                 idOrdinalMemo: new Map(ensureState(states, sessionId).idOrdinalMemo),
+            };
+        },
+        getHeapStats(): RustWireCacheHeapStats {
+            const sessions = [...heapHolder.wireCaches].map(([sessionId, cache]) => ({
+                sessionId,
+                rawMessages: cache.rawCount,
+                wireMessages: cache.wireCount,
+                rawContentSnapshots: cache.rawContentSnapshots.length,
+            }));
+            return {
+                snapshots: heapHolder.wireCaches.size,
+                rawContentSnapshots: sessions.reduce(
+                    (sum, session) => sum + session.rawContentSnapshots,
+                    0,
+                ),
+                sessions,
             };
         },
     };

@@ -2674,6 +2674,15 @@ export function createTransform(deps: TransformDeps) {
         async clearRustSession(sessionId: string): Promise<void> {
             await rustModeTransform?.clearSession(sessionId);
         },
+        getRustWireCacheHeapStats() {
+            return (
+                rustModeTransform?.getHeapStats() ?? {
+                    snapshots: 0,
+                    rawContentSnapshots: 0,
+                    sessions: [],
+                }
+            );
+        },
     });
 }
 

@@ -43,6 +43,17 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("fail_closed_blocking"))).toBe(true);
     });
 
+    it("strips debug_rpc from project config (user-tier only)", () => {
+        const raw: Record<string, unknown> = {
+            debug_rpc: true,
+            dreamer: { model: "x" },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("debug_rpc" in raw).toBe(false);
+        expect(raw.dreamer).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("debug_rpc"))).toBe(true);
+    });
+
     it("strips allow_home_project from project config (user-tier only)", () => {
         const raw: Record<string, unknown> = {
             allow_home_project: true,
