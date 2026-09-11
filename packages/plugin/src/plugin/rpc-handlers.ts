@@ -1175,7 +1175,7 @@ async function generateDebugHeapSnapshot(
     // EXC_BREAKPOINT inside Bun and took the host down, so the endpoint refuses
     // above a resident-size ceiling instead of risking the process; the cheap
     // debug.memoryUsage counters remain available at any size.
-    const rssBytes = memory.process.rss;
+    const rssBytes = memory.memoryUsage.rss;
     const maxRssBytes = resolveHeapSnapshotMaxRssBytes();
     if (rssBytes > maxRssBytes) {
         throw new Error(
