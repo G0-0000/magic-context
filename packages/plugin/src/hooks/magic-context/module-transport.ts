@@ -212,6 +212,15 @@ interface OpeningRoute {
     promise: Promise<EnsuredRoute>;
 }
 
+export interface ModuleCallTimings {
+    lane: number;
+    route: number;
+    encode: number;
+    issue: number;
+    responseWait: number;
+    settle: number;
+}
+
 export class SubcModuleTransport {
     private readonly connectionFile: string;
     private readonly moduleId: string;
@@ -479,6 +488,8 @@ export class SubcModuleTransport {
             | "dreamer.run_task"
             | "memory.set_classification";
         body: unknown;
+        /** Per-call durations; responseWait includes the client's opaque receive and decode. */
+        onTimings?: (timings: ModuleCallTimings) => void;
         signal?: AbortSignal;
         /** Do not retry after reconnecting; let the caller rebuild for the new connection. */
         generationSensitive?: boolean;
@@ -487,6 +498,15 @@ export class SubcModuleTransport {
         /** Distinguishes cheap page admission from the cold execute on the completed series. */
         attemptClass?: "transform_page_upload" | "transform_series_execute";
     }): Promise<unknown> {
+        const callStartedAt = performance.now();
+        const timings: ModuleCallTimings = {
+            lane: 0,
+            route: 0,
+            encode: 0,
+            issue: 0,
+            responseWait: 0,
+            settle: 0,
+        };
         const wrapupInFlight = (this.wrapupSessions.get(args.sessionId) ?? 0) > 0;
         const attemptTimeoutMs =
             args.timeoutMs ??
@@ -539,6 +559,7 @@ export class SubcModuleTransport {
             }
             throw error;
         }
+        timings.lane = performance.now() - callStartedAt;
         let rejectAbort!: (reason: unknown) => void;
         const aborted = new Promise<never>((_resolve, reject) => {
             rejectAbort = reject;
@@ -559,6 +580,7 @@ export class SubcModuleTransport {
                     // Each attempt gets its own timeout, apart from the queue wait limit, so a dead
                     // socket can hit the deadline and still be replaced on one reconnect.
                     const attemptDeadlineMs = Date.now() + attemptTimeoutMs;
+                    const routeStartedAt = performance.now();
                     ensuredRoute = await this.ensureRoute(
                         args.sessionId,
                         args.projectRoot,
@@ -568,18 +590,29 @@ export class SubcModuleTransport {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
                     }
+                    timings.route += performance.now() - routeStartedAt;
+                    const encodeStartedAt = performance.now();
+                    // Pre-encoded JSON retains the JSON frame flag; binary denotes an opaque
+                    // request protocol, not a preference for how the reply is decoded.
+                    const body =
+                        args.body instanceof Uint8Array
+                            ? args.body
+                            : Buffer.from(JSON.stringify(args.body));
+                    timings.encode += performance.now() - encodeStartedAt;
+                    const issueStartedAt = performance.now();
+                    const request = ensuredRoute.client.request(ensuredRoute.route, body, {
+                        priority: Priority.Background,
+                        admissionClass: AdmissionClass.Normal,
+                        timeoutMs: Math.max(1, attemptDeadlineMs - Date.now()),
+                    });
+                    timings.issue += performance.now() - issueStartedAt;
+                    const waitStartedAt = performance.now();
                     const response = await this.beforeDeadline(
-                        Promise.race([
-                            ensuredRoute.client.request(ensuredRoute.route, args.body, {
-                                priority: Priority.Background,
-                                admissionClass: AdmissionClass.Normal,
-                                timeoutMs: Math.max(1, attemptDeadlineMs - Date.now()),
-                            }),
-                            aborted,
-                        ]),
+                        Promise.race([request, aborted]),
                         attemptDeadlineMs,
                         "waiting for the module response",
                     );
+                    timings.responseWait += performance.now() - waitStartedAt;
                     if (
                         this.client !== ensuredRoute.client ||
                         this.connectionGeneration !== ensuredRoute.generation
@@ -644,6 +677,17 @@ export class SubcModuleTransport {
             args.signal?.removeEventListener("abort", onAbort);
             finishWrapupTracking();
             releaseLane();
+            timings.settle = Math.max(
+                0,
+                performance.now() -
+                    callStartedAt -
+                    timings.lane -
+                    timings.route -
+                    timings.encode -
+                    timings.issue -
+                    timings.responseWait,
+            );
+            args.onTimings?.(timings);
         }
     }
 

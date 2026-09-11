@@ -31,6 +31,10 @@ import {
     transformColdStartExecuteTimeoutMs,
 } from "./module-transport";
 
+function decodedBody(body: unknown): unknown {
+    return body instanceof Uint8Array ? JSON.parse(Buffer.from(body).toString("utf8")) : body;
+}
+
 class FakeServerReader {
     private buffered = Buffer.alloc(0);
     private readonly iterator: AsyncIterator<Uint8Array>;
@@ -688,7 +692,7 @@ describe("SubcModuleTransport", () => {
         let wrapupSettled = false;
         const client = {
             request: async (_route: RouteHandle, body: unknown) => {
-                const method = (body as { method: string }).method;
+                const method = (decodedBody(body) as { method: string }).method;
                 if (method === "session.wrapup") {
                     wrapupStarted.resolve();
                     await releaseWrapup.promise;
@@ -750,7 +754,7 @@ describe("SubcModuleTransport", () => {
         const starts: string[] = [];
         const client = {
             request: async (_route: RouteHandle, body: unknown) => {
-                const method = (body as { method: string }).method;
+                const method = (decodedBody(body) as { method: string }).method;
                 starts.push(method);
                 if (method === "state_sync") {
                     stateSyncStarted.resolve();
@@ -814,7 +818,7 @@ describe("SubcModuleTransport", () => {
         const starts: string[] = [];
         const client = {
             request: async (_route: RouteHandle, body: unknown) => {
-                const method = (body as { method: string }).method;
+                const method = (decodedBody(body) as { method: string }).method;
                 starts.push(method);
                 if (method === "transform") {
                     transformStarted.resolve();
@@ -885,7 +889,7 @@ describe("SubcModuleTransport", () => {
                 } as unknown as RouteHandle;
             },
             request: async (_route: RouteHandle, body: unknown) => {
-                const sessionId = (body as { session_id: string }).session_id;
+                const sessionId = (decodedBody(body) as { session_id: string }).session_id;
                 freshRequestSessions.push(sessionId);
                 return { result: { sessionId } };
             },
@@ -975,7 +979,7 @@ describe("SubcModuleTransport", () => {
         let activeCallsStarted = 0;
         const client = {
             request: async (_route: RouteHandle, body: unknown) => {
-                if ((body as { active?: boolean }).active) {
+                if ((decodedBody(body) as { active?: boolean }).active) {
                     activeCallsStarted += 1;
                     if (activeCallsStarted === 4) allActiveCallsStarted.resolve();
                     await releaseActiveCalls.promise;
@@ -1044,7 +1048,7 @@ describe("SubcModuleTransport", () => {
         const observedTimeouts = new Map<string, number>();
         const client = {
             request: async (_route: RouteHandle, body: unknown, options: { timeoutMs: number }) => {
-                const method = (body as { method: string }).method;
+                const method = (decodedBody(body) as { method: string }).method;
                 observedTimeouts.set(method, options.timeoutMs);
                 if (method === "session.wrapup") {
                     markWrapupStarted?.();
@@ -1151,7 +1155,9 @@ describe("connection backoff in-pass wait", () => {
         const client = {
             routeOpen: async () => route,
             request: async (_route: RouteHandle, body: unknown) => ({
-                result: { sessionId: (body as { session_id?: string }).session_id ?? "ok" },
+                result: {
+                    sessionId: (decodedBody(body) as { session_id?: string }).session_id ?? "ok",
+                },
             }),
             close: () => undefined,
         } as unknown as SubcClient;
@@ -1300,7 +1306,7 @@ it("a per-call abort preserves the shared client for another session", async () 
     let closed = 0;
     const client = {
         request: async (_route: RouteHandle, body: unknown) => {
-            if ((body as { method: string }).method === "state_sync") {
+            if ((decodedBody(body) as { method: string }).method === "state_sync") {
                 started.resolve();
                 return pending.promise;
             }
@@ -1359,7 +1365,7 @@ it("a state-sync deadline is typed with page progress and does not reconnect", a
     let closed = 0;
     const client = {
         request: async (_route: RouteHandle, body: unknown) =>
-            (body as { method: string }).method === "state_sync"
+            (decodedBody(body) as { method: string }).method === "state_sync"
                 ? new Promise(() => {})
                 : { ok: true },
         close: () => {
@@ -1432,4 +1438,58 @@ it("a state-sync deadline is typed with page progress and does not reconnect", a
             body: { method: "session.status" },
         }),
     ).resolves.toEqual({ ok: true });
+});
+
+it("attributes encode, route, request issue, response wait and settlement on one call", async () => {
+    const transport = new SubcModuleTransport("unused");
+    const route = { channel: 7, epoch: 77 } as RouteHandle;
+    const samples: import("./module-transport").ModuleCallTimings[] = [];
+    const client = {
+        request: async (_route: RouteHandle, body: unknown, options: { binary?: boolean }) => {
+            expect(body).toBeInstanceOf(Uint8Array);
+            expect(options.binary).not.toBe(true);
+            expect(decodedBody(body)).toEqual({ method: "transform", text: "🚀" });
+            await Bun.sleep(20);
+            return { ok: true };
+        },
+    } as unknown as SubcClient;
+    const internals = transport as unknown as {
+        client: SubcClient;
+        ensureRoute: () => Promise<{
+            client: SubcClient;
+            route: RouteHandle;
+            routeKey: string;
+            generation: number;
+        }>;
+    };
+    internals.client = client;
+    internals.ensureRoute = async () => {
+        await Bun.sleep(10);
+        return { client, route, routeKey: "timing", generation: 0 };
+    };
+    const start = performance.now();
+    expect(
+        await transport.call({
+            sessionId: "timing",
+            projectRoot: ".",
+            method: "transform",
+            body: { method: "transform", text: "🚀" },
+            onTimings: (timings) => samples.push(timings),
+        }),
+    ).toEqual({ ok: true });
+    const elapsed = performance.now() - start;
+    expect(samples).toHaveLength(1);
+    expect(samples[0].route).toBeGreaterThanOrEqual(8);
+    expect(samples[0].responseWait).toBeGreaterThanOrEqual(18);
+    expect(Object.keys(samples[0]).sort()).toEqual([
+        "encode",
+        "issue",
+        "lane",
+        "responseWait",
+        "route",
+        "settle",
+    ]);
+    const sum = Object.values(samples[0]).reduce((a, b) => a + b, 0);
+    expect(sum).toBeLessThanOrEqual(elapsed);
+    expect(elapsed - sum).toBeLessThan(10);
 });

@@ -1,13 +1,17 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { MODULE_PAGE_MAX_BYTES } from "../../plugin/src/hooks/magic-context/module-wire";
 import { RustTestHarness, type RustPassLine } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
+import { appendPerfReplay } from "../src/rust-perf-replay";
 
 const formatTiming = (pass: RustPassLine) => ({
     messages: pass.inputCount,
-    adapter_ms: pass.adapterElapsedMs,
+    adapter_overhead_ms: pass.adapterElapsedMs,
+    end_to_end_ms: pass.adapterElapsedMs + pass.moduleElapsedMs,
     module_ms: pass.moduleElapsedMs,
     prefix_guard_ms: pass.prefixGuardMs,
     state_sync_ms: pass.stateSyncMs,
@@ -33,6 +37,15 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
     });
 
     afterAll(async () => {
+        if (h) {
+            console.log(
+                readFileSync(h.logPath, "utf8")
+                    .split("\n")
+                    .filter((line) => /rust pass:|rust transform failed/.test(line))
+                    .slice(-10)
+                    .join("\n"),
+            );
+        }
         await h?.dispose();
     });
 
@@ -41,7 +54,20 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         await h.sendPrompt(sessionId, "establish the initial module snapshot");
         await h.waitForRustPasses(1);
 
-        h.appendSyntheticHistory(sessionId, { count: 1_000, textBytes: 1024 });
+        const replayDb = process.env.MC_RUST_PERF_REPLAY_DB;
+        const replaySession = process.env.MC_RUST_PERF_REPLAY_SESSION;
+        const historyCount =
+            replayDb && replaySession
+                ? appendPerfReplay(h, sessionId, replayDb, replaySession)
+                : 2_000;
+        console.log(
+            `[rust-e2e] history_messages=${historyCount} source=${replayDb && replaySession ? "read-only replay" : "synthetic"}`,
+        );
+        if (!replayDb || !replaySession)
+            h.appendSyntheticHistory(sessionId, {
+                count: historyCount,
+                textBytes: 128,
+            });
         await h.restart({
             rust: true,
             magicContextConfig: {
@@ -51,20 +77,30 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
             },
         });
         await h.sendPrompt(sessionId, "prime the synthetic big-session snapshot", {
-            timeoutMs: 300_000,
+            timeoutMs: replayDb ? 90_000 : 300_000,
         });
         const primed = await h.waitFor(
             () => {
                 const passes = h.readRustPasses();
                 for (let index = passes.length - 1; index >= 0; index -= 1) {
-                    if (passes[index]!.inputCount > 1_000) return passes[index];
+                    if (passes[index]!.inputCount > historyCount) return passes[index];
                 }
                 return undefined;
             },
-            { timeoutMs: 30_000, label: "primed 1,000-message rust pass" },
+            { timeoutMs: 30_000, label: "primed 2,000-message rust pass" },
         );
-        expect(primed.inputCount).toBeGreaterThan(1_000);
+        expect(primed.inputCount).toBeGreaterThan(historyCount);
         expect(primed.servedFrom).toBe("transform");
+        if (!replayDb) {
+            const wire = h.lastMainWireSerialized();
+            const lastSynthetic = wire.indexOf(
+                `synthetic history message ${String(historyCount - 1).padStart(4, "0")}`,
+            );
+            expect(lastSynthetic).toBeGreaterThanOrEqual(0);
+            expect(wire.indexOf("establish the initial module snapshot")).toBeGreaterThan(
+                lastSynthetic,
+            );
+        }
         // Priming can reuse the caller-owned native tail in one request or page a full
         // retransmission. This phase establishes module state; the large delta below
         // separately proves that provider-visible tail content survives either path.
@@ -80,10 +116,20 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         expect(settled.applied).toBe(true);
 
         const smallDeltas: RustPassLine[] = [];
+        const servedWireHashes: string[] = [];
         for (let probe = 0; probe < 5; probe += 1) {
             const before = h.readRustPasses().length;
             await h.sendPrompt(sessionId, `small steady-state delta ${probe}`);
             smallDeltas.push((await h.waitForRustPasses(before + 1)).at(-1)!);
+            if (process.env.MC_RUST_PERF_WIRE_ARTIFACT) {
+                writeFileSync(
+                    `${process.env.MC_RUST_PERF_WIRE_ARTIFACT}-${probe}.json`,
+                    JSON.stringify(h.lastMainMessages()),
+                );
+            }
+            servedWireHashes.push(
+                createHash("sha256").update(JSON.stringify(h.lastMainMessages())).digest("hex"),
+            );
         }
         const smallDelta = [...smallDeltas].sort(
             (left, right) => left.adapterElapsedMs - right.adapterElapsedMs,
@@ -101,6 +147,7 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
             `[rust-e2e] large tail delta timings ${JSON.stringify({
                 primed: formatTiming(primed),
                 small_delta_samples: smallDeltas.map(formatTiming),
+                served_wire_sha256: servedWireHashes,
                 small_delta_p50: formatTiming(smallDelta),
                 large_tail_delta: formatTiming(largeTailDelta),
                 provider_bytes_before: providerBytesBeforeLargeTail,
@@ -108,8 +155,20 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
             })}`,
         );
 
+        const passLines = readFileSync(h.logPath, "utf8")
+            .split("\n")
+            .filter((line) => line.includes("rust pass:"));
+        expect(passLines.length).toBeGreaterThan(0);
+        for (const line of passLines) expect(line).toMatch(/todo_unprobed_bust:\d+/);
+        const missedBusts = passLines.filter((line) => /todo_unprobed_bust:[1-9]/.test(line));
+        console.log(
+            `[rust-e2e] todo predictor passes=${passLines.length} unprobed_busts=${missedBusts.length}`,
+        );
+        expect(missedBusts).toEqual([]);
         expect(smallDeltas.every((pass) => pass.applied)).toBe(true);
-        expect(smallDelta.prefixGuardMs).toBeLessThan(10);
+        // The fixed guard budget belongs to the synthetic payload size. A replay
+        // can carry much larger tool payloads; its measured timings stay in the report.
+        if (!replayDb) expect(smallDelta.prefixGuardMs).toBeLessThan(10);
         expect(smallDelta.stateSyncMs).toBeLessThan(15);
         expect(smallDelta.wireBuildMs).toBeLessThan(10);
         // The hermetic daemon uses ck-mc over external TCP, which can add scheduling overhead.
