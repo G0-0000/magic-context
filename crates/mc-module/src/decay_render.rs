@@ -26,6 +26,7 @@ pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
 /// tiers (None / empty = not a v2-tiered row); `legacy = Some(1)` marks a pre-v2
 /// flat-content row; `importance` defaults to 50 when absent.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub struct DecayRenderCompartment {
     pub start_message: i64,
     pub end_message: i64,
@@ -376,6 +377,85 @@ pub fn render_decayed_compartments(
     body
 }
 
+#[derive(Default)]
+struct PreparedTier {
+    text: String,
+    final_count: usize,
+    continued_count: usize,
+}
+
+/// A compose-local tier cache. Retry attempts change pressure, not tier bytes.
+/// Only tiers actually visited by the curve or demotion loop are rendered.
+pub(crate) struct PreparedDecay<'a> {
+    compartments: Vec<&'a DecayRenderCompartment>,
+    tiers: Vec<[Option<PreparedTier>; 4]>,
+    pub tokenize_ms: f64,
+}
+
+impl<'a> PreparedDecay<'a> {
+    pub fn new(compartments: &'a [DecayRenderCompartment]) -> Self {
+        let compartments: Vec<_> = compartments.iter().filter(|c| !c.is_no_content()).collect();
+        let tiers = (0..compartments.len())
+            .map(|_| Default::default())
+            .collect();
+        Self {
+            compartments,
+            tiers,
+            tokenize_ms: 0.0,
+        }
+    }
+
+    fn tier(&mut self, index: usize, tier: u8) -> &PreparedTier {
+        let slot = &mut self.tiers[index][usize::from(tier - 1)];
+        slot.get_or_insert_with(|| {
+            let text = render_one_compartment(self.compartments[index], tier);
+            let start = std::time::Instant::now();
+            let (final_count, continued_count) = mc_tokenizer::history_paragraph_counts(&text);
+            self.tokenize_ms += start.elapsed().as_secs_f64() * 1000.0;
+            PreparedTier {
+                text,
+                final_count,
+                continued_count,
+            }
+        })
+    }
+
+    pub fn render(&mut self, budget: f64) -> String {
+        let mapped: Vec<_> = self.compartments.iter().map(|c| (*c).clone()).collect();
+        let mut tiers = compute_tiers(&mapped, budget);
+        let mut active: std::collections::VecDeque<_> = tiers
+            .iter()
+            .enumerate()
+            .filter(|(_, tier)| **tier < 5)
+            .map(|(i, _)| i)
+            .collect();
+        let mut continued_total: usize = active
+            .iter()
+            .map(|&i| self.tier(i, tiers[i]).continued_count)
+            .sum();
+        while let Some(&last) = active.back() {
+            let last_tier = self.tier(last, tiers[last]);
+            let exact = continued_total - last_tier.continued_count + last_tier.final_count;
+            if budget.is_nan() || budget <= 0.0 || exact as f64 <= budget {
+                break;
+            }
+            let first = *active.front().unwrap();
+            continued_total -= self.tier(first, tiers[first]).continued_count;
+            tiers[first] += 1;
+            if tiers[first] == 5 {
+                active.pop_front();
+            } else {
+                continued_total += self.tier(first, tiers[first]).continued_count;
+            }
+        }
+        active
+            .iter()
+            .map(|&i| self.tier(i, tiers[i]).text.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
 /// Extract a top-level m0 block slice (e.g. "session-history") for budget measurement
 /// and token attribution. Returns the full `<tag>…</tag>` slice or None. Manual
 /// shortest-match (the non-greedy `<tag>[\s\S]*?</tag>`): the first `</tag>` after the
@@ -395,6 +475,84 @@ mod tests {
     use super::*;
     use crate::test_support::FixtureBuilder;
     use serde::Deserialize;
+
+    #[test]
+    fn incremental_decay_matches_generic_for_nonmonotone_tiers_and_whitespace() {
+        let rows = (0..30)
+            .map(|i| DecayRenderCompartment {
+                start_message: i * 2,
+                end_message: i * 2 + 1,
+                title: format!("title {i} \t"),
+                p1: Some("small🙂".into()),
+                p2: Some("larger tier 漢字 \n".repeat(10)),
+                p3: Some("x".into()),
+                p4: Some(String::new()),
+                importance: Some(50),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let mut prepared = PreparedDecay::new(&rows);
+        for budget in [0.0, 1.0, 40.0, 200.0, 500.0, 10_000.0] {
+            assert_eq!(
+                prepared.render(budget),
+                render_decayed_compartments(&rows, budget, |s| mc_tokenizer::encode_ordinary(s)
+                    .len()),
+                "budget={budget}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a read-only live-store fixture"]
+    fn aft_live_compose_profile() {
+        let path = std::env::var("AFT_COMPOSE_FIXTURE").expect("fixture path");
+        let rows: Vec<DecayRenderCompartment> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let token_time = std::cell::Cell::new(std::time::Duration::ZERO);
+        let start = std::time::Instant::now();
+        let body = render_decayed_compartments(&rows, 60_000.0, |text| {
+            calls.set(calls.get() + 1);
+            let start = std::time::Instant::now();
+            let count = mc_tokenizer::estimate_tokens(text);
+            token_time.set(token_time.get() + start.elapsed());
+            count
+        });
+        let elapsed = start.elapsed();
+        let incremental_start = std::time::Instant::now();
+        let mut prepared = PreparedDecay::new(&rows);
+        let incremental = prepared.render(60_000.0);
+        assert_eq!(body, incremental);
+        eprintln!(
+            "aft-incremental total_ms={:.1} tier_tokenize_ms={:.1}",
+            incremental_start.elapsed().as_secs_f64() * 1000.0,
+            prepared.tokenize_ms
+        );
+        for row in &rows {
+            for tier in 1..5 {
+                let text = render_one_compartment(row, tier);
+                let joined = format!("{text}\n\n## next\n🙂 ");
+                assert_eq!(
+                    mc_tokenizer::estimate_tokens(&joined),
+                    mc_tokenizer::encode_ordinary(&joined).len()
+                );
+                let counts = mc_tokenizer::history_paragraph_counts(&text);
+                assert_eq!(
+                    counts.1 + mc_tokenizer::encode_ordinary("## next\n🙂 ").len(),
+                    mc_tokenizer::encode_ordinary(&joined).len()
+                );
+            }
+        }
+        use sha2::{Digest, Sha256};
+        eprintln!(
+            "aft-compose rows={} total_ms={:.1} tokenize_ms={:.1} calls={} sha256={:x}",
+            rows.len(),
+            elapsed.as_secs_f64() * 1000.0,
+            token_time.get().as_secs_f64() * 1000.0,
+            calls.get(),
+            Sha256::digest(body.as_bytes())
+        );
+    }
     use sha2::{Digest, Sha256};
 
     fn comp(
@@ -687,6 +845,13 @@ mod tests {
                 || render_decayed_compartments(&comps, case.budget, no_guard),
                 |tier| render_compartment_at_tier(&comps[0], tier),
             );
+            if case.forced_tier.is_none() {
+                assert_eq!(
+                    PreparedDecay::new(&comps).render(case.budget),
+                    got,
+                    "incremental loose golden case {n}"
+                );
+            }
             if let Some(expected_hex) = &case.body_utf16_hex {
                 let actual_hex = crate::transform::js_utf16_units_from_internal(&got)
                     .into_iter()
@@ -873,6 +1038,11 @@ mod tests {
                 case.body.as_ref(),
                 "tight render mismatch in case {n} (budget {})",
                 case.budget
+            );
+            assert_eq!(
+                PreparedDecay::new(&comps).render(case.budget),
+                got,
+                "incremental tight golden case {n}"
             );
             // Confirm this case actually exercised the guard (the real estimator agrees the
             // body fits): either it demoted to fit, or it hit the floor (empty). A case

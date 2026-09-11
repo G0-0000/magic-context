@@ -25,9 +25,7 @@ use crate::injection::{
     advance_injection_from_meta, capture_todo_state_on_bust, injection_pending_after_capture,
     is_synthetic_todo_id, InjectionOutcome,
 };
-use crate::m0_compose::{
-    compose_m0_from_store, trim_memories_to_budget, trim_user_profile_to_budget,
-};
+use crate::m0_compose::{trim_memories_to_budget, trim_user_profile_to_budget};
 use crate::m1_compose::{
     claim_and_render_notes, compose_m1_from_store, m1_revision_signal_parts_for_pass_timed,
     M1RevisionReadTimings, M1RevisionSignal,
@@ -1296,6 +1294,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub compose_m0m1: f64,
     #[serde(default)]
+    pub compose: crate::m0_compose::ComposeTimings,
+    #[serde(default)]
     pub selection: f64,
     #[serde(default)]
     pub transition_detection: f64,
@@ -1412,7 +1412,7 @@ pub fn format_pass_timing_line(
          planning={:.1} state_evolution={:.1} finalize={:.1} \
          tag_overlay={:.1} unit_mint={:.1} temporal={:.1} caveman={:.1} \
          tag_mint_candidates={} tag_mint_new={} tag_mint_tokenized_bytes={} \
-         decide={:.1} seed_or_sync={:.1} compose_m0m1={:.1} selection={:.1} \
+         decide={:.1} seed_or_sync={:.1} compose_m0m1={:.1} decay_render_ms={:.3} tier_tokenize_ms={:.3} memory_render_ms={:.3} mural_ms={:.3} user_profile_ms={:.3} retry_attempts={} selection={:.1} \
          transition_detection={:.3} emergency_reasoning_exclusions={} todo={:.1} \
          blocks_by_mid={:.1} build_frozen_unit_index={:.1} full_drop_tool_ids={:.1} \
          build_output={:.1} build_identity={:.1} build_identity_max={:.1} build_frozen_unit_scan={:.1} \
@@ -1472,6 +1472,12 @@ pub fn format_pass_timing_line(
         timings.decide,
         timings.seed_or_sync,
         timings.compose_m0m1,
+        timings.compose.decay_render_ms,
+        timings.compose.tier_tokenize_ms,
+        timings.compose.memory_render_ms,
+        timings.compose.mural_ms,
+        timings.compose.user_profile_ms,
+        timings.compose.retry_attempts,
         timings.selection,
         timings.transition_detection,
         timings.emergency_reasoning_exclusions,
@@ -2061,7 +2067,15 @@ pub fn transform_with_projection(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result = apply_once_with_estimator(store, req, ctx, mc_tokenizer::estimate_tokens, None);
+    let result = apply_once_with_estimator_and_projection(
+        store,
+        req,
+        ctx,
+        mc_tokenizer::estimate_tokens,
+        None,
+        None,
+        true,
+    );
     record_stable_pass_trace(store, req, ctx, &result);
     result
 }
@@ -2080,6 +2094,7 @@ pub(crate) fn transform_with_projection_cached(
         mc_tokenizer::estimate_tokens,
         Some(output_cache),
         projection_cache,
+        true,
     );
     record_stable_pass_trace(store, req, ctx, &result);
     result
@@ -2133,6 +2148,7 @@ fn pass_scheduler_observation(
 /// The retry wrapper around [`apply_once`], parameterized by the token estimator so tests
 /// can inject a panicking/counting one to prove the estimator is HARD-only (never called
 /// on SOFT/defer). Production always passes [`mc_tokenizer::estimate_tokens`].
+#[cfg(test)]
 fn apply_once_with_estimator(
     store: &McStore,
     req: &TransformRequest,
@@ -2140,7 +2156,15 @@ fn apply_once_with_estimator(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
 ) -> Result<TransformWithProjection, TransformError> {
-    apply_once_with_estimator_and_projection(store, req, ctx, estimate_tokens, output_cache, None)
+    apply_once_with_estimator_and_projection(
+        store,
+        req,
+        ctx,
+        estimate_tokens,
+        output_cache,
+        None,
+        false,
+    )
 }
 
 /// Convert MC's assumed cache lifetime into a provider-expressible Claude Code marker TTL.
@@ -2227,6 +2251,7 @@ fn apply_once_with_estimator_and_projection(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     output_cache: Option<&Mutex<SerializedOutputCache>>,
     projection_cache: Option<&ProjectionCacheInput>,
+    incremental_history: bool,
 ) -> Result<TransformWithProjection, TransformError> {
     emit_protected_tags_deprecation_once(req);
     let mut attempt = 0;
@@ -2242,6 +2267,7 @@ fn apply_once_with_estimator_and_projection(
             projection_cache,
             boundary_divergence_retry,
             &mut boundary_divergence_detected,
+            incremental_history,
         ) {
             Err(TransformError::Store(McStoreError::CasConflict { .. }))
                 if attempt < MAX_CAS_RETRIES =>
@@ -3226,6 +3252,7 @@ fn apply_once(
     projection_cache: Option<&ProjectionCacheInput>,
     boundary_divergence_retry: bool,
     boundary_divergence_detected: &mut bool,
+    incremental_history: bool,
 ) -> Result<TransformWithProjection, TransformError> {
     *boundary_divergence_detected = false;
     if !ctx.compaction_enabled {
@@ -4682,7 +4709,7 @@ fn apply_once(
                     coverage_bounds.map(|(start, _)| start),
                     serializer_profile,
                 );
-                let mut comp = compose_m0_from_store(
+                let mut comp = crate::m0_compose::compose_m0_from_store_timed(
                     store,
                     &crate::m0_compose::M0ComposeInputs {
                         session_id: &req.session_id,
@@ -4699,6 +4726,8 @@ fn apply_once(
                         mural: m0_mural_input(req, serializer_profile),
                     },
                     estimate_tokens,
+                    incremental_history,
+                    &mut timings.compose,
                 )?;
 
                 // Live coverage guard: store-pure validation allows sparse coordinate
@@ -4783,7 +4812,7 @@ fn apply_once(
                                     recut_coverage_bounds.map(|(start, _)| start),
                                     serializer_profile,
                                 );
-                            comp = compose_m0_from_store(
+                            comp = crate::m0_compose::compose_m0_from_store_timed(
                                 store,
                                 &crate::m0_compose::M0ComposeInputs {
                                     session_id: &req.session_id,
@@ -4800,6 +4829,8 @@ fn apply_once(
                                     mural: m0_mural_input(req, serializer_profile),
                                 },
                                 estimate_tokens,
+                                incremental_history,
+                                &mut timings.compose,
                             )?;
                             meta.last_execute_ordinal = meta
                                 .last_execute_ordinal
@@ -5030,7 +5061,7 @@ fn apply_once(
                         coverage_bounds.map(|(start, _)| start),
                         serializer_profile,
                     );
-                    let comp = compose_m0_from_store(
+                    let comp = crate::m0_compose::compose_m0_from_store_timed(
                         store,
                         &crate::m0_compose::M0ComposeInputs {
                             session_id: &req.session_id,
@@ -5047,6 +5078,8 @@ fn apply_once(
                             mural: m0_mural_input(req, serializer_profile),
                         },
                         estimate_tokens,
+                        incremental_history,
+                        &mut timings.compose,
                     )?;
 
                     if let Some(stray) = first_uncovered_live_block(
@@ -14641,6 +14674,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn compose_timing_line_preserves_each_measured_value() {
+        for scale in [1.0, 7.0] {
+            let timings = TransformTimings {
+                compose: crate::m0_compose::ComposeTimings {
+                    decay_render_ms: 1.25 * scale,
+                    tier_tokenize_ms: 2.5 * scale,
+                    memory_render_ms: 3.75 * scale,
+                    mural_ms: 4.25 * scale,
+                    user_profile_ms: 5.5 * scale,
+                    retry_attempts: scale as usize,
+                },
+                ..Default::default()
+            };
+            let line = format_pass_timing_line("fixture", &timings, 0.0);
+            let fields = line
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.split_once('=').unwrap())
+                .collect::<BTreeMap<_, _>>();
+            for (key, value) in [
+                ("decay_render_ms", 1.25),
+                ("tier_tokenize_ms", 2.5),
+                ("memory_render_ms", 3.75),
+                ("mural_ms", 4.25),
+                ("user_profile_ms", 5.5),
+            ] {
+                assert_eq!(fields[key], format!("{:.3}", value * scale), "{key}");
+            }
+            assert_eq!(fields["retry_attempts"], (scale as usize).to_string());
+        }
+    }
+
+    #[test]
     fn pass_timing_line_is_parseable_for_an_empty_session() {
         let line = format_pass_timing_line("", &TransformTimings::default(), 0.0);
         let fields = line
@@ -14704,6 +14770,128 @@ pub(crate) mod tests {
             "cache_dirty_skips",
         ] {
             assert_eq!(fields[key], "0", "{key} renders as an integer");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the private read-only store fixture; release performance gate"]
+    fn aft_store_compose_replay_parity() {
+        use sha2::{Digest, Sha256};
+        let root = std::path::PathBuf::from(
+            std::env::var("AFT_COMPOSE_STORE").expect("fixture directory"),
+        );
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let session = manifest["session"].as_str().unwrap();
+        let project = manifest["project"].as_str().unwrap();
+        let mut expected = Vec::new();
+        for optimized in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::copy(root.join("store.db"), dir.path().join("store.db")).unwrap();
+            let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+            conn.execute("DELETE FROM mc_cache_state", []).unwrap();
+            conn.execute("UPDATE cortexkit_fence SET epoch=1", [])
+                .unwrap();
+            drop(conn);
+            let s = store(dir.path());
+            let compartments = s.load_compartments(session).unwrap();
+            assert_eq!(compartments.len(), 1627);
+            let last = compartments.last().unwrap();
+            let (mid, part) = last.end_message_id.rsplit_once('#').unwrap();
+            let part: usize = part.parse().unwrap();
+            let mut messages = vec![wire_item(
+                "user",
+                mid,
+                last.end_message as u64,
+                &vec!["covered"; part + 1],
+            )];
+            messages.extend((1..=776).map(|i| {
+                item(
+                    &format!("fixture-tail-{i}"),
+                    last.end_message as u64 + i,
+                    &format!("tail {i} {}", "payload ".repeat(64)),
+                )
+            }));
+            let mut request = req(session, "fixture", messages);
+            request.serializer_profile = "opencode".into();
+            let mural = s
+                .load_project_mural_artifact(project)
+                .unwrap()
+                .expect("live mural");
+            request.mural = Some(crate::m0_compose::M0MuralInput {
+                enabled: true,
+                supports_vision: true,
+                data_url: Some(String::from_utf8(mural.data_url).unwrap()),
+                content_hash: Some(mural.content_hash),
+            });
+            let mut context = pctx(project, dir.path().to_str().unwrap(), 1_789_124_333_840);
+            context.memory_budget_tokens = 15_000.0;
+            context.inject_docs = false;
+            let estimator: fn(&str) -> usize = if optimized {
+                mc_tokenizer::estimate_tokens
+            } else {
+                |s| mc_tokenizer::encode_ordinary(s).len()
+            };
+            for (index, phase) in ["cold", "SOFT+", "SOFT", "HARD"].iter().enumerate() {
+                if index == 2 {
+                    let mut loaded = s.load(session).unwrap();
+                    loaded.meta.soft_refresh_pending = true;
+                    s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                }
+                if index == 3 {
+                    request.render_config = "fixture-hard".into();
+                }
+                let execute_start = Instant::now();
+                let mut output = apply_once_with_estimator_and_projection(
+                    &s, &request, &context, estimator, None, None, optimized,
+                )
+                .unwrap();
+                output.response.timings.as_mut().unwrap().transform_execute =
+                    elapsed_ms(execute_start);
+                assert_eq!(
+                    output.response.decision,
+                    if index == 0 || index == 3 {
+                        "HARD"
+                    } else {
+                        phase
+                    }
+                );
+                let loaded = s.load(session).unwrap();
+                let hashes = ["m0", "m1"].map(|key| {
+                    let unit = loaded
+                        .core
+                        .frozen_units
+                        .iter()
+                        .find(|u| u.key == key)
+                        .unwrap();
+                    format!("{:x}", Sha256::digest(unit.frozen_payload.as_bytes()))
+                });
+                if optimized {
+                    expected.push(hashes.clone());
+                } else {
+                    assert_eq!(hashes, expected[index], "{phase}");
+                }
+                let timings = output.response.timings.as_ref().unwrap();
+                eprintln!(
+                    "aft-store optimized={optimized} phase={phase} m0={} m1={} {}",
+                    hashes[0],
+                    hashes[1],
+                    format_pass_timing_line(session, timings, 0.0)
+                );
+                if optimized && !cfg!(debug_assertions) {
+                    assert!(
+                        timings.compose_m0m1 < 1000.0,
+                        "compose {}ms",
+                        timings.compose_m0m1
+                    );
+                    assert!(
+                        timings.total < 2000.0,
+                        "synthetic-tail full pass {}ms",
+                        timings.total
+                    );
+                }
+            }
         }
     }
 

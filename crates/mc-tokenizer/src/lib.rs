@@ -74,7 +74,99 @@ pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    tokenizer().count_ordinary(text)
+    count_history_cached(text)
+}
+
+// A heading follows two newlines, so no Claude pre-tokenization piece crosses
+// this boundary. The sentinel preserves the whitespace regex's end-of-input
+// lookahead for non-final chunks; it is a separate one-token punctuation piece.
+fn count_history_cached(text: &str) -> usize {
+    let cache = HISTORY_COUNTS.get_or_init(|| std::sync::Mutex::new(HistoryCounts::default()));
+    // Counting on another transform must not wait behind a cold cache fill.
+    let Ok(mut cache) = cache.try_lock() else {
+        return tokenizer().count_ordinary(text);
+    };
+    let mut start = 0;
+    let mut total = 0;
+    for (offset, _) in text.match_indices("\n\n## ") {
+        let end = offset + 2;
+        total += cache.count(&text[start..end], true);
+        start = end;
+    }
+    total + cache.count(&text[start..], false)
+}
+
+/// Count a paragraph both at end of input and before a `\n\n## ` heading.
+/// The continued count includes the two joining newlines, not the next heading.
+/// Callers must preserve that separator and heading prefix when summing counts.
+pub fn history_paragraph_counts(text: &str) -> (usize, usize) {
+    let final_count = estimate_tokens(text);
+    let continued_count = estimate_tokens(&format!("{text}\n\n#")) - 1;
+    (final_count, continued_count)
+}
+
+/// Process-local ceiling for retained history text and entry overhead.
+/// Oversized chunks bypass the cache; eviction is least-recently-used.
+const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+static HISTORY_COUNTS: OnceLock<std::sync::Mutex<HistoryCounts>> = OnceLock::new();
+
+#[derive(Default)]
+struct HistoryCounts {
+    entries: std::collections::HashMap<String, HistoryCount>,
+    age: std::collections::BTreeMap<u64, String>,
+    clock: u64,
+    bytes: usize,
+}
+
+struct HistoryCount {
+    counts: [Option<usize>; 2],
+    age: u64,
+}
+
+impl HistoryCounts {
+    fn count(&mut self, text: &str, continued: bool) -> usize {
+        let slot = usize::from(continued);
+        self.clock += 1;
+        if let Some(entry) = self.entries.get_mut(text) {
+            self.age.remove(&entry.age);
+            entry.age = self.clock;
+            self.age.insert(self.clock, text.to_owned());
+            if let Some(count) = entry.counts[slot] {
+                return count;
+            }
+        }
+        let count = if continued {
+            tokenizer().count_ordinary(&format!("{text}#")) - 1
+        } else {
+            tokenizer().count_ordinary(text)
+        };
+        if let Some(entry) = self.entries.get_mut(text) {
+            entry.counts[slot] = Some(count);
+            return count;
+        }
+        let cost = text.len().saturating_mul(2).saturating_add(128);
+        if cost > HISTORY_CACHE_BYTES {
+            return count;
+        }
+        while self.bytes + cost > HISTORY_CACHE_BYTES {
+            let (_, key) = self.age.pop_first().expect("non-empty bounded cache");
+            self.bytes -= key.len() * 2 + 128;
+            self.entries.remove(&key);
+        }
+        let mut counts = [None; 2];
+        counts[slot] = Some(count);
+        self.entries.insert(
+            text.to_owned(),
+            HistoryCount {
+                counts,
+                age: self.clock,
+            },
+        );
+        self.age.insert(self.clock, text.to_owned());
+        self.bytes += cost;
+        count
+    }
 }
 
 /// The full token-ID sequence for `text` (ordinary byte-BPE). Exposed for the
@@ -82,4 +174,68 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// stronger check than the count alone (it catches count-coincident merge bugs).
 pub fn encode_ordinary(text: &str) -> Vec<Rank> {
     tokenizer().encode_ordinary(text)
+}
+
+#[cfg(test)]
+mod history_cache_tests {
+    use super::*;
+
+    #[test]
+    fn history_piece_counts_equal_ordinary_encoding() {
+        let bodies = [
+            "",
+            "x",
+            "  ",
+            "x\n",
+            "x\n \t\n",
+            "é漢字🙂🚀",
+            "can't I'd we've",
+            "\u{2003}\u{2028}",
+            "## title\n## nested",
+            "<EOT>",
+            "x \r\n\t ",
+        ];
+        for left in bodies {
+            for right in bodies {
+                let text = format!("## first\n{left}\n\n## second\n{right}");
+                assert_eq!(
+                    estimate_tokens(&text),
+                    encode_ordinary(&text).len(),
+                    "{text:?}"
+                );
+                let first = format!("## first\n{left}");
+                let second = format!("## second\n{right}");
+                assert_eq!(
+                    history_paragraph_counts(&first).1 + history_paragraph_counts(&second).0,
+                    encode_ordinary(&text).len(),
+                    "joined: {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn history_cache_is_byte_bounded_and_evicts_least_recently_used() {
+        let mut cache = HistoryCounts::default();
+        let recent = format!("0{}", "x ".repeat(25_000));
+        cache.count(&recent, false);
+        for index in 1..100 {
+            let text = format!("{index}{}", "x ".repeat(25_000));
+            cache.count(&text, false);
+            cache.count(&recent, false);
+        }
+        assert!(cache.bytes <= HISTORY_CACHE_BYTES);
+        assert!(cache.entries.contains_key(&recent));
+        assert!(!cache
+            .entries
+            .contains_key(&format!("1{}", "x ".repeat(25_000))));
+        assert_eq!(
+            cache.bytes,
+            cache
+                .entries
+                .keys()
+                .map(|s| s.len() * 2 + 128)
+                .sum::<usize>()
+        );
+    }
 }

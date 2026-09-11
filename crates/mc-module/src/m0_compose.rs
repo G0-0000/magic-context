@@ -332,11 +332,43 @@ fn history_slice_tokens(m0_text: &str, estimate_tokens: impl Fn(&str) -> usize) 
 
 /// Render m0 and, when the history slice overshoots, tighten decay pressure at most three times.
 /// The capped final render is retained even when its history still exceeds the slack threshold.
+#[cfg(test)]
 fn render_m0_with_decay_pressure_retry(
     inputs: &M0Inputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> String {
-    let render = |decay_pressure_multiplier| {
+    render_m0_retry(
+        inputs,
+        estimate_tokens,
+        false,
+        &mut ComposeTimings::default(),
+    )
+}
+
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ComposeTimings {
+    pub decay_render_ms: f64,
+    pub tier_tokenize_ms: f64,
+    pub memory_render_ms: f64,
+    pub mural_ms: f64,
+    pub user_profile_ms: f64,
+    pub retry_attempts: usize,
+}
+
+fn render_m0_retry(
+    inputs: &M0Inputs<'_>,
+    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    incremental: bool,
+    timings: &mut ComposeTimings,
+) -> String {
+    let start = std::time::Instant::now();
+    let mut prepared = crate::decay_render::PreparedDecay::new(inputs.compartments);
+    let generic_tokenize_ms = std::cell::Cell::new(0.0);
+    let mut render = |decay_pressure_multiplier| {
+        if incremental {
+            let history = prepared.render(inputs.history_budget_tokens / decay_pressure_multiplier);
+            return crate::memory_render::render_m0_with_history(inputs, &history);
+        }
         render_m0(
             &M0Inputs {
                 project_docs: inputs.project_docs,
@@ -348,7 +380,13 @@ fn render_m0_with_decay_pressure_retry(
                 history_budget_tokens: inputs.history_budget_tokens,
                 decay_pressure_multiplier,
             },
-            estimate_tokens,
+            |text| {
+                let start = std::time::Instant::now();
+                let count = estimate_tokens(text);
+                generic_tokenize_ms
+                    .set(generic_tokenize_ms.get() + start.elapsed().as_secs_f64() * 1000.0);
+                count
+            },
         )
     };
     let mut decay_pressure_multiplier = 1.0;
@@ -363,6 +401,9 @@ fn render_m0_with_decay_pressure_retry(
         m0_bytes = render(decay_pressure_multiplier);
         attempts += 1;
     }
+    timings.retry_attempts += attempts;
+    timings.decay_render_ms += start.elapsed().as_secs_f64() * 1000.0;
+    timings.tier_tokenize_ms += prepared.tokenize_ms + generic_tokenize_ms.get();
     m0_bytes
 }
 
@@ -372,6 +413,22 @@ pub fn compose_m0_from_store(
     store: &McStore,
     inputs: &M0ComposeInputs<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
+) -> Result<M0Composition, M0ComposeError> {
+    compose_m0_from_store_timed(
+        store,
+        inputs,
+        estimate_tokens,
+        false,
+        &mut ComposeTimings::default(),
+    )
+}
+
+pub(crate) fn compose_m0_from_store_timed(
+    store: &McStore,
+    inputs: &M0ComposeInputs<'_>,
+    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    incremental: bool,
+    timings: &mut ComposeTimings,
 ) -> Result<M0Composition, M0ComposeError> {
     // --- compartments: the session history, coverage anchor, and folded watermark ---
     let compartments = store.load_compartments(inputs.session_id)?;
@@ -392,6 +449,7 @@ pub fn compose_m0_from_store(
             None => (String::new(), None, None, 0),
         };
 
+    let memory_start = std::time::Instant::now();
     // --- memories: rows and watermarks share one SQLite snapshot ---
     let membership = store.resolve_workspace_membership(inputs.project_path)?;
     let snapshot = if inputs.memory_enabled {
@@ -421,6 +479,8 @@ pub fn compose_m0_from_store(
     let max_memory_id = snapshot.revision.max_memory_id;
     let memory_mutation_cursor = snapshot.revision.mutation_cursor;
 
+    timings.memory_render_ms += memory_start.elapsed().as_secs_f64() * 1000.0;
+    let profile_start = std::time::Instant::now();
     // --- user-profile + project-docs ---
     let user_profile = if inputs.memory_enabled {
         store.load_active_user_memories()?
@@ -432,6 +492,7 @@ pub fn compose_m0_from_store(
         inputs.user_profile_budget_tokens,
         estimate_tokens,
     );
+    timings.user_profile_ms += profile_start.elapsed().as_secs_f64() * 1000.0;
     let docs = if inputs.inject_docs {
         read_project_docs_canonical(inputs.project_directory)
     } else {
@@ -451,11 +512,13 @@ pub fn compose_m0_from_store(
             rendered
         })
         .collect();
+    let mural_start = std::time::Instant::now();
     let mural = inputs
         .memory_enabled
         .then(|| resolved_mural(inputs.mural))
         .flatten();
-    let mut m0_bytes = render_m0_with_decay_pressure_retry(
+    timings.mural_ms += mural_start.elapsed().as_secs_f64() * 1000.0;
+    let mut m0_bytes = render_m0_retry(
         &M0Inputs {
             project_docs: &docs.rendered_block,
             user_profile: &user_profile,
@@ -467,6 +530,8 @@ pub fn compose_m0_from_store(
             decay_pressure_multiplier: 1.0,
         },
         estimate_tokens,
+        incremental,
+        timings,
     );
     if mural.is_some() {
         m0_bytes.push_str("\n\n");
@@ -583,6 +648,66 @@ mod tests {
         ] {
             assert!(resolved_mural(Some(&disabled)).is_none());
         }
+    }
+
+    #[test]
+    fn compose_substage_writers_record_live_work() {
+        let fixture = FixtureBuilder::store();
+        let store = &fixture.store;
+        store
+            .replace_compartments("ses", &[comp(1, 1, 10, "m10")])
+            .unwrap();
+        seed_user_profile(store, &["profile".into()]);
+        store
+            .seed_memory(1, "git:proj", "CONSTRAINTS", "memory", 50)
+            .unwrap();
+        let mural = M0MuralInput {
+            enabled: true,
+            supports_vision: true,
+            data_url: Some("data:image/png;base64,cG5n".into()),
+            content_hash: None,
+        };
+        let inputs = M0ComposeInputs {
+            session_id: "ses",
+            project_path: "git:proj",
+            project_directory: fixture.dir.path().to_str().unwrap(),
+            now_ms: 0,
+            history_budget_tokens: 60_000.0,
+            covered_system_messages: &[],
+            memory_enabled: true,
+            memory_budget_tokens: 15_000.0,
+            user_profile_budget_tokens: 4_000.0,
+            inject_docs: false,
+            temporal_awareness: true,
+            mural: Some(&mural),
+        };
+        let mut timings = ComposeTimings::default();
+        let start = std::time::Instant::now();
+        let composed = compose_m0_from_store_timed(
+            store,
+            &inputs,
+            mc_tokenizer::estimate_tokens,
+            true,
+            &mut timings,
+        )
+        .unwrap();
+        let total = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(composed.m0_bytes.contains("memory"));
+        assert!(composed.mural.is_some());
+        for (name, value) in [
+            ("decay", timings.decay_render_ms),
+            ("tokenize", timings.tier_tokenize_ms),
+            ("memory", timings.memory_render_ms),
+            ("mural", timings.mural_ms),
+            ("profile", timings.user_profile_ms),
+        ] {
+            assert!(
+                value > 0.0 && value <= total,
+                "{name}={value}, total={total}"
+            );
+        }
+        assert!(timings.decay_render_ms >= timings.tier_tokenize_ms);
+        assert_eq!(timings.retry_attempts, 0);
     }
 
     #[test]
@@ -1000,6 +1125,13 @@ mod tests {
         };
 
         let rendered = render_m0_with_decay_pressure_retry(&inputs, estimator);
+        let mut timings = ComposeTimings::default();
+        let optimized = render_m0_retry(&inputs, mc_tokenizer::estimate_tokens, true, &mut timings);
+        assert_eq!(optimized, rendered, "incremental TS retry bytes");
+        assert_eq!(timings.retry_attempts, fixture.attempts);
+        assert!(timings.decay_render_ms > 0.0);
+        assert!(timings.tier_tokenize_ms > 0.0);
+        assert!(timings.decay_render_ms >= timings.tier_tokenize_ms);
         let history = extract_m0_block(&rendered, "session-history").expect("history slice");
         let body = history
             .strip_prefix("<session-history>\n")
