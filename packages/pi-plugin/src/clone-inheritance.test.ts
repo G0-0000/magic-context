@@ -202,6 +202,22 @@ function pending(
 }
 
 describe("Pi clone state inheritance", () => {
+	it("does not inherit Rust reasoning decisions across fork or branch filters", () => {
+		for (const branch of [[user("kept")], [user("kept"), assistant("branch-new")]]) {
+			const database = db();
+			seedTag(database, { tagNumber: 1, messageId: "kept" });
+			seedTag(database, { tagNumber: 2, messageId: "removed" });
+			// Rust state normally lives in a separate store. Even if both stores are
+			// colocated, the Pi clone's explicit table list must not copy its units.
+			database.exec("CREATE TABLE mc_cache_state (session_id TEXT PRIMARY KEY, core_state TEXT, meta TEXT)");
+			database.prepare("INSERT INTO mc_cache_state VALUES (?, ?, ?)").run("source", JSON.stringify({ frozen_units: [{ key: "strip:reasoning_clear:kept", frozen_payload: "" }] }), JSON.stringify({ reasoning_replay_evidence: { source_hash: "source-only" } }));
+			const result = copyWithEntries(database, branch);
+			expect(result.kind).toBe("migrated");
+			expect(getTagsBySession(database, "clone").map((tag) => tag.messageId)).toEqual(["kept"]);
+			expect(count(database, "mc_cache_state", "source")).toBe(1);
+			expect(count(database, "mc_cache_state", "clone")).toBe(0);
+		}
+	});
 	it("filters prefix clones, including compartments that span the fork point", () => {
 		const database = db();
 		seedCompartment(database, { sequence: 1, startId: "u1", endId: "a1" });

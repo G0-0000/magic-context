@@ -3979,6 +3979,15 @@ pub struct ModuleMeta {
     /// the served block set for that pass, so it stays bounded by the output size.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
+    /// Revert and shadow-hydration generations that produced the served CK fingerprints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_output_generation: Option<(u64, u64, u64)>,
+    /// After a priced native pass, numeric-cutoff legacy replay is permanently retired.
+    #[serde(default)]
+    pub reasoning_clear_initialized: bool,
+    /// Native replay proof for the short legacy-adoption interval; no schema change is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_replay_evidence: Option<ReasoningReplayEvidence>,
 
     /// Tracks which shadow reset generation this record belongs to. Operations created
     /// before the most recent reset are rejected so they cannot write rows from an older
@@ -4028,6 +4037,16 @@ pub struct TagMintInput {
     pub kind: String,
     pub token_count: i64,
     pub source_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReasoningReplayEvidence {
+    pub row_version: u64,
+    pub generation: (u64, u64, u64),
+    pub source_hash: String,
+    pub ck_fingerprints: Vec<ServedBlockFingerprint>,
+    pub native: BTreeMap<String, serde_json::Value>,
+    pub unit_native: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10832,6 +10851,12 @@ impl McStore {
             };
 
             target_core = source_core;
+            // A descent changes the live message set. Tail reasoning decisions cannot
+            // authorize changes in the new lineage, even if a harness reuses an id.
+            target_core.frozen_units.retain(|unit| {
+                !unit.key.starts_with("strip:reasoning_clear:")
+                    && !unit.key.starts_with("strip:native_reasoning_keep:")
+            });
             target_core.boundary_id = anchor.block_id.clone();
             target_core.reconcile_pending = false;
             target_meta = source_meta;
@@ -10844,6 +10869,9 @@ impl McStore {
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
             target_meta.served_output_fingerprint.clear();
+            target_meta.served_output_generation = None;
+            target_meta.reasoning_replay_evidence = None;
+            target_meta.reasoning_clear_initialized = false;
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
             target_meta.ordinal_continuation_base = Some(prior_last);
@@ -27303,6 +27331,102 @@ mod lineage_descent_tests {
     /// anchor sits at ordinal 0 (measured on the rig — ccm-0#1 carrying the
     /// stored summary). A fresh-origin anchor at 0 must descend exactly like
     /// the 1-based form; the placeholder still lands at prior_last+1.
+    #[test]
+    fn reasoning_clear_units_and_proofs_do_not_cross_direct_or_composed_descent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let seed_decisions = |key: &str| {
+            let mut state = store.load(key).unwrap();
+            for prefix in ["reasoning_clear", "native_reasoning_keep"] {
+                state
+                    .core
+                    .frozen_units
+                    .push(cortexkit_cache_core::FrozenUnit {
+                        key: format!("strip:{prefix}:summary"),
+                        kind: format!("strip_{prefix}"),
+                        frozen_payload: String::new(),
+                        durability_class: cortexkit_cache_core::DurabilityClass::Lineage,
+                        reset_rule: String::new(),
+                    });
+            }
+            state.meta.newest_live_ordinal = state
+                .meta
+                .newest_live_ordinal
+                .max(state.meta.coverage_ordinal.unwrap_or(0) + 1);
+            state.meta.reasoning_clear_initialized = true;
+            state.meta.served_output_generation = Some((0, 0, 0));
+            state.meta.reasoning_replay_evidence = Some(ReasoningReplayEvidence {
+                row_version: state.row_version.unwrap() + 1,
+                generation: (0, 0, 0),
+                source_hash: "old-source".to_string(),
+                ck_fingerprints: Vec::new(),
+                native: BTreeMap::new(),
+                unit_native: BTreeMap::new(),
+            });
+            store
+                .commit(key, state.row_version, &state.core, &state.meta)
+                .unwrap();
+        };
+        seed_decisions("A");
+        let anchor = anchor();
+        let direct = direct_hop("A", "B", 2);
+        store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: None,
+                edge_id: 90,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &direct,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap();
+        let assert_clean = |key: &str| {
+            let state = store.load(key).unwrap();
+            assert!(!state
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key.starts_with("strip:reasoning_clear:")
+                    || unit.key.starts_with("strip:native_reasoning_keep:")));
+            assert!(state.meta.reasoning_replay_evidence.is_none());
+            assert!(state.meta.served_output_fingerprint.is_empty());
+            assert!(state.meta.served_output_generation.is_none());
+            assert!(!state.meta.reasoning_clear_initialized);
+            assert_eq!(state.core.boundary_id, "summary#1");
+        };
+        assert_clean("B");
+        seed_decisions("B");
+        let composed = [direct[0].clone(), direct_hop("B", "C", 3)[0].clone()];
+        let outcome = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "C",
+                expected_target_row_version: None,
+                edge_id: 91,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 3,
+                constituents: &composed,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 11,
+            })
+            .unwrap();
+        assert_eq!(outcome.source_key.as_deref(), Some("B"));
+        assert_clean("C");
+        assert!(store
+            .load("A")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:reasoning_clear:summary"));
+    }
+
     #[test]
     fn descent_accepts_a_zero_based_fresh_anchor() {
         let dir = tempfile::tempdir().unwrap();

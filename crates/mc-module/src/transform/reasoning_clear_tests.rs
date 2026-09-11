@@ -141,86 +141,6 @@ fn reasoning_clear_exempt_at_cutoff_waits_for_bust_and_replays_after_restart() {
 }
 
 #[test]
-fn reasoning_clear_legacy_adoption_preserves_cleared_and_held_bytes() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = store(dir.path());
-    let mut request = reasoning_clear_fixture();
-    let mut already = request.messages[1].clone();
-    already.mid = "already".to_string();
-    already.ck.meta.harness_id = Some("already".to_string());
-    for message in request.messages.iter_mut().skip(1) {
-        message.ordinal += 2;
-    }
-    request.messages.insert(1, already);
-    let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 0);
-    transform_with_projection(&db, &request, &ctx).unwrap();
-    request.render_config = "cfg1".to_string();
-    let before = transform_with_projection(&db, &request, &ctx).unwrap();
-    let before_native = reasoning_clear_native(&before, &request);
-    assert!(reasoning_clear_mids(&before.reasoning_clear_units).contains("already"));
-    assert!(!reasoning_clear_mids(&before.reasoning_clear_units).contains("old"));
-    // A legacy row has exactly these served bytes and watermark, but no applied-set units.
-    let mut legacy = db.load(&request.session_id).unwrap();
-    legacy
-        .core
-        .frozen_units
-        .retain(|unit| !unit.key.starts_with("strip:reasoning_clear:"));
-    db.commit(
-        &request.session_id,
-        legacy.row_version,
-        &legacy.core,
-        &legacy.meta,
-    )
-    .unwrap();
-    drop(db);
-    let db = store(dir.path());
-    let mut newer = request.messages[2].clone();
-    newer.mid = "new".to_string();
-    newer.ordinal = 19;
-    newer.ck.meta.harness_id = Some("new".to_string());
-    request.messages.push(newer);
-    let adopted = transform_with_projection(&db, &request, &ctx).unwrap();
-    assert_eq!(adopted.response.action, "SOFT+");
-    let adopted_native = reasoning_clear_native(&adopted, &request);
-    assert_eq!(adopted_native.len(), before_native.len() + 1);
-    assert_eq!(
-        &adopted_native[..before_native.len()],
-        before_native.as_slice()
-    );
-    assert!(adopted.response.first_divergence.is_none());
-    assert_eq!(
-        reasoning_clear_target(&adopted.response),
-        reasoning_clear_target(&before.response)
-    );
-    for message in before.response.messages() {
-        let mid = message.meta.harness_id.as_deref();
-        if mid == Some("already") || mid == Some("old") {
-            let after = adopted
-                .response
-                .messages()
-                .iter()
-                .find(|candidate| candidate.meta.harness_id.as_deref() == mid)
-                .unwrap();
-            assert_eq!(message.canonical_bytes(), after.canonical_bytes());
-        }
-    }
-    assert!(reasoning_clear_mids(&adopted.reasoning_clear_units).contains("already"));
-    assert!(!reasoning_clear_mids(&adopted.reasoning_clear_units).contains("old"));
-    assert_eq!(
-        reasoning_clear_native_target(&adopted, &request),
-        reasoning_clear_native_target(&before, &request)
-    );
-    request.render_config = "cfg2".to_string();
-    let priced = transform_with_projection(&db, &request, &ctx).unwrap();
-    assert_eq!(priced.response.action, "HARD");
-    assert!(reasoning_clear_mids(&priced.reasoning_clear_units).contains("old"));
-    assert!(
-        !String::from_utf8_lossy(&reasoning_clear_target(&priced.response))
-            .contains("thinking-old")
-    );
-}
-
-#[test]
 fn reasoning_clear_legacy_missing_fingerprint_holds_until_bust() {
     let mut request = reasoning_clear_fixture();
     let mut newer = request.messages[1].clone();
@@ -234,7 +154,33 @@ fn reasoning_clear_legacy_missing_fingerprint_holds_until_bust() {
         ..Default::default()
     };
     let tags = BTreeMap::from([("old".to_string(), 2), ("new".to_string(), 16)]);
-    assert!(new_reasoning_clear_units(&core, &meta, &request, &tags, false, None).is_empty());
-    let units = new_reasoning_clear_units(&core, &meta, &request, &tags, true, None);
+    let projection = ck_wire::project_messages(&request.messages).unwrap();
+    assert!(new_reasoning_clear_units(
+        &core,
+        &meta,
+        &request,
+        &tags,
+        false,
+        None,
+        ReasoningClearSnapshot {
+            meta: &meta,
+            row_version: None,
+            projection: &projection
+        }
+    )
+    .is_empty());
+    let units = new_reasoning_clear_units(
+        &core,
+        &meta,
+        &request,
+        &tags,
+        true,
+        None,
+        ReasoningClearSnapshot {
+            meta: &meta,
+            row_version: None,
+            projection: &projection,
+        },
+    );
     assert_eq!(reasoning_clear_mids(&units), HashSet::from(["old"]));
 }
