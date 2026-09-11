@@ -1,6 +1,6 @@
 /**
  * Debug / data-collection switch for settled ordinary child sessions
- * (historian, sidekick, and memory migration). Privacy-sensitive dreamer and
+ * (historian and memory migration). Privacy-sensitive Dreamer and
  * smart-note children are still deleted after their prompts settle.
  *
  * Unsettled children are never deleted inline because OpenCode's server loop may

@@ -3825,7 +3825,6 @@ def summarize_hunt12_source_contract(root: Path) -> dict[str, Any]:
         source(path)
         for path in (
             "packages/plugin/src/index.ts",
-            "packages/plugin/src/features/magic-context/sidekick/agent.ts",
             "packages/plugin/src/features/magic-context/user-memory/review-user-memories.ts",
             "packages/plugin/src/features/magic-context/dreamer/refresh-primers.ts",
             "packages/plugin/src/features/magic-context/dreamer/verify.ts",

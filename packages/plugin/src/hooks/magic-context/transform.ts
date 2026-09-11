@@ -658,7 +658,7 @@ export interface TransformDeps {
     sessionDirectoryBySession?: Map<string, string>;
     /**
      * Process-scoped set of Magic Context's OWN hidden child sessions
-     * (historian/dreamer/sidekick/memory-migration), detected by title prefix
+     * (historian/dreamer/memory-migration), detected by title prefix
      * at `session.created`. When a session is in this set the transform returns
      * immediately (messages unmodified) — these children have their own fixed
      * agent identity and never use any MC feature, so even reduced-mode work
@@ -783,8 +783,8 @@ export function createTransform(deps: TransformDeps) {
         }
         logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
 
-        // Magic Context's OWN hidden children (historian/dreamer/sidekick/
-        // memory-migration) are fully exempt from the transform. They have a
+        // Magic Context's OWN hidden children (historian/dreamer/memory-migration)
+        // are fully exempt from the transform. They have a
         // fixed agent identity + single-shot/bounded job and use zero MC
         // features, so even reduced-mode work (tagging, heuristic drops) is
         // pure overhead and conceptual noise. Detected at session.created by

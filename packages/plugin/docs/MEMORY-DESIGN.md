@@ -47,14 +47,12 @@ AI coding agents forget everything between sessions. Each new session rediscover
 │              Single SQLite DB                              │
 │          (currently context.db)                             │
 └──────────────────────────────────────────────────────────┘
-         │                    │                    │
-    ┌────┴────┐         ┌────┴────┐         ┌────┴────┐
-    │Historian│         │Sidekick │         │Dreamer  │
-    │(existing)│        │(Phase 2)│         │(Phase 3)│
-    │writes    │        │local or │         │overnight│
-    │session   │        │remote   │         │local LLM│
-    │facts     │        │LLM      │         │+ fs     │
-    └─────────┘        └─────────┘         └─────────┘
+         │                                      │
+    ┌────┴────┐                            ┌────┴────┐
+    │Historian│                            │Dreamer  │
+    │(existing)│                           │(Phase 3)│
+    │writes session facts│                 │overnight│
+    └─────────┘                            └─────────┘
 ```
 
 ## Storage Schema
@@ -186,7 +184,7 @@ On the first transform call for a new session:
 **Deterministic selective injection** (when memory exceeds ~80% of budget):
 - Always inject pinned categories: USER_DIRECTIVES, USER_PREFERENCES, NAMING, top CONSTRAINTS
 - Fill remaining budget with semantic top-K from the first user message, with per-category caps
-- No sidekick LLM needed — deterministic selection using embeddings
+- No retrieval LLM needed — deterministic selection using embeddings
 
 At current scale (79 memories = ~2400 tokens), this injects everything. The budget cap and selective injection are safety valves for growth.
 
@@ -198,46 +196,6 @@ A tool the agent can call mid-session to search memories:
 - Output: top N results with category, content, and relevance score
 - `retrieval_count` incremented on each result returned (not `seen_count`)
 
-### Layer 3: Sidekick Agent (Phase 2, optional)
-
-A configurable LLM agent that runs at session start to augment the user's first message with targeted memory search. The sidekick has different latency requirements than the dreamer and uses a different model config.
-
-**Flow:**
-1. User sends first message
-2. Sidekick receives the message + access to `search_memory` tool
-3. Sidekick makes 1-3 targeted semantic searches
-4. Sidekick writes a context briefing
-5. Briefing is injected alongside or instead of raw auto-injection
-
-**Configuration:**
-```jsonc
-{
-  "magic_context": {
-    "sidekick": {
-      "enabled": false,
-      "provider": "local",          // "local" | "lmstudio" | "cerebras" | "openai-compatible"
-      "model": "qwen3.5-9b",       // model identifier — needs fast inference
-      "endpoint": "http://localhost:1234/v1",
-      "api_key": "",
-      "max_tool_calls": 3,
-      "timeout_ms": 30000
-    }
-  }
-}
-```
-
-**Provider options (validated by prototype):**
-
-| Provider | Model | Speed | Quality | Cost |
-|---|---|---|---|---|
-| Local (LM Studio) | Qwen 3.5 0.8B | ~6s | Poor (hallucinates) | Free |
-| Local (LM Studio) | Nemotron 4B | ~15s | Good | Free |
-| Local (LM Studio) | Qwen 3.5 9B | ~15-35s | Very good | Free |
-| Remote (Cerebras) | Qwen 3 235B | ~2s | Excellent | API cost |
-
-**Minimum recommended:** 4B+ for no-hallucination, 9B+ for reliable structured output.
-
-**Note:** Oracle recommends skipping the sidekick entirely in favor of deterministic selective injection (Layer 1). The sidekick remains in the design as an optional enhancement for users who want LLM-powered augmentation, but Phase 1's deterministic path should be sufficient for most use cases.
 
 ### Layer 4: FTS5 Keyword Search (fallback + hybrid component)
 
@@ -320,7 +278,7 @@ Nothing. The historian prompt and runner are unchanged. Promotion happens after 
 
 An overnight background process that maintains and improves memory quality using a local LLM with filesystem access. Runs during a user-configured schedule window (e.g., 02:00-06:00) when no coding sessions are active.
 
-The dreamer has zero latency pressure — it can run large models (35B+) slowly and still process everything overnight. This is fundamentally different from the sidekick, which needs sub-second inference.
+The dreamer has zero latency pressure — it can run large models (35B+) slowly and still process everything overnight. This makes large, thorough models practical for maintenance work.
 
 ### Inspiration
 
@@ -488,24 +446,6 @@ Dream Session (scheduled window)
 - Seen/retrieved counters properly separated
 - All configurable, disabled by default
 
-### Phase 2: Sidekick Agent (Optional Enhancement)
-
-**Effort:** ~5-7 days
-
-| Task | Description | Deps |
-|---|---|---|
-| 2.1 Provider abstraction | OpenAI-compatible client for local (LM Studio) and remote (Cerebras, etc.) | None |
-| 2.2 Sidekick agent loop | Tool-calling loop with search_memory, max iterations, forced write | 2.1, Phase 1 |
-| 2.3 Session-start hook | Intercept first user message, run sidekick, inject result | 2.2 |
-| 2.4 Config surface | `magic_context.sidekick.*`: enabled, provider, model, endpoint, api_key | 2.1 |
-| 2.5 Fallback behavior | Graceful degradation when LLM unavailable → fall back to Layer 1 auto-injection | 2.3 |
-
-**Deliverables:**
-- Optional local/remote LLM augments first message with targeted memory search
-- Configurable provider: LM Studio, Cerebras, any OpenAI-compatible endpoint
-- Falls back cleanly to auto-injection when sidekick is unavailable
-- Uses different model config than dreamer (optimized for speed, not depth)
-
 ### Phase 3: Dreamer (Overnight Maintenance)
 
 **Effort:** ~12-15 days
@@ -530,7 +470,6 @@ Dream Session (scheduled window)
 - Automatic AGENTS.md / codebase map maintenance
 - Lease-based locking prevents stuck dreamers from crashed processes
 - Full dream log for transparency
-- Uses separate model config from sidekick (optimized for quality, not speed)
 
 ### Phase 4: Memory Lifecycle & Advanced Features (Future)
 
@@ -576,9 +515,7 @@ All prototype scripts are in `local-ignore/memory-prototype/`:
    - 9B (unsloth): best local honesty, slightly slower, leaks `<think>` blocks
    - 235B (Cerebras Qwen 3): best quality AND fastest (~2s total), but requires API
 
-5. **The sidekick's best role is targeted search + faithful quoting** — not synthesis. Small models fabricate when synthesizing; large models are reliable but expensive. The simplest reliable pattern is: LLM generates 2-3 search queries → embedding search returns results → LLM quotes results without paraphrasing.
-
-6. **Dreaming is the highest-value use of local LLMs** — overnight batch processing has no latency constraints, can use larger models (35B+), and filesystem access enables code verification that cloud models can't do.
+5. **Dreaming is the highest-value use of local LLMs** — overnight batch processing has no latency constraints, can use larger models (35B+), and filesystem access enables code verification that cloud models can't do.
 
 ---
 
@@ -596,16 +533,6 @@ All prototype scripts are in `local-ignore/memory-prototype/`:
       "retrieval_count_promotion_threshold": 3 // retrievals needed for permanent status
     },
 
-    // Phase 2: Sidekick agent (fast model, latency-sensitive)
-    "sidekick": {
-      "enabled": false,
-      "provider": "local",                    // "local" | "lmstudio" | "cerebras" | "openai-compatible"
-      "model": "qwen3.5-9b",                 // needs fast inference — 9B+ recommended
-      "endpoint": "http://localhost:1234/v1",
-      "api_key": "",
-      "max_tool_calls": 3,
-      "timeout_ms": 30000
-    },
 
     // Phase 3: Dreamer (large model, no latency pressure)
     "dreaming": {
@@ -640,7 +567,6 @@ All prototype scripts are in `local-ignore/memory-prototype/`:
 | Dreamer uses separate model config | Zero latency pressure allows 35B+ models for higher quality overnight | Design discussion |
 | All dreamer tasks independently configurable | Users start with decay+consolidate (no LLM) and progressively enable | Design discussion |
 | LLM-generated insights start unverified | Next session's injection flags these so main agent can confirm or discard | Design discussion |
-| Deterministic selective injection over sidekick | Pinned categories + semantic top-K is cheaper and more reliable than LLM selection | Oracle review |
 
 ## Open Questions
 

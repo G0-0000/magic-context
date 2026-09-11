@@ -6,7 +6,7 @@
 // huge sessions (10k+ messages) which is exactly when Magic Context shines.
 //
 // Background: the plugin only ever needs the latest assistant message of a
-// helper subagent (historian / dreamer / sidekick / key-files / user-memory)
+// helper subagent (historian / dreamer / key-files / user-memory)
 // or a bounded tail of the active session (conflict-warning cleanup). Both
 // fit comfortably in `limit: 50` with massive headroom.
 //

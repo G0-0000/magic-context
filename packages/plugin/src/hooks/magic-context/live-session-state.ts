@@ -62,7 +62,7 @@ export interface LiveSessionState {
     dreamerProgressByProject: Map<string, DreamTaskProgress>;
     /**
      * Sessions that are Magic Context's OWN hidden children (historian,
-     * dreamer, sidekick, memory-migration). Detected at `session.created` by
+     * dreamer and memory-migration). Detected at `session.created` by
      * the `magic-context-` title prefix. These sessions are fully exempt from
      * the message transform AND system-prompt injection — they have their own
      * fixed agent identity/prompt, never use ctx_reduce/nudges/compartments,

@@ -34,7 +34,6 @@ import {
 } from "../../features/magic-context/dreamer/task-prompts";
 import { VERIFY_SYSTEM_PROMPT } from "../../features/magic-context/dreamer/verify-prompt";
 import { MIGRATION_SYSTEM_PROMPT } from "../../features/magic-context/memory/memory-migration";
-import { SIDEKICK_SYSTEM_PROMPT } from "../../features/magic-context/sidekick/agent";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "../../features/magic-context/smart-notes/compiler-prompt";
 import {
     closeDatabase,
@@ -592,7 +591,7 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
 });
 
 /**
- * Magic Context's OWN hidden children (historian/dreamer/sidekick/migration)
+ * Magic Context's OWN hidden children (historian/dreamer/migration)
  * must not get the guidance block — wasted spend + a contradictory second
  * identity frame. Detected by prompt signature (pass-1, timing-independent)
  * AND the title-prefix `internalChildSessions` flag.
@@ -600,8 +599,6 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
 describe("system-prompt-hash skips Magic Context internal child agents", () => {
     const HISTORIAN_HEAD =
         "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
-    const SIDEKICK_HEAD =
-        "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.";
     // Every dreamer task prompt shares "for the magic-context system"; each opener
     // below must be detected so the guidance block is never injected into a dreamer
     // child even in the title-flag race window.
@@ -619,7 +616,6 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
         ["maintain-docs", MAINTAIN_DOCS_HEAD],
         ["review-user-memories", REVIEW_USER_HEAD],
         ["primer-investigator", PRIMER_HEAD],
-        ["sidekick", SIDEKICK_HEAD],
     ] as const) {
         it(`skips ALL injection for the ${label} agent (prompt signature)`, async () => {
             useTempDataHome(`sph-skip-mc-${label}-`);
@@ -639,7 +635,6 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
             historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
             historianRecompPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
             historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
-            sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
             historianDisallowed: [],
         });
 
@@ -667,7 +662,6 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
             ["historian-recomp", COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT],
             ["historian-editor", HISTORIAN_EDITOR_SYSTEM_PROMPT],
             ["memory-migration", MIGRATION_SYSTEM_PROMPT],
-            ["sidekick", SIDEKICK_SYSTEM_PROMPT],
         ] as const;
 
         for (const [label, prompt] of prompts) {

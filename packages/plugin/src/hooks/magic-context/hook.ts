@@ -2,14 +2,12 @@ import {
     isCompactionEnabled,
     isDreamerRunnable,
     isHistorianRunnable,
-    isSidekickRunnable,
 } from "../../config/agent-disable";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     type DreamerConfig,
     type HistorianConfig,
     type MagicContextConfig,
-    type SidekickConfig,
 } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
@@ -178,7 +176,6 @@ export interface MagicContextDeps {
         embedding?: {
             provider?: "local" | "openai-compatible" | "off" | "synapse";
         };
-        sidekick?: SidekickConfig;
         dreamer?: DreamerConfig;
         smart_notes?: { retina_handoff?: boolean };
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
@@ -785,8 +782,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         })();
     };
 
-    const sidekickRunnable = isSidekickRunnable(deps.config);
-    const sidekickConfig = sidekickRunnable ? deps.config.sidekick : undefined;
     const rustMemorySyncRequestedSessions = new Set<string>();
     // Build the same subc-backed client for the TS recovery arm. Constructing the
     // transport is inert; it connects only if a marker actually needs draining.
@@ -1419,15 +1414,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 ...params,
             });
         },
-        sidekick: sidekickConfig
-            ? {
-                  config: sidekickConfig,
-                  projectPath,
-                  sessionDirectory: deps.directory,
-                  client: deps.client,
-                  language: deps.config.language,
-              }
-            : undefined,
         dreamer: dreamerConfig
             ? {
                   config: dreamerConfig,

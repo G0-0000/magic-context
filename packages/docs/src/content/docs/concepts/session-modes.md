@@ -19,7 +19,7 @@ Caveman text compression (`caveman_text_compression.enabled`) is an orthogonal o
 
 ### Subagent
 
-Subagent sessions (delegated workers and historian, sidekick, or dreamer child sessions) get a lightweight pass:
+Subagent sessions (delegated workers and historian or Dreamer child sessions) get a lightweight pass:
 
 - Tagging and heuristic cleanup run normally
 - No historian, no compartment injection, no prompt-adjunct blocks (`<project-docs>`, `<user-profile>`)

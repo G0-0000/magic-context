@@ -5,7 +5,6 @@ export * from "./memory";
 export * from "./range-parser";
 export * from "./scheduler";
 export * from "./search";
-export * from "./sidekick";
 export * from "./smart-notes";
 export * from "./storage";
 export * from "./tagger";

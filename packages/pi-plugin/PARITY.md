@@ -24,7 +24,7 @@ historian / m[0]m[1] injection / nudges / auto-search behind `fullFeatureMode`
 (i.e. `!isSubagent`), and detects subagents via OpenCode's `session.parent_id`.
 
 **Pi:** Pi has **no native subagent concept**. The subagents Magic Context itself
-spawns (historian, dreamer, sidekick) each run as a **separate `pi --print` process**
+spawns (historian and dreamer) each run as a **separate `pi --print` process**
 loading only the lean `subagent-entry.js`, whose recursion guard **never wires
 `pi.on("context")`** (see `subagent-entry.ts` header). A Magic Context subagent
 therefore *cannot* reach the context-handler pipeline at all.
@@ -589,7 +589,7 @@ Both also clear the flag on a successful `/ctx-recomp` (OpenCode runManagedRecom
 ## 17. Runaway hidden-agent loop: OpenCode needs an in-config step cap; Pi relies on subprocess-kill
 
 A weak local model (e.g. llama.cpp with poor instruction-following) can get a
-hidden agent (historian/dreamer/sidekick) stuck in an infinite tool-call loop
+hidden agent (historian/dreamer) stuck in an infinite tool-call loop
 (issue #154). The protection differs because the spawn model differs:
 
 - **OpenCode** spawns hidden agents as a child SESSION whose run loop is an
@@ -660,21 +660,6 @@ data, mimeType }` user and tool-result parts with the same empty-text sentinel.
 Both persist the frozen id before changing bytes, and clone inheritance copies
 `processed_image_stripped_ids`.
 
----
-
-## 19a. `/ctx-aug` skips empty sidekick augmentation blocks
-
-When sidekick returns the empty-result sentinel (for example, "No relevant
-memories found"), **Pi sends the original prompt without a
-`<sidekick-augmentation>` block**. This is intentional: a no-op augmentation
-block consumes tokens and adds noise while giving the main agent no useful
-context.
-
-OpenCode currently injects a `<sidekick-augmentation>` block containing the
-empty sentinel text. Pi's behavior is the desired target; OpenCode should
-eventually adopt the same skip-empty behavior.
-
----
 
 ## 20. Pi subagents discover extensions, then fail closed with per-agent tools
 
@@ -804,9 +789,9 @@ but they control model visibility through their host-specific tool lifecycle:
   active session waits for the next session/reload; the existing call-time guard
   still refuses a stale enabled tool in the meantime.
 
-Pi's `memoryToolEnabled` registration flag remains for the lean SUBAGENT entry
-(`subagent-entry.ts`) to keep `ctx_memory` off the retrieval-only sidekick, a
-separate security boundary unaffected by the main-session activation behavior.
+Pi's `memoryToolEnabled` registration flag remains for the lean subagent entry
+(`subagent-entry.ts`) to keep `ctx_memory` off read-only Dreamer tasks, a separate
+security boundary unaffected by the main-session activation behavior.
 
 ---
 

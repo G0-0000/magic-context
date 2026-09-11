@@ -94,9 +94,8 @@ beforeAll(async () => {
             protected_tags: 5,
             // Keep noise out of the test — no compaction markers (they touch
             // opencode.db and aren't part of the subagent invariant set), no
-            // dreamer, no sidekick, no auto-search hints in subagent mode.
+            // No dreamer or auto-search hints in subagent mode.
             dreamer: { disable: true },
-            sidekick: { disable: true },
         },
     });
 });

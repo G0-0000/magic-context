@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Der Assistent erkennt automatisch, welche Harnesses du hast (OpenCode, Pi oder beide), fügt das Plugin hinzu, deaktiviert eingebaute compaction, hilft dir bei der Modellauswahl für historian, dreamer und sidekick und löst Konflikte mit anderen Kontextverwaltungs-Plugins. Wähle ein bestimmtes Harness mit `--harness opencode` oder `--harness pi` aus.
+Der Assistent erkennt automatisch, welche Harnesses du hast (OpenCode, Pi oder beide), fügt das Plugin hinzu, deaktiviert eingebaute compaction, hilft dir bei der Modellauswahl für historian und dreamer und löst Konflikte mit anderen Kontextverwaltungs-Plugins. Wähle ein bestimmtes Harness mit `--harness opencode` oder `--harness pi` aus.
 
 > **Warum eingebaute compaction deaktivieren?** Magic Context verwaltet Kontext selbst. Die compaction des Hosts würde seine cache-bewussten verzögerten Operationen stören und doppelt komprimieren.
 
@@ -236,7 +236,6 @@ Abruf funktioniert **über Sitzungen hinweg** (eine neue Sitzung erbt alles) und
 | `/ctx-flush` | Alle eingereihten Operationen sofort erzwingen und Cache-TTL umgehen |
 | `/ctx-recomp` | Kompartimente aus Rohhistorie neu aufbauen (akzeptiert einen `start-end`-Bereich). Verwenden, wenn gespeicherter Zustand falsch wirkt |
 | `/ctx-session-upgrade` | Diese Sitzung auf das neueste Historienformat aktualisieren: Kompartimente neu aufbauen und Projekterinnerungen migrieren |
-| `/ctx-aug` | Sidekick-Augmentierung für einen Prompt ausführen: relevante Erinnerungen über ein separates Modell abrufen |
 | `/ctx-dream` | Dreamer-Wartung bei Bedarf ausführen: Speicher, Dokumente, smart notes und user-profile-Review pflegen |
 
 ---

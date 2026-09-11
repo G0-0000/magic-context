@@ -248,7 +248,6 @@ describe("long-running Pi Magic Context session", () => {
                 },
                 historian: { model: "anthropic/claude-haiku-4-5" },
                 dreamer: { disable: true },
-                sidekick: { disable: true },
                 compressor: { enabled: false },
             },
         });

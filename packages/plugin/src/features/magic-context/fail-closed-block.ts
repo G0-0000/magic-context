@@ -88,11 +88,7 @@ const OPENCODE_INTERNAL_AGENT_NAMES = new Set(["title", "summary", "compaction"]
  * session is blocked — otherwise recovery work and background maintenance stall.
  */
 function isMagicContextHiddenAgentName(agent: string): boolean {
-    if (
-        agent === "sidekick" ||
-        agent === "smart-note-compiler" ||
-        agent.startsWith("smart-note-")
-    ) {
+    if (agent === "smart-note-compiler" || agent.startsWith("smart-note-")) {
         return true;
     }
     if (agent === "historian" || agent.startsWith("historian-")) return true;

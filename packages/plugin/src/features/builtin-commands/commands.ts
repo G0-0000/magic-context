@@ -34,10 +34,6 @@ export function getMagicContextBuiltinCommands(compactionEnabled = true) {
                 ? "Force-process all pending magic context operations immediately"
                 : unavailableInCompactionOff("ctx-flush"),
         },
-        "ctx-aug": {
-            template: "ctx-aug",
-            description: "Augment your prompt with project memory context via sidekick agent",
-        },
         "ctx-dream": {
             template: "ctx-dream",
             description: "Run the hidden dreamer maintenance pass for this project now",

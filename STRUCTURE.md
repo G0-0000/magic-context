@@ -45,7 +45,7 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 **`src/agents/`:**
 - Purpose: Define hidden agent identifiers and shared agent prompt helpers.
 - Contains: Agent-name constants and prompt-building helpers.
-- Key files: `src/agents/dreamer.ts`, `src/agents/historian.ts` (declares `HISTORIAN_AGENT` and `HISTORIAN_EDITOR_AGENT`), `src/agents/sidekick.ts`, `src/agents/magic-context-prompt.ts`
+- Key files: `src/agents/dreamer.ts`, `src/agents/historian.ts` (declares `HISTORIAN_AGENT` and `HISTORIAN_EDITOR_AGENT`), `src/agents/magic-context-prompt.ts`
 
 **`src/config/`:**
 - Purpose: Parse and validate plugin configuration.
@@ -70,8 +70,8 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **`src/features/`:**
 - Purpose: Group reusable subsystem logic by feature.
-- Contains: Magic-context services (storage, scheduler, tagger, search, message-index, compartment-chunk embedding, overflow detection, compaction markers, session-project storage and backfill, clone-state copying), dreamer runtime, sidekick support, memory system, user-memory pipeline, git-commit indexer, tool-definition token measurement, schema migrations, built-in commands, and the smart-notes evaluation engine.
-- Key subdirs: `src/features/magic-context/dreamer/`, `src/features/magic-context/memory/`, `src/features/magic-context/mural/`, `src/features/magic-context/sidekick/`, `src/features/magic-context/user-memory/`, `src/features/magic-context/git-commits/`, `src/features/magic-context/smart-notes/`, `src/features/builtin-commands/`
+- Contains: Magic-context services (storage, scheduler, tagger, search, message-index, compartment-chunk embedding, overflow detection, compaction markers, session-project storage and backfill, clone-state copying), dreamer runtime, memory system, user-memory pipeline, git-commit indexer, tool-definition token measurement, schema migrations, built-in commands, and the smart-notes evaluation engine.
+- Key subdirs: `src/features/magic-context/dreamer/`, `src/features/magic-context/memory/`, `src/features/magic-context/mural/`, `src/features/magic-context/user-memory/`, `src/features/magic-context/git-commits/`, `src/features/magic-context/smart-notes/`, `src/features/builtin-commands/`
 - Key files: `src/features/magic-context/storage-db.ts`, `src/features/magic-context/storage-tags.ts`, `src/features/magic-context/storage-meta-persisted.ts`, `src/features/magic-context/storage-meta-session.ts`, `src/features/magic-context/storage-session-tables.ts`, `src/features/magic-context/fail-closed-block.ts`, `src/features/magic-context/storage-schema-helpers.ts`, `src/features/magic-context/storage-clone.ts`, `src/features/magic-context/storage.ts` (barrel), `src/features/magic-context/migrations.ts`, `src/features/magic-context/reclaim-protection.ts`, `src/features/magic-context/message-index.ts`, `src/features/magic-context/search.ts`, `src/features/magic-context/compartment-chunk-embedding.ts`, `src/features/magic-context/shadow-backfill-state.ts`, `src/features/magic-context/session-project-storage.ts`, `src/features/magic-context/session-project-backfill.ts`, `src/features/magic-context/overflow-detection.ts`, `src/features/magic-context/context-authority.ts`, `src/features/magic-context/storage-identity-merge.ts`, `src/features/magic-context/schema-fence-probe.ts`, `src/features/magic-context/dreamer/task-executor.ts`, `src/features/magic-context/dreamer/lease.ts`, `src/features/magic-context/dreamer/manifest-parser.ts`, `src/features/magic-context/dreamer/memory-claim-safety.ts`, `src/features/magic-context/dreamer/provider-output-failure.ts`, `src/features/magic-context/memory/project-identity.ts`, `src/features/magic-context/memory/storage-memory.ts`, `src/features/magic-context/memory/embedding-local.ts`, `src/features/magic-context/memory/transformers-web-entry.ts`, `src/features/magic-context/memory/embedding-failure.ts`, `src/features/magic-context/memory/embedding-synapse.ts`, `src/features/magic-context/mural/render-mural.ts`, `src/features/magic-context/user-memory/storage-user-memory.ts`, `src/features/magic-context/smart-notes/wake-plane.ts`, `src/features/builtin-commands/commands.ts`
 
 **`src/tools/`:**
@@ -111,7 +111,7 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` and Rust paths are relative to the project root.
 
 **Entry Points:**
-- `src/index.ts`: Register the plugin, hidden agents (`historian`, `historian-editor`, `dreamer`, `sidekick`), hooks, commands, tools, RPC server, dream-schedule timer, and the auto-update checker.
+- `src/index.ts`: Register the plugin, hidden agents (`historian`, `historian-editor`, `dreamer`), hooks, commands, tools, RPC server, dream-schedule timer, and the auto-update checker.
 - `packages/plugin/src/plugin/boot-deadline.ts`: Coordinate whole-server plugin boot initialization under a 15s deadline (`BOOT_SERVER_DEADLINE_MS`) with per-phase timing attribution and late-settling hooks adoption.
 - `src/tui/index.tsx`: Register TUI command-palette entries and the sidebar slot for OpenCode TUI.
 - `packages/cli/src/index.ts`: Unified setup/doctor/migrate entry for the separate `@cortexkit/magic-context` package.

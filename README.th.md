@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-ตัวช่วยจะตรวจหา harnesses ที่คุณมีโดยอัตโนมัติ (OpenCode, Pi หรือทั้งคู่) เพิ่ม plugin ปิด compaction ในตัว ช่วยเลือกโมเดลสำหรับ historian, dreamer และ sidekick และแก้ความขัดแย้งกับ plugins จัดการบริบทอื่น ๆ ระบุ harness เฉพาะได้ด้วย `--harness opencode` หรือ `--harness pi`.
+ตัวช่วยจะตรวจหา harnesses ที่คุณมีโดยอัตโนมัติ (OpenCode, Pi หรือทั้งคู่) เพิ่ม plugin ปิด compaction ในตัว ช่วยเลือกโมเดลสำหรับ historian และ dreamer และแก้ความขัดแย้งกับ plugins จัดการบริบทอื่น ๆ ระบุ harness เฉพาะได้ด้วย `--harness opencode` หรือ `--harness pi`.
 
 > **ทำไมต้องปิด compaction ในตัว?** Magic Context จัดการบริบทเอง compaction ของโฮสต์จะรบกวนงานที่เลื่อนเวลาและรับรู้ cache ของมัน และจะบีบอัดซ้ำสองครั้ง.
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | บังคับ operations ที่เข้าคิวทั้งหมดทันที โดยข้าม cache TTL |
 | `/ctx-recomp` | สร้างช่องใหม่จากประวัติดิบ (รับช่วง `start-end`) ใช้เมื่อสถานะที่เก็บดูผิด |
 | `/ctx-session-upgrade` | อัปเกรดเซสชันนี้เป็นรูปแบบประวัติล่าสุด: สร้างช่องใหม่และย้ายความจำโปรเจกต์ |
-| `/ctx-aug` | รัน sidekick augmentation บน prompt: ดึงความจำที่เกี่ยวข้องผ่านโมเดลแยก |
 | `/ctx-dream` | รันการดูแล dreamer ตามต้องการ: ดูแลความจำ docs smart notes และ user-profile review |
 
 ---

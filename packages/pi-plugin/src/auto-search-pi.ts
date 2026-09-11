@@ -42,8 +42,8 @@
  *
  * Before appending, we check whether the target message already contains
  * the exact hint or any `<ctx-search-hint>` block. Before searching, we
- * skip if raw user text already contains `<sidekick-augmentation>`,
- * `<ctx-search-hint>`, or `<ctx-search-auto>`, matching OpenCode's stacked
+ * skip if raw user text already contains `<ctx-search-hint>` or
+ * `<ctx-search-auto>`, matching OpenCode's stacked
  * augmentation guard (lines 106-115, 189-198). Prompt extraction strips
  * Magic Context markers and prior plugin blocks before embedding, matching
  * OpenCode lines 118-143.
@@ -146,7 +146,6 @@ function collectUserPromptParts(message: UserMessage): string {
 
 function hasStackedAugmentation(rawText: string): boolean {
 	return (
-		rawText.includes("<sidekick-augmentation>") ||
 		rawText.includes("<ctx-search-hint>") ||
 		rawText.includes("<ctx-search-auto>")
 	);
@@ -189,7 +188,6 @@ function extractUserPromptText(message: UserMessage): string {
 			.replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
 			.replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")
 			.replace(/<instruction[^>]*>[\s\S]*?<\/instruction>/g, "")
-			.replace(/<sidekick-augmentation>[\s\S]*?<\/sidekick-augmentation>/g, "")
 			// Generic XML/HTML tags — opening, closing, and self-closing.
 			// Preserve text between paired tags so pasted content still embeds.
 			.replace(/<\/?[a-zA-Z][^<>]*>/g, "")

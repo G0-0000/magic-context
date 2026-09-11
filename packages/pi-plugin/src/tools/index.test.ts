@@ -35,7 +35,7 @@ describe("registerMagicContextTools", () => {
 		]);
 	});
 
-	it("can omit ctx_memory for retrieval-only sidekick subagents", () => {
+	it("can omit ctx_memory for lean child processes", () => {
 		const db = createTestDb();
 		try {
 			const registered: string[] = [];

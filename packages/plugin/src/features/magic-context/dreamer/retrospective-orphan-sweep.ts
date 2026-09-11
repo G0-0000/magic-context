@@ -28,7 +28,6 @@ export const VERIFY_CHILD_TITLE = "magic-context-dream-verify";
 export const CLASSIFY_CHILD_TITLE = "magic-context-dream-classify";
 export const COMPRESS_CUES_CHILD_TITLE = "magic-context-dream-compress-cues";
 export const MEMORY_MIGRATION_CHILD_TITLE = "magic-context-memory-migration";
-export const SIDEKICK_CHILD_TITLE = "magic-context-sidekick";
 export const SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX = "magic-context-smart-note-compile-";
 export const SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX = "magic-context-smart-note-confirm-";
 
@@ -67,7 +66,7 @@ export const PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMa
 };
 
 export const RETAINABLE_CHILD_TITLE_MATCHES: PrivacySensitiveChildTitleMatches = {
-    exact: [HISTORIAN_CHILD_TITLE, MEMORY_MIGRATION_CHILD_TITLE, SIDEKICK_CHILD_TITLE],
+    exact: [HISTORIAN_CHILD_TITLE, MEMORY_MIGRATION_CHILD_TITLE],
     prefixes: [],
 };
 

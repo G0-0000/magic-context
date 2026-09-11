@@ -78,7 +78,7 @@ const QUERIES: Query[] = [
     // Entity / name lookups (short, lexical-friendly)
     { id: "e1", group: "entity", text: "ctx_expand" },
     { id: "e2", group: "entity", text: "execute_threshold_percentage" },
-    { id: "e3", group: "entity", text: "sidekick augmentation" },
+    { id: "e3", group: "entity", text: "prompt augmentation" },
 
     // Semantic paraphrase (worded unlike stored memories — hardest)
     {

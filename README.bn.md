@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-উইজার্ড স্বয়ংক্রিয়ভাবে দেখে আপনার কোন harnesses আছে (OpenCode, Pi, অথবা দুটিই), plugin যোগ করে, built-in compaction বন্ধ করে, historian, dreamer ও sidekick-এর জন্য মডেল বাছতে সাহায্য করে, এবং অন্য context-management plugins-এর সংঘাত মেটায়। নির্দিষ্ট harness লক্ষ্য করতে `--harness opencode` বা `--harness pi` ব্যবহার করুন।
+উইজার্ড স্বয়ংক্রিয়ভাবে দেখে আপনার কোন harnesses আছে (OpenCode, Pi, অথবা দুটিই), plugin যোগ করে, built-in compaction বন্ধ করে, historian ও dreamer-এর জন্য মডেল বাছতে সাহায্য করে, এবং অন্য context-management plugins-এর সংঘাত মেটায়। নির্দিষ্ট harness লক্ষ্য করতে `--harness opencode` বা `--harness pi` ব্যবহার করুন।
 
 > **built-in compaction কেন বন্ধ করবেন?** Magic Context নিজেই প্রসঙ্গ পরিচালনা করে। host-এর compaction তার cache-aware deferred operations-এ বাধা দেবে এবং দ্বিগুণ কমপ্রেস করবে।
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | Queue করা সব operations সঙ্গে সঙ্গে force করে, cache TTL bypass করে |
 | `/ctx-recomp` | raw history থেকে compartments rebuild করে (`start-end` range নেয়)। stored state ভুল মনে হলে ব্যবহার করুন |
 | `/ctx-session-upgrade` | এই session-কে latest history format-এ upgrade করে: compartments rebuild এবং project memories migrate করে |
-| `/ctx-aug` | prompt-এ sidekick augmentation চালায়: আলাদা model দিয়ে relevant memories আনে |
 | `/ctx-dream` | on demand dreamer maintenance চালায়: memory, docs, smart notes এবং user-profile review maintain করে |
 
 ---

@@ -452,9 +452,9 @@ describe("auto-search-runner", () => {
                     [
                         "help me implement feature X in the plugin",
                         "",
-                        "<sidekick-augmentation>",
+                        "<ctx-search-auto>",
                         "relevant memories: transform pipeline",
-                        "</sidekick-augmentation>",
+                        "</ctx-search-auto>",
                     ].join("\n"),
                 ),
             ];

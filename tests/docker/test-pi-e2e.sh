@@ -120,7 +120,6 @@ cat > "$HOME/.config/cortexkit/magic-context.jsonc" <<'JSON'
 {
   "enabled": true,
   "dreamer": { "enabled": false },
-  "sidekick": { "enabled": false },
   "embedding": { "provider": "off" },
   "auto_update": false
 }

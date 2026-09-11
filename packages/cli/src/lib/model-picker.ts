@@ -11,7 +11,7 @@
  */
 import type { PromptIO, SelectOption } from "./prompts";
 
-export type ModelRole = "historian" | "dreamer" | "sidekick";
+export type ModelRole = "historian" | "dreamer";
 
 interface RoleCopy {
     title: string;
@@ -41,14 +41,6 @@ const ROLE_COPY: Record<ModelRole, RoleCopy> = {
             "model — a cheaper or local model is a good fit here.",
         pickMessage: "Select a model for the dreamer",
         placeholder: "type to filter (e.g. flash, local, glm)…",
-    },
-    sidekick: {
-        title: "Sidekick",
-        blurb:
-            "The sidekick augments your prompt with relevant project context when you run\n" +
-            "/ctx-aug. Fast models are preferred here.",
-        pickMessage: "Select a model for the sidekick",
-        placeholder: "type to filter…",
     },
 };
 

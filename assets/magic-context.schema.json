@@ -47,7 +47,7 @@
       "type": "boolean"
     },
     "language": {
-      "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
+      "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
       "type": "string"
     },
     "profile": {
@@ -56,7 +56,7 @@
       "minLength": 1
     },
     "profiles": {
-      "description": "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
+      "description": "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
       "type": "object",
       "propertyNames": {
         "type": "string",
@@ -580,51 +580,10 @@
               }
             },
             "additionalProperties": false
-          },
-          "sidekick": {
-            "type": "object",
-            "properties": {
-              "model": {
-                "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
-                "type": "string"
-              },
-              "fallback_models": {
-                "description": "Fallback model IDs if primary is unavailable",
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                ]
-              },
-              "variant": {
-                "description": "OpenCode reasoning variant (e.g. for extended thinking)",
-                "type": "string"
-              },
-              "thinking_level": {
-                "description": "Pi thinking level for the sidekick model selection.",
-                "type": "string",
-                "enum": [
-                  "off",
-                  "minimal",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ]
-              }
-            },
-            "additionalProperties": false
           }
         },
         "additionalProperties": false,
-        "description": "User-owned model-selection overlay. Only historian/dreamer harness model blocks and sidekick model-selection fields are allowed."
+        "description": "User-owned model-selection overlay. Only historian/dreamer harness model blocks are allowed."
       }
     },
     "historian": {
@@ -2325,7 +2284,7 @@
     },
     "keep_subagents": {
       "default": false,
-      "description": "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
+      "description": "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
       "type": "boolean"
     },
     "debug_rpc": {
@@ -2515,176 +2474,6 @@
               "maximum": 20000
             }
           }
-        }
-      }
-    },
-    "sidekick": {
-      "description": "Optional sidekick agent configuration for session-start memory retrieval",
-      "type": "object",
-      "properties": {
-        "model": {
-          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
-          "type": "string"
-        },
-        "temperature": {
-          "description": "Sampling temperature (0-2)",
-          "type": "number",
-          "minimum": 0,
-          "maximum": 2
-        },
-        "top_p": {
-          "description": "Nucleus sampling top_p (0-1)",
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "prompt": {
-          "description": "Additional system prompt text",
-          "type": "string"
-        },
-        "tools": {
-          "description": "Tool enable/disable overrides",
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {
-            "type": "boolean"
-          }
-        },
-        "disable": {
-          "description": "Disable this agent",
-          "type": "boolean"
-        },
-        "description": {
-          "description": "Agent description",
-          "type": "string"
-        },
-        "mode": {
-          "description": "Agent mode (subagent, primary, or all)",
-          "type": "string",
-          "enum": [
-            "subagent",
-            "primary",
-            "all"
-          ]
-        },
-        "color": {
-          "description": "Hex color for the agent (e.g. '#a1b2c3')",
-          "type": "string",
-          "pattern": "^#[0-9A-Fa-f]{6}$"
-        },
-        "maxSteps": {
-          "description": "Maximum tool-call steps per invocation",
-          "type": "number"
-        },
-        "permission": {
-          "description": "Per-tool permission overrides",
-          "type": "object",
-          "properties": {
-            "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "bash": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "ask",
-                    "allow",
-                    "deny"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "type": "string",
-                    "enum": [
-                      "ask",
-                      "allow",
-                      "deny"
-                    ]
-                  }
-                }
-              ]
-            },
-            "webfetch": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "doom_loop": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            }
-          }
-        },
-        "maxTokens": {
-          "description": "Maximum output tokens",
-          "type": "number"
-        },
-        "variant": {
-          "description": "OpenCode reasoning variant (e.g. for extended thinking)",
-          "type": "string"
-        },
-        "fallback_models": {
-          "description": "Fallback model IDs if primary is unavailable",
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ]
-        },
-        "timeout_ms": {
-          "default": 30000,
-          "description": "Timeout for sidekick calls in milliseconds",
-          "type": "number"
-        },
-        "system_prompt": {
-          "description": "Custom system prompt for sidekick",
-          "type": "string"
-        },
-        "thinking_level": {
-          "description": "Pi only: explicit thinking level for sidekick subagent invocations. See historian.pi.thinking_level.",
-          "type": "string",
-          "enum": [
-            "off",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ]
         }
       }
     },

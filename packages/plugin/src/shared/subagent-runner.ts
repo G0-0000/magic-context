@@ -1,7 +1,7 @@
 /**
  * Cross-harness subagent runner abstraction.
  *
- * Magic Context spawns three kinds of subagents — historian, dreamer, sidekick —
+ * Magic Context spawns historian and Dreamer subagents
  * each as a child "session" with its own model/prompt/tools. OpenCode and Pi
  * have very different APIs for this:
  *
@@ -15,15 +15,15 @@
  *     disk, optionally addressed via `--session <path>`.
  *
  * The runner interface below normalizes both into the same shape so the
- * actual subagent business logic (historian XML parsing, dreamer task loop,
- * sidekick augmentation) can stay harness-agnostic. Each harness ships its
+ * actual subagent business logic (historian XML parsing and Dreamer task loops)
+ * can stay harness-agnostic. Each harness ships its
  * own runner implementation; agents take a `SubagentRunner` as a dep instead
  * of reaching for `client.session.*` directly.
  *
  * Step 5a (this commit) defines the contract and ships `PiSubagentRunner`.
  * Step 5b will refactor the OpenCode-side spawn paths in
- * `compartment-runner-historian.ts`, `dreamer/runner.ts`, and
- * `sidekick/agent.ts` onto an `OpenCodeSubagentRunner` so both harnesses
+ * `compartment-runner-historian.ts` and `dreamer/runner.ts` onto an
+ * `OpenCodeSubagentRunner` so both harnesses
  * share the agent business logic instead of duplicating it. Until 5b lands,
  * OpenCode keeps its existing direct `client.session.*` calls untouched —
  * the runner contract is purely additive on the OpenCode side.
@@ -36,11 +36,11 @@ import type { ModelInput } from "./model-resolution";
  *
  * Mirrors the union of OpenCode's `session.create` + `session.prompt` body
  * fields and Pi's `--print` CLI flags, picking the shared subset that all
- * three subagent kinds (historian, dreamer, sidekick) actually use today.
+ * the historian and Dreamer subagents actually use today.
  *
  * Fields:
  * - `agent`: harness-specific agent name. OpenCode looks this up in its
- *   agent registry (`HISTORIAN_AGENT`, `DREAMER_AGENT`, `SIDEKICK_AGENT`).
+ *   agent registry (`HISTORIAN_AGENT`, `DREAMER_AGENT`).
  *   Pi has no concept of "agent name" beyond config, so this is ignored
  *   on the Pi side and used only by `OpenCodeSubagentRunner`.
  * - `systemPrompt`: full system prompt for this child run. Replaces (not
@@ -88,7 +88,7 @@ export interface SubagentRunOptions {
     /**
      * Optional progress callback. The runner invokes it for milestone events
      * during the run: spawn, first event received, terminal stop reason
-     * detected, child exit. Used by historian/dreamer/sidekick to write
+     * detected, child exit. Used by historian/dreamer to write
      * lifecycle entries to the magic-context.log without polluting the
      * normal stdout stream.
      *
@@ -104,7 +104,6 @@ export interface SubagentRunOptions {
         | "historian_editor"
         | "compressor"
         | "dreamer"
-        | "sidekick"
         | "user_memory_review"
         | "recomp"
         | undefined;
@@ -230,7 +229,7 @@ export type SubagentRunResult =
  *
  * Each harness ships a single instance — the OpenCode plugin wires
  * `OpenCodeSubagentRunner` and the Pi plugin wires `PiSubagentRunner` in
- * its `extension` boot path. Agent code (historian, dreamer, sidekick)
+ * its `extension` boot path. Agent code (historian and dreamer)
  * receives the runner as a dep and never reaches for harness-specific
  * client APIs directly.
  */

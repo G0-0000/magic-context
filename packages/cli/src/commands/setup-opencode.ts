@@ -3,6 +3,7 @@ import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
+import { stripRemovedAgentConfig } from "@magic-context/core/config/removed-agent-config";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import {
@@ -12,7 +13,6 @@ import {
 } from "@magic-context/core/shared/jsonc-edit";
 import { sanitizeParsedJson } from "@magic-context/core/shared/jsonc-parser";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
-
 import {
     isDevPathPluginEntry,
     isLocalPathPluginEntry,
@@ -278,13 +278,11 @@ export function writeMagicContextConfig(
         dreamerModel: string | null;
         /** Per-task schedule overrides (Dreamer v2); undefined keeps schema defaults. */
         dreamerTasks?: Record<string, { schedule: string }>;
-        sidekickEnabled: boolean;
-        sidekickModel: string | null;
         claudeMax: boolean;
     },
 ): void {
     // A malformed existing file must abort rather than become an empty config.
-    const config = readMagicContextConfigForSetup(configPath);
+    const config = stripRemovedAgentConfig(readMagicContextConfigForSetup(configPath), []);
 
     // Always set $schema for editor autocomplete/validation
     if (!config.$schema) {
@@ -319,19 +317,6 @@ export function writeMagicContextConfig(
         dreamer.disable = true;
     }
     config.dreamer = dreamer;
-
-    const sidekick = configObject(config.sidekick);
-    delete sidekick.enabled;
-    if (options.sidekickEnabled) {
-        delete sidekick.disable;
-        if (options.sidekickModel) {
-            sidekick.model = options.sidekickModel;
-        }
-        config.sidekick = sidekick;
-    } else {
-        sidekick.disable = true;
-        config.sidekick = sidekick;
-    }
 
     if (options.claudeMax) {
         const cacheTtl = (config.cache_ttl as Record<string, string>) ?? {};
@@ -498,14 +483,6 @@ export async function runSetup(dryRun = false): Promise<number> {
         dreamerTasks = result.tasks;
     }
 
-    // ─── Step 7: Sidekick ───────────────────────────────
-    const sidekickEnabled = await confirm("Enable sidekick?", false);
-    let sidekickModel: string | null = null;
-    if (sidekickEnabled) {
-        sidekickModel = await pickModel(promptIO, allModels, "sidekick");
-        log.success(`Sidekick: ${sidekickModel}`);
-    }
-
     // ─── Claude Max subscription ────────────────────────
     const hasAnthropic = allModels.some((m) => m.startsWith("anthropic/"));
     let claudeMax = false;
@@ -590,8 +567,6 @@ export async function runSetup(dryRun = false): Promise<number> {
             dreamerEnabled,
             dreamerModel,
             dreamerTasks,
-            sidekickEnabled,
-            sidekickModel,
             claudeMax,
         });
         log.success(`Config written to ${paths.magicContextConfig}`);
@@ -629,9 +604,6 @@ export async function runSetup(dryRun = false): Promise<number> {
         dreamerEnabled
             ? `Dreamer: enabled${dreamerModel ? ` (${dreamerModel})` : ""}`
             : "Dreamer: disabled",
-        sidekickEnabled
-            ? `Sidekick: enabled${sidekickModel ? ` (${sidekickModel})` : ""}`
-            : "Sidekick: disabled",
     ].join("\n");
 
     note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");

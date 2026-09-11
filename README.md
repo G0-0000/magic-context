@@ -96,7 +96,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-The wizard auto-detects which harnesses you have (OpenCode, Pi, OMP, or any combination), adds the plugin, disables built-in compaction, helps you pick models for the historian, dreamer, and sidekick, and resolves conflicts with other context-management plugins. Target one with `--harness opencode`, `--harness pi`, or `--harness omp`.
+The wizard auto-detects which harnesses you have (OpenCode, Pi, OMP, or any combination), adds the plugin, disables built-in compaction, helps you pick models for the historian and dreamer, and resolves conflicts with other context-management plugins. Target one with `--harness opencode`, `--harness pi`, or `--harness omp`.
 
 > **Why disable built-in compaction?** Magic Context manages context itself. The host's compaction would interfere with its cache-aware deferred operations and double-compress.
 
@@ -125,7 +125,7 @@ Then create `magic-context.jsonc` with the OpenCode historian setting:
 ```
 
 - **Required:** `historian.opencode.model` must be a real `provider/model-id`. Without it, the plugin loads but historian runs fail, older history is not summarized, and repeated failures show a `Magic Context — history comparting needs attention` notice.
-- **Optional:** `dreamer` and `sidekick` model/disable blocks. Omit them to leave periodic memory consolidation and `/ctx-aug` off.
+- **Optional:** the `dreamer` model/disable block. Omit it to leave periodic memory consolidation off.
 - **Optional:** `embedding`. Omit it to use the local `Xenova/all-MiniLM-L6-v2`; turning embeddings off removes semantic/embedding-backed search, but keyword search and context management continue.
 
 ### Flat model-config migration (before/after)
@@ -302,7 +302,6 @@ Recall works **across sessions** (a new session inherits everything) and **acros
 | `/ctx-recomp` | Rebuild compartments from raw history (accepts a `start-end` range). Use when stored state seems wrong |
 | `/ctx-wrapup [messages_to_keep]` | Compact older live history while keeping the newest N messages raw; queued compaction materializes on the next model message |
 | `/ctx-session-upgrade` | Upgrade this session to the latest history format: rebuild compartments and migrate project memories |
-| `/ctx-aug` | Run sidekick augmentation on a prompt: retrieve relevant memories via a separate model |
 | `/ctx-dream` | Run dreamer maintenance on demand: maintain memory, docs, smart notes, and user-profile review |
 | `/ctx-embed` | Embedding status, or start/pause history compartment embedding (`start` \| `pause`) |
 

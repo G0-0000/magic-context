@@ -83,7 +83,7 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
 
 /**
  * Detect Magic Context's OWN hidden child agents by their system-prompt
- * openers. These children (historian/dreamer/sidekick/memory-migration) load a
+ * openers. These children (historian/dreamer/memory-migration) load a
  * fixed agent identity and must NOT receive the MC guidance block — it's wasted
  * spend and a contradictory second identity frame ("You are Historian…" plus
  * "You are the user's long-term partner…").
@@ -106,11 +106,7 @@ export function isMagicContextInternalAgent(systemPromptContent: string): boolea
         // Every dreamer task prompt (generic base + curate / maintain-docs /
         // review-user-memories / primer-investigator) shares this identity phrase,
         // so one substring covers them all even though their openers differ.
-        systemPromptContent.includes("for the magic-context system") ||
-        // SIDEKICK_SYSTEM_PROMPT
-        systemPromptContent.includes(
-            "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
-        )
+        systemPromptContent.includes("for the magic-context system")
     );
 }
 
@@ -174,7 +170,7 @@ export function createSystemPromptHashHandler(deps: {
     injectionSkipSignatures?: string[];
     /**
      * Process-scoped set of Magic Context's OWN hidden child sessions
-     * (historian/dreamer/sidekick/memory-migration), flagged by title prefix at
+     * (historian/dreamer/memory-migration), flagged by title prefix at
      * `session.created`. When the active session is in this set we skip ALL
      * injection — these children have their own fixed agent identity/prompt and
      * never benefit from the MC guidance block. Belt to the prompt-signature
@@ -259,7 +255,7 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Skip Magic Context's OWN hidden children ──
-        // historian/dreamer/sidekick/memory-migration must not get the MC
+        // historian/dreamer/memory-migration must not get the MC
         // guidance block (wasted spend + contradictory identity frame). Two
         // signals: the title-prefix flag (set at session.created) and the
         // prompt-signature (timing-independent, reliable on pass 1). Either
@@ -270,7 +266,7 @@ export function createSystemPromptHashHandler(deps: {
         ) {
             sessionLog(
                 sessionId,
-                "system-prompt-hash skipped (Magic Context internal child: historian/dreamer/sidekick/migration)",
+                "system-prompt-hash skipped (Magic Context internal child: historian/dreamer/migration)",
             );
             return;
         }

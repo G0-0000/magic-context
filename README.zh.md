@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-向导会自动检测你拥有的 harness（OpenCode、Pi，或两者），添加插件，关闭内置压缩，帮助你为 historian、dreamer 和 sidekick 选择模型，并解决与其他上下文管理插件的冲突。用 `--harness opencode` 或 `--harness pi` 指定某个 harness。
+向导会自动检测你拥有的 harness（OpenCode、Pi，或两者），添加插件，关闭内置压缩，帮助你为 historian 和 dreamer 选择模型，并解决与其他上下文管理插件的冲突。用 `--harness opencode` 或 `--harness pi` 指定某个 harness。
 
 > **为什么关闭内置压缩？** Magic Context 自己管理上下文。宿主的压缩会干扰它的缓存感知延迟操作，并造成双重压缩。
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | 立即强制执行所有排队操作，绕过缓存 TTL |
 | `/ctx-recomp` | 从原始历史重建分区（接受 `start-end` 范围）。当存储状态看起来不对时使用 |
 | `/ctx-session-upgrade` | 将此会话升级到最新历史格式：重建分区并迁移项目记忆 |
-| `/ctx-aug` | 对提示运行 sidekick 增强：通过单独模型检索相关记忆 |
 | `/ctx-dream` | 按需运行 dreamer 维护：维护记忆、文档、smart notes，并审查 user-profile |
 
 ---

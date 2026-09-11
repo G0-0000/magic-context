@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-La procedura rileva automaticamente quali harness hai (OpenCode, Pi o entrambi), aggiunge il plugin, disattiva la compaction integrata, ti aiuta a scegliere i modelli per historian, dreamer e sidekick, e risolve i conflitti con altri plugin di gestione del contesto. Punta a un harness specifico con `--harness opencode` o `--harness pi`.
+La procedura rileva automaticamente quali harness hai (OpenCode, Pi o entrambi), aggiunge il plugin, disattiva la compaction integrata, ti aiuta a scegliere i modelli per historian e dreamer, e risolve i conflitti con altri plugin di gestione del contesto. Punta a un harness specifico con `--harness opencode` o `--harness pi`.
 
 > **Perché disattivare la compaction integrata?** Magic Context gestisce il contesto da sé. La compaction dell'host interferirebbe con le sue operazioni differite attente alla cache e comprimerebbe due volte.
 
@@ -236,7 +236,6 @@ Il richiamo funziona **tra sessioni** (una nuova sessione eredita tutto) e **tra
 | `/ctx-flush` | Forza immediatamente tutte le operazioni in coda, bypassando il TTL cache |
 | `/ctx-recomp` | Ricostruisce i compartimenti dalla cronologia grezza (accetta un intervallo `start-end`). Da usare quando lo stato salvato sembra errato |
 | `/ctx-session-upgrade` | Aggiorna questa sessione al formato cronologia più recente: ricostruisci compartimenti e migra memorie di progetto |
-| `/ctx-aug` | Esegui sidekick augmentation su un prompt: recupera memorie rilevanti tramite un modello separato |
 | `/ctx-dream` | Esegui manutenzione dreamer su richiesta: memoria, documenti, smart notes e review di user-profile |
 
 ---

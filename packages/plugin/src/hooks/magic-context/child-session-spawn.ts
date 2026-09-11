@@ -70,8 +70,8 @@ async function surfaceSchemaFenceFailure(
 }
 
 /**
- * Shared OpenCode child-session choke point. Every historian/recomp, dreamer,
- * and sidekick child must pass this probe before asking OpenCode to create it.
+ * Shared OpenCode child-session choke point. Every historian/recomp and Dreamer
+ * child must pass this probe before asking OpenCode to create it.
  */
 export async function createChildSessionWithFence(
     args: ChildSessionSpawnArgs,

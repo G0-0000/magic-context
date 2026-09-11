@@ -334,7 +334,6 @@ function writeConfigs(
         execute_threshold_percentage: 40,
         history_budget_percentage: 0.15,
         dreamer: { disable: true },
-        sidekick: { disable: true },
         ...pinMockAgents(opts.magicContextConfig, `${mockProviderID}/${mockModelID}`),
     };
     if (opts.userSubcConnectionFile) {

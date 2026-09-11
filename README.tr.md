@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Sihirbaz hangi harnesses bulunduğunu (OpenCode, Pi veya ikisi) otomatik algılar, plugin ekler, yerleşik compaction özelliğini kapatır, historian, dreamer ve sidekick için model seçmene yardım eder ve diğer bağlam yönetimi plugins ile çakışmaları çözer. Belirli bir harness hedeflemek için `--harness opencode` veya `--harness pi` kullan.
+Sihirbaz hangi harnesses bulunduğunu (OpenCode, Pi veya ikisi) otomatik algılar, plugin ekler, yerleşik compaction özelliğini kapatır, historian ve dreamer için model seçmene yardım eder ve diğer bağlam yönetimi plugins ile çakışmaları çözer. Belirli bir harness hedeflemek için `--harness opencode` veya `--harness pi` kullan.
 
 > **Yerleşik compaction neden kapatılır?** Magic Context bağlamı kendisi yönetir. Host compaction, cache-aware ertelenmiş işlemlerine karışır ve iki kez sıkıştırır.
 
@@ -236,7 +236,6 @@ Hatırlama **oturumlar arasında** (yeni oturum her şeyi devralır) ve **harnes
 | `/ctx-flush` | Kuyruktaki tüm operasyonları cache TTL atlayarak hemen zorla |
 | `/ctx-recomp` | Ham geçmişten bölmeleri yeniden oluştur (`start-end` aralığı kabul eder). Saklanan durum yanlış görünürse kullan |
 | `/ctx-session-upgrade` | Bu oturumu en yeni geçmiş formatına yükselt: bölmeleri yeniden oluştur ve proje anılarını taşı |
-| `/ctx-aug` | Bir prompt üzerinde sidekick augmentation çalıştır: ilgili anıları ayrı modelle getir |
 | `/ctx-dream` | İstek üzerine dreamer bakımı çalıştır: bellek, docs, smart notes ve user-profile review bakımı |
 
 ---

@@ -1,6 +1,5 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
-import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import { getAuthorityManagedMarker } from "../../features/magic-context/context-authority";
 import {
     assessCurateMutationSafety,
@@ -470,11 +469,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 reason: "string",
                 superseded_by: "number",
             });
-            // Sidekick consumes untrusted `/ctx-aug` prompt text and is retrieval-only;
-            // fail closed even if a future permission list accidentally exposes this tool.
-            if (toolContext.agent === SIDEKICK_AGENT) {
-                return "Error: ctx_memory is not available to the sidekick agent.";
-            }
             if (
                 args.action === undefined ||
                 (toolContext.agent !== DREAMER_AGENT && !allowedActions.includes(args.action))

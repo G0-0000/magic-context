@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Trình hướng dẫn tự phát hiện harnesses bạn có (OpenCode, Pi hoặc cả hai), thêm plugin, tắt compaction tích hợp, giúp bạn chọn mô hình cho historian, dreamer và sidekick, rồi giải quyết xung đột với các plugins quản lý ngữ cảnh khác. Nhắm một harness cụ thể bằng `--harness opencode` hoặc `--harness pi`.
+Trình hướng dẫn tự phát hiện harnesses bạn có (OpenCode, Pi hoặc cả hai), thêm plugin, tắt compaction tích hợp, giúp bạn chọn mô hình cho historian và dreamer, rồi giải quyết xung đột với các plugins quản lý ngữ cảnh khác. Nhắm một harness cụ thể bằng `--harness opencode` hoặc `--harness pi`.
 
 > **Vì sao tắt compaction tích hợp?** Magic Context tự quản lý ngữ cảnh. Compaction của host sẽ can thiệp vào các thao tác trì hoãn có nhận biết cache và nén hai lần.
 
@@ -236,7 +236,6 @@ Nhớ lại hoạt động **xuyên phiên** (phiên mới thừa hưởng mọi
 | `/ctx-flush` | Buộc tất cả thao tác đang xếp hàng chạy ngay, bỏ qua cache TTL |
 | `/ctx-recomp` | Dựng lại khoang từ lịch sử thô (nhận khoảng `start-end`). Dùng khi trạng thái lưu trữ có vẻ sai |
 | `/ctx-session-upgrade` | Nâng cấp phiên này lên định dạng lịch sử mới nhất: dựng lại khoang và di chuyển ký ức dự án |
-| `/ctx-aug` | Chạy sidekick augmentation trên prompt: lấy ký ức liên quan bằng mô hình riêng |
 | `/ctx-dream` | Chạy bảo trì dreamer theo yêu cầu: duy trì bộ nhớ, docs, smart notes và review user-profile |
 
 ---

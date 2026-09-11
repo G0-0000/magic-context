@@ -525,7 +525,7 @@ describe("createEventHandler", () => {
             internalChildSessions,
         });
 
-        // A magic-context child (historian/dreamer/sidekick/migration title).
+        // A Magic Context child (historian, Dreamer, or migration title).
         await handler({
             event: {
                 type: "session.created",

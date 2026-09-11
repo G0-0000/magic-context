@@ -18,6 +18,7 @@ import {
 } from "@magic-context/core/config/project-security";
 import { pruneNestedConfigLeaf } from "@magic-context/core/config/prune-config-leaf";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
+import { stripRemovedAgentConfig } from "@magic-context/core/config/removed-agent-config";
 import {
 	type MagicContextConfig,
 	MagicContextConfigSchema,
@@ -296,13 +297,17 @@ function parsePiConfig(
 	warnings: string[];
 } {
 	const preMigrationWarnings: string[] = [];
+	const configWithoutRemovedAgent = stripRemovedAgentConfig(
+		rawConfig,
+		preMigrationWarnings,
+	);
 	const hasDeprecatedProtectedTags = Object.hasOwn(rawConfig, "protected_tags");
 	if (hasDeprecatedProtectedTags) {
 		preMigrationWarnings.push(
 			'The "protected_tags" setting is deprecated and ignored. Use "protected_tokens" instead.',
 		);
 	}
-	const configToMigrate = { ...rawConfig };
+	const configToMigrate = { ...configWithoutRemovedAgent };
 	if (hasDeprecatedProtectedTags) {
 		delete configToMigrate.protected_tags;
 	}
@@ -350,8 +355,7 @@ function parsePiConfig(
 
 	for (const key of errorPaths) {
 		recoveredTopLevelKeys.push(key);
-		const isAgentConfig =
-			key === "historian" || key === "dreamer" || key === "sidekick";
+		const isAgentConfig = key === "historian" || key === "dreamer";
 
 		// Object-valued key: prune ONLY invalid nested leaves, keep valid siblings
 		// (e.g. don't wipe the whole `memory` block — incl. migrated auto_search /
@@ -552,7 +556,11 @@ export function loadPiConfigDetailed(
 		if (a.scope === b.scope) return 0;
 		return a.scope === "user" ? -1 : 1;
 	});
-	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config ?? {};
+	const removedConfigWarnings: string[] = [];
+	const userRaw = stripRemovedAgentConfig(
+		mergeFiles.find((f) => f.scope === "user")?.config ?? {},
+		removedConfigWarnings,
+	);
 	const projectLayer = mergeFiles.find((f) => f.scope === "project");
 	let projectRaw: Record<string, unknown> = {};
 
@@ -561,11 +569,15 @@ export function loadPiConfigDetailed(
 			loaded.scope === "user" ? "[user config]" : "[project config]";
 		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
 		if (loaded.scope !== "project") continue;
-		projectRaw = { ...loaded.config };
+		projectRaw = stripRemovedAgentConfig(loaded.config, removedConfigWarnings);
 		for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
 			warnings.push(`${prefix} ${warning}`);
 		}
 	}
+
+	warnings.push(
+		...removedConfigWarnings.map((warning) => `[config] ${warning}`),
+	);
 
 	const profileResolution = resolveConfigProfile({ userRaw, projectRaw });
 	warnings.push(

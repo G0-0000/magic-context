@@ -767,7 +767,6 @@ describe("pi cache stability", () => {
     // inspection of Pi's JSONL compaction entry after appendCompaction(...).
     it.skip("writes a Pi compaction marker at the historian boundary and resumes after it", () => {});
 
-    // FIXME(pi-cache-stability): /ctx-aug subagent runs need a print-mode command/tool
     // harness that can wait for the child Pi process and inspect its session rows.
     it.skip("marks Pi subagents isolated and skips historian/project-docs/user-profile/key-files", () => {});
 

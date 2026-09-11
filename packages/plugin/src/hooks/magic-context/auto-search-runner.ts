@@ -122,11 +122,7 @@ function collectUserPromptParts(message: MessageLike): string {
  *  up. This runs on the RAW text (before stripping) because the whole point is
  *  to detect what the stripper would remove. */
 function hasStackedAugmentation(rawText: string): boolean {
-    return (
-        rawText.includes("<sidekick-augmentation>") ||
-        rawText.includes("<ctx-search-hint>") ||
-        rawText.includes("<ctx-search-auto>")
-    );
+    return rawText.includes("<ctx-search-hint>") || rawText.includes("<ctx-search-auto>");
 }
 
 /**

@@ -304,7 +304,7 @@ describe("runAutoSearchHintForPi", () => {
 		}
 	});
 
-	it("skips stacked sidekick augmentation without searching", async () => {
+	it("skips stacked search augmentation without searching", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
 			async () => [memoryResult()],
@@ -312,7 +312,7 @@ describe("runAutoSearchHintForPi", () => {
 		try {
 			const messages = [
 				userMessage(
-					"Implement this\n\n<sidekick-augmentation>context</sidekick-augmentation>",
+					"Implement this\n\n<ctx-search-hint>context</ctx-search-hint>",
 					1,
 				),
 			];
@@ -325,7 +325,9 @@ describe("runAutoSearchHintForPi", () => {
 			});
 
 			expect(spy).toHaveBeenCalledTimes(0);
-			expect(textOf(messages[0])).not.toContain("<ctx-search-hint>");
+			expect(textOf(messages[0])).toBe(
+				"Implement this\n\n<ctx-search-hint>context</ctx-search-hint>",
+			);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

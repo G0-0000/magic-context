@@ -4,7 +4,6 @@ import {
     applyDisallowedTools,
     buildAllowOnlyPermission,
     HISTORIAN_ALLOWED_TOOLS,
-    SIDEKICK_ALLOWED_TOOLS,
 } from "./permissions";
 
 describe("buildAllowOnlyPermission", () => {
@@ -34,7 +33,7 @@ describe("buildAllowOnlyPermission", () => {
 
     it("never accidentally allows `task`, `bash`, or `edit` unless explicitly listed", () => {
         // The whole point of this helper is preventing historian / dreamer /
-        // sidekick from inheriting the primary-agent surface. Lock that in.
+        // hidden agents from inheriting the primary-agent surface. Lock that in.
         const perm = buildAllowOnlyPermission(["read"]);
         expect(perm.task).toBeUndefined();
         expect(perm.bash).toBeUndefined();
@@ -174,36 +173,6 @@ describe("DREAMER_DOCS_ALLOWED_TOOLS (maintain-docs)", () => {
     });
 });
 
-describe("SIDEKICK_ALLOWED_TOOLS", () => {
-    it("includes ctx_search but not ctx_memory for retrieval", () => {
-        // Sidekick is the /ctx-aug memory retriever. It searches memories without
-        // receiving the mutation-capable ctx_memory tool.
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_search");
-        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("ctx_memory");
-    });
-
-    it("includes `aft_outline` and `aft_zoom` for lightweight structural context", () => {
-        // Sidekick can pull file outline / symbol body when the user's
-        // prompt references a specific file or symbol, without dragging
-        // in whole files.
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_outline");
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_zoom");
-    });
-
-    it("does NOT include `read` (use aft_outline/aft_zoom for navigation instead)", () => {
-        // Sidekick should pull symbol-scoped views, not arbitrary file
-        // contents. If it needs full source it can use aft_zoom on a
-        // specific symbol.
-        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("read");
-    });
-
-    it("does NOT include `task` or any edit / bash / web tool", () => {
-        for (const denied of ["task", "bash", "edit", "write", "webfetch", "websearch"]) {
-            expect(SIDEKICK_ALLOWED_TOOLS).not.toContain(denied);
-        }
-    });
-});
-
 describe("integration: full hidden-agent permission shape", () => {
     it("historian permission object: `*` denied + read + aft_outline + aft_zoom + aft_search allowed", () => {
         const perm = buildAllowOnlyPermission(HISTORIAN_ALLOWED_TOOLS);
@@ -237,16 +206,6 @@ describe("integration: full hidden-agent permission shape", () => {
             aft_outline: "allow",
             aft_zoom: "allow",
             aft_search: "allow",
-        });
-    });
-
-    it("sidekick permission object: `*` denied + read-only retrieval/navigation allowed", () => {
-        const perm = buildAllowOnlyPermission(SIDEKICK_ALLOWED_TOOLS);
-        expect(perm).toEqual({
-            "*": "deny",
-            ctx_search: "allow",
-            aft_outline: "allow",
-            aft_zoom: "allow",
         });
     });
 });

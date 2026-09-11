@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-يكتشف المعالج تلقائيا أي harnesses لديك (OpenCode أو Pi أو كلاهما)، يضيف plugin، يعطل compaction المدمج، يساعدك على اختيار نماذج historian و dreamer و sidekick، ويحل التعارضات مع plugins أخرى لإدارة السياق. استهدف harness محددا باستخدام `--harness opencode` أو `--harness pi`.
+يكتشف المعالج تلقائيا أي harnesses لديك (OpenCode أو Pi أو كلاهما)، يضيف plugin، يعطل compaction المدمج، يساعدك على اختيار نماذج historian و dreamer، ويحل التعارضات مع plugins أخرى لإدارة السياق. استهدف harness محددا باستخدام `--harness opencode` أو `--harness pi`.
 
 > **لماذا نعطل compaction المدمج؟** Magic Context يدير السياق بنفسه. compaction الخاص بالمضيف سيتداخل مع عملياته المؤجلة الواعية للـ cache وسيضغط مرتين.
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | إجبار كل العمليات المصطفة فورا، مع تجاوز cache TTL |
 | `/ctx-recomp` | إعادة بناء الحجرات من التاريخ الخام (يقبل نطاق `start-end`). استخدمه عندما تبدو الحالة المخزنة خاطئة |
 | `/ctx-session-upgrade` | ترقية هذه الجلسة إلى أحدث تنسيق تاريخ: إعادة بناء الحجرات وترحيل ذكريات المشروع |
-| `/ctx-aug` | تشغيل sidekick augmentation على prompt: استرجاع ذكريات ذات صلة عبر نموذج منفصل |
 | `/ctx-dream` | تشغيل صيانة dreamer عند الطلب: صيانة الذاكرة و docs و smart notes ومراجعة user-profile |
 
 ---

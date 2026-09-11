@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Čarobnjak automatski otkriva koje harnesses imaš (OpenCode, Pi ili oba), dodaje plugin, isključuje ugrađeni compaction, pomaže da izabereš modele za historian, dreamer i sidekick, i rješava konflikte s drugim pluginima za upravljanje kontekstom. Ciljaj određeni harness pomoću `--harness opencode` ili `--harness pi`.
+Čarobnjak automatski otkriva koje harnesses imaš (OpenCode, Pi ili oba), dodaje plugin, isključuje ugrađeni compaction, pomaže da izabereš modele za historian i dreamer, i rješava konflikte s drugim pluginima za upravljanje kontekstom. Ciljaj određeni harness pomoću `--harness opencode` ili `--harness pi`.
 
 > **Zašto isključiti ugrađeni compaction?** Magic Context sam upravlja kontekstom. Compaction hosta bi ometao njegove odgođene operacije svjesne cachea i kompresovao dva puta.
 
@@ -236,7 +236,6 @@ Prisjećanje radi **kroz sesije** (nova sesija nasljeđuje sve) i **kroz harness
 | `/ctx-flush` | Odmah forsiraj sve operacije u redu, zaobilazeći cache TTL |
 | `/ctx-recomp` | Ponovo izgradi kompartmente iz sirove historije (prima `start-end` raspon). Koristi kada pohranjeno stanje izgleda pogrešno |
 | `/ctx-session-upgrade` | Nadogradi ovu sesiju na najnoviji format historije: ponovo izgradi kompartmente i migriraj projektne memorije |
-| `/ctx-aug` | Pokreni sidekick augmentation na promptu: dohvati relevantne memorije preko odvojenog modela |
 | `/ctx-dream` | Pokreni dreamer održavanje na zahtjev: održavaj memoriju, docs, smart notes i user-profile review |
 
 ---
