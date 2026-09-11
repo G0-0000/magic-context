@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	getOrCreateSessionMeta,
 	getPendingOps,
 	insertTag,
 	queuePendingOp,
@@ -23,6 +24,50 @@ import { handlePiSessionBeforeCompact } from "./index";
 import { createTestDb } from "./test-utils.test";
 
 describe("Pi compaction-off mode", () => {
+	it("preserves the frozen prefix when MC cancels a native compaction attempt", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-cancelled-native-prefix";
+		const ctx = { sessionManager: { getSessionId: () => sessionId } };
+		const m0 = Buffer.from("frozen m0 before attempted compaction");
+		const m1 = Buffer.from("frozen m1 before attempted compaction");
+		try {
+			updateSessionMeta(db, sessionId, {
+				cachedM0Bytes: m0,
+				cachedM1Bytes: m1,
+			});
+			expect(
+				await handlePiSessionBeforeCompact({ db, compactionOff: false, ctx }),
+			).toEqual({ cancel: true });
+			const cancelled = getOrCreateSessionMeta(db, sessionId);
+			expect(cancelled.cachedM0Bytes).toEqual(m0);
+			expect(cancelled.cachedM1Bytes).toEqual(m1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("invalidates the frozen prefix when native compaction is allowed", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-allowed-native-prefix";
+		try {
+			updateSessionMeta(db, sessionId, {
+				cachedM0Bytes: Buffer.from("m0"),
+				cachedM1Bytes: Buffer.from("m1"),
+			});
+			expect(
+				await handlePiSessionBeforeCompact({
+					db,
+					compactionOff: true,
+					ctx: { sessionManager: { getSessionId: () => sessionId } },
+				}),
+			).toBeUndefined();
+			const allowed = getOrCreateSessionMeta(db, sessionId);
+			expect(allowed.cachedM0Bytes).toBeNull();
+			expect(allowed.cachedM1Bytes).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
 	it("allows native compaction only when compaction-off is selected", async () => {
 		const db = createTestDb();
 		try {
