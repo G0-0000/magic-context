@@ -762,7 +762,7 @@ Prefer many small targeted operations over one large blanket operation. Compress
 **Key Characteristics:**
 - Route all OpenCode integration through thin adapters in `src/plugin/` and keep feature logic in `src/hooks/`, `src/features/`, and `src/tools/`.
 - Use SQLite-backed durable state from `src/features/magic-context/storage*.ts` for tags, pending ops, compartments, memories, dreamer queue state, and per-session cache-stability watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`).
-- Use hidden subagents from `src/agents/*.ts` plus prompt builders in `src/features/magic-context/dreamer/task-prompts.ts`, `src/features/magic-context/sidekick/agent.ts`, and `src/hooks/magic-context/compartment-prompt.ts`.
+- Use hidden subagents from `src/agents/*.ts` plus prompt builders in `src/features/magic-context/dreamer/task-prompts.ts` and `src/hooks/magic-context/compartment-prompt.ts`.
 - Replay all persistent message mutations (reasoning clearing, placeholder stripping) on every transform pass — including defer passes — so stripped state survives OpenCode's message rebuilds without re-triggering a cache bust.
 
 ## Layers
@@ -791,7 +791,7 @@ Prefer many small targeted operations over one large blanket operation. Compress
 **Core feature services:**
 - Purpose: Encapsulate reusable stateful services behind pure or narrow APIs.
 - Location: `src/features/magic-context/`
-- Contains: Storage access, scheduler, tagger, compaction handler, memory system, dreamer queue/runner/scheduler, sidekick support.
+- Contains: Storage access, scheduler, tagger, compaction handler, memory system, dreamer queue/runner/scheduler.
 - Depends on: `src/shared/` and Bun SQLite.
 - Used by: `src/hooks/magic-context/`, `src/plugin/tool-registry.ts`, and `src/index.ts`.
 
@@ -850,9 +850,9 @@ Prefer many small targeted operations over one large blanket operation. Compress
 4. Spawn one child session per task from `src/features/magic-context/dreamer/runner.ts` using prompts from `src/features/magic-context/dreamer/task-prompts.ts`.
 
 **Command augmentation flow:**
-1. Register `/ctx-status`, `/ctx-flush`, `/ctx-recomp`, `/ctx-aug`, and `/ctx-dream` in `src/features/builtin-commands/commands.ts`.
+1. Register `/ctx-status`, `/ctx-flush`, `/ctx-recomp`, and `/ctx-dream` in `src/features/builtin-commands/commands.ts`.
 2. Intercept command execution in `src/hooks/magic-context/command-handler.ts`.
-3. Run sidekick augmentation from `src/features/magic-context/sidekick/agent.ts` or queue dream work through `src/features/magic-context/dreamer/runner.ts`.
+3. Queue dream work through `src/features/magic-context/dreamer/runner.ts`.
 4. Send ignored notifications or real user prompts through `src/hooks/magic-context/send-session-notification.ts`.
 
 ## Key Abstractions
@@ -894,7 +894,7 @@ Prefer many small targeted operations over one large blanket operation. Compress
 
 **Agent prompt pack:**
 - Purpose: Keep hidden-agent identities and prompt text isolated from runtime wiring.
-- Location: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/magic-context-prompt.ts`
+- Location: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/magic-context-prompt.ts`
 - Pattern: Constants plus prompt builders.
 
 **Content stripping and replay:**
@@ -953,7 +953,7 @@ Magic Context runs in two effective modes: primary sessions and subagents. The m
 | 95 % block + emergency recovery | ✓ | ✗ |
 | Experimental age-tier caveman text compression | opt-in | ✗ |
 
-**Subagent rationale:** subagents are driven by a parent agent, have bounded lifetimes, and often run in parallel (council, historian, sidekick, dreamer child sessions). They still benefit from automatic heuristic drops on their own context at execute passes, but turning on historian, prompt-adjunct injections, or caveman text compression in each subagent would create redundant work and per-agent cache churn. Subagents that run into overflow fall back to the existing `overflow-detection.ts` path rather than Magic Context's own 85/95 thresholds.
+**Subagent rationale:** subagents are driven by a parent agent, have bounded lifetimes, and often run in parallel (council, historian, and dreamer child sessions). They still benefit from automatic heuristic drops on their own context at execute passes, but turning on historian, prompt-adjunct injections, or caveman text compression in each subagent would create redundant work and per-agent cache churn. Subagents that run into overflow fall back to the existing `overflow-detection.ts` path rather than Magic Context's own 85/95 thresholds.
 
 **Reduce availability rationale:** a session whose tool allow-list denies `ctx_reduce` cannot act on `§N§` markers or reduce nudges, so Magic Context hides that visible surface while keeping deterministic parts (historian, heuristic drops, compartment injection, memory).
 
@@ -1004,7 +1004,7 @@ Magic Context runs in two effective modes: primary sessions and subagents. The m
 **`src/agents/`:**
 - Purpose: Define hidden agent identifiers and shared agent prompt helpers.
 - Contains: Agent-name constants and prompt-building helpers.
-- Key files: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/magic-context-prompt.ts`
+- Key files: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/magic-context-prompt.ts`
 
 **`src/config/`:**
 - Purpose: Parse and validate plugin configuration.
@@ -1023,7 +1023,7 @@ Magic Context runs in two effective modes: primary sessions and subagents. The m
 
 **`src/features/`:**
 - Purpose: Group reusable subsystem logic by feature.
-- Contains: Magic-context services, dreamer runtime, sidekick support, storage, scheduler, tagger, and built-in commands.
+- Contains: Magic-context services, dreamer runtime, storage, scheduler, tagger, and built-in commands.
 - Key files: `src/features/magic-context/storage-db.ts`, `src/features/magic-context/storage-meta-persisted.ts`, `src/features/magic-context/dreamer/runner.ts`, `src/features/magic-context/memory/storage-memory.ts`, `src/features/magic-context/user-memory/storage-user-memory.ts`, `src/features/builtin-commands/commands.ts`
 
 **`src/tools/`:**

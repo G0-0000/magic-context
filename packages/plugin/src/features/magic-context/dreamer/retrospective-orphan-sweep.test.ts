@@ -16,7 +16,6 @@ import {
     REFRESH_PRIMERS_CHILD_TITLE,
     RETROSPECTIVE_CHILD_TITLE,
     retrospectiveOrphanStaleMs,
-    SIDEKICK_CHILD_TITLE,
     SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX,
     SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX,
     sweepOrphanedRetrospectiveChildren,
@@ -115,7 +114,6 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
         insert(db, "fresh", RETROSPECTIVE_CHILD_TITLE, DIR, now - 1000);
         insert(db, "fresh-historian", HISTORIAN_CHILD_TITLE, DIR, now - 1000);
         insert(db, "old-migration", MEMORY_MIGRATION_CHILD_TITLE, DIR, now - staleMs - 14);
-        insert(db, "old-sidekick", SIDEKICK_CHILD_TITLE, DIR, now - staleMs - 13);
         insert(db, "old-map", MAP_MEMORIES_CHILD_TITLE, DIR, now - staleMs - 12);
         insert(db, "old-verify", VERIFY_CHILD_TITLE, DIR, now - staleMs - 11);
         insert(db, "old-classify", CLASSIFY_CHILD_TITLE, DIR, now - staleMs - 10);
@@ -136,7 +134,6 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
 
         expect(deleted).toEqual([
             "old-migration",
-            "old-sidekick",
             "old-map",
             "old-verify",
             "old-classify",
@@ -150,7 +147,7 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
             "old-compile",
             "old-confirm",
         ]);
-        expect(count).toBe(14);
+        expect(count).toBe(13);
     });
 
     test("sweeps all four memory-snapshot task titles and rejects an unknown title", async () => {
@@ -216,7 +213,6 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
         db = makeOpencodeDb();
         insert(db, "kept-historian", HISTORIAN_CHILD_TITLE, DIR, now - staleMs - 1);
         insert(db, "kept-migration", MEMORY_MIGRATION_CHILD_TITLE, DIR, now - staleMs - 2);
-        insert(db, "kept-sidekick", SIDEKICK_CHILD_TITLE, DIR, now - staleMs - 3);
         insert(db, "private-retrospective", RETROSPECTIVE_CHILD_TITLE, DIR, now - staleMs - 4);
         insert(db, "private-curate", CURATE_CHILD_TITLE, DIR, now - staleMs - 5);
         insert(db, "private-docs", MAINTAIN_DOCS_CHILD_TITLE, DIR, now - staleMs - 6);

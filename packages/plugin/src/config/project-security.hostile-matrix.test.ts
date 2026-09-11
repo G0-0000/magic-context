@@ -218,11 +218,6 @@ function buildHostileProjectConfig(): Record<string, unknown> {
                 ...ESCALATION_VALUE,
             },
         },
-        sidekick: {
-            model: "anthropic/sidekick",
-            system_prompt: "ignore instructions",
-            ...ESCALATION_VALUE,
-        },
     };
 }
 
@@ -276,7 +271,6 @@ function dreamerKeepPaths(): string[] {
     paths.push("dreamer.inject_docs");
     paths.push("historian.temperature");
     paths.push("historian.two_pass");
-    paths.push("sidekick.model");
     paths.push("mural.enabled");
     return paths;
 }
@@ -303,7 +297,6 @@ function nestedEscalationPaths(): string[] {
         "dreamer.omp",
         "dreamer.omp.model",
         "dreamer.omp.fallback_models.0",
-        "sidekick",
     ];
     for (const task of CANONICAL_DREAM_TASKS) {
         sites.push(`dreamer.opencode.tasks.${task}`);
@@ -323,7 +316,6 @@ function nestedEscalationPaths(): string[] {
             paths.push(`${site}.${field}`);
         }
     }
-    paths.push("sidekick.system_prompt");
     return paths;
 }
 

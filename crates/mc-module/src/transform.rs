@@ -9771,13 +9771,9 @@ fn user_hint_message_text(message: &CkIngressMessage) -> String {
 }
 
 fn has_stacked_user_hint_augmentation(raw_prompt: &str) -> bool {
-    [
-        "<sidekick-augmentation>",
-        "<ctx-search-hint>",
-        "<ctx-search-auto>",
-    ]
-    .iter()
-    .any(|marker| raw_prompt.contains(marker))
+    ["<ctx-search-hint>", "<ctx-search-auto>"]
+        .iter()
+        .any(|marker| raw_prompt.contains(marker))
 }
 
 fn sanitize_user_hint_query(text: &str) -> String {
@@ -28485,7 +28481,7 @@ pub(crate) mod tests {
                 "user",
                 "m1",
                 1,
-                &["rust ownership beta <sidekick-augmentation>existing</sidekick-augmentation>"],
+                &["rust ownership beta <ctx-search-hint>existing</ctx-search-hint>"],
             )],
         );
         let stacked_projection = project_messages(&stacked_request.messages).unwrap();

@@ -138,7 +138,6 @@ cat > "$HOME/.config/opencode/magic-context.jsonc" <<'JSON'
   "enabled": true,
   "historian": { "model": "mock/mock-model" },
   "dreamer": { "enabled": false },
-  "sidekick": { "enabled": false },
   "embedding": { "provider": "off" },
   "auto_update": false
 }

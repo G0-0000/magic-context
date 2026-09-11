@@ -71,7 +71,7 @@ export interface PromptRetryOptions {
     fallbackModels?: readonly ModelInput[];
     /**
      * Identifier for structured logging (e.g. "dreamer:consolidate",
-     * "historian", "compressor", "sidekick"). Helps correlate fallback
+     * "historian", "compressor", "dreamer"). Helps correlate fallback
      * attempts to a specific call site in `magic-context.log`. Defaults to
      * "subagent" if not provided.
      */

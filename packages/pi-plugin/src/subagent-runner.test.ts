@@ -583,8 +583,8 @@ describe("subagent-runner pure helpers", () => {
 			"--print",
 			"--mode",
 			"json",
-			// `--no-session` keeps historian / sidekick / dreamer /
-			// recomp / compressor child sessions out of `pi resume`
+			// `--no-session` keeps historian, dreamer, recomp, and compressor
+			// child sessions out of `pi resume`
 			// and the session picker (uses Pi's
 			// SessionManager.inMemory()).
 			"--no-session",
@@ -613,11 +613,11 @@ describe("subagent-runner pure helpers", () => {
 		expect(historian).toEqual(
 			expect.arrayContaining(["--extension", "/tmp/historian-calibration.js"]),
 		);
-		const sidekick = buildArgsForTest(
-			{ ...baseOptions, agent: "sidekick" },
+		const dreamer = buildArgsForTest(
+			{ ...baseOptions, agent: "dreamer" },
 			{ historianCalibrationEntryPath: "/tmp/historian-calibration.js" },
 		);
-		expect(sidekick).not.toContain("/tmp/historian-calibration.js");
+		expect(dreamer).not.toContain("/tmp/historian-calibration.js");
 	});
 
 	it("passes the active entry thinking level through Pi's --thinking flag", () => {
@@ -651,7 +651,7 @@ describe("subagent-runner pure helpers", () => {
 		const args = buildArgsForTest(
 			{
 				...baseOptions,
-				agent: "sidekick",
+				agent: "dreamer-retrospective",
 				model: "anthropic/claude-sonnet",
 			},
 			{
@@ -889,7 +889,7 @@ describe("subagent-runner pure helpers", () => {
 
 	it("always includes --no-session so child sessions don't appear in pi resume", () => {
 		// Pinned-down regression: the user-visible promise of magic-context
-		// hidden subagents is that historian/sidekick/dreamer runs never
+		// hidden subagents is that historian/dreamer runs never
 		// pollute Pi's session list. If this assertion ever fails, the
 		// child sessions WILL show up in `pi resume` again.
 		const args = buildArgsForTest({
@@ -965,20 +965,13 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--no-tools");
 	});
 
-	it("locks historian and sidekick to explicit read-only allow-lists", () => {
+	it("locks historian to an explicit read-only allow-list", () => {
 		const historianArgs = buildArgsForTest({
 			...baseOptions,
 			agent: "historian",
 		});
 		expect(historianArgs).toEqual(
 			expect.arrayContaining(["--tools", "read,grep,find,ls,aft_search"]),
-		);
-		const sidekickArgs = buildArgsForTest({
-			...baseOptions,
-			agent: "sidekick",
-		});
-		expect(sidekickArgs).toEqual(
-			expect.arrayContaining(["--tools", "read,grep,find,ls,ctx_search"]),
 		);
 	});
 
@@ -1253,9 +1246,9 @@ describe("subagent-runner pure helpers", () => {
 
 	it("does not set --magic-context-dreamer-actions for non-dreamer agents", () => {
 		// Even if the bundle were present, only dreamer-equivalent agents should
-		// receive ctx_memory in the child extension. Historian, sidekick,
-		// compressor etc. stay without the dreamer flag.
-		for (const agent of ["historian", "sidekick", "compressor", "recomp"]) {
+		// receive ctx_memory in the child extension. Historian, compressor,
+		// and recomp agents stay without the dreamer flag.
+		for (const agent of ["historian", "compressor", "recomp"]) {
 			const args = buildArgsForTest({
 				...baseOptions,
 				agent,
@@ -2814,7 +2807,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const args = buildArgsForTest(
 			{
 				...baseOptions,
-				agent: "sidekick",
+				agent: "dreamer-retrospective",
 				model: "anthropic/claude-sonnet",
 			},
 			{

@@ -33,8 +33,6 @@ describe("setup-opencode config safety", () => {
                 historianModel: "anthropic/claude-sonnet-4-6",
                 dreamerEnabled: false,
                 dreamerModel: null,
-                sidekickEnabled: false,
-                sidekickModel: null,
                 claudeMax: false,
             }),
         ).toThrow(`Refusing to overwrite unparseable config ${path}`);
@@ -98,8 +96,6 @@ describe("setup-opencode per-harness config", () => {
             historianModel: "fresh/historian",
             dreamerEnabled: true,
             dreamerModel: "fresh/dreamer",
-            sidekickEnabled: false,
-            sidekickModel: null,
             claudeMax: false,
         });
 
@@ -130,8 +126,6 @@ describe("setup-opencode per-harness config", () => {
             historianModel: "new/historian",
             dreamerEnabled: true,
             dreamerModel: "new/dreamer",
-            sidekickEnabled: false,
-            sidekickModel: null,
             claudeMax: false,
         });
 

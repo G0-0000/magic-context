@@ -17,7 +17,6 @@ Magic Context is a context engine that keeps long Pi sessions productive by:
 | **`<session-history>` injection** | Prepends compressed history into the system prompt every turn so the agent never loses context |
 | **Project memories** | Persistent cross-session knowledge store with embedding-based semantic search |
 | **Dreamer** | Scheduled background subagent that consolidates, verifies, archives, and improves stored memories |
-| **`/ctx-aug`** | On-demand sidekick that augments the next turn with relevant memories |
 | **Auto-search hint** | When user prompts mention previously-discussed topics, appends a compact memory hint |
 | **Note nudges** | Surface deferred intentions at natural work boundaries (commit, todo completion, historian publication) |
 | **Cross-harness sharing** | Memories written from OpenCode appear in Pi (and vice versa) for the same project |
@@ -35,7 +34,7 @@ npx @cortexkit/magic-context@latest setup --harness pi
 This handles everything for you:
 1. Adds `npm:@cortexkit/pi-magic-context` to Pi's `packages` array in `~/.pi/agent/settings.json` (the same place `pi install` writes to)
 2. Creates `~/.config/cortexkit/magic-context.jsonc` with defaults
-3. Prompts you for historian, dreamer, sidekick, and embedding model choices
+3. Prompts you for historian, dreamer, and embedding model choices
 4. Warns about provider-specific gotchas (e.g. GitHub Copilot reasoning models need an explicit `thinking_level`)
 
 If you'd rather register the Pi extension package directly with Pi (skipping the wizard), use Pi's own installer:
@@ -74,7 +73,7 @@ Verify with:
 npx @cortexkit/magic-context@latest doctor --harness omp
 ```
 
-OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-pi/*` runtime. Magic Context identifies OMP from `@oh-my-pi/pi-utils`'s in-process `APP_NAME` through the running host's module graph, not from an executable basename, so compiled and symlinked launches behave the same. It also re-invokes the current host executable for historian, dreamer, and sidekick children, so OMP children remain OMP processes.
+OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-pi/*` runtime. Magic Context identifies OMP from `@oh-my-pi/pi-utils`'s in-process `APP_NAME` through the running host's module graph, not from an executable basename, so compiled and symlinked launches behave the same. It also re-invokes the current host executable for historian and dreamer children, so OMP children remain OMP processes.
 
 ---
 
@@ -109,7 +108,7 @@ Session discovery follows the active host. Relative `pi.subagent_extensions` are
 
 OMP uses `historian.omp ?? historian.pi` and `dreamer.omp ?? dreamer.pi`; leaving the OMP blocks absent preserves existing Pi-compatible configuration. OMP supports `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `inherit`, and `auto` thinking levels.
 
-For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — OpenCode, Pi, and OMP share the same schema.
+For the full configuration reference (including dreamer, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — OpenCode, Pi, and OMP share the same schema.
 
 ---
 
@@ -124,7 +123,6 @@ All commands trigger `triggerTurn: false` (never sent to the LLM):
 | `/ctx-recomp` | Rebuild compartments from raw history (heavy operation) |
 | `/ctx-wrapup [messages_to_keep]` | Compact older live history while keeping the newest N messages raw |
 | `/ctx-dream` | Trigger a dream run on demand |
-| `/ctx-aug` | Augment your next prompt with sidekick-retrieved memories |
 
 ---
 

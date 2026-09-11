@@ -160,7 +160,6 @@ describe("setup-pi per-harness config", () => {
             historianThinkingLevel: "medium",
             dreamerEnabled: true,
             dreamerModel: "new/dreamer",
-            sidekickEnabled: false,
             embedding: { provider: "local", model: "Xenova/all-MiniLM-L6-v2" },
             modelRefToCanonical: (model) => model,
         });
@@ -322,8 +321,8 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true
+        const prompts = new MockPrompts({ confirms: [true, true, true] });
 
         const code = await runSetup({ prompts, env });
 
@@ -341,7 +340,6 @@ describe("runSetup", () => {
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
             historian?: { pi?: { model?: string; thinking_level?: string } };
             dreamer?: { enabled?: boolean; pi?: { model?: string }; disable?: boolean };
-            sidekick?: { enabled?: boolean; disable?: boolean };
             embedding?: { provider?: string; model?: string };
         };
         // No recommendation tree anymore: the picker shows the full model list
@@ -353,8 +351,6 @@ describe("runSetup", () => {
             pi: { model: "anthropic/claude-haiku-4-5" },
         });
         expect(config.dreamer).not.toHaveProperty("enabled");
-        expect(config.sidekick?.disable).toBe(true);
-        expect(config.sidekick).not.toHaveProperty("enabled");
         expect(config.embedding).toEqual({
             provider: "local",
             model: "Xenova/all-MiniLM-L6-v2",
@@ -378,11 +374,11 @@ describe("runSetup", () => {
                 getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
             },
         };
-        // confirms: configurePi=true, dreamerEnabled=FALSE, sidekickEnabled=false.
+        // confirms: configurePi=true, dreamerEnabled=FALSE.
         // The picker is invoked once (historian); a 2nd autocomplete call would
         // mean the dreamer model was wrongly requested after the user declined.
         let autocompleteCalls = 0;
-        const prompts = new MockPrompts({ confirms: [true, false, false] });
+        const prompts = new MockPrompts({ confirms: [true, false] });
         const origAuto = prompts.selectAutocomplete.bind(prompts);
         prompts.selectAutocomplete = async (message, options) => {
             autocompleteCalls += 1;
@@ -421,8 +417,8 @@ describe("runSetup", () => {
             },
         };
         // selectOne picks the recommended option ("medium" for thinking_level)
-        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+        // confirms: configurePi=true, dreamerEnabled=true, useRecommendedSchedules=true
+        const prompts = new MockPrompts({ confirms: [true, true, true] });
 
         const code = await runSetup({ prompts, env });
         expect(code).toBe(0);
@@ -505,8 +501,8 @@ describe("runSetup", () => {
             },
         };
         // confirms: continue-anyway=true, configurePi=true,
-        //           dreamerEnabled=true, useRecommendedSchedules=true, sidekickEnabled=false
-        const prompts = new MockPrompts({ confirms: [true, true, true, true, false] });
+        //           dreamerEnabled=true, useRecommendedSchedules=true
+        const prompts = new MockPrompts({ confirms: [true, true, true, true] });
 
         const code = await runSetup({ prompts, env });
 

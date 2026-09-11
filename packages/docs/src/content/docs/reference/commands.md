@@ -1,9 +1,9 @@
 ---
 title: Commands
-description: Slash commands to inspect Magic Context, flush queues, rebuild or wrap up history, augment prompts, and run dreamer.
+description: Slash commands to inspect Magic Context, flush queues, rebuild or wrap up history, and run dreamer.
 ---
 
-You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-wrapup`, `ctx-aug`, `ctx-dream`, `ctx-embed`, and `ctx-session-upgrade` (type them with a leading `/`).
+You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-wrapup`, `ctx-dream`, `ctx-embed`, and `ctx-session-upgrade` (type them with a leading `/`).
 
 ## Is something stuck?
 
@@ -64,15 +64,6 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 
 **What you'll see.** It reports how many messages and compartments were wrapped. The compacted history is queued and materializes on the next model message that busts context. If there is no natural bust pending and you want the queued compacted history applied on the very next message, run `/ctx-flush` first; `/ctx-flush` marks the next pass as busting, it does not reduce the current context synchronously. OpenCode TUI shows a **Wrapup** progress bar; Pi shows per-chunk status messages.
 
-## /ctx-aug
-
-**What it does.** Runs **sidekick** on your text, optionally wraps results in `<sidekick-augmentation>`, and submits the prompt as a new user turn.
-
-**When to use it.** You want memory-aware context prepended without pasting it yourself.
-
-**Usage.** `/ctx-aug <your prompt>`
-
-**What you'll see.** A short preparing notice, then the augmented prompt is sent. Requires sidekick in [Configuration](/reference/configuration/). Pi sends the original prompt if sidekick fails.
 
 ## /ctx-dream
 

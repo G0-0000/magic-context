@@ -1606,7 +1606,7 @@ describe("createTransform", () => {
 
     it("fully skips the transform for Magic Context's own hidden children", async () => {
         //#given — a session flagged as an internal MC child (historian/dreamer/
-        // sidekick/migration). Unlike a generic subagent, these get ZERO
+        // migration). Unlike a generic subagent, these get ZERO
         // transform work: no tagging, scheduler never consulted, messages
         // untouched.
         useTempDataHome("context-transform-internal-child-");

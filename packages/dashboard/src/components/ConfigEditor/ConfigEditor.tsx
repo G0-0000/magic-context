@@ -15,7 +15,6 @@ import { configSaveBlocker } from "./config-save-guard";
 import type { DreamTaskConfig, DreamTaskModelConfig } from "./DreamerTasksField";
 import DreamerTasksField from "./DreamerTasksField";
 import HarnessModelFields, { type Harness, modelCatalogForHarness } from "./HarnessModelFields";
-import ModelSelect from "./ModelSelect";
 import PerModelField from "./PerModelField";
 
 // ── JSONC helpers ───────────────────────────────────────────
@@ -214,30 +213,6 @@ function setNestedValue(
   }
   current[parts[parts.length - 1]] = value;
   return clone;
-}
-
-/**
- * Normalize a `fallback_models` value to a string array.
- *
- * The plugin's `AgentOverrideConfigSchema` accepts `fallback_models` as
- * either a string (single model) or `string[]` (chain). When stored as a
- * bare string, the dashboard's old `as string[]` cast caused two visible
- * bugs:
- *   1. The chip list iterated the string per-character ("o", "p", "e", ...).
- *   2. The "Add fallback" dropdown filter ran `String.prototype.includes(m)`
- *      against every available model, substring-matching aggressively (any
- *      model containing "o" or "/" would be filtered out), leaving the
- *      dropdown empty with "No models found".
- *
- * This helper coerces both shapes to a real array so all consumers can
- * treat the value uniformly. Returns an empty array for `undefined`,
- * `null`, or other unexpected shapes.
- */
-function readFallbackModels(formData: Record<string, unknown>, path: string): string[] {
-  const raw = getNestedValue(formData, path);
-  if (typeof raw === "string") return raw.length > 0 ? [raw] : [];
-  if (Array.isArray(raw)) return raw.filter((v): v is string => typeof v === "string");
-  return [];
 }
 
 // ── Section icons ───────────────────────────────────────────
@@ -1490,140 +1465,6 @@ function ConfigForm(props: {
             </div>
           </div>
 
-          {/* Sidekick Card */}
-          <div class="config-card">
-            <div class="config-card-header">
-              <span class="config-card-icon">🤖</span>
-              <span class="config-card-title">SIDEKICK</span>
-            </div>
-            <div class="config-card-content">
-              {/* Enabled Toggle */}
-              <div class="config-field">
-                <div class="config-field-header">
-                  <span class="config-field-label">Sidekick agent enabled</span>
-                </div>
-                <span class="config-field-desc">
-                  Controls whether the Sidekick hidden agent is registered for /ctx-aug.
-                </span>
-                <label class="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={getNestedValue(formData(), "sidekick.disable") !== true}
-                    onChange={(e) => {
-                      handleFieldChange("sidekick.disable", !e.currentTarget.checked);
-                      handleFieldChange("sidekick.enabled", undefined);
-                    }}
-                  />
-                  <span class="toggle-slider" />
-                  <span class="toggle-label">
-                    {getNestedValue(formData(), "sidekick.disable") !== true
-                      ? "Enabled"
-                      : "Disabled"}
-                  </span>
-                </label>
-              </div>
-
-              {/* Model Select */}
-              <div class="config-field">
-                <div class="config-field-header">
-                  <span class="config-field-label">Model</span>
-                </div>
-                <span class="config-field-desc">Primary model for sidekick agent</span>
-                {manualModelHint()}
-                <ModelSelect
-                  models={models() ?? []}
-                  value={getNestedValue(formData(), "sidekick.model") as string | undefined}
-                  onChange={(v) => handleFieldChange("sidekick.model", v || undefined)}
-                  placeholder="— Use fallback chain —"
-                />
-              </div>
-
-              {/* Timeout */}
-              <div class="config-field">
-                <div class="config-field-header">
-                  <span class="config-field-label">Timeout (ms)</span>
-                </div>
-                <span class="config-field-desc">Max wait time for sidekick response</span>
-                <input
-                  class="config-input"
-                  type="number"
-                  value={
-                    getNestedValue(formData(), "sidekick.timeout_ms") != null
-                      ? String(getNestedValue(formData(), "sidekick.timeout_ms"))
-                      : ""
-                  }
-                  placeholder="30000"
-                  onInput={(e) => {
-                    const v = e.currentTarget.value;
-                    handleFieldChange("sidekick.timeout_ms", v ? Number(v) : undefined);
-                  }}
-                />
-              </div>
-
-              {/* Fallback Models */}
-              <div class="config-field">
-                <div class="config-field-header">
-                  <span class="config-field-label">Fallback Models</span>
-                </div>
-                <span class="config-field-desc">Models to try if primary fails</span>
-                <div class="model-chain-list">
-                  <Show
-                    when={readFallbackModels(formData(), "sidekick.fallback_models").length > 0}
-                    fallback={<span class="model-chain-empty">Using built-in fallback chain</span>}
-                  >
-                    <For each={readFallbackModels(formData(), "sidekick.fallback_models")}>
-                      {(model, index) => (
-                        <div class="model-chain-item">
-                          <span class="mono" style={{ flex: 1 }}>
-                            {model}
-                          </span>
-                          <button
-                            type="button"
-                            class="btn sm danger"
-                            onClick={() => {
-                              const current = readFallbackModels(
-                                formData(),
-                                "sidekick.fallback_models",
-                              );
-                              const updated = current.filter((_, i) => i !== index());
-                              handleFieldChange(
-                                "sidekick.fallback_models",
-                                updated.length > 0 ? updated : undefined,
-                              );
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      )}
-                    </For>
-                  </Show>
-                </div>
-                <div class="model-chain-add">
-                  <ModelSelect
-                    models={(models() ?? []).filter(
-                      (m) =>
-                        !readFallbackModels(formData(), "sidekick.fallback_models").includes(m),
-                    )}
-                    value={undefined}
-                    onChange={(v) => {
-                      if (v) {
-                        const current = readFallbackModels(formData(), "sidekick.fallback_models");
-                        handleFieldChange("sidekick.fallback_models", [...current, v]);
-                      }
-                    }}
-                    placeholder="— Add fallback model —"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Tags & Cleanup — placed right after Sidekick so it fills the empty
-              right column of the grid (Sidekick is a regular-width card and was
-              otherwise leaving its right slot empty). Tags & Cleanup is also a
-              regular-width card, so the two pair naturally on one row before the
-              full-width Experimental card closes the form. */}
           {(() => {
             const tagsFields = sections().find(([name]) => name === "Tags & Cleanup");
             if (!tagsFields) return null;
@@ -2028,9 +1869,9 @@ function ConfigForm(props: {
                     </div>
                     <span class="config-field-desc">
                       Retain the child sessions magic-context spawns for its own agents (historian,
-                      dreamer, sidekick, memory migration, key-files, user-memory). By default these
-                      are deleted on success; enable this to keep their full transcript and token
-                      usage for debugging. Kept sessions accumulate until cleared. Off by default.
+                      dreamer, memory migration, key-files, user-memory). By default these are
+                      deleted on success; enable this to keep their full transcript and token usage
+                      for debugging. Kept sessions accumulate until cleared. Off by default.
                     </span>
                     <label class="toggle-switch">
                       <input

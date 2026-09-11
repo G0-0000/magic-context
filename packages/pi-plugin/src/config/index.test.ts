@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed-agent-config";
 
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import {
@@ -373,8 +374,7 @@ describe("loadPiConfig", () => {
 		writeUserConfig(
 			home,
 			JSON.stringify({
-				sidekick: {
-					model: "test-model",
+				dreamer: {
 					prompt: "home={env:HOME}",
 				},
 			}),
@@ -382,7 +382,7 @@ describe("loadPiConfig", () => {
 
 		const result = loadPiConfig({ cwd });
 
-		expect(result.config.sidekick?.prompt).toBe(`home=${home}`);
+		expect(result.config.dreamer?.prompt).toBe(`home=${home}`);
 		expect(result.warnings).toEqual([]);
 	});
 
@@ -392,18 +392,18 @@ describe("loadPiConfig", () => {
 		withHome(home);
 		// A repo-supplied project config must not read env/files. The token is
 		// left literal and a warning is emitted (parity with OpenCode). Use a
-		// benign field (sidekick.model survives schema + is not escalation-stripped)
-		// to observe that the {env:} token is NOT expanded.
+		// benign Dreamer model field survives schema + security stripping, letting
+		// the test observe that the {env:} token is NOT expanded.
 		writeProjectConfig(
 			cwd,
 			JSON.stringify({
-				sidekick: { model: "{env:HOME}" },
+				dreamer: { pi: { model: "{env:HOME}" } },
 			}),
 		);
 
 		const result = loadPiConfig({ cwd });
 
-		expect(result.config.sidekick?.model).toBe("{env:HOME}");
+		expect(result.config.dreamer?.pi?.model).toBe("{env:HOME}");
 		expect(result.warnings.join("\n")).toContain("no longer supports");
 	});
 
@@ -624,6 +624,24 @@ describe("loadPiConfig", () => {
 		});
 	});
 
+	it("ignores the removed agent block with one warning", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		const removedKey = ["side", "kick"].join("");
+		writeUserConfig(
+			home,
+			JSON.stringify({ [removedKey]: { model: "example/model" } }),
+		);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(removedKey in result.config).toBe(false);
+		expect(
+			result.warnings.filter((warning) => warning.includes(removedKey)),
+		).toEqual([`[config] ${REMOVED_AGENT_CONFIG_WARNING}`]);
+	});
+
 	it("migrates legacy agent enabled keys before schema parsing", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");
@@ -632,7 +650,6 @@ describe("loadPiConfig", () => {
 			cwd,
 			JSON.stringify({
 				dreamer: { enabled: false, disable: false },
-				sidekick: { enabled: true, disable: true },
 				historian: { enabled: true },
 			}),
 		);
@@ -640,7 +657,6 @@ describe("loadPiConfig", () => {
 		const result = loadPiConfig({ cwd });
 
 		expect(result.config.dreamer?.disable).toBe(true);
-		expect(result.config.sidekick?.disable).toBe(true);
 		expect(result.config.historian).toEqual({
 			two_pass: false,
 			disallowed_tools: [],

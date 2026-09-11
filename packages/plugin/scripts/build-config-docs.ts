@@ -152,9 +152,9 @@ const SECTION_ORDER: Array<{ keys: string[]; title: string; intro: string }> = [
         intro: "Durable project memory, semantic search, and recall features.",
     },
     {
-        keys: ["dreamer", "sidekick"],
+        keys: ["dreamer"],
         title: "Background agents",
-        intro: "Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).",
+        intro: "Off-hours maintenance through Dreamer.",
     },
     {
         keys: [

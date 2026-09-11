@@ -445,27 +445,15 @@ const ProfileDreamerSchema = z
         omp: ProfileOmpModelBlockSchema.optional(),
     })
     .strict();
-const ProfileSidekickSchema = AgentOverrideConfigSchema.pick({
-    model: true,
-    fallback_models: true,
-    variant: true,
-})
-    .extend({
-        thinking_level: PiThinkingLevelSchema.describe(
-            "Pi thinking level for the sidekick model selection.",
-        ),
-    })
-    .strict();
 
 export const ConfigProfileSchema = z
     .object({
         historian: ProfileHistorianSchema.optional(),
         dreamer: ProfileDreamerSchema.optional(),
-        sidekick: ProfileSidekickSchema.optional(),
     })
     .strict()
     .describe(
-        "User-owned model-selection overlay. Only historian/dreamer harness model blocks and sidekick model-selection fields are allowed.",
+        "User-owned model-selection overlay. Only historian/dreamer harness model blocks are allowed.",
     );
 export type ConfigProfile = z.infer<typeof ConfigProfileSchema>;
 
@@ -624,15 +612,6 @@ export const DreamerConfigSchema = AgentMetadataSchema.extend({
         ),
 });
 export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
-
-export const SidekickConfigSchema = AgentOverrideConfigSchema.extend({
-    timeout_ms: z.number().default(30000).describe("Timeout for sidekick calls in milliseconds"),
-    system_prompt: z.string().optional().describe("Custom system prompt for sidekick"),
-    thinking_level: PiThinkingLevelSchema.describe(
-        "Pi only: explicit thinking level for sidekick subagent invocations. See historian.pi.thinking_level.",
-    ),
-}).optional();
-export type SidekickConfig = NonNullable<z.infer<typeof SidekickConfigSchema>>;
 
 /**
  * Historian metadata remains harness-independent. Only model resolution moves to
@@ -917,7 +896,7 @@ export interface MagicContextConfig {
      *  Graduated from `experimental.temporal_awareness`; default: true. */
     temporal_awareness: boolean;
     /** Debug: when true, keep the child sessions Magic Context spawns for its
-     *  own subagents (historian, dreamer, sidekick, memory-migration) instead
+     *  own subagents (historian, dreamer, memory-migration) instead
      *  of deleting them on success. For short-term inspection/data collection;
      *  kept sessions accumulate until manually cleared. Default false. */
     keep_subagents: boolean;
@@ -1013,7 +992,6 @@ export interface MagicContextConfig {
             max_commits: number;
         };
     };
-    sidekick?: SidekickConfig;
 }
 
 export const MagicContextConfigSchema = z
@@ -1065,7 +1043,7 @@ export const MagicContextConfigSchema = z
             .describe(
                 "Output language for Magic Context's generated content and guidance, as a " +
                     '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
-                    "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
+                    "historian, dreamer, and the agent-guidance block instruct the model to " +
                     "write its PROSE in this language while keeping all structural tokens (XML tags, " +
                     "the five memory category names, code identifiers, file paths) in English. " +
                     "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
@@ -1082,7 +1060,7 @@ export const MagicContextConfigSchema = z
                 "Select a named user-owned model profile. A valid project name overrides this user default; an empty string, null, or other non-string project value is ignored with a warning so the user selection still applies. Unknown names warn and use the base configuration.",
             ),
         profiles: ConfigProfilesSchema.optional().describe(
-            "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
+            "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
         ),
         historian: HistorianConfigSchema.describe(
             "Historian metadata plus independent strict OpenCode, Pi, and OMP execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode, historian.pi, or historian.omp.",
@@ -1303,7 +1281,7 @@ export const MagicContextConfigSchema = z
             .boolean()
             .default(false)
             .describe(
-                "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
+                "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
             ),
         debug_rpc: z
             .boolean()
@@ -1474,9 +1452,6 @@ export const MagicContextConfigSchema = z
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
             })
             .describe("Cross-session memory configuration"),
-        sidekick: SidekickConfigSchema.describe(
-            "Optional sidekick agent configuration for session-start memory retrieval",
-        ),
     })
     .transform((data): MagicContextConfig => {
         return {

@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
-import type {
-    DreamerConfig,
-    MagicContextConfig,
-    SidekickConfig,
-} from "../../config/schema/magic-context";
+import type { DreamerConfig, MagicContextConfig } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
 import { getDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-gates";
@@ -15,10 +11,8 @@ import {
     isCanonicalDreamTask,
 } from "../../features/magic-context/dreamer/task-registry";
 import type { ManualRunResult } from "../../features/magic-context/dreamer/task-scheduler";
-import { runSidekick } from "../../features/magic-context/sidekick/agent";
 import { getCompartments, getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import type { RustSessionStatus } from "../../plugin/rpc-handlers";
-import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
@@ -40,7 +34,6 @@ import { RUST_PARTIAL_RECOMP_REFUSAL, RUST_SESSION_UPGRADE_REFUSAL } from "./mai
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
 import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { NotificationParams } from "./send-session-notification";
-import { sendUserPrompt } from "./send-session-notification";
 
 /**
  * Track per-session recomp confirmation for Desktop (no dialog available).
@@ -147,7 +140,6 @@ const commandArgumentValidators: Record<MagicContextBuiltinCommandName, (raw: st
         "ctx-wrapup": (raw) => parseWrapupArgs(raw).ok,
         "ctx-session-upgrade": (raw) => raw.trim() === "",
         "ctx-flush": (raw) => raw.trim() === "",
-        "ctx-aug": (raw) => raw.trim().length > 0,
         "ctx-dream": (raw) => {
             const requested = raw.trim();
             return requested === "" || isCanonicalDreamTask(requested);
@@ -356,84 +348,6 @@ async function executeSessionUpgrade(
     return deps.runUpgrade(sessionId);
 }
 
-/**
- * Execute /ctx-aug: run sidekick to augment the user's prompt with relevant memories,
- * then send the augmented prompt as a real user message.
- */
-async function executeAugmentation(
-    deps: {
-        db: Database;
-        sendNotification: (
-            sessionId: string,
-            text: string,
-            params: NotificationParams,
-        ) => Promise<void>;
-        sidekick?: {
-            config: SidekickConfig;
-            projectPath: string;
-            sessionDirectory?: string;
-            client: PluginContext["client"];
-            language?: string;
-        };
-    },
-    sessionId: string,
-    userPrompt: string,
-): Promise<never> {
-    if (!deps.sidekick?.config) {
-        await deps.sendNotification(
-            sessionId,
-            "## /ctx-aug\n\nSidekick is not configured. Add sidekick settings to `magic-context.jsonc` to use /ctx-aug.",
-            {},
-        );
-        throwSentinel("CTX-AUG");
-    }
-
-    const prompt = userPrompt.trim();
-    if (prompt.length === 0) {
-        await deps.sendNotification(
-            sessionId,
-            "## /ctx-aug\n\nUsage: `/ctx-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
-            {},
-        );
-        throwSentinel("CTX-AUG");
-    }
-
-    // Step 1: Show "preparing" notification (hidden from LLM)
-    await deps.sendNotification(
-        sessionId,
-        "🔍 Preparing augmentation… this may take 2-10s depending on your sidekick provider.",
-        {},
-    );
-
-    // Step 2: Run sidekick
-    sessionLog(sessionId, "/ctx-aug: running sidekick");
-    const sidekickResult = await runSidekick({
-        client: deps.sidekick.client,
-        sessionId,
-        projectPath: deps.sidekick.projectPath,
-        sessionDirectory: deps.sidekick.sessionDirectory,
-        userMessage: prompt,
-        config: deps.sidekick.config,
-        language: deps.sidekick.language,
-    });
-
-    // Step 3: Build augmented prompt
-    let augmentedPrompt: string;
-    if (sidekickResult) {
-        augmentedPrompt = `${prompt}\n\n<sidekick-augmentation>\n${sidekickResult}\n</sidekick-augmentation>`;
-        sessionLog(sessionId, `/ctx-aug: sidekick returned ${sidekickResult.length} chars`);
-    } else {
-        // Sidekick returned nothing — send the prompt as-is with a note
-        augmentedPrompt = prompt;
-        sessionLog(sessionId, "/ctx-aug: sidekick returned no result, sending prompt as-is");
-    }
-
-    // Step 4: Send as a real user prompt (will be processed by the model)
-    await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
-
-    throwSentinel("CTX-AUG");
-}
-
 export type ManualDreamSummary = ManualRunResult;
 
 function readDreamTaskBacklogsSafely(
@@ -609,13 +523,6 @@ export function createMagicContextCommandHandler(deps: {
     transformMode?: ResolvedTransformMode;
     rustModeModuleClient?: RustModeModuleClient;
     projectRoot?: string;
-    sidekick?: {
-        config: SidekickConfig;
-        projectPath: string;
-        sessionDirectory?: string;
-        client: PluginContext["client"];
-        language?: string;
-    };
     dreamer?: {
         config: DreamerConfig;
         projectPath: string;
@@ -631,7 +538,7 @@ export function createMagicContextCommandHandler(deps: {
     // throwSentinel and the raw command would be forwarded to the model (and a
     // real error logged). Wrap it once so a delivery failure is logged and
     // swallowed, never preempting the sentinel. Reassigning the deps method
-    // covers the handler AND the standalone executeAugmentation/executeDreaming,
+    // covers the handler and the standalone executeDreaming helper,
     // which receive this same deps reference.
     const rawSendNotification = deps.sendNotification;
     deps.sendNotification = async (sessionId, text, params) => {
@@ -649,7 +556,6 @@ export function createMagicContextCommandHandler(deps: {
     const isFlushCommand = (command: string): boolean => command === "ctx-flush";
     const isRecompCommand = (command: string): boolean => command === "ctx-recomp";
     const isWrapupCommand = (command: string): boolean => command === "ctx-wrapup";
-    const isAugCommand = (command: string): boolean => command === "ctx-aug";
     const isDreamCommand = (command: string): boolean => command === "ctx-dream";
     const isSessionUpgradeCommand = (command: string): boolean => command === "ctx-session-upgrade";
     const isEmbedCommand = (command: string): boolean => command === "ctx-embed";
@@ -681,7 +587,6 @@ export function createMagicContextCommandHandler(deps: {
             const isFlush = isFlushCommand(input.command);
             const isRecomp = isRecompCommand(input.command);
             const isWrapup = isWrapupCommand(input.command);
-            const isAug = isAugCommand(input.command);
             const isDream = isDreamCommand(input.command);
             const isSessionUpgrade = isSessionUpgradeCommand(input.command);
             const isEmbed = isEmbedCommand(input.command);
@@ -691,7 +596,6 @@ export function createMagicContextCommandHandler(deps: {
                 !isFlush &&
                 !isRecomp &&
                 !isWrapup &&
-                !isAug &&
                 !isDream &&
                 !isSessionUpgrade &&
                 !isEmbed
@@ -710,11 +614,6 @@ export function createMagicContextCommandHandler(deps: {
                     {},
                 );
                 throwSentinel(input.command);
-            }
-
-            if (isAug) {
-                await executeAugmentation(deps, sessionId, input.arguments);
-                return; // executeAugmentation throws sentinel internally
             }
 
             if (isDream) {

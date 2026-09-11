@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Майстер автоматично визначає, які harnesses у вас є (OpenCode, Pi або обидва), додає plugin, вимикає вбудований compaction, допомагає вибрати моделі для historian, dreamer і sidekick, а також розв'язує конфлікти з іншими plugins керування контекстом. Націльте конкретний harness за допомогою `--harness opencode` або `--harness pi`.
+Майстер автоматично визначає, які harnesses у вас є (OpenCode, Pi або обидва), додає plugin, вимикає вбудований compaction, допомагає вибрати моделі для historian і dreamer, а також розв'язує конфлікти з іншими plugins керування контекстом. Націльте конкретний harness за допомогою `--harness opencode` або `--harness pi`.
 
 > **Навіщо вимикати вбудований compaction?** Magic Context сам керує контекстом. Compaction хоста заважав би його відкладеним операціям з урахуванням cache і стискав би двічі.
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | Негайно примусово виконати всі операції в черзі, оминаючи cache TTL |
 | `/ctx-recomp` | Перебудувати компартменти із сирої історії (приймає діапазон `start-end`). Використовуйте, коли збережений стан здається неправильним |
 | `/ctx-session-upgrade` | Оновити цю сесію до найновішого формату історії: перебудувати компартменти і мігрувати пам'ять проєкту |
-| `/ctx-aug` | Запустити sidekick augmentation на prompt: отримати релевантні спогади через окрему модель |
 | `/ctx-dream` | Запустити обслуговування dreamer на вимогу: пам'ять, docs, smart notes і user-profile review |
 
 ---

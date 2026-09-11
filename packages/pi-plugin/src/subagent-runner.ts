@@ -587,8 +587,7 @@ const PI_HISTORIAN_TOOLS = [...PI_READ_ONLY_BUILTINS, "aft_search"] as const;
 
 /**
  * Set of subagent agent ids that get ctx_memory in the lean child extension.
- * Sidekick is retrieval-only and uses ctx_search; only dreamer-equivalent
- * agents need memory mutation/list capabilities.
+ * Only dreamer-equivalent agents need memory mutation/list capabilities.
  *
  * Membership uses the SAME agent strings the Pi callers actually pass
  * (see e.g. `dreamer/index.ts` passing `"magic-context-dreamer"`). If
@@ -607,7 +606,6 @@ const HISTORIAN_AGENTS: ReadonlySet<string> = new Set([
 	"historian-editor",
 ]);
 const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
-	"sidekick",
 	"dreamer-retrospective",
 	// Loads the lean extension so ctx_search is REGISTERED (the strict allow-list
 	// only gates an existing registration). Deliberately NOT in
@@ -654,10 +652,6 @@ const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	["historian", PI_HISTORIAN_TOOLS],
 	["historian-recomp", PI_HISTORIAN_TOOLS],
 	["historian-editor", PI_HISTORIAN_TOOLS],
-	// Sidekick augments the user's prompt by retrieving memory. It needs the lean
-	// ctx_search registration plus Pi's read-only built-ins for safe local context,
-	// but no write/bash/ctx_memory surface.
-	["sidekick", [...PI_READ_ONLY_BUILTINS, "ctx_search"]],
 	// classify-memories: a pure metadata transform (prompt in → XML out). ZERO
 	// tools — it scores from the memory text and the host applies the columns.
 	["dreamer-classifier", []],
@@ -751,7 +745,6 @@ const KNOWN_PI_SUBAGENT_AGENTS = [
 	"historian",
 	"historian-recomp",
 	"historian-editor",
-	"sidekick",
 	"dreamer-retrospective",
 	"smart-note-compiler",
 	"dreamer-classifier",
@@ -764,7 +757,6 @@ const KNOWN_PI_SUBAGENT_AGENTS = [
 ] as const;
 
 function inferAccountingSubagent(agent: string): SubagentKind {
-	if (agent.includes("sidekick")) return "sidekick";
 	if (agent.includes("retrospective")) return "dreamer";
 	if (agent.includes("dreamer")) return "dreamer";
 	if (agent.includes("compressor")) return "compressor";
@@ -869,7 +861,7 @@ type ExtensionRetryResult = {
  *   fine — we just don't surface intermediate state to the caller.
  * - Per-turn token usage. Pi reports usage in each `message_end`, but
  *   the runner contract only returns the final assistant text. If the
- *   sidekick/historian/dreamer ever needs token accounting, we'll add
+ *   historian/dreamer ever needs token accounting, we'll add
  *   a `usage` field to `SubagentRunResult.meta` rather than changing
  *   the core contract.
  */
@@ -1262,8 +1254,8 @@ export class PiSubagentRunner implements SubagentRunner {
 				cleanupSystemPromptFile();
 				// recordAccounting must never block resolution: a throw here (e.g.
 				// a DB write failure during token accounting) would leave the
-				// promise unresolved and hang the caller (historian/dreamer/
-				// sidekick). Accounting is best-effort telemetry; resolve regardless.
+				// promise unresolved and hang the caller (historian/dreamer).
+				// Accounting is best-effort telemetry; resolve regardless.
 				try {
 					recordAccounting(result, accountingMessages);
 				} catch (err) {
@@ -2031,8 +2023,8 @@ export function buildArgs(
 		"--mode",
 		"json",
 		// `--no-session` makes Pi use SessionManager.inMemory() — no
-		// JSONL is written to ~/.pi/agent/sessions/<cwd>/, so historian /
-		// sidekick / dreamer / recomp / compressor child sessions never
+		// JSONL is written to ~/.pi/agent/sessions/<cwd>/, so historian,
+		// dreamer, recomp, and compressor child sessions never
 		// show up in `pi resume` or the session picker. We don't need
 		// the persisted JSONL anyway: the result comes back through the
 		// `agent_end` event on stdout (see extractFinalAssistant). Maps
@@ -2093,7 +2085,7 @@ export function buildArgs(
 	// Do not load the lean Magic Context extension for historian/compressor style
 	// subagents. They do not use ctx_* tools, and loading the entry would add
 	// startup cost and an avoidable tool-registration surface. Tool-using agents
-	// (sidekick/dreamer) still receive the lean entry.
+	// Dreamer tool users still receive the lean entry.
 	const subagentEntryPath = opts?.subagentEntryPath ?? SUBAGENT_ENTRY_PATH;
 	const shouldLoadSubagentExtension =
 		subagentEntryPath &&
@@ -2102,8 +2094,7 @@ export function buildArgs(
 	if (shouldLoadSubagentExtension) {
 		args.push("--extension", subagentEntryPath);
 
-		// Only dreamer subagents get ctx_memory in the child extension. Sidekick
-		// loads the same entry for ctx_search but must stay read-only. The flag is
+		// Only dreamer subagents get ctx_memory in the child extension. The flag is
 		// read inside the subagent extension via `pi.getFlag(...)`.
 		if (DREAMER_ACTION_AGENTS.has(options.agent)) {
 			args.push("--magic-context-dreamer-actions");
@@ -2142,7 +2133,7 @@ export function buildArgs(
 		// --append-system-prompt (chain) because subagents are one-shot
 		// and have their own focused system prompt. Mixing in Pi's
 		// default coding-assistant prompt would dilute the historian
-		// / dreamer / sidekick role guidance. The runner always writes that
+		// / dreamer role guidance. The runner always writes that
 		// prompt to a temp file and passes the ABSOLUTE path here because
 		// Windows CreateProcess caps the whole command line at 32,767 chars
 		// and the historian prompt alone is ~60 KB. A temp file also avoids

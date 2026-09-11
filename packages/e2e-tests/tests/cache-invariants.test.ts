@@ -164,7 +164,6 @@ beforeEach(async () => {
             execute_threshold_percentage: 20,
             protected_tags: 1,
             dreamer: { disable: true },
-            sidekick: { disable: true },
             compressor: { enabled: false },
             memory: {
                 enabled: true,

@@ -94,7 +94,6 @@ beforeAll(async () => {
 		magicContextConfig: {
 			execute_threshold_percentage: 20,
 			dreamer: { disable: true },
-			sidekick: { disable: true },
 		},
 	});
 });

@@ -6,7 +6,6 @@ export type SubagentKind =
     | "historian_editor"
     | "compressor"
     | "dreamer"
-    | "sidekick"
     | "user_memory_review"
     | "recomp";
 

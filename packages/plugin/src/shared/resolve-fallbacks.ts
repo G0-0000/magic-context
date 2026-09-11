@@ -2,7 +2,7 @@ import type { ModelInput, ResolvedModelEntry } from "./model-resolution";
 
 /**
  * Resolve the fallback model list to attempt for a hidden-agent (historian /
- * dreamer / sidekick) call when its configured primary fails.
+ * dreamer) call when its configured primary fails.
  *
  * Policy: ONLY the user's explicitly-configured `fallback_models` for this
  * agent. There is NO builtin provider-agnostic chain — a hardcoded chain

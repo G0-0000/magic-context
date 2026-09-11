@@ -21,7 +21,7 @@ export interface SessionCreatedInfo {
     modelID?: string;
     /**
      * Session title set at create time. Magic Context's own hidden children
-     * (historian/dreamer/sidekick/memory-migration) all use `magic-context-*`
+     * (historian/dreamer/memory-migration) all use `magic-context-*`
      * titles, so this is the signal used to fully exempt them from the
      * transform + system-prompt injection pipeline.
      */

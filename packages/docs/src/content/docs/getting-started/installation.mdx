@@ -110,7 +110,7 @@ Then create `magic-context.jsonc` with the one setting the historian needs:
 ```
 
 - **Recommended:** Set `historian.opencode.model` to a real `provider/model-id` so historian quality and cost are independent of the main coding model. When omitted, historian runs fall back to the live session model; if no runnable model is available, older history is not summarized and repeated failures appear in status.
-- **Optional:** `dreamer` and `sidekick` model/disable blocks. Omit them to leave periodic memory consolidation and `/ctx-aug` off.
+- **Optional:** the `dreamer` model/disable block. Omit it to leave periodic memory consolidation off.
 - **Optional:** `embedding`. Omit it to use the local `Xenova/all-MiniLM-L6-v2`; turning embeddings off removes semantic/embedding-backed search, but keyword search and context management continue.
 
 User-level config is `~/.config/cortexkit/magic-context.jsonc` on macOS/Linux and `%USERPROFILE%\.config\cortexkit\magic-context.jsonc` on Windows (or `$XDG_CONFIG_HOME/cortexkit/magic-context.jsonc` when set). OpenCode Desktop users can use the dashboard's config editor or hand-edit that file; Desktop does not include the CLI setup wizard.

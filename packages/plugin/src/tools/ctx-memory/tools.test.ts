@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DREAMER_AGENT } from "../../agents/dreamer";
-import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
     computeNormalizedHash,
     getMemoriesByProject,
@@ -2015,20 +2014,6 @@ describe("createCtxMemoryTools", () => {
     describe("#given restricted actions", () => {
         // Primary set = write/archive/update/merge. list/verified/classify are dreamer-only.
         const PRIMARY_ACTIONS = ["write", "archive", "update", "merge"] as const;
-
-        it("rejects sidekick ctx_memory calls even if the tool is exposed", async () => {
-            const result = await tools.ctx_memory.execute(
-                {
-                    action: "write",
-                    category: "USER_DIRECTIVES",
-                    content: "Sidekick should not be able to write this.",
-                },
-                toolContext("ses-sidekick", SIDEKICK_AGENT),
-            );
-
-            expect(result).toBe("Error: ctx_memory is not available to the sidekick agent.");
-            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
-        });
 
         it("keeps the dreamer-only `list` action in the schema so OpenCode can deliver it to execute", () => {
             const primaryTools = createCtxMemoryTools({

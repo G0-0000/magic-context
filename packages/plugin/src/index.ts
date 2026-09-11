@@ -22,7 +22,6 @@ import {
 } from "./features/magic-context/fail-closed-block";
 import { resolveProjectIdentityForSession } from "./features/magic-context/memory/project-identity";
 import { runSessionProjectBackfill } from "./features/magic-context/session-project-backfill";
-import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
 import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/magic-context/smart-notes/compiler-prompt";
 import {
     getSchemaFenceRejection,
@@ -140,7 +139,7 @@ const server: Plugin = async (ctx) => {
         mmapSizeMb: pluginConfig.sqlite.mmap_size_mb,
     });
     // Debug data-collection toggle: when on, keep subagent child sessions
-    // (historian/dreamer/sidekick/migration) instead of deleting on success.
+    // (historian/dreamer/migration) instead of deleting on success.
     setKeepSubagents(pluginConfig.keep_subagents === true);
     const autoUpdateAbort = new AbortController();
     // Abort on process exit via the shared single-listener registry. Registering
@@ -854,7 +853,7 @@ const server: Plugin = async (ctx) => {
         "tool.definition": async (input, output) => {
             // Attribute tool schema tokens to the most recent chat-message context.
             // If no chat.message has fired yet in this process (e.g. a subagent
-            // flight that reuses a historian/dreamer/sidekick agent whose
+            // flight that reuses a historian/dreamer agent whose
             // chat.message preceded plugin init), skip — the measurement will
             // land correctly on the next flight.
             if (!lastChatContext) return;
@@ -910,17 +909,6 @@ const server: Plugin = async (ctx) => {
                           return agentOverrides;
                       })()
                     : undefined;
-                const sidekickAgentOverrides = pluginConfig.sidekick
-                    ? (() => {
-                          const {
-                              timeout_ms: _timeoutMs,
-                              system_prompt: _systemPrompt,
-                              thinking_level: _thinkingLevel,
-                              ...agentOverrides
-                          } = pluginConfig.sidekick;
-                          return agentOverrides;
-                      })()
-                    : undefined;
                 // Strip two_pass + disallowed_tools + thinking_level from historian
                 // overrides — two_pass is consumed by the runner, disallowed_tools is
                 // consumed below to build the permission map, thinking_level is Pi-only
@@ -964,10 +952,8 @@ const server: Plugin = async (ctx) => {
                         pluginConfig.language,
                         { preserveUserQuotes: true },
                     ),
-                    sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
                     dreamerOverrides: dreamerAgentOverrides,
                     historianOverrides: historianAgentOverrides,
-                    sidekickOverrides: sidekickAgentOverrides,
                     historianDisallowed: pluginConfig.historian?.disallowed_tools ?? [],
                 });
 

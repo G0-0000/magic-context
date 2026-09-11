@@ -24,8 +24,8 @@ import { applyDisallowedTools, buildAllowOnlyPermission } from "./permissions";
 
 // Clamp a user-provided step override to the hidden-agent's built-in cap (loop
 // insurance — see buildHiddenAgentConfig). Caps live as inline literals in
-// buildHiddenAgentRegistrations (historian/sidekick=40, dreamer=150): a handful
-// of tool calls for the historian/sidekick, a real multi-step maintenance loop
+// buildHiddenAgentRegistrations (historian=40, dreamer=150): a handful
+// of tool calls for the historian, a real multi-step maintenance loop
 // for the dreamer.
 function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
     return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
@@ -75,7 +75,7 @@ export interface HiddenAgentRegistration {
 }
 
 /**
- * Hoisted function declaration: returns the four hidden-agent registrations with
+ * Hoisted function declaration: returns the hidden-agent registrations with
  * INLINE id / allow-list / step-cap literals (see {@link HiddenAgentRegistration}
  * for why these must not come from module-level `var` consts). Prompts and
  * computed overrides are passed in by the caller; the historian disallow filter
@@ -87,10 +87,8 @@ export function buildHiddenAgentRegistrations(args: {
     historianPrompt: string | undefined;
     historianRecompPrompt?: string | undefined;
     historianEditorPrompt: string | undefined;
-    sidekickPrompt: string | undefined;
     dreamerOverrides?: Record<string, unknown>;
     historianOverrides?: Record<string, unknown>;
-    sidekickOverrides?: Record<string, unknown>;
     historianDisallowed: readonly string[];
 }): HiddenAgentRegistration[] {
     const historianAllowedTools = applyDisallowedTools(
@@ -286,16 +284,6 @@ export function buildHiddenAgentRegistrations(args: {
             allowedTools: historianAllowedTools,
             maxSteps: 40,
             overrides: args.historianOverrides,
-        },
-        {
-            id: "sidekick",
-            mode: "primary",
-            hidden: true,
-            description: HIDDEN_AGENT_DESCRIPTION,
-            prompt: args.sidekickPrompt,
-            allowedTools: ["ctx_search", "aft_outline", "aft_zoom"],
-            maxSteps: 40,
-            overrides: args.sidekickOverrides,
         },
     ];
 }

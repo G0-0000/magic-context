@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
+import { stripRemovedAgentConfig } from "@magic-context/core/config/removed-agent-config";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sanitizeParsedJson } from "@magic-context/core/shared/jsonc-parser";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
-
 import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
@@ -257,13 +257,11 @@ export function writeMagicContextConfig(
         dreamerModel?: string;
         /** Per-task schedule overrides (Dreamer v2); undefined keeps schema defaults. */
         dreamerTasks?: Record<string, { schedule: string }>;
-        sidekickEnabled: boolean;
-        sidekickModel?: string;
         embedding: EmbeddingChoice;
         modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
-    const config = readMagicContextConfigForSetup(configPath);
+    const config = stripRemovedAgentConfig(readMagicContextConfigForSetup(configPath), []);
     ensureDir(dirname(configPath));
 
     if (!config.$schema) {
@@ -303,17 +301,6 @@ export function writeMagicContextConfig(
         dreamer.disable = true;
     }
     config.dreamer = dreamer;
-
-    const sidekick = {
-        ...configObject(config.sidekick),
-        model:
-            options.sidekickEnabled && options.sidekickModel
-                ? toCanonical(options.sidekickModel)
-                : undefined,
-        disable: options.sidekickEnabled ? undefined : true,
-        enabled: undefined,
-    };
-    config.sidekick = compactObject(sidekick);
 
     config.embedding = {
         ...configObject(config.embedding),
@@ -482,10 +469,6 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         dreamerModel = result.model;
         dreamerTasks = result.tasks;
     }
-    const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
-    const sidekickModel = sidekickEnabled
-        ? await pickModel(prompts, allModels, "sidekick")
-        : undefined;
     const embedding = await chooseEmbedding(prompts);
 
     const rollbackHost =
@@ -517,8 +500,6 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 dreamerEnabled,
                 dreamerModel,
                 dreamerTasks,
-                sidekickEnabled,
-                sidekickModel,
                 embedding,
                 modelRefToCanonical: host.modelRefToCanonical,
             });
@@ -542,7 +523,6 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         `Magic Context config: ${configPath}`,
         `Historian: ${historianModel}${thinkingLevelSuffix}`,
         `Dreamer: ${dreamerEnabled ? dreamerModel : "disabled"}`,
-        sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
         `Embedding: ${embedding.provider}${"model" in embedding ? ` (${embedding.model})` : ""}`,
     ].join("\n");
 
@@ -550,7 +530,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     prompts.outro(
         dryRun
             ? "Dry run complete — nothing was written."
-            : `Start a ${host.displayName} session and try /ctx-aug`,
+            : `Start a ${host.displayName} session and run /ctx-status`,
     );
     return 0;
 }

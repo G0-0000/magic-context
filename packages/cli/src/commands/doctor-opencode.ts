@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
+import {
+    REMOVED_AGENT_CONFIG_WARNING,
+    stripRemovedAgentConfig,
+} from "@magic-context/core/config/removed-agent-config";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import type { LocalEmbeddingRuntime } from "@magic-context/core/features/magic-context/memory/embedding-local";
 import {
@@ -141,7 +145,16 @@ export function migrateLegacyAgentEnabledConfigForDoctor(
     let changed = false;
     let fixes = 0;
 
-    const migrateLegacyAgentEnabled = (agentName: "dreamer" | "sidekick" | "historian"): void => {
+    const sanitized = stripRemovedAgentConfig(mcConfig, []);
+    if (sanitized !== mcConfig) {
+        for (const key of Object.keys(mcConfig)) delete mcConfig[key];
+        Object.assign(mcConfig, sanitized);
+        logs.warn(REMOVED_AGENT_CONFIG_WARNING);
+        changed = true;
+        fixes++;
+    }
+
+    const migrateLegacyAgentEnabled = (agentName: "dreamer" | "historian"): void => {
         const agent = mcConfig[agentName] as Record<string, unknown> | undefined;
         if (!agent || typeof agent !== "object" || !("enabled" in agent)) return;
 
@@ -169,21 +182,10 @@ export function migrateLegacyAgentEnabledConfigForDoctor(
                     'Removed deprecated dreamer.enabled (use dreamer.disable=true to turn off the Dreamer agent; use schedule="" for manual-only dreaming).',
                 );
             }
-            return;
-        }
-
-        if (disable !== true && enabled === false) {
-            agent.disable = true;
-            logs.success("Migrated sidekick.enabled=false → sidekick.disable=true.");
-        } else {
-            logs.success(
-                "Removed deprecated sidekick.enabled (use sidekick.disable=true to turn off Sidekick).",
-            );
         }
     };
 
     migrateLegacyAgentEnabled("dreamer");
-    migrateLegacyAgentEnabled("sidekick");
     migrateLegacyAgentEnabled("historian");
 
     return { changed, fixes };

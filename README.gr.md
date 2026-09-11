@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Ο οδηγός ανιχνεύει αυτόματα ποια harnesses έχεις (OpenCode, Pi ή και τα δύο), προσθέτει το plugin, απενεργοποιεί το ενσωματωμένο compaction, σε βοηθά να διαλέξεις μοντέλα για historian, dreamer και sidekick, και λύνει συγκρούσεις με άλλα plugins διαχείρισης πλαισίου. Στόχευσε συγκεκριμένο harness με `--harness opencode` ή `--harness pi`.
+Ο οδηγός ανιχνεύει αυτόματα ποια harnesses έχεις (OpenCode, Pi ή και τα δύο), προσθέτει το plugin, απενεργοποιεί το ενσωματωμένο compaction, σε βοηθά να διαλέξεις μοντέλα για historian και dreamer, και λύνει συγκρούσεις με άλλα plugins διαχείρισης πλαισίου. Στόχευσε συγκεκριμένο harness με `--harness opencode` ή `--harness pi`.
 
 > **Γιατί να απενεργοποιηθεί το ενσωματωμένο compaction;** Το Magic Context διαχειρίζεται το πλαίσιο μόνο του. Το compaction του host θα παρενέβαινε στις cache-aware αναβαλλόμενες λειτουργίες του και θα συμπίεζε δύο φορές.
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | Αναγκαστική άμεση εκτέλεση όλων των queued operations, παρακάμπτοντας cache TTL |
 | `/ctx-recomp` | Αναδόμηση διαμερισμάτων από raw history (δέχεται εύρος `start-end`). Χρήση όταν η αποθηκευμένη κατάσταση φαίνεται λάθος |
 | `/ctx-session-upgrade` | Αναβάθμιση της συνεδρίας στο πιο πρόσφατο history format: rebuild compartments και migrate project memories |
-| `/ctx-aug` | Εκτέλεση sidekick augmentation σε prompt: ανάκτηση σχετικών μνημών μέσω ξεχωριστού μοντέλου |
 | `/ctx-dream` | Εκτέλεση dreamer maintenance κατά απαίτηση: memory, docs, smart notes και user-profile review |
 
 ---

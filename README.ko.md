@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-마법사는 보유한 harness(OpenCode, Pi 또는 둘 다)를 자동 감지하고, 플러그인을 추가하며, 내장 compaction을 비활성화하고, historian, dreamer, sidekick에 사용할 모델 선택을 돕고, 다른 컨텍스트 관리 플러그인과의 충돌을 해결합니다. 특정 harness를 대상으로 하려면 `--harness opencode` 또는 `--harness pi`를 사용하세요.
+마법사는 보유한 harness(OpenCode, Pi 또는 둘 다)를 자동 감지하고, 플러그인을 추가하며, 내장 compaction을 비활성화하고, historian과 dreamer에 사용할 모델 선택을 돕고, 다른 컨텍스트 관리 플러그인과의 충돌을 해결합니다. 특정 harness를 대상으로 하려면 `--harness opencode` 또는 `--harness pi`를 사용하세요.
 
 > **왜 내장 compaction을 비활성화하나요?** Magic Context가 직접 컨텍스트를 관리합니다. 호스트의 compaction은 캐시를 고려한 지연 작업을 방해하고 이중 압축을 일으킬 수 있습니다.
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | 캐시 TTL을 우회하여 모든 대기 작업을 즉시 강제 실행 |
 | `/ctx-recomp` | 원시 기록에서 구획을 다시 빌드합니다(`start-end` 범위 허용). 저장 상태가 잘못된 것 같을 때 사용 |
 | `/ctx-session-upgrade` | 이 세션을 최신 기록 형식으로 업그레이드합니다: 구획 재빌드와 프로젝트 메모리 마이그레이션 |
-| `/ctx-aug` | 프롬프트에 sidekick augmentation 실행: 별도 모델로 관련 메모리 검색 |
 | `/ctx-dream` | 필요할 때 dreamer 유지 관리를 실행: 메모리, 문서, smart notes, user-profile 검토 관리 |
 
 ---

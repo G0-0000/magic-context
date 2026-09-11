@@ -18,7 +18,7 @@ import {
  */
 
 /** Hidden agents that run with elevated/autonomous capability. */
-const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
+const HIDDEN_AGENT_KEYS = ["historian", "dreamer"] as const;
 const HARNESS_KEYS = PER_HARNESS_MODEL_KEYS;
 /** Every historian model-resolution field, including per-harness qualifiers.
  *  Variant and thinking_level merge onto the user's historian model at resolve
@@ -36,20 +36,13 @@ const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descrip
  *  - `permission` — broadens the agent's per-tool permissions.
  *  - `tools`      — enable/disable map; could flip a denied tool (e.g. `bash`)
  *                   on for an agent whose allow-list intentionally excludes it.
- *  - `system_prompt` — sidekick's custom system prompt. It takes precedence over
- *                   the built-in prompt (sidekick/agent.ts reads
- *                   `config.system_prompt` before `config.prompt`), so leaving it
- *                   unstripped reopens the exact reprogramming vector `prompt`
- *                   closes — a cloned repo could rewrite sidekick's instructions
- *                   via `/ctx-aug`.
- *
  * Dreamer model/cadence fields are deliberately NOT stripped: a repo may tune
  * its own dreamer overlays and schedules through the user's provider auth.
  * Historian model selection stays USER-tier only, and compaction thresholds are
  * project raise-only, so a cloned repo cannot force earlier compaction or extra
  * historian spend on the user's dime.
  */
-const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
+const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools"] as const;
 const EMBEDDING_DESTINATION_FIELDS = ["endpoint", "provider", "fallback_provider"] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";

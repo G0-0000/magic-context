@@ -34,9 +34,9 @@ Global on/off switches for the plugin and its agent-facing surface.
 |---|---|---|---|
 | `enabled` | boolean | `true` | Enable magic context (default: true) |
 | `allow_home_project` | boolean | `false` | Allow Magic Context sessions launched from the exact canonical home directory. The home session uses its deterministic dir: identity so pre-gate memories reconnect. USER-LEVEL ONLY: project config is ignored. The home identity is excluded from registry seed exports, never resolves descendants by containment, and cannot join a workspace. |
-| `language` | string | — | Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten. |
+| `language` | string | — | Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the historian, dreamer, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten. |
 | `auto_update` | boolean | — | Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates. |
-| `keep_subagents` | boolean | `false` | Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. |
+| `keep_subagents` | boolean | `false` | Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. |
 | `todowrite` | object | — | Pi-only todowrite tool and overlay controls. Pi registers tools and widgets at extension boot, so changing this after /cd requires /reload or restart. |
 | `todowrite.enabled` | boolean | `true` | Pi only: register Magic Context's todowrite task-list tool. Disable if you use your own todo extension. OpenCode ships its own built-in todowrite; this setting has no effect there. |
 | `todowrite.overlay` | boolean | `true` | Pi only: show the persistent todo overlay above the editor while tasks are active. |
@@ -79,7 +79,7 @@ Named user-owned model-selection overlays. A project may select a profile name b
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `profile` | string | — | Select a named user-owned model profile. A valid project name overrides this user default; an empty string, null, or other non-string project value is ignored with a warning so the user selection still applies. Unknown names warn and use the base configuration. |
-| `profiles` | map<string, object> | — | User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles. |
+| `profiles` | map<string, object> | — | User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles. |
 
 ## Historian
 
@@ -157,7 +157,7 @@ Durable project memory, semantic search, and recall features.
 
 ## Background agents
 
-Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
+Off-hours maintenance through Dreamer.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -209,29 +209,6 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.tasks.promote-primers.promotion_threshold` | number (2–20) | — | promote-primers: min recurring source days before promotion is considered (default: 2) |
 | `dreamer.tasks.refresh-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true) |
-| `sidekick` | object | — | Optional sidekick agent configuration for session-start memory retrieval |
-| `sidekick.model` | string | — | Primary model ID (e.g. 'claude-sonnet-4-6') |
-| `sidekick.temperature` | number (0–2) | — | Sampling temperature (0-2) |
-| `sidekick.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
-| `sidekick.prompt` | string | — | Additional system prompt text |
-| `sidekick.tools` | map<string, boolean> | — | Tool enable/disable overrides |
-| `sidekick.disable` | boolean | — | Disable this agent |
-| `sidekick.description` | string | — | Agent description |
-| `sidekick.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
-| `sidekick.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
-| `sidekick.maxSteps` | number | — | Maximum tool-call steps per invocation |
-| `sidekick.permission` | object | — | Per-tool permission overrides |
-| `sidekick.permission.edit` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
-| `sidekick.permission.bash` | `"ask"` \\| `"allow"` \\| `"deny"` \\| map<string, `"ask"` \\| `"allow"` \\| `"deny"`> | — |  |
-| `sidekick.permission.webfetch` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
-| `sidekick.permission.doom_loop` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
-| `sidekick.permission.external_directory` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
-| `sidekick.maxTokens` | number | — | Maximum output tokens |
-| `sidekick.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
-| `sidekick.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
-| `sidekick.timeout_ms` | number | `30000` | Timeout for sidekick calls in milliseconds |
-| `sidekick.system_prompt` | string | — | Custom system prompt for sidekick |
-| `sidekick.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` | — | Pi only: explicit thinking level for sidekick subagent invocations. See historian.pi.thinking_level. |
 
 ## Advanced
 

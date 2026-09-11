@@ -54,7 +54,7 @@ describe("createChildSessionWithFence", () => {
             client,
             db: staleDatabase(),
             parentSessionId: "ses_parent",
-            title: "magic-context-sidekick",
+            title: "magic-context-dreamer",
             directory: "/project",
             onFenceLatched: (failure: ChildSpawnFenceFailure) => latchedFailures.push(failure),
         };
@@ -84,7 +84,7 @@ describe("createChildSessionWithFence", () => {
             client,
             db,
             parentSessionId: "ses_parent",
-            title: "magic-context-sidekick",
+            title: "magic-context-dreamer",
             directory: "/project",
         };
 
@@ -111,7 +111,7 @@ describe("createChildSessionWithFence", () => {
             client,
             db,
             parentSessionId: "ses_parent",
-            title: "magic-context-sidekick",
+            title: "magic-context-dreamer",
             directory: "/project",
         };
 

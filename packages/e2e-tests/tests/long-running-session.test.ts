@@ -74,7 +74,6 @@ beforeAll(async () => {
                 git_commit_indexing: { enabled: false },
             },
             dreamer: { disable: true },
-            sidekick: { disable: true },
             compressor: { enabled: false },
         },
     });

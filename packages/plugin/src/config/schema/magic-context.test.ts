@@ -45,7 +45,6 @@ describe("MagicContextConfigSchema", () => {
             expect(result.historian_timeout_ms).toBeGreaterThanOrEqual(10 * 60_000);
             expect(result.historian).toBeUndefined();
             expect(result.dreamer).toBeUndefined();
-            expect(result.sidekick).toBeUndefined();
             expect(result.pi).toBeUndefined();
             expect(result.mural).toEqual({ enabled: false });
         });
@@ -145,15 +144,6 @@ describe("MagicContextConfigSchema", () => {
                 pi: {
                     subagent_extensions: ["@example/provider", "./extensions/local.ts"],
                 },
-                sidekick: {
-                    disable: false,
-                    model: "qwen-test",
-                    fallback_models: ["qwen-fallback"],
-                    temperature: 0.1,
-                    variant: "fast",
-                    timeout_ms: 12_000,
-                    system_prompt: "Custom prompt",
-                },
                 compaction: {
                     enabled: true,
                 },
@@ -177,19 +167,6 @@ describe("MagicContextConfigSchema", () => {
             ).toBe(false);
         });
 
-        it("applies sidekick defaults when the object is present", () => {
-            const result = MagicContextConfigSchema.parse({
-                sidekick: {
-                    model: "github-copilot/gpt-5.4",
-                },
-            });
-
-            expect(result.sidekick).toEqual({
-                model: "github-copilot/gpt-5.4",
-                timeout_ms: 30000,
-            });
-        });
-
         it("accepts disable on hidden agents and strips deprecated top-level enabled", () => {
             const result = MagicContextConfigSchema.parse({
                 historian: { disable: true },
@@ -203,14 +180,11 @@ describe("MagicContextConfigSchema", () => {
                         "maintain-docs": { schedule: "0 * * * *" },
                     },
                 },
-                sidekick: { disable: true, enabled: true },
             });
 
             expect(result.historian?.disable).toBe(true);
             expect(result.dreamer?.disable).toBe(true);
-            expect(result.sidekick?.disable).toBe(true);
             expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
-            expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
             expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
             expect(result.dreamer?.tasks["maintain-docs"].schedule).toBe("0 * * * *");
             expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
@@ -353,10 +327,6 @@ describe("MagicContextConfigSchema", () => {
                                 thinking_level: "inherit",
                             },
                         },
-                        sidekick: {
-                            model: "anthropic/work-sidekick",
-                            fallback_models: ["openai/work-sidekick-fallback"],
-                        },
                     },
                 },
             });
@@ -376,7 +346,6 @@ describe("MagicContextConfigSchema", () => {
                 { model: "opencode/work-historian-fallback", thinking_level: "inherit" },
             ]);
             expect(result.profiles?.work?.dreamer?.omp?.thinking_level).toBe("inherit");
-            expect(result.profiles?.work?.sidekick?.model).toBe("anthropic/work-sidekick");
         });
 
         it("rejects timeout_minutes in a dreamer profile", () => {
@@ -432,7 +401,7 @@ describe("MagicContextConfigSchema", () => {
                     },
                 },
                 { work: { dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } } } },
-                { work: { sidekick: { timeout_ms: 60_000 } } },
+                { work: { dreamer: { timeout_ms: 60_000 } } },
             ];
 
             for (const profiles of profilesWithExcludedFields) {

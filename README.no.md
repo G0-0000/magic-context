@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-Veiviseren oppdager automatisk hvilke harnesses du har (OpenCode, Pi eller begge), legger til pluginet, deaktiverer innebygd compaction, hjelper deg å velge modeller for historian, dreamer og sidekick, og løser konflikter med andre kontekststyringsplugins. Rett deg mot et bestemt harness med `--harness opencode` eller `--harness pi`.
+Veiviseren oppdager automatisk hvilke harnesses du har (OpenCode, Pi eller begge), legger til pluginet, deaktiverer innebygd compaction, hjelper deg å velge modeller for historian og dreamer, og løser konflikter med andre kontekststyringsplugins. Rett deg mot et bestemt harness med `--harness opencode` eller `--harness pi`.
 
 > **Hvorfor deaktivere innebygd compaction?** Magic Context styrer konteksten selv. Hostens compaction ville forstyrre de cache-bevisste utsatte operasjonene og dobbeltkomprimere.
 
@@ -236,7 +236,6 @@ Gjenkalling fungerer **på tvers av økter** (en ny økt arver alt) og **på tve
 | `/ctx-flush` | Tving alle køede operasjoner umiddelbart, forbi cache TTL |
 | `/ctx-recomp` | Bygg kompartementer på nytt fra rå historikk (aksepterer et `start-end`-område). Bruk når lagret tilstand virker feil |
 | `/ctx-session-upgrade` | Oppgrader denne økten til nyeste historikkformat: bygg kompartementer på nytt og migrer prosjektminner |
-| `/ctx-aug` | Kjør sidekick augmentation på en prompt: hent relevante minner via en separat modell |
 | `/ctx-dream` | Kjør dreamer-vedlikehold på forespørsel: vedlikehold minne, docs, smart notes og user-profile review |
 
 ---

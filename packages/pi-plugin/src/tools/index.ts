@@ -74,11 +74,10 @@ export interface RegisterToolsOptions {
 	dreamerEnabled?: boolean;
 	/** Resolve smart-note enablement from the current cwd at tool-call time. */
 	resolveDreamerEnabled?: (ctx: { cwd: string }) => boolean | undefined;
-	/** When false, omit ctx_memory from the registered surface. Sidekick only
-	 *  needs read-only ctx_search; dreamer and the main agent keep ctx_memory. */
+	/** When false, omit ctx_memory from the registered surface. */
 	memoryToolEnabled?: boolean;
 	/** When true, omit session-scoped tools (ctx_note, ctx_expand) from the
-	 *  registered surface. Set by `--no-session` children (sidekick, dreamer):
+	 *  registered surface. Set by `--no-session` Dreamer children:
 	 *  those tools resolve `ctx.sessionManager.getSessionId()` to the EPHEMERAL
 	 *  child session, so ctx_note would write notes orphaned under the hidden
 	 *  child id and ctx_expand would expand the child's empty transcript. */

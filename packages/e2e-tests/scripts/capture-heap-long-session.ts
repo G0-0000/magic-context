@@ -72,7 +72,6 @@ function scenarioConfig(scenario: Scenario): Record<string, unknown> {
         enabled: scenario.hooksEnabled,
         debug_rpc: true,
         dreamer: { disable: true },
-        sidekick: { disable: true },
         memory: { enabled: true },
         embedding:
             scenario.embedding === "local"

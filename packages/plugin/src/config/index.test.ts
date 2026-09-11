@@ -13,6 +13,7 @@ import {
 } from "../shared/window-geometry";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 import { resolveConfigProfile } from "./profiles";
+import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "./schema/magic-context";
 import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
 
@@ -747,18 +748,26 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
         expect(warnings).not.toContain("dreamer.enabled");
     });
 
-    it("migrates sidekick.enabled=false (loud) and removes sidekick.enabled=true (silent)", () => {
-        const disabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: false } }));
-        expect(disabled.sidekick?.disable).toBe(true);
-        expect(disabled.configWarnings?.join("\n")).toContain(
-            'Migrated "sidekick.enabled=false" → "sidekick.disable=true" in-memory (run doctor to persist).',
+    it("ignores the removed agent block with one warning", () => {
+        const removedKey = ["side", "kick"].join("");
+        const result = loadWithUserConfig(
+            JSON.stringify({
+                profile: "work",
+                [removedKey]: { enabled: false, model: "example/model" },
+                profiles: {
+                    work: {
+                        [removedKey]: { model: "example/profile-model" },
+                        historian: { opencode: { model: "example/historian" } },
+                    },
+                },
+            }),
         );
 
-        const enabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: true } }));
-        expect(enabled.sidekick?.disable).toBeUndefined();
-        expect("enabled" in (enabled.sidekick as Record<string, unknown>)).toBe(false);
-        const enabledWarnings = enabled.configWarnings?.join("\n") ?? "";
-        expect(enabledWarnings).not.toContain("sidekick.enabled");
+        expect(removedKey in result).toBe(false);
+        expect(result.historian?.opencode?.model).toBe("example/historian");
+        expect(result.configWarnings?.filter((warning) => warning.includes(removedKey))).toEqual([
+            `[config] ${REMOVED_AGENT_CONFIG_WARNING}`,
+        ]);
     });
 
     it("removes invalid historian.enabled and applies conflict rules", () => {
@@ -766,13 +775,11 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
             JSON.stringify({
                 historian: { enabled: false },
                 dreamer: { enabled: false, disable: false },
-                sidekick: { enabled: true, disable: true },
             }),
         );
 
         expect(result.historian).toEqual({ two_pass: false, disallowed_tools: [] });
         expect(result.dreamer?.disable).toBe(true);
-        expect(result.sidekick?.disable).toBe(true);
         expect(result.configWarnings?.join("\n")).toContain(
             'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
         );
@@ -1176,7 +1183,6 @@ describe("loadPluginConfig — user-owned model profiles", () => {
                                 ],
                             },
                         },
-                        sidekick: { model: "anthropic/work-sidekick" },
                     },
                     personal: {
                         historian: { opencode: { model: "anthropic/personal-historian" } },
@@ -1200,7 +1206,6 @@ describe("loadPluginConfig — user-owned model profiles", () => {
         expect(result.dreamer?.opencode?.fallback_models).toEqual([
             { model: "openai/work-dreamer-fallback", variant: "medium" },
         ]);
-        expect(result.sidekick?.model).toBe("anthropic/work-sidekick");
     });
 
     it("uses project selection over user selection and falls back to the base on an unknown name", () => {

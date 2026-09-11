@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed-agent-config";
 import {
     initializeDatabase,
     runMigrations,
@@ -55,17 +56,17 @@ describe("OpenCode database doctor surface", () => {
 });
 
 describe("doctor OpenCode legacy agent enabled migration", () => {
-    it("migrates legacy enabled fields with conflict rules and warning text", () => {
+    it("migrates legacy enabled fields and deletes removed agent config", () => {
+        const removedKey = ["side", "kick"].join("");
         const { config, logs, result } = migrate({
             dreamer: { enabled: false, disable: false },
-            sidekick: { enabled: true, disable: true },
+            [removedKey]: { enabled: true, disable: true },
             historian: { enabled: true, disable: true },
         });
 
         expect(result).toEqual({ changed: true, fixes: 3 });
         expect(config).toEqual({
             dreamer: { disable: true },
-            sidekick: { disable: true },
             historian: { disable: true },
         });
         expect(logs).toContainEqual({
@@ -73,17 +74,15 @@ describe("doctor OpenCode legacy agent enabled migration", () => {
             message:
                 "Migrated dreamer.enabled=false → dreamer.disable=true. This now also disables manual /ctx-dream. To keep manual dreaming, remove disable=true and set schedule to empty string.",
         });
-        expect(logs.map((entry) => entry.message)).toContain(
-            "Removed deprecated sidekick.enabled (use sidekick.disable=true to turn off Sidekick).",
-        );
+        expect(logs.map((entry) => entry.message)).toContain(REMOVED_AGENT_CONFIG_WARNING);
         expect(logs.map((entry) => entry.message)).toContain(
             "Removed invalid historian.enabled (historian uses disable=true to turn off).",
         );
     });
 
     it("removes enabled=true without adding disable=false and is idempotent", () => {
-        const first = migrate({ dreamer: { enabled: true }, sidekick: { enabled: false } });
-        expect(first.config).toEqual({ dreamer: {}, sidekick: { disable: true } });
+        const first = migrate({ dreamer: { enabled: true } });
+        expect(first.config).toEqual({ dreamer: {} });
 
         const second = migrate(first.config);
         expect(second.result).toEqual({ changed: false, fixes: 0 });
@@ -91,9 +90,7 @@ describe("doctor OpenCode legacy agent enabled migration", () => {
     });
 
     it("round-trips migrated config through JSONC serialization", () => {
-        const config = parseJsonc(
-            '{ "dreamer": { "enabled": false }, "sidekick": { "enabled": false } }',
-        ) as Record<string, unknown>;
+        const config = parseJsonc('{ "dreamer": { "enabled": false } }') as Record<string, unknown>;
         migrateLegacyAgentEnabledConfigForDoctor(config, { success: () => {}, warn: () => {} });
         const serialized = stringifyJsonc(config, null, 2);
 

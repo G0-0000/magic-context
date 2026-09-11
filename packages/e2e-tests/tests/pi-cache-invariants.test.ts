@@ -271,7 +271,6 @@ async function createHarness(): Promise<PiTestHarness> {
             execute_threshold_percentage: 20,
             protected_tags: 1,
             dreamer: { disable: true },
-            sidekick: { disable: true },
             compressor: { enabled: false },
             historian: { model: "anthropic/claude-haiku-4-5" },
             memory: {

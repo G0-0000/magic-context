@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-ウィザードは、利用中の harness（OpenCode、Pi、または両方）を自動検出し、プラグインを追加し、組み込み compaction を無効化し、historian、dreamer、sidekick 用のモデル選択を手伝い、ほかのコンテキスト管理プラグインとの衝突を解決します。特定の harness を対象にするには `--harness opencode` または `--harness pi` を使います。
+ウィザードは、利用中の harness（OpenCode、Pi、または両方）を自動検出し、プラグインを追加し、組み込み compaction を無効化し、historian、dreamer 用のモデル選択を手伝い、ほかのコンテキスト管理プラグインとの衝突を解決します。特定の harness を対象にするには `--harness opencode` または `--harness pi` を使います。
 
 > **なぜ組み込み compaction を無効化するのですか?** Magic Context は自分でコンテキストを管理します。ホスト側の compaction は、キャッシュを意識した遅延操作に干渉し、二重圧縮を起こします。
 
@@ -236,7 +236,6 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 | `/ctx-flush` | キュー内のすべての操作を即時に強制実行し、cache TTL を迂回 |
 | `/ctx-recomp` | 生の履歴から区画を再構築（`start-end` 範囲を受け付けます）。保存状態がおかしく見えるときに使用 |
 | `/ctx-session-upgrade` | このセッションを最新の履歴形式へアップグレード：区画を再構築し、プロジェクトメモリを移行 |
-| `/ctx-aug` | prompt に sidekick augmentation を実行：別モデルで関連メモリを取得 |
 | `/ctx-dream` | 必要に応じて dreamer メンテナンスを実行：メモリ、docs、smart notes、user-profile review を維持 |
 
 ---

@@ -538,7 +538,7 @@ async function runHealthChecks(options: {
             add(
                 results,
                 "fail",
-                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
+                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
             );
         } else if (version) {
             add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);

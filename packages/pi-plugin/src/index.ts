@@ -4,7 +4,7 @@
  * Loaded once per Pi session via `pi.extensions` in package.json. Boots
  * Magic Context's shared SQLite store and registers session lifecycle
  * hooks: tools, transform pipeline (tagging + drops), historian trigger,
- * /ctx-aug command, system-prompt injection, dreamer scheduling, and
+ * system-prompt injection, dreamer scheduling, and
  * agent_end cleanup.
  *
  * Storage: shares one SQLite database with the OpenCode plugin at
@@ -33,7 +33,6 @@ import type {
 	DreamerConfig,
 	HistorianConfig,
 	MagicContextConfig,
-	SidekickConfig,
 } from "@magic-context/core/config/schema/magic-context";
 import {
 	summarizeDreamSchedule,
@@ -106,7 +105,6 @@ import {
 	createPromptSurfaceGuidanceEpochCache,
 	createPromptSurfaceRuntime,
 } from "@magic-context/core/shared/prompt-surface-runtime";
-import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import {
 	hasTrustedAbsoluteWall,
@@ -114,10 +112,6 @@ import {
 } from "@magic-context/core/shared/window-geometry";
 
 import { handlePiCloneSessionStart } from "./clone-inheritance";
-import {
-	type PiSidekickConfig,
-	registerCtxAugCommand,
-} from "./commands/ctx-aug";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
 import {
 	maybeAutoEmbedPiSession,
@@ -813,24 +807,6 @@ setHarness(PI_HARNESS_KIND);
 // in config, so the registration helpers can short-circuit cleanly.
 // ---------------------------------------------------------------------------
 
-export function resolveSidekickFromConfig(
-	config: MagicContextConfig,
-): PiSidekickConfig | undefined {
-	const sidekick = config.sidekick as SidekickConfig | undefined;
-	if (!sidekick || sidekick.disable === true) return undefined;
-	const model = sidekick.model?.trim();
-	if (!model || model.length === 0) return undefined;
-	return {
-		model,
-		systemPrompt: sidekick.system_prompt,
-		timeoutMs: sidekick.timeout_ms,
-		thinking_level: sidekick.thinking_level,
-		fallbackModels: resolveFallbackChain(sidekick.fallback_models),
-		language: config.language,
-		allowHomeProject: config.allow_home_project,
-	};
-}
-
 export function resolveHistorianFromConfig(
 	config: MagicContextConfig,
 	harness: PiHarnessKind = PI_HARNESS_KIND,
@@ -912,7 +888,7 @@ export function resolveDreamerFromConfig(
  *
  * Registers the full Magic Context Pi runtime: tools, transform pipeline
  * (tagging + drops), historian trigger, nudges, auto-search hint,
- * /ctx-aug command, system-prompt injection, and dreamer scheduling.
+ * system-prompt injection and dreamer scheduling.
  * All driven by the user's `magic-context.jsonc` (Pi convention paths).
  */
 export default async function (pi: ExtensionAPI): Promise<void> {
@@ -1240,7 +1216,6 @@ async function startPiMagicContextRuntime(
 		historianConfig: PiHistorianOptions | undefined;
 		autoSearchConfig: PiAutoSearchHandlerOptions;
 		contextOptions: PiContextHandlerOptions;
-		sidekickConfig: PiSidekickConfig | undefined;
 		dreamerConfig: DreamerConfig | undefined;
 		dreamerEnabled: boolean;
 		configParseFailures: typeof configParseFailures;
@@ -1339,7 +1314,6 @@ async function startPiMagicContextRuntime(
 			historianConfig: hist,
 			autoSearchConfig: auto,
 			contextOptions: buildContextOptions(cfg, hist, auto),
-			sidekickConfig: resolveSidekickFromConfig(cfg),
 			dreamerConfig: resolveDreamerFromConfig(cfg),
 			dreamerEnabled: isDreamerRunnable(cfg),
 			configParseFailures: loadMetadata.configParseFailures,
@@ -1461,8 +1435,8 @@ async function startPiMagicContextRuntime(
 		// Keep the definition registered so Pi can activate it in a later session
 		// after a project config flip. session_start below removes it from the
 		// active tool set when the resolved project disables memory. (The subagent
-		// entry still uses memoryToolEnabled to keep ctx_memory off the retrieval-
-		// only sidekick, a separate security concern.)
+		// entry still uses memoryToolEnabled to keep ctx_memory off read-only
+		// Dreamer tasks, a separate security concern.)
 		memoryToolEnabled: true,
 		protectedTags: config.protected_tags ?? 20,
 		resolveProtectedTags: (ctx) =>
@@ -1559,18 +1533,6 @@ async function startPiMagicContextRuntime(
 		bootProjectDeps.autoSearchConfig.enabled
 			? `registered auto-search hint (threshold=${bootProjectDeps.autoSearchConfig.scoreThreshold}, minChars=${bootProjectDeps.autoSearchConfig.minPromptChars})`
 			: "registered auto-search hint: DISABLED (memory.auto_search.enabled=false)",
-	);
-
-	// Register /ctx-aug once, but resolve sidekick config from the active cwd
-	// every invocation so `/cd` follows the current project's model/language.
-	registerCtxAugCommand(
-		pi,
-		(ctx) => resolveCurrentProjectDeps(ctx).sidekickConfig,
-	);
-	info(
-		bootProjectDeps.sidekickConfig
-			? `registered /ctx-aug (sidekick model=${bootProjectDeps.sidekickConfig.model})`
-			: "registered /ctx-aug (sidekick disabled — set sidekick.disable=false and sidekick.model in config)",
 	);
 
 	// Register the shared renderer before any command can append a status entry.
