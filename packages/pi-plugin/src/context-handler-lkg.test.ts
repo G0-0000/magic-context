@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import {
 	recordOverflowDetected,
@@ -77,6 +78,99 @@ describe("Pi context handler LKG replay", () => {
 		for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 		tempDirs.length = 0;
 	});
+
+	for (const count of [2812, 300]) {
+		it(`fit-guards ${count} raw messages after snapshot, boundary contraction, and SQLITE_BUSY`, async () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lkg-fit-"));
+			tempDirs.push(dir);
+			const dbPath = join(dir, "context.db");
+			const db = createTestDb(dbPath);
+			const sessionId = `pi-lkg-fit-${count}`;
+			sessions.add(sessionId);
+			const locker = new Database(dbPath);
+			const logLines: string[] = [];
+			const restoreLog =
+				contextHandlerInternals.setLkgRecoveryLogObserverForTests((line) =>
+					logLines.push(line),
+				);
+			try {
+				updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+				const handler = handlerFor(db);
+				const head = Array.from({ length: 268 }, (_, i) =>
+					userMessage(`covered ${i}`, i),
+				);
+				const raw = Array.from({ length: count }, (_, i) =>
+					userMessage("x".repeat(1850), i + 268),
+				);
+				const ids = Array.from({ length: count }, (_, i) => `entry-${i + 268}`);
+				const firstRaw = [...head, ...raw.slice(0, 1)];
+				const firstCtx = fakeContext(
+					sessionId,
+					process.cwd(),
+					[...head.map((_, i) => `entry-${i}`), "entry-268"],
+					firstRaw as never,
+				);
+				const model = {
+					provider: "openai-codex",
+					id: "gpt-5.6-sol",
+					contextWindow: 272000,
+					maxTokens: 68000,
+				};
+				Object.assign(firstCtx, { model });
+				expect(
+					await handler({ messages: firstRaw as never[] }, firstCtx as never),
+				).toBeDefined();
+				await nextImmediate();
+				appendCompartments(db, sessionId, [
+					{
+						sequence: 0,
+						startMessage: 1,
+						endMessage: 268,
+						startMessageId: "entry-0",
+						endMessageId: "entry-267",
+						title: "Published head",
+						content: "Covered history",
+						p1: "Covered history",
+					},
+				]);
+				// Model the next pass after publication removed the covered head. The
+				// stored served JSON has no entry-id-to-output map proving a safe splice.
+				db.exec("PRAGMA busy_timeout=0");
+				locker.exec("BEGIN IMMEDIATE");
+				const ctx = fakeContext(sessionId, process.cwd(), ids, raw as never);
+				Object.assign(ctx, {
+					model,
+					getContextUsage: () => ({
+						tokens: 184856,
+						percent: 90.6,
+						contextWindow: 272000,
+					}),
+				});
+				const pass = handler({ messages: raw as never[] }, ctx as never);
+				if (count === 2812) {
+					await expect(pass).rejects.toMatchObject({
+						name: "PiStorageBusyError",
+						message: "Magic Context storage is busy; send your message again",
+					});
+					expect(
+						logLines.some(
+							(line) =>
+								line.includes("raw_fallback_over_context_limit") &&
+								line.includes("limit="),
+						),
+					).toBe(true);
+				} else {
+					expect(await pass).toBeUndefined();
+				}
+				expect(logLines.join("\n")).toContain("lkg_invalidated_reshape");
+			} finally {
+				if (locker.inTransaction) locker.exec("ROLLBACK");
+				restoreLog();
+				closeQuietly(locker);
+				closeQuietly(db);
+			}
+		});
+	}
 
 	it("serves the previous transformed bytes plus the raw tail when a tagging write hits SQLITE_BUSY", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-busy-"));
@@ -191,7 +285,7 @@ describe("Pi context handler LKG replay", () => {
 				]);
 				expect(replay).toBeUndefined();
 				expect(logLines).toContain(
-					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); serving raw 1-message input",
+					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); checking raw 1-message input",
 				);
 			} finally {
 				locker.exec("ROLLBACK");
@@ -233,7 +327,7 @@ describe("Pi context handler LKG replay", () => {
 			);
 			expect(replay).toBeUndefined();
 			expect(logLines).toContain(
-				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); serving raw 2-message input",
+				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); checking raw 2-message input",
 			);
 		} finally {
 			if (locker.inTransaction) locker.exec("ROLLBACK");

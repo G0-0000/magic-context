@@ -332,6 +332,11 @@ export function createPiLkgCoordinator(
 		) {
 			return { ok: false, reason: "lkg_miss" };
 		}
+		// A published boundary can contract the live input prefix. Keep the shared
+		// exact-prefix fence: jsonPrefix stores served bytes, not a mapping from
+		// input entry ids to served entries (which may include m0/m1 and drops).
+		// Slicing that JSON by an input count could remove the wrong messages.
+		// The context handler fit-checks raw input when this replay is refused.
 		const entry: LkgEntryNote = {
 			pristineTail: snapshot.pristineTail,
 			entryInputIds: snapshot.inputs.map((input) => input.id),

@@ -247,6 +247,7 @@ import {
 	formatPiPressureForLog,
 	resolvePiPressureSnapshot,
 } from "./pi-pressure";
+import { assertPiRawFallbackFits } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import {
@@ -2283,6 +2284,7 @@ export function registerPiContextHandler(
 	pi.on("context", async (event, ctx) => {
 		const transformStartTime = performance.now();
 		let rawMessageCount = 0;
+		let rawFallbackLimit: number | undefined;
 		let sessionIdForError: string | undefined;
 		let sessionMetaForPass:
 			| ReturnType<typeof getOrCreateSessionMeta>
@@ -2301,6 +2303,19 @@ export function registerPiContextHandler(
 				return;
 			}
 			sessionIdForError = sessionId;
+			// Resolve a DB-independent wall before the first storage operation can fail.
+			let piUsage:
+				| ReturnType<NonNullable<ExtensionContext["getContextUsage"]>>
+				| undefined;
+			try {
+				piUsage = ctx.getContextUsage?.();
+			} catch {
+				// Model metadata remains available if the host usage probe fails.
+			}
+			rawFallbackLimit = resolvePiWindowGeometry({
+				rawContextWindow: piUsage?.contextWindow,
+				model: ctx.model,
+			})?.usableHard;
 			const projectDirectory = ctx.cwd;
 			rawMessageCount = event.messages.length;
 			const fullWireMessageCount = rawMessageCount;
@@ -2519,7 +2534,7 @@ export function registerPiContextHandler(
 			const isFirstContextPassForSession =
 				!firstContextPassSeenBySession.has(sessionId);
 			firstContextPassSeenBySession.add(sessionId);
-			const piUsage = ctx.getContextUsage?.();
+
 			const tModelDetect = performance.now();
 			// Seed the in-memory model key from the JSONL on the first pass after a
 			// (re)start. liveModelBySession is volatile, so without this a model
@@ -2770,6 +2785,7 @@ export function registerPiContextHandler(
 				model: ctx.model,
 				detectedContextLimit,
 			});
+			rawFallbackLimit = baseWindowGeometry?.usableHard ?? rawFallbackLimit;
 			let provenInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
 			if (
 				baseWindowGeometry &&
@@ -3657,12 +3673,12 @@ export function registerPiContextHandler(
 					}
 					logPiLkgRecovery(
 						sessionIdForError,
-						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); serving raw ${rawMessageCount}-message input`,
+						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
 					);
 				} catch (replayError) {
 					logPiLkgRecovery(
 						sessionIdForError,
-						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); serving raw ${rawMessageCount}-message input`,
+						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
 					);
 				}
 			} else if (transientStorageFailure && sessionIdForError) {
@@ -3673,7 +3689,20 @@ export function registerPiContextHandler(
 						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
 				logPiLkgRecovery(
 					sessionIdForError,
-					`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); serving raw ${rawMessageCount}-message input`,
+					`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); checking raw ${rawMessageCount}-message input`,
+				);
+			}
+			// Keep refusal outside the replay try/catch: it must reach Pi, not be
+			// mistaken for another replay failure and swallowed into raw fallthrough.
+			if (transientStorageFailure) {
+				assertPiRawFallbackFits(
+					event.messages,
+					rawFallbackLimit,
+					(line) => {
+						if (sessionIdForError) logPiLkgRecovery(sessionIdForError, line);
+						else log(line);
+					},
+					err,
 				);
 			}
 			log(
