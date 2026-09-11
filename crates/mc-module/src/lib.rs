@@ -95,8 +95,8 @@ use classify::{
 use config::{derive_historian_chunk_tokens, ConfigCache, McModuleConfig};
 use healing::{tail_reclaim, SerializerProfile};
 use historian::{
-    reattach_historian_producer, run_historian_firing, HistorianNoFireCause,
-    HistorianProducerDriver,
+    reattach_historian_producer, run_historian_firing_with_model_cache,
+    HistorianModelUnresolvableCache, HistorianNoFireCause, HistorianProducerDriver,
 };
 use historian_chunk::{
     assemble_historian_firing, AssembleHistorianFiringOutcome, AssembledHistorianFiring,
@@ -340,9 +340,8 @@ fn store_open_error_is_live_lease(error: &McStoreError) -> bool {
 }
 
 /// The process-wide transform heartbeat observes the data-plane lane from the SDK's channel-0
-/// control path without touching the store. Route-lifecycle accounting uses one short registry
-/// lock so a closed request route can release its accepted dispatch even when no response
-/// consumer remains.
+/// control path without touching the store. Route lifecycle and the last historian outcome use
+/// short in-memory locks so health reporting never waits on SQLite.
 #[derive(Default)]
 struct DispatchRegistry {
     next_id: u64,
@@ -357,6 +356,7 @@ struct DispatchHealth {
     oldest_queued_at_ms: AtomicU64,
     consecutive_error_count: AtomicU64,
     registry: OnceLock<Mutex<DispatchRegistry>>,
+    last_historian_outcome: OnceLock<Mutex<Option<String>>>,
 }
 
 impl DispatchHealth {
@@ -368,12 +368,21 @@ impl DispatchHealth {
             oldest_queued_at_ms: AtomicU64::new(0),
             consecutive_error_count: AtomicU64::new(0),
             registry: OnceLock::new(),
+            last_historian_outcome: OnceLock::new(),
         }
     }
 
     fn registry(&self) -> &Mutex<DispatchRegistry> {
         self.registry
             .get_or_init(|| Mutex::new(DispatchRegistry::default()))
+    }
+
+    fn record_historian_outcome(&self, outcome: String) {
+        *self
+            .last_historian_outcome
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
     }
 
     fn route_open(&self, channel: u16) {
@@ -448,6 +457,12 @@ impl DispatchHealth {
         let in_flight = self.in_flight_count.load(Ordering::Relaxed);
         let oldest_queued = self.oldest_queued_at_ms.load(Ordering::Relaxed);
         let consecutive_errors = self.consecutive_error_count.load(Ordering::Relaxed);
+        let last_historian_outcome = self
+            .last_historian_outcome
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let completion_lag_ms = started.saturating_sub(completed);
         let heartbeat_age_ms = if started == 0 {
             0
@@ -479,7 +494,7 @@ impl DispatchHealth {
             HealthStatus::Ok
         };
         let state = if stale { "stuck" } else { "advancing" };
-        let detail = if stale {
+        let mut detail = if stale {
             if queue_stale && !heartbeat_stale {
                 format!(
                     "{TRANSFORM_HEALTH_LANE} lane stuck: queue stale; oldest queued item is {stale_age_ms}ms old; in-flight={in_flight}; consecutive errors={consecutive_errors}"
@@ -498,6 +513,10 @@ impl DispatchHealth {
         } else {
             format!("{TRANSFORM_HEALTH_LANE} lane advancing; in-flight={in_flight}")
         };
+        if let Some(historian) = last_historian_outcome.as_deref() {
+            detail.push_str("; last historian: ");
+            detail.push_str(historian);
+        }
         HealthReport {
             status,
             detail: Some(detail),
@@ -516,6 +535,7 @@ impl DispatchHealth {
                 "queue_stale": queue_stale,
                 "stale": stale,
                 "stale_age_ms": stale_age_ms,
+                "last_historian_outcome": last_historian_outcome,
             })),
         }
     }
@@ -3153,6 +3173,7 @@ pub struct McHandler {
     producer_factory: Arc<dyn HistorianProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
     config: Mutex<ConfigCache>,
+    historian_model_unresolvable: Arc<HistorianModelUnresolvableCache>,
     #[cfg(test)]
     fixed_config: Option<McModuleConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
@@ -3605,6 +3626,8 @@ struct HistorianFiringTask {
     project_root: PathBuf,
     project_slug: String,
     firing: AssembledHistorianFiring,
+    model_chain_generation: u64,
+    model_unresolvable_cache: Arc<HistorianModelUnresolvableCache>,
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
@@ -3650,6 +3673,7 @@ impl McHandler {
             producer_factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
+            historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -3926,6 +3950,7 @@ impl McHandler {
             producer_factory: factory,
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
+            historian_model_unresolvable: Arc::new(HistorianModelUnresolvableCache::default()),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -5190,12 +5215,44 @@ impl McHandler {
             .historian_model_chain
             .as_deref()
             .unwrap_or(&cfg.model_chain);
+        let model_chain_generation = self
+            .historian_model_unresolvable
+            .activate_chain(model_chain);
         if model_chain.is_empty() {
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "no_models".into(),
                 detail_kind: "no_models",
                 cause: HistorianNoFireCause::NoModels,
                 extra: None,
+                reason: trigger_reason,
+                state,
+                progress,
+                last_failure,
+            });
+            self.record_no_fire(
+                &store,
+                &parsed.session_id,
+                &loaded,
+                diagnostics
+                    .no_fire_detail
+                    .as_deref()
+                    .expect("no-fire detail"),
+            );
+            return PreparedHistorianAction::Complete(diagnostics);
+        }
+        if self
+            .historian_model_unresolvable
+            .all_models_unresolvable(model_chain_generation, model_chain)
+        {
+            let failures = self
+                .historian_model_unresolvable
+                .cached_reasons(model_chain_generation, model_chain);
+            let detail = historian::model_unresolvable_detail(&failures, true);
+            let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
+                no_fire: detail.clone(),
+                detail_kind: "model_unresolvable",
+                cause: HistorianNoFireCause::ModelUnresolvable,
+                extra: Some(&detail),
                 reason: trigger_reason,
                 state,
                 progress,
@@ -5408,6 +5465,8 @@ impl McHandler {
                 project_root: binding.project_root.clone(),
                 project_slug,
                 firing,
+                model_chain_generation,
+                model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
                 live_guard,
                 connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
                 // Organic pressure firings assemble and publish in one continuous drive
@@ -5462,8 +5521,22 @@ impl McHandler {
         }
 
         let cfg = self.effective_config(&binding.project_root);
+        let model_chain_generation = self
+            .historian_model_unresolvable
+            .activate_chain(&cfg.model_chain);
         if cfg.model_chain.is_empty() {
             return PreparedWrapupAction::Failed("no historian models are configured".to_string());
+        }
+        if self
+            .historian_model_unresolvable
+            .all_models_unresolvable(model_chain_generation, &cfg.model_chain)
+        {
+            let failures = self
+                .historian_model_unresolvable
+                .cached_reasons(model_chain_generation, &cfg.model_chain);
+            return PreparedWrapupAction::Failed(historian::model_unresolvable_detail(
+                &failures, true,
+            ));
         }
         let live = projection
             .blocks
@@ -5536,6 +5609,8 @@ impl McHandler {
             project_root: binding.project_root.clone(),
             project_slug,
             firing,
+            model_chain_generation,
+            model_unresolvable_cache: Arc::clone(&self.historian_model_unresolvable),
             live_guard,
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             publication_fence: None,
@@ -5588,6 +5663,8 @@ impl McHandler {
             project_root,
             project_slug,
             firing,
+            model_chain_generation,
+            model_unresolvable_cache,
             live_guard,
             connect_failure_commit_hook,
             publication_fence,
@@ -5595,7 +5672,7 @@ impl McHandler {
         let _guard = live_guard;
         let failure_started_at_ms = firing.now_ms;
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
-        match factory.connect(&project_root).await {
+        let result = match factory.connect(&project_root).await {
             Ok(mut producer) => {
                 let mut request = firing.as_fire_request(
                     &store,
@@ -5606,7 +5683,13 @@ impl McHandler {
                 );
                 request.temperature = historian_temperature;
                 request.publication_fence = publication_fence.as_deref();
-                run_historian_firing(&mut *producer, request).await
+                run_historian_firing_with_model_cache(
+                    &mut *producer,
+                    request,
+                    Some(model_unresolvable_cache.as_ref()),
+                    model_chain_generation,
+                )
+                .await
             }
             Err(err) => {
                 let failure_backoff_at_ms = historian::completion_failure_backoff_at_ms(
@@ -5628,7 +5711,12 @@ impl McHandler {
                     backoff_error,
                 })
             }
+        };
+        if let Ok(loaded) = store.load(&session_id) {
+            DISPATCH_HEALTH
+                .record_historian_outcome(historian_status_summary(&loaded.meta.historian));
         }
+        result
     }
 
     fn transform_historian_followup_budget(&self) -> Duration {
@@ -6683,6 +6771,7 @@ impl McHandler {
             "historian": {
                 "consecutive_publish_failures": consecutive_publish_failures,
                 "publish_health_degraded": consecutive_publish_failures >= 3,
+                "last_outcome": historian,
             },
             // Keep the current-pass attribution separate from the explicitly historical
             // `last_divergence` field so stable status reads cannot imply a fresh bust.
@@ -15535,6 +15624,20 @@ fn historian_status_summary(state: &mc_store::HistorianDurableState) -> String {
         return format!("no fire: {}", compact_status_detail(reason));
     }
     if let Some(reason) = state.last_failure.as_deref() {
+        if let Some(detail) = reason.strip_prefix(historian::MODEL_UNRESOLVABLE_PUBLISHED_PREFIX) {
+            return format!(
+                "published seq {}; {}",
+                state.firing_seq,
+                compact_status_detail(detail)
+            );
+        }
+        if reason.starts_with(historian::MODEL_UNRESOLVABLE_CHAIN_EXHAUSTED_PREFIX) {
+            return format!(
+                "failed seq {}: {}",
+                state.firing_seq,
+                compact_status_detail(reason)
+            );
+        }
         return format!("failure: {}", compact_status_detail(reason));
     }
     if state.firing_seq > 0 {
@@ -18636,6 +18739,24 @@ mod tests {
         let metrics = report.metrics.unwrap();
         assert_eq!(metrics["in_flight_count"], json!(0));
         assert_eq!(metrics["oldest_queued_age_ms"], Value::Null);
+    }
+
+    #[test]
+    fn module_health_line_surfaces_last_historian_model_refusal() {
+        let health = DispatchHealth::new();
+        health.record_historian_outcome(
+            "published seq 2; model_unresolvable:opencode/model-a: open_failed".to_string(),
+        );
+
+        let report = health.report(10_000);
+        assert!(report.detail.as_deref().is_some_and(|detail| {
+            detail.contains("last historian: published seq 2")
+                && detail.contains("model_unresolvable:opencode/model-a")
+        }));
+        assert_eq!(
+            report.metrics.unwrap()["last_historian_outcome"],
+            json!("published seq 2; model_unresolvable:opencode/model-a: open_failed")
+        );
     }
 
     #[test]
@@ -27732,6 +27853,13 @@ mod tests {
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta;
         meta.historian.consecutive_publish_failures = 0;
+        meta.historian.firing_seq = 2;
+        meta.historian.failure_backoff_at_ms = None;
+        meta.historian.last_no_fire = None;
+        meta.historian.last_failure = Some(
+            "published_with_model_unresolvable:model_unresolvable:opencode/model-a: open_failed: run resolution failed"
+                .to_string(),
+        );
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
@@ -27741,6 +27869,15 @@ mod tests {
         ));
         assert_eq!(recovered["historian"]["consecutive_publish_failures"], 0);
         assert_eq!(recovered["historian"]["publish_health_degraded"], false);
+        assert!(recovered["historian"]["last_outcome"]
+            .as_str()
+            .is_some_and(|outcome| {
+                outcome.contains("published seq 2")
+                    && outcome.contains("model_unresolvable:opencode/model-a")
+            }));
+        assert!(recovered["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("model_unresolvable:opencode/model-a")));
     }
 
     #[tokio::test(flavor = "current_thread")]
