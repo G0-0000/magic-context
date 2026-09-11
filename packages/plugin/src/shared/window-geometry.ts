@@ -7,6 +7,7 @@ import type { ModelLimit } from "./models-dev-cache";
 
 export const WINDOW_OVERLAY_SCHEMA = "fusiform-window-overlay/v1";
 export const PROMPT_WALL_MARGIN = 4_096;
+export const PI_OUTPUT_FLOOR = 4_096;
 export const OPENCODE_OUTPUT_CAP = 32_000;
 
 const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
@@ -77,6 +78,7 @@ export interface WindowDerivation {
     reserveSource: WindowReserveSource;
     geometry: WindowGeometry;
     windowSource: WindowLimitSource;
+    absoluteWall: number;
 }
 
 export interface WindowGeometryResult {
@@ -585,13 +587,17 @@ export function deriveWindowGeometry(
             ? "overlay"
             : "catalog";
     let usableHard: number;
-    if (geometry === "shared_truncating") {
-        usableHard = hardWindow - PROMPT_WALL_MARGIN;
-    } else {
-        // Output reservation defines the soft scheduler denominator, not the
-        // absolute prompt wall. A successful request can consume part of the
-        // reserved output budget and still remain inside the provider window.
+    if (geometry === "separate") {
         usableHard = hardWindow;
+    } else if (geometry === "shared_truncating") {
+        usableHard = hardWindow - PROMPT_WALL_MARGIN;
+    } else if (options.harness === "pi" && providerID !== "openai-codex") {
+        usableHard = hardWindow - PI_OUTPUT_FLOOR;
+    } else if (options.harness === "pi") {
+        usableHard = hardWindow - (output ?? OPENCODE_OUTPUT_CAP);
+    } else {
+        const requestedOutput = Math.min(output ?? OPENCODE_OUTPUT_CAP, OPENCODE_OUTPUT_CAP);
+        usableHard = hardWindow - requestedOutput;
     }
     usableHard = Math.max(MIN_PLAUSIBLE_CONTEXT_LIMIT, Math.floor(usableHard));
     if (usableHard < usableSoft) {
@@ -614,16 +620,17 @@ export function deriveWindowGeometry(
             reserveSource,
             geometry,
             windowSource,
+            absoluteWall: Math.floor(hardWindow),
         },
     };
 }
 
 export interface ProvenInputFloorResult {
     geometry: WindowGeometryResult;
-    refused?: { reading: number; usableHard: number };
+    refused?: { reading: number; absoluteWall: number };
 }
 
-export function hasTrustedHardWall(geometry: WindowGeometryResult): boolean {
+export function hasTrustedAbsoluteWall(geometry: WindowGeometryResult): boolean {
     return geometry.derivation.windowSource !== "catalog";
 }
 
@@ -643,28 +650,34 @@ export function applyProvenInputFloor(
     ) {
         return { geometry };
     }
-    if (hasTrustedHardWall(geometry) && provenInputTokens > geometry.usableHard) {
+    if (hasTrustedAbsoluteWall(geometry) && provenInputTokens > geometry.derivation.absoluteWall) {
         return {
             geometry,
-            refused: { reading: provenInputTokens, usableHard: geometry.usableHard },
+            refused: {
+                reading: provenInputTokens,
+                absoluteWall: geometry.derivation.absoluteWall,
+            },
         };
     }
 
-    const trustedHardWall = hasTrustedHardWall(geometry);
-    const window = trustedHardWall
+    const trustedAbsoluteWall = hasTrustedAbsoluteWall(geometry);
+    const window = trustedAbsoluteWall
         ? geometry.derivation.window
         : Math.max(geometry.derivation.window, provenInputTokens);
     return {
         geometry: {
             ...geometry,
             usableSoft: provenInputTokens,
-            usableHard: trustedHardWall
+            usableHard: trustedAbsoluteWall
                 ? geometry.usableHard
                 : Math.max(geometry.usableHard, provenInputTokens),
             derivation: {
                 ...geometry.derivation,
                 window,
                 reserve: Math.max(0, window - provenInputTokens),
+                absoluteWall: trustedAbsoluteWall
+                    ? geometry.derivation.absoluteWall
+                    : Math.max(geometry.derivation.absoluteWall, provenInputTokens),
             },
         },
     };

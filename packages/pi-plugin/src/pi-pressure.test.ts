@@ -49,7 +49,7 @@ describe("Pi prompt usage accounting", () => {
 		expect(pressure?.inputTokens).not.toBe(503_348);
 	});
 
-	test("rejects the captured impossible Codex success reading above its hard wall", () => {
+	test("rejects the captured impossible Codex success reading above its absolute wall", () => {
 		const usage = extractAssistantUsage({
 			role: "assistant",
 			provider: sessionFixture.assistant_message.provider,

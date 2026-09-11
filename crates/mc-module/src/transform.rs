@@ -629,6 +629,8 @@ pub struct DeclaredTrim {
 pub struct TransformGeometry {
     pub usable_soft: u64,
     pub usable_hard: u64,
+    #[serde(default)]
+    pub absolute_wall: u64,
     pub derivation: String,
 }
 
@@ -6253,8 +6255,8 @@ fn effective_context_limit_tokens(
 ) -> f64 {
     if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
         && geometry.is_none_or(|geometry| {
-            geometry.usable_hard < crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
-                || usage.context_limit_tokens <= geometry.usable_hard
+            geometry.absolute_wall < crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
+                || usage.context_limit_tokens <= geometry.absolute_wall
         })
     {
         return usage.context_limit_tokens as f64;
@@ -14548,6 +14550,7 @@ pub(crate) mod tests {
         let geometry = TransformGeometry {
             usable_soft: 167_000,
             usable_hard: 200_000,
+            absolute_wall: 200_000,
             derivation: "claude-code/200000 window; soft = 167000".to_string(),
         };
         assert_eq!(
@@ -14570,6 +14573,7 @@ pub(crate) mod tests {
         let implausible = TransformGeometry {
             usable_soft: 12,
             usable_hard: 200_000,
+            absolute_wall: 200_000,
             derivation: String::new(),
         };
         assert_eq!(
@@ -14587,6 +14591,7 @@ pub(crate) mod tests {
                 Some(&TransformGeometry {
                     usable_soft: 1,
                     usable_hard: 168_000,
+                    absolute_wall: 168_000,
                     derivation: "s1-pre-carve/input=128000".to_string(),
                 }),
                 soft,
@@ -14606,6 +14611,7 @@ pub(crate) mod tests {
         let geometry = TransformGeometry {
             usable_soft: 128_000,
             usable_hard: 168_000,
+            absolute_wall: 168_000,
             derivation: "s1-pre-carve/input=128000".to_string(),
         };
         let mut current = req("geometry-wire", "cfg0", vec![]);
@@ -17398,12 +17404,25 @@ pub(crate) mod tests {
         split.geometry = Some(TransformGeometry {
             usable_soft: 128_000,
             usable_hard: 168_000,
+            absolute_wall: 272_000,
             derivation: "s1-pre-carve/input=128000".to_string(),
         });
         let forced =
             transform_with_projection(&s, &split, &pctx("git:proj", "/nonexistent-docs", 0))
                 .unwrap();
         assert_eq!(forced.scheduler_pass, scheduler::PassDecision::Force85);
+
+        let proof_above_emergency_wall = ModuleUsage {
+            current_total_input_tokens: 255_834,
+            context_limit_tokens: 255_834,
+            final_wire_input_tokens: 0,
+            final_wire_trusted: false,
+        };
+        assert_eq!(
+            effective_context_limit_tokens(&proof_above_emergency_wall, split.geometry.as_ref()),
+            255_834.0,
+            "a proven denominator below absolute_wall may exceed usable_hard"
+        );
 
         let poisoned_usage = ModuleUsage {
             current_total_input_tokens: 285_310,
@@ -17414,7 +17433,7 @@ pub(crate) mod tests {
         assert_eq!(
             effective_context_limit_tokens(&poisoned_usage, split.geometry.as_ref()),
             128_000.0,
-            "a host denominator above usable_hard must fall back to geometry soft"
+            "a host denominator above absolute_wall must fall back to geometry soft"
         );
 
         let no_geometry = with_usage(

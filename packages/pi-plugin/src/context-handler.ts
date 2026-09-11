@@ -186,7 +186,7 @@ import {
 	TEXT_TAG_IDENTITY_MARKER,
 	tagTranscript,
 } from "@magic-context/core/shared/tag-transcript";
-import { hasTrustedHardWall } from "@magic-context/core/shared/window-geometry";
+import { hasTrustedAbsoluteWall } from "@magic-context/core/shared/window-geometry";
 
 import {
 	clearAutoSearchForPiSession,
@@ -2773,30 +2773,32 @@ export function registerPiContextHandler(
 			let provenInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
 			if (
 				baseWindowGeometry &&
-				hasTrustedHardWall(baseWindowGeometry) &&
-				provenInputTokens > baseWindowGeometry.usableHard
+				hasTrustedAbsoluteWall(baseWindowGeometry) &&
+				provenInputTokens > baseWindowGeometry.derivation.absoluteWall
 			) {
 				sessionLog(
 					sessionId,
-					`transform: persisted proven floor ${provenInputTokens} exceeds trusted usable hard ${baseWindowGeometry.usableHard}; cleared and re-resolved to ${baseWindowGeometry.usableSoft}`,
+					`transform: persisted proven floor ${provenInputTokens} exceeds trusted absolute wall ${baseWindowGeometry.derivation.absoluteWall}; cleared and re-resolved to ${baseWindowGeometry.usableSoft}`,
 				);
 				updateSessionMeta(options.db, sessionId, {
 					observedSafeInputTokens: 0,
 					cacheAlertSent: false,
 					lastUsageContextLimit: baseWindowGeometry.usableSoft,
 					lastInputTokens:
-						sessionMeta.lastInputTokens > baseWindowGeometry.usableHard
+						sessionMeta.lastInputTokens >
+						baseWindowGeometry.derivation.absoluteWall
 							? 0
 							: sessionMeta.lastInputTokens,
 					lastContextPercentage:
-						sessionMeta.lastInputTokens > baseWindowGeometry.usableHard
+						sessionMeta.lastInputTokens >
+						baseWindowGeometry.derivation.absoluteWall
 							? 0
 							: sessionMeta.lastContextPercentage,
 				});
 				provenInputTokens = 0;
 				sessionMeta.observedSafeInputTokens = 0;
 				sessionMeta.cacheAlertSent = false;
-				if (usageInputTokens > baseWindowGeometry.usableHard) {
+				if (usageInputTokens > baseWindowGeometry.derivation.absoluteWall) {
 					usageInputTokens = 0;
 					usagePercentage = 0;
 					usedPersistedUsage = false;

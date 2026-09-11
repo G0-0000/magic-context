@@ -46,7 +46,7 @@ import {
     refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
-import { hasTrustedHardWall } from "../../shared/window-geometry";
+import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -650,19 +650,20 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         info.providerID,
                         info.modelID,
                     );
-                    const trustedUsableHard =
-                        baseGeometry && hasTrustedHardWall(baseGeometry)
-                            ? baseGeometry.usableHard
+                    const trustedAbsoluteWall =
+                        baseGeometry && hasTrustedAbsoluteWall(baseGeometry)
+                            ? baseGeometry.derivation.absoluteWall
                             : undefined;
                     const usageReadingValid =
-                        trustedUsableHard === undefined || totalInputTokens <= trustedUsableHard;
-                    if (!usageReadingValid && trustedUsableHard !== undefined) {
+                        trustedAbsoluteWall === undefined ||
+                        totalInputTokens <= trustedAbsoluteWall;
+                    if (!usageReadingValid && trustedAbsoluteWall !== undefined) {
                         const refusalKey = `${info.sessionID}|${modelKey ?? "unknown"}`;
                         if (!usageRefusalLogSeen.has(refusalKey)) {
                             usageRefusalLogSeen.add(refusalKey);
                             sessionLog(
                                 info.sessionID,
-                                `usage accounting refused reading ${totalInputTokens} above trusted usable hard ${trustedUsableHard}; sample ignored`,
+                                `usage accounting refused reading ${totalInputTokens} above trusted absolute wall ${trustedAbsoluteWall}; sample ignored`,
                             );
                         }
                     }

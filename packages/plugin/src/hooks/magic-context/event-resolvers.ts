@@ -12,7 +12,7 @@ import {
     isSaneLimit,
 } from "../../shared/models-dev-cache";
 import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
-import { applyProvenInputFloor, hasTrustedHardWall } from "../../shared/window-geometry";
+import { applyProvenInputFloor, hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 200_000;
@@ -60,7 +60,7 @@ function applySessionProvenFloor(
     const result = applyProvenInputFloor(geometry, provenLimit);
     if (result.refused && ctx?.db && ctx.sessionID) {
         const impossiblePressure = persisted?.usage.inputTokens
-            ? persisted.usage.inputTokens > result.refused.usableHard
+            ? persisted.usage.inputTokens > result.refused.absoluteWall
             : false;
         updateSessionMeta(ctx.db, ctx.sessionID, {
             observedSafeInputTokens: 0,
@@ -71,7 +71,7 @@ function applySessionProvenFloor(
         });
         sessionLog(
             ctx.sessionID,
-            `persisted proven floor ${result.refused.reading} exceeds trusted usable hard ${result.refused.usableHard}; cleared and re-resolved to ${geometry.usableSoft}`,
+            `persisted proven floor ${result.refused.reading} exceeds trusted absolute wall ${result.refused.absoluteWall}; cleared and re-resolved to ${geometry.usableSoft}`,
         );
     }
     return result.geometry;
@@ -156,7 +156,11 @@ export function resolveContextLimit(
     if (!isSaneLimit(provenLimit)) return resolved;
     const geometry = resolveContextWindowGeometry(providerID, modelID, ctx);
     if (ctx?.reservation !== "none" && geometry) return geometry.usableSoft;
-    if (geometry && hasTrustedHardWall(geometry) && provenLimit > geometry.usableHard) {
+    if (
+        geometry &&
+        hasTrustedAbsoluteWall(geometry) &&
+        provenLimit > geometry.derivation.absoluteWall
+    ) {
         return resolved;
     }
     return Math.max(resolved, provenLimit);

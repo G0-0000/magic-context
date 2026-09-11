@@ -62,7 +62,7 @@ describe("resolvePiUsableContextLimit", () => {
 		).toBe(90_000);
 	});
 
-	test("bounds successful-request proof by an observed runtime hard wall", () => {
+	test("bounds successful-request proof by an observed absolute wall", () => {
 		const model = {
 			provider: "openai-codex",
 			id: "gpt-5.6-sol",

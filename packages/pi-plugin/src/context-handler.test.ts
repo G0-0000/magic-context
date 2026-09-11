@@ -2342,7 +2342,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("self-heals a persisted proof above an observed hard wall", async () => {
+	it("self-heals a persisted proof above an observed absolute wall", async () => {
 		const db = createTestDb();
 		const sessionId = "019de471-4fdc-762d-9286-624dfad0b5fe";
 		try {

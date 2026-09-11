@@ -416,9 +416,10 @@ describe("Rust mode authority adapter", () => {
 
         expect(geometry).toEqual({
             usable_soft: 255_616,
-            usable_hard: 400_000,
+            usable_hard: 368_000,
+            absolute_wall: 400_000,
             derivation:
-                "s1-shared/context-output/context=272000/output=16384/mode=shared_upfront/usable-hard=400000",
+                "s1-shared/context-output/context=272000/output=16384/mode=shared_upfront/usable-hard=368000",
         });
     });
 
@@ -432,11 +433,14 @@ describe("Rust mode authority adapter", () => {
                 reserve: 40_000,
                 reserveSource: "output_catalog",
                 geometry: "separate",
+                windowSource: "provider",
+                absoluteWall: 168_000,
             },
         });
         expect(geometry).toEqual({
             usable_soft: 128_000,
             usable_hard: 168_000,
+            absolute_wall: 168_000,
             derivation: "s1-pre-carve/input=128000",
         });
         expect(

@@ -109,7 +109,7 @@ import {
 import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import {
-	hasTrustedHardWall,
+	hasTrustedAbsoluteWall,
 	reloadWindowOverlay,
 } from "@magic-context/core/shared/window-geometry";
 
@@ -568,14 +568,14 @@ const piUsageRefusalLogSeen = new Set<string>();
 function logPiUsageRefusalOnce(
 	sessionId: string,
 	reading: number,
-	usableHard: number,
+	absoluteWall: number,
 	reason: "current reading" | "persisted floor",
 ): void {
 	const key = `${sessionId}|${reason}`;
 	if (piUsageRefusalLogSeen.has(key)) return;
 	piUsageRefusalLogSeen.add(key);
 	info(
-		`message_end: session=${sessionId} refused ${reason} ${reading} above trusted usable hard ${usableHard}; accounting sample ignored`,
+		`message_end: session=${sessionId} refused ${reason} ${reading} above trusted absolute wall ${absoluteWall}; accounting sample ignored`,
 	);
 }
 
@@ -637,25 +637,25 @@ export async function persistPiPressureFromMessageEnd(args: {
 		rawContextWindowSource: args.piContextWindowSource,
 		model: activeModel,
 	});
-	const trustedUsableHard =
-		reportedGeometry && hasTrustedHardWall(reportedGeometry)
-			? reportedGeometry.usableHard
+	const trustedAbsoluteWall =
+		reportedGeometry && hasTrustedAbsoluteWall(reportedGeometry)
+			? reportedGeometry.derivation.absoluteWall
 			: undefined;
 	const unboundedPressure = computePiPressure(usage, args.piContextWindow);
 	const rawPressure = computePiPressure(
 		usage,
 		args.piContextWindow,
-		trustedUsableHard,
+		trustedAbsoluteWall,
 	);
 	if (
 		unboundedPressure &&
-		trustedUsableHard !== undefined &&
-		unboundedPressure.inputTokens > trustedUsableHard
+		trustedAbsoluteWall !== undefined &&
+		unboundedPressure.inputTokens > trustedAbsoluteWall
 	) {
 		logPiUsageRefusalOnce(
 			args.sessionId,
 			unboundedPressure.inputTokens,
-			trustedUsableHard,
+			trustedAbsoluteWall,
 			"current reading",
 		);
 	}
@@ -698,20 +698,20 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}> = { lastResponseTime: Date.now() };
 
 	if (
-		trustedUsableHard !== undefined &&
-		observedSafeInputTokens > trustedUsableHard
+		trustedAbsoluteWall !== undefined &&
+		observedSafeInputTokens > trustedAbsoluteWall
 	) {
 		logPiUsageRefusalOnce(
 			args.sessionId,
 			observedSafeInputTokens,
-			trustedUsableHard,
+			trustedAbsoluteWall,
 			"persisted floor",
 		);
 		observedSafeInputTokens = 0;
 		updates.observedSafeInputTokens = 0;
 		updates.cacheAlertSent = false;
 		updates.lastUsageContextLimit = reportedGeometry?.usableSoft ?? 0;
-		if (meta.lastInputTokens > trustedUsableHard) {
+		if (meta.lastInputTokens > trustedAbsoluteWall) {
 			updates.lastInputTokens = 0;
 			updates.lastContextPercentage = 0;
 		}
@@ -729,7 +729,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const pressure = computePiPressure(
 		usage,
 		effectiveContextLimit,
-		trustedUsableHard,
+		trustedAbsoluteWall,
 	);
 
 	if (pressure) {
@@ -772,7 +772,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	} else if (
 		usage === null &&
 		typeof args.piTokens === "number" &&
-		(trustedUsableHard === undefined || args.piTokens <= trustedUsableHard)
+		(trustedAbsoluteWall === undefined || args.piTokens <= trustedAbsoluteWall)
 	) {
 		updates.lastInputTokens = args.piTokens;
 		if (effectiveContextLimit > 0) {

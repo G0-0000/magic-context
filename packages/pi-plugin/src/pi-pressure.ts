@@ -86,7 +86,7 @@ export function extractAssistantUsage(
 export function computePiPressure(
 	usage: PiAssistantUsage | null,
 	contextLimit: number,
-	usableHard?: number,
+	absoluteWall?: number,
 ): PiPressure | null {
 	if (!usage) return null;
 	const input = usage.input ?? 0;
@@ -106,10 +106,10 @@ export function computePiPressure(
 			: componentPromptTokens;
 	if (inputTokens <= 0 || !Number.isFinite(inputTokens)) return null;
 	if (
-		typeof usableHard === "number" &&
-		Number.isFinite(usableHard) &&
-		usableHard > 0 &&
-		inputTokens > usableHard
+		typeof absoluteWall === "number" &&
+		Number.isFinite(absoluteWall) &&
+		absoluteWall > 0 &&
+		inputTokens > absoluteWall
 	) {
 		return null;
 	}

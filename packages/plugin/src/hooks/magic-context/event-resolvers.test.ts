@@ -97,7 +97,7 @@ describe("event-resolvers", () => {
             }
         });
 
-        it("clears a persisted floor above an overlay-backed hard wall", async () => {
+        it("clears a persisted floor above an overlay-backed absolute wall", async () => {
             const db = new Database(":memory:");
             initializeDatabase(db);
             runMigrations(db);
@@ -162,7 +162,8 @@ describe("event-resolvers", () => {
                     sessionID: sessionId,
                 });
                 expect(geometry?.usableSoft).toBe(240_000);
-                expect(geometry?.usableHard).toBe(272_000);
+                expect(geometry?.usableHard).toBe(240_000);
+                expect(geometry?.derivation.absoluteWall).toBe(272_000);
                 const meta = db
                     .prepare(
                         "SELECT observed_safe_input_tokens, last_usage_context_limit, last_input_tokens, last_context_percentage, cache_alert_sent FROM session_meta WHERE session_id = ?",
