@@ -5,12 +5,21 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	decodePiContentDecision,
+	encodePiContentDecision,
+	freezePiContentDecision,
+	getPiContentDecisions,
+	PI_CONTENT_DECISION_LIMIT,
+} from "@magic-context/core/features/magic-context/pi-content-decisions";
+import {
 	type CloneSessionStateFilter,
+	clearSession,
 	copySessionStateForClone,
 	getOrCreateSessionMeta,
 	getSourceContents,
 	getTagsBySession,
 } from "@magic-context/core/features/magic-context/storage";
+import { thinkingBindingRecoveryFrozenId } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import type { Database } from "@magic-context/core/shared/sqlite";
@@ -626,6 +635,96 @@ describe("Pi clone state inheritance", () => {
 			cleared_reasoning_through_tag: 4,
 			tool_reclaim_watermark: 4,
 		});
+	});
+
+	it("copies only retained Pi content decisions into a clone", () => {
+		const database = db();
+		seedMeta(database, {
+			merged_reasoning_stripped_ids: JSON.stringify([
+				encodePiContentDecision("reminder-strip", "u1:p0"),
+				encodePiContentDecision("seam-temporal-strip", "u1"),
+				encodePiContentDecision("reminder-strip", "u3:p0"),
+			]),
+		});
+		copyWithEntries(database, [user("u1")]);
+		expect([...getPiContentDecisions(database, "clone")]).toEqual([
+			encodePiContentDecision("reminder-strip", "u1:p0"),
+			encodePiContentDecision("seam-temporal-strip", "u1"),
+		]);
+	});
+
+	it("retains nonzero text parts during pruning and remaps their message roots on clone", () => {
+		const database = db();
+		seedTag(database, { tagNumber: 1, messageId: "u1:p1" });
+		seedMeta(database, {
+			merged_reasoning_stripped_ids: JSON.stringify([
+				encodePiContentDecision("seam-temporal-strip", "u1"),
+			]),
+		});
+		expect(
+			freezePiContentDecision(database, "source", "reminder-strip", "u1:p1"),
+		).toBe(true);
+		expect(getPiContentDecisions(database, "source").size).toBe(2);
+		copySessionStateForClone(database, "source", "clone", {
+			...__test.createCloneFilter([user("u1")]),
+			mapMessageId: (id) => `mapped-${id}`,
+		});
+		expect([...getPiContentDecisions(database, "clone")]).toEqual([
+			encodePiContentDecision("seam-temporal-strip", "mapped-u1"),
+			encodePiContentDecision("reminder-strip", "mapped-u1:p1"),
+		]);
+	});
+
+	it("preserves legacy replay entries while bounding content decisions and pruning deleted messages", () => {
+		const database = db();
+		const legacy = [
+			"bare-id",
+			thinkingBindingRecoveryFrozenId("entry"),
+			'__merged_reasoning_parts_v1__:["assistant",["part-id",2]]',
+		];
+		const entries = [...legacy];
+		for (let i = 0; i < PI_CONTENT_DECISION_LIMIT; i++) {
+			seedTag(database, { tagNumber: i + 1, messageId: `u${i}:p0` });
+			entries.push(encodePiContentDecision("reminder-strip", `u${i}:p0`));
+		}
+		seedMeta(database, {
+			merged_reasoning_stripped_ids: JSON.stringify(entries),
+		});
+		expect(legacy.map(decodePiContentDecision)).toEqual([null, null, null]);
+		expect(
+			freezePiContentDecision(database, "source", "reminder-strip", "new:p0"),
+		).toBe(false);
+		database
+			.prepare("DELETE FROM tags WHERE session_id = ? AND message_id = ?")
+			.run("source", "u0:p0");
+		expect(
+			freezePiContentDecision(database, "source", "reminder-strip", "new:p0"),
+		).toBe(true);
+		const row = database
+			.prepare(
+				"SELECT merged_reasoning_stripped_ids AS value FROM session_meta WHERE session_id = ?",
+			)
+			.get("source") as { value: string };
+		expect(JSON.parse(row.value).slice(0, 3)).toEqual(legacy);
+		expect(getPiContentDecisions(database, "source").size).toBe(
+			PI_CONTENT_DECISION_LIMIT,
+		);
+		expect(
+			getPiContentDecisions(database, "source").has(
+				encodePiContentDecision("reminder-strip", "u0:p0"),
+			),
+		).toBe(false);
+	});
+
+	it("clears Pi content decisions with session deletion", () => {
+		const database = db();
+		seedMeta(database, {
+			merged_reasoning_stripped_ids: JSON.stringify([
+				encodePiContentDecision("reminder-strip", "u:p0"),
+			]),
+		});
+		clearSession(database, "source");
+		expect(getPiContentDecisions(database, "source").size).toBe(0);
 	});
 
 	it("inherits frozen ids that remain on the clone path", () => {

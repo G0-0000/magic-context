@@ -26,18 +26,17 @@
  * force-materialization gating as OpenCode (gating is the caller's
  * responsibility — this function unconditionally executes when called).
  *
- * Cache safety: every mutation persists to the DB (`tags.status`,
- * `tags.drop_mode`, `source_contents`, `tags.caveman_depth`). Subsequent
- * defer passes read these durable signals via `applyFlushedStatuses` +
- * `replayCavemanCompression` so the visible message bytes stay stable
- * across passes.
+ * Cache safety: mutations persist as tag drop/compression state or namespaced
+ * Pi content decisions in session_meta. The context handler replays reminder
+ * strips after caveman restores its source, including on defer passes. Original
+ * source_contents remain intact for expansion.
  */
 
+import { freezePiContentDecision } from "@magic-context/core/features/magic-context/pi-content-decisions";
 import {
 	type ContextDatabase,
 	getActiveTagsBySession,
 	getMaxTagNumberBySession,
-	replaceSourceContent,
 	updateTagDropMode,
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
@@ -485,17 +484,21 @@ export function applyPiHeuristicCleanup(
 							? target.setContent(`[dropped §${tag.tagNumber}§]`)
 							: false;
 					if (dropResult === "removed" || dropResult === "absent") {
-						replaceSourceContent(db, sessionId, tag.tagNumber, "");
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						if (dropResult === "removed" || didReplace) {
 							droppedInjections++;
 						}
 					}
 				} else {
-					const didSet = target.setContent(stripped);
-					if (didSet) {
-						replaceSourceContent(db, sessionId, tag.tagNumber, strippedSource);
-						droppedInjections++;
+					if (
+						freezePiContentDecision(
+							db,
+							sessionId,
+							"reminder-strip",
+							tag.messageId,
+						)
+					) {
+						if (target.setContent(stripped)) droppedInjections++;
 					}
 				}
 			}

@@ -526,6 +526,7 @@ function lastBreakpointIndex(segs: Segment[]): number {
 }
 
 function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
+    let previousShortRead = false;
     return snaps.map((current, index) => {
         if (index === 0) return { current, divergenceIndex: -1, verdict: "BASE" };
         const previous = snaps[index - 1];
@@ -538,6 +539,7 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
                 : divergenceIndex !== -1 && divergenceIndex <= lastBreakpointIndex(current.segments);
         const byteVerdict: ByteVerdict = byteBust ? "BUST" : "STABLE";
         if (!current.usage || !previous.usage) {
+            previousShortRead = false;
             return {
                 current,
                 previous,
@@ -557,7 +559,11 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
             current.provider === "openai"
                 ? current.usage.cacheRead
                 : current.usage.cacheRead + current.usage.input;
-        const shortRead = comparableRead < meterFloor;
+        // A rewrite cannot use the prior rewrite's direct input as forgiveness
+        // while cacheRead remains at the same floor.
+        const rebust = previousShortRead && current.usage.cacheRead <= previous.usage.cacheRead;
+        const shortRead = rebust || comparableRead < meterFloor;
+        previousShortRead = shortRead;
         const verdict: MeterVerdict = shortRead
             ? byteVerdict === "BUST"
                 ? "BUST"
@@ -583,7 +589,7 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
             shortRead,
             rewrittenTokens:
                 verdict === "BUST" || verdict === "LATENCY"
-                    ? prevTotal - current.usage.cacheRead
+                    ? rebust ? current.usage.input : prevTotal - current.usage.cacheRead
                     : undefined,
         };
     });

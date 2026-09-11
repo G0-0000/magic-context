@@ -42,7 +42,6 @@ import {
 	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
-
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -50,6 +49,11 @@ import {
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
+import {
+	encodePiContentDecision,
+	freezePiContentDecision,
+	getPiContentDecisions,
+} from "@magic-context/core/features/magic-context/pi-content-decisions";
 import {
 	computeProtectionWindow,
 	readEpochFloorSnapshot,
@@ -166,6 +170,7 @@ import {
 	buildSupersessionReclaimOps,
 	recentSupersessionOwnerMessageIds,
 } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
+import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import {
 	advanceToolReclaimWatermarkToCurrentMax,
@@ -5825,6 +5830,23 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 
+	// Caveman renders from pristine source, so frozen reminder cleanup must run
+	// after both its discovery and replay paths, including when cleanup is disabled.
+	const contentDecisions = getPiContentDecisions(args.db, args.sessionId);
+	for (const tag of activeTags) {
+		if (
+			!contentDecisions.has(
+				encodePiContentDecision("reminder-strip", tag.messageId),
+			)
+		)
+			continue;
+		const target = targets.get(tag.tagNumber);
+		const content = target?.getContent?.();
+		if (!content) continue;
+		const stripped = stripSystemInjection(content);
+		if (stripped !== null) target?.setContent(stripped);
+	}
+
 	// 5. Commit tagging mutations back to Pi messages BEFORE injecting
 	// the history block. Otherwise the injection write target is the
 	// pre-tagged content. Pi's transcript adapter writes mutations
@@ -5941,11 +5963,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// marker-applying pass matches the next pass, where trimming happens first.
 			if (
 				args.temporalAwareness &&
+				isCacheBustingPass &&
 				injectionResult.skippedVisibleMessages > 0
 			) {
 				const firstRetainedMessage =
 					args.messages[injectionResult.syntheticLeadingCount];
-				stripPiLeadingTemporalMarker(firstRetainedMessage);
+				const id =
+					firstRetainedMessage && typeof firstRetainedMessage === "object"
+						? postCommitStableIdByRef.get(firstRetainedMessage)
+						: undefined;
+				if (
+					id &&
+					firstRetainedMessage !== null &&
+					typeof firstRetainedMessage === "object" &&
+					stripPiLeadingTemporalMarker({ ...firstRetainedMessage }) &&
+					freezePiContentDecision(
+						args.db,
+						args.sessionId,
+						"seam-temporal-strip",
+						id,
+					)
+				) {
+					contentDecisions.add(
+						encodePiContentDecision("seam-temporal-strip", id),
+					);
+				}
+			}
+			// A prior trim's marker removal remains authoritative after caveman
+			// restores pre-trim source, even when this pass trims nothing late.
+			for (const message of args.messages) {
+				if (!message || typeof message !== "object") continue;
+				const id = postCommitStableIdByRef.get(message);
+				if (
+					id &&
+					contentDecisions.has(
+						encodePiContentDecision("seam-temporal-strip", id),
+					)
+				) {
+					stripPiLeadingTemporalMarker(message);
+				}
 			}
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
 			// only drain `historyRefreshSessions` if the rebuild

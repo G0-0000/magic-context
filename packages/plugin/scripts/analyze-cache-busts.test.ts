@@ -103,6 +103,19 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("does not forgive consecutive prefix rewrites at the same read floor", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-rebust-"));
+        tempDirs.push(dir);
+        const session = "ses_rebust";
+        const readings = [[254592, 1054], [16896, 173076], [16896, 173524], [190336, 493]];
+        readings.forEach(([cacheRead, input], index) => {
+            writeDump(dir, `2026-09-11T07-56-0${index}-000Z-${session}`, `2026-09-11T07:56:0${index}Z`, session,
+                bodyWithBreakpointMessage(String(index)), responseUsage({input_tokens: input!, cache_read_input_tokens: cacheRead!, cache_creation_input_tokens: 0}));
+        });
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session));
+        expect(rows.map(row => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
+        expect(rows[2]!.rewrittenTokens).toBe(173524);
+    });
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-body-bytes-"));
         tempDirs.push(dir);

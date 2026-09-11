@@ -1,5 +1,6 @@
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
+import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 
 export interface CloneCompartmentRow {
     sequence: number;
@@ -90,12 +91,35 @@ type RawSessionMetaRow = {
     stripped_placeholder_ids: string | null;
     stale_reduce_stripped_ids: string | null;
     processed_image_stripped_ids: string | null;
+    merged_reasoning_stripped_ids: string | null;
     pending_pi_compaction_marker_state: string | null;
     last_todo_state: string | null;
     todo_synthetic_call_id: string | null;
     todo_synthetic_anchor_message_id: string | null;
     todo_synthetic_state_json: string | null;
 };
+
+function clonePiContentDecisions(
+    raw: string | null,
+    filter: CloneSessionStateFilter,
+): string | null {
+    if (!raw) return null;
+    const entries: unknown = JSON.parse(raw);
+    if (!Array.isArray(entries)) return null;
+    const copied: string[] = [];
+    for (const entry of entries) {
+        if (typeof entry !== "string") continue;
+        const decision = decodePiContentDecision(entry);
+        if (!decision) continue;
+        const [kind, id] = decision;
+        const root = kind === "reminder-strip" ? id.replace(/:p\d+$/, "") : id;
+        if (!filter.includeMessageId(root)) continue;
+        copied.push(
+            encodePiContentDecision(kind, `${mapMessageId(filter, root)}${id.slice(root.length)}`),
+        );
+    }
+    return copied.length ? JSON.stringify(copied) : null;
+}
 
 function runImmediate<T>(db: Database, body: () => T): T {
     db.exec("BEGIN IMMEDIATE");
@@ -432,7 +456,7 @@ export function copySessionStateForClone(
             .prepare(
                 `SELECT cleared_reasoning_through_tag, tool_reclaim_watermark,
                         pi_stable_id_scheme, stripped_placeholder_ids,
-                        stale_reduce_stripped_ids, processed_image_stripped_ids,
+                        stale_reduce_stripped_ids, processed_image_stripped_ids, merged_reasoning_stripped_ids,
                         pending_pi_compaction_marker_state, last_todo_state,
                         todo_synthetic_call_id, todo_synthetic_anchor_message_id,
                         todo_synthetic_state_json
@@ -451,11 +475,11 @@ export function copySessionStateForClone(
             `INSERT INTO session_meta
                 (session_id, harness, counter, cleared_reasoning_through_tag,
                  tool_reclaim_watermark, pi_stable_id_scheme, stripped_placeholder_ids,
-                 stale_reduce_stripped_ids, processed_image_stripped_ids,
+                 stale_reduce_stripped_ids, processed_image_stripped_ids, merged_reasoning_stripped_ids,
                  pending_pi_compaction_marker_state, last_todo_state,
                  todo_synthetic_call_id, todo_synthetic_anchor_message_id,
                  todo_synthetic_state_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(session_id) DO UPDATE SET
                 harness = excluded.harness,
                 counter = excluded.counter,
@@ -464,7 +488,8 @@ export function copySessionStateForClone(
                 pi_stable_id_scheme = excluded.pi_stable_id_scheme,
                 stripped_placeholder_ids = excluded.stripped_placeholder_ids,
                 stale_reduce_stripped_ids = excluded.stale_reduce_stripped_ids,
-                processed_image_stripped_ids = excluded.processed_image_stripped_ids,
+                 processed_image_stripped_ids = excluded.processed_image_stripped_ids,
+                 merged_reasoning_stripped_ids = excluded.merged_reasoning_stripped_ids,
                 pending_pi_compaction_marker_state = excluded.pending_pi_compaction_marker_state,
                 last_todo_state = excluded.last_todo_state,
                 todo_synthetic_call_id = excluded.todo_synthetic_call_id,
@@ -485,6 +510,7 @@ export function copySessionStateForClone(
             filterIdBlob(meta?.stripped_placeholder_ids ?? null, filter),
             filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, filter),
             filterIdBlob(meta?.processed_image_stripped_ids ?? null, filter),
+            clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, filter),
             pendingMarker,
             migrateTodo ? (meta?.last_todo_state ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_call_id ?? "") : "",

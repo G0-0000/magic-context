@@ -205,6 +205,48 @@ describe("Pi cache-bust analyzer body attribution", () => {
 });
 
 describe("Pi cache-bust analyzer meter", () => {
+	test("flags session A's consecutive rewrite instead of forgiving the previous bust input", () => {
+		const readings = [
+			[254592, 1054],
+			[16896, 173076],
+			[16896, 173524],
+			[190336, 493],
+		];
+		const passes = readings.map(([cacheRead, input], index) => ({
+			ledger: {
+				version: 1 as const,
+				session_id: "A",
+				pass_ts: new Date(index * 1000).toISOString(),
+				sequence: index,
+				message_count: 2,
+				sha256: String(index),
+				previous_sha256: null,
+				first_divergence_message_index: 0,
+				block_vector_start: 0,
+				block_vectors: ["user:text(1)"],
+			},
+			usage: {
+				timestamp: index * 1000,
+				createdAt: new Date(index * 1000).toISOString(),
+				line: index,
+				ordinal: index,
+				messageId: String(index),
+				input,
+				cacheRead,
+				cacheWrite: 0,
+				total: input + cacheRead,
+			},
+			intervening: [],
+		}));
+		const rows = __test.analyzeJoinedPasses(passes);
+		expect(rows.map((row) => row.verdict)).toEqual([
+			"BASE",
+			"BUST",
+			"BUST",
+			"STABLE",
+		]);
+		expect(rows[2].rewrittenTokens).toBe(173524);
+	});
 	test("detector control reports a known post-compaction collapse as BUST at the seam", () => {
 		const sessionRoot = temporaryDirectory("pi-cache-positive-session-");
 		const storageDir = temporaryDirectory("pi-cache-positive-ledger-");

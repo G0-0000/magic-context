@@ -369,6 +369,7 @@ function digestAttribution(previous: JoinedPass, current: JoinedPass): string {
 }
 
 function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
+	let previousBust = false;
 	return joined.map((current, index) => {
 		if (index === 0) {
 			return { current, verdict: "BASE", attribution: "first joined pass" };
@@ -377,7 +378,12 @@ function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
 		const prevTotal = previous.usage.total;
 		const meterFloor = prevTotal - Math.max(64, previous.usage.input);
 		const comparableRead = current.usage.cacheRead + current.usage.input;
-		const bust = comparableRead < meterFloor;
+		// A bust's large direct input cannot forgive another rewrite at the
+		// same cache floor. Cache reads must recover before forgiveness resumes.
+		const rebust =
+			previousBust && current.usage.cacheRead <= previous.usage.cacheRead;
+		const bust = rebust || comparableRead < meterFloor;
+		previousBust = bust;
 		return {
 			current,
 			previous,
@@ -385,7 +391,11 @@ function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
 			prevTotal,
 			meterFloor,
 			comparableRead,
-			rewrittenTokens: bust ? prevTotal - current.usage.cacheRead : undefined,
+			rewrittenTokens: rebust
+				? current.usage.input
+				: bust
+					? prevTotal - current.usage.cacheRead
+					: undefined,
 			attribution: digestAttribution(previous, current),
 		};
 	});
@@ -495,7 +505,7 @@ async function main(): Promise<void> {
 	console.log(`Digests: ${ledgers.length}`);
 	console.log("");
 	console.log(
-		"Meter rule (Pi host): BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). The meter decides the verdict; normalized pi-llm-debugging request bodies attribute changed messages.",
+		"Meter rule (Pi host): BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). After a bust, a read that does not grow past the prior read is another BUST (rewritten≈current input). The meter decides the verdict; normalized pi-llm-debugging request bodies attribute changed messages.",
 	);
 	console.log(
 		"time(UTC)            | verdict | meter                                                                  | first divergence",
