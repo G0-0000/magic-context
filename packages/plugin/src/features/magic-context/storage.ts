@@ -239,8 +239,11 @@ export { bumpSessionFactsVersion } from "./storage-meta-shared";
 export {
     addNote,
     type ConditionCompileStatus,
+    type DismissNoteOutcome,
+    type DismissNoteResult,
     deleteNote,
     dismissNote,
+    dismissNotes,
     getNotes,
     getPendingSmartNotes,
     getReadySmartNotes,

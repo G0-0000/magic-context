@@ -458,6 +458,59 @@ describe("createCtxNoteTools", () => {
         expect(readAllResult).toContain("First note");
     });
 
+    it("dismisses note_ids in one transaction and reports each outcome", async () => {
+        await tools.ctx_note.execute(
+            { action: "write", content: "Owned note one" },
+            toolContext("ses-a"),
+        );
+        await tools.ctx_note.execute(
+            { action: "write", content: "Foreign note" },
+            toolContext("ses-b"),
+        );
+        await tools.ctx_note.execute(
+            { action: "write", content: "Owned note two" },
+            toolContext("ses-a"),
+        );
+        await tools.ctx_note.execute({ action: "dismiss", note_id: 3 }, toolContext("ses-a"));
+
+        const result = await tools.ctx_note.execute(
+            { action: "dismiss", note_ids: [1, 2, 3, 999] },
+            toolContext("ses-a"),
+        );
+
+        expect(result).toBe(
+            "Dismissed 1 of 4 notes.\n" +
+                "- Note #1: dismissed\n" +
+                "- Note #2: not_owned\n" +
+                "- Note #3: already_dismissed\n" +
+                "- Note #999: not_found",
+        );
+        expect(db.prepare("SELECT id, status FROM notes ORDER BY id").all()).toEqual([
+            { id: 1, status: "dismissed" },
+            { id: 2, status: "active" },
+            { id: 3, status: "dismissed" },
+        ]);
+    });
+
+    it("rejects note_ids outside dismiss and rejects note_id conflicts", async () => {
+        const outsideDismiss = await tools.ctx_note.execute(
+            { action: "update", note_ids: [1], content: "not allowed" },
+            toolContext(),
+        );
+        const conflict = await tools.ctx_note.execute(
+            { action: "dismiss", note_id: 1, note_ids: [1] },
+            toolContext(),
+        );
+        const nonDismissConflict = await tools.ctx_note.execute(
+            { action: "update", note_id: 1, note_ids: [1] },
+            toolContext(),
+        );
+
+        expect(outsideDismiss).toContain("'note_ids' is only valid");
+        expect(conflict).toContain("'note_id' and 'note_ids'");
+        expect(nonDismissConflict).toContain("'note_id' and 'note_ids'");
+    });
+
     it("rejects dismissing another session's session note", async () => {
         await tools.ctx_note.execute(
             { action: "write", content: "Other session note" },

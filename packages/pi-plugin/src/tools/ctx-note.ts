@@ -4,7 +4,7 @@
  * Action surface mirrors OpenCode's `packages/plugin/src/tools/ctx-note/tools.ts`:
  *   - write: append a session note OR a smart note (when surface_condition is set)
  *   - read: show active session notes + ready smart notes by default; supports `filter`
- *   - dismiss: dismiss a note by note_id
+ *   - dismiss: dismiss one note by note_id or 1–50 notes by note_ids
  *   - update: update a note's content and/or surface_condition by note_id
  *
  * Smart notes (with `surface_condition`) are project-scoped and evaluated
@@ -34,6 +34,7 @@ import type {
 import {
 	addNote,
 	dismissNote,
+	dismissNotes,
 	getNotes,
 	type Note,
 	type NoteStatus,
@@ -84,6 +85,17 @@ const ParamsSchema = Type.Object(
 			Type.Number({
 				description: "Note ID (required for 'dismiss' and 'update' actions).",
 			}),
+		),
+		note_ids: Type.Optional(
+			Type.Array(
+				Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+				{
+					minItems: 1,
+					maxItems: 50,
+					description:
+						"One to fifty note ids for 'dismiss' only; do not combine with note_id.",
+				},
+			),
 		),
 		filter: Type.Optional(
 			Type.Union(
@@ -162,7 +174,32 @@ function formatNoteLine(note: Note): string {
 }
 
 const DISMISS_FOOTER =
-	'\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
+	'\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N) or note_ids=[N,...]';
+
+function formatDismissResults(
+	results: Array<{ noteId: number; outcome: string }>,
+): string {
+	const dismissedCount = results.filter(
+		(result) => result.outcome === "dismissed",
+	).length;
+	return `Dismissed ${dismissedCount} of ${results.length} notes.\n${results
+		.map((result) => `- Note #${result.noteId}: ${result.outcome}`)
+		.join("\n")}`;
+}
+
+function parseDismissNoteIds(value: unknown): number[] | string {
+	if (
+		!Array.isArray(value) ||
+		value.length < 1 ||
+		value.length > 50 ||
+		value.some(
+			(id) => typeof id !== "number" || !Number.isInteger(id) || id <= 0,
+		)
+	) {
+		return "Error: 'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.";
+	}
+	return value;
+}
 
 /** Default page size for read. Long-running sessions accumulate hundreds of
  *  notes; read pages newest-first and points the caller at older pages.
@@ -219,6 +256,7 @@ export function createCtxNoteTool(
 				content: "string",
 				surface_condition: "string",
 				note_id: "number",
+				note_ids: { type: "array", items: "number", maxItems: 50 },
 				filter: { type: "enum", values: FILTER_VALUES },
 				limit: "number",
 				offset: "number",
@@ -231,6 +269,21 @@ export function createCtxNoteTool(
 			// check would mis-infer `write` and then reject the empty content.
 			const action =
 				params.action ?? (params.content?.trim() ? "write" : "read");
+			const hasNoteId = params.note_id !== undefined;
+			const hasNoteIds = params.note_ids !== undefined;
+			if (hasNoteId && hasNoteIds) {
+				return err(
+					"Error: 'note_id' and 'note_ids' cannot be used together; provide one or the other.",
+				);
+			}
+			if (hasNoteIds && action !== "dismiss") {
+				return err("Error: 'note_ids' is only valid when action is 'dismiss'.");
+			}
+			const dismissNoteIds =
+				action === "dismiss" && hasNoteIds
+					? parseDismissNoteIds(params.note_ids)
+					: undefined;
+			if (typeof dismissNoteIds === "string") return err(dismissNoteIds);
 
 			if (action === "write") {
 				const content = params.content?.trim();
@@ -290,14 +343,24 @@ export function createCtxNoteTool(
 			}
 
 			if (action === "dismiss") {
-				if (typeof params.note_id !== "number") {
-					return err("Error: 'note_id' is required when action is 'dismiss'.");
-				}
 				const projectIdentity = resolveProject(ctx.cwd);
 				if (!projectIdentity) {
 					return err(
 						"Error: Could not resolve project identity for note dismiss.",
 					);
+				}
+				if (dismissNoteIds) {
+					return ok(
+						formatDismissResults(
+							dismissNotes(deps.db, dismissNoteIds, {
+								projectPath: projectIdentity,
+								sessionId,
+							}),
+						),
+					);
+				}
+				if (typeof params.note_id !== "number") {
+					return err("Error: 'note_id' is required when action is 'dismiss'.");
 				}
 				const dismissed = dismissNote(deps.db, params.note_id, {
 					projectPath: projectIdentity,

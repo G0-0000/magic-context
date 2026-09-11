@@ -5600,6 +5600,15 @@ pub enum FacadeMutationOutcome {
     Duplicate(Vec<u8>),
 }
 
+/// Per-id result for a transaction-scoped note dismissal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteDismissOutcome {
+    Dismissed,
+    NotFound,
+    NotOwned,
+    AlreadyDismissed,
+}
+
 /// Transaction-scoped ports used by the module facade. Every method operates on the transaction
 /// owned by `with_facade_command`, so the mutation and its response ledger row commit together.
 pub struct FacadeMutationTxn<'a> {
@@ -6294,28 +6303,31 @@ impl<'a> FacadeMutationTxn<'a> {
         ))
     }
 
-    pub fn dismiss_note(
+    fn dismiss_note_with_outcome(
         &self,
         project_path: &str,
         session_id: &str,
         note_id: i64,
         resolution: Option<&str>,
         now_ms: i64,
-    ) -> Result<Option<StoredNote>, String> {
+    ) -> Result<(NoteDismissOutcome, Option<StoredNote>), String> {
         let Some(current) = load_note_tx(self.tx, note_id)
             .optional()
             .map_err(|error| error.to_string())?
         else {
-            return Ok(None);
+            return Ok((NoteDismissOutcome::NotFound, None));
         };
-        if current.project_path != project_path
-            || current.session_id != session_id
-            || !matches!(
-                current.status.as_str(),
-                "active" | "pending" | "ready" | "surfacing" | "surfaced"
-            )
-        {
-            return Ok(None);
+        if current.project_path != project_path || current.session_id != session_id {
+            return Ok((NoteDismissOutcome::NotOwned, None));
+        }
+        if current.status == "dismissed" {
+            return Ok((NoteDismissOutcome::AlreadyDismissed, Some(current)));
+        }
+        if !matches!(
+            current.status.as_str(),
+            "active" | "pending" | "ready" | "surfacing" | "surfaced"
+        ) {
+            return Ok((NoteDismissOutcome::AlreadyDismissed, Some(current)));
         }
         let resolution = resolution.map(str::trim).filter(|value| !value.is_empty());
         let content = resolution
@@ -6342,11 +6354,50 @@ impl<'a> FacadeMutationTxn<'a> {
             )
             .map_err(|error| error.to_string())?;
         if changed == 0 {
-            return Ok(None);
+            return Ok((NoteDismissOutcome::AlreadyDismissed, None));
         }
-        Ok(Some(
-            load_note_tx(self.tx, note_id).map_err(|error| error.to_string())?,
+        Ok((
+            NoteDismissOutcome::Dismissed,
+            Some(load_note_tx(self.tx, note_id).map_err(|error| error.to_string())?),
         ))
+    }
+
+    pub fn dismiss_notes(
+        &self,
+        project_path: &str,
+        session_id: &str,
+        note_ids: &[i64],
+        resolution: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Vec<(i64, NoteDismissOutcome)>, String> {
+        note_ids
+            .iter()
+            .map(|&note_id| {
+                self.dismiss_note_with_outcome(
+                    project_path,
+                    session_id,
+                    note_id,
+                    resolution,
+                    now_ms,
+                )
+                .map(|(outcome, _)| (note_id, outcome))
+            })
+            .collect()
+    }
+
+    pub fn dismiss_note(
+        &self,
+        project_path: &str,
+        session_id: &str,
+        note_id: i64,
+        resolution: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Option<StoredNote>, String> {
+        let (outcome, note) =
+            self.dismiss_note_with_outcome(project_path, session_id, note_id, resolution, now_ms)?;
+        Ok((outcome == NoteDismissOutcome::Dismissed)
+            .then_some(note)
+            .flatten())
     }
 }
 
