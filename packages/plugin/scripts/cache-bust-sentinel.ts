@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
  * | divergence_class | accounted | rule |
  * | --- | --- | --- |
  * | system_row_shift | yes | message[0]/system divergence rewrites less than 5% of the prompt |
- * | no_mc_pass_row | no | no MC pass record within +/-5 s of the provider request/pass timestamp |
+ * | no_mc_pass_row | no | no MC pass record in [request - 30 s, request + 5 s] |
  * | accounted_ctx_flush | yes | matched pass records an explicit /ctx-flush |
  * | accounted_force_band | yes | matched pass records a forced emergency drop batch |
  * | accounted_hard_marker_drain | yes | matched HARD/m0 pass records marker_drain or a compaction-marker seam |

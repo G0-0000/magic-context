@@ -85,7 +85,7 @@ interface Snapshot {
     bodyPath: string;
     bodyBytes: number;
     createdAt: string;
-    passTimestampMs: number;
+    requestTimestampMs: number;
     session: string;
     messagesCount: number;
     provider: BodyProvider;
@@ -495,10 +495,7 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[
                 bodyPath,
                 bodyBytes: rawBody.byteLength,
                 createdAt,
-                passTimestampMs:
-                    responsePath && existsSync(responsePath)
-                        ? statSync(responsePath).mtimeMs
-                        : Date.parse(createdAt),
+                requestTimestampMs: Date.parse(dumpName?.createdAt ?? createdAt),
                 session: candidate.session,
                 messagesCount: normalized.segments.length,
                 provider: normalized.provider,
@@ -760,8 +757,8 @@ export function analyzeSnapshots(
                     ? current.usage.input
                     : prevTotal - current.usage.cacheRead
                 : undefined;
-        const decision = nearestCacheBustDecision(decisions, current.passTimestampMs);
-        const previousDecision = nearestCacheBustDecision(decisions, previous.passTimestampMs);
+        const decision = nearestCacheBustDecision(decisions, current.requestTimestampMs);
+        const previousDecision = nearestCacheBustDecision(decisions, previous.requestTimestampMs);
         const attributionDecision =
             rebust && byteVerdict === "STABLE" && previousDecision?.materialized
                 ? previousDecision
