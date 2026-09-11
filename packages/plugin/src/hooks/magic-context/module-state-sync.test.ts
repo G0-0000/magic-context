@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { flushLogger, getLogFilePath } from "../../shared/logger";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -39,10 +40,12 @@ import {
     resolveOrdinalsForModule,
 } from "./module-wire";
 import { closeReadOnlySessionDb } from "./read-session-db";
+import { StateSyncTiming } from "./module-state-sync-timing";
 
 const databases: Database[] = [];
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalLogPath = process.env.MAGIC_CONTEXT_LOG_PATH;
 
 afterEach(() => {
     for (const db of databases.splice(0)) closeQuietly(db);
@@ -51,12 +54,15 @@ afterEach(() => {
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
     resetCompartmentMirrorCursorsForTest();
+    if (originalLogPath === undefined) delete process.env.MAGIC_CONTEXT_LOG_PATH;
+    else process.env.MAGIC_CONTEXT_LOG_PATH = originalLogPath;
 });
 
 function useTempDataHome(prefix: string): void {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_LOG_PATH = join(dir, "state-sync.log");
 }
 
 function createOpenCodeDb(
@@ -1389,4 +1395,344 @@ describe("module compartment mirror-back", () => {
             "module compartment mirror changed while its authoritative set was read",
         );
     });
+});
+
+describe("state-sync resumable series", () => {
+    it("a deadline mid-series resumes only the remaining pages", async () => {
+        useTempDataHome("state-sync-resume-");
+        const sessionId = "ses-resume";
+        createOpenCodeDb(sessionId, [{ id: "m1", role: "user" }]);
+        const db = createContextDb();
+        appendCompartments(
+            db,
+            sessionId,
+            Array.from({ length: 5 }, (_, sequence) => ({
+                sequence,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "m1",
+                endMessageId: "m1",
+                title: "large",
+                content: "x".repeat(20 * 1024 * 1024),
+            })),
+        );
+        const state = syncState();
+        let next = 0;
+        let seedId: unknown;
+        let fail = true;
+        const sent: number[] = [];
+        const client = {
+            getCachedStateSyncCapabilities: () => ({
+                state_sync_deltas: true,
+                state_sync_resume: true,
+            }),
+            async call(args: { method: string; body: unknown }) {
+                const body = args.body as Record<string, unknown>;
+                if (args.method === "session.status")
+                    return {
+                        state_sync: {
+                            seed_id: seedId,
+                            generation: 1,
+                            next_expected_index: next,
+                            shadow_seq: 0,
+                            completed: false,
+                        },
+                    };
+                seedId ??= body.seed_id;
+                expect(body.seed_id).toBe(seedId);
+                const index = body.seed_batch_index as number;
+                sent.push(index);
+                if (index === 1 && fail) {
+                    fail = false;
+                    await new Promise((_resolve, reject) =>
+                        setTimeout(
+                            () =>
+                                reject(
+                                    Object.assign(new Error("state_sync transport timeout"), {
+                                        code: "state_sync_timeout",
+                                    }),
+                                ),
+                            1,
+                        ),
+                    );
+                }
+                next = index + 1;
+                return { ok: true };
+            },
+        };
+        const sync = () =>
+            syncModuleState({
+                client,
+                state,
+                pass: { db, sessionId, nowMs: 1 },
+                projectRoot: "/tmp/project",
+                force: true,
+            });
+        await expect(sync()).rejects.toMatchObject({ code: "state_sync_timeout" });
+        await expect(sync()).resolves.toMatchObject({ status: "acked" });
+        expect(sent).toEqual([0, 1, 1, 2]);
+    });
+});
+
+it("AFT warm inventory sends only boundary-owned seeds with one raw batch", async () => {
+    useTempDataHome("aft-warm-seed-");
+    const sessionId = "ses-aft-warm";
+    createOpenCodeDb(
+        sessionId,
+        Array.from({ length: 770 }, (_, index) => ({ id: `tail${index}`, role: "user" })),
+    );
+    const rawDb = new Database(join(process.env.XDG_DATA_HOME ?? "", "opencode", "opencode.db"));
+    rawDb.exec(
+        `UPDATE message SET time_created=time_created+100000; CREATE INDEX parts_by_owner ON part(session_id, message_id);`,
+    );
+    rawDb
+        .prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO message SELECT 'old'||i, ?, i, i, json_object('id','old'||i,'role','user') FROM n`)
+        .run(sessionId);
+    rawDb
+        .prepare(`INSERT INTO part(message_id, session_id, time_created, time_updated, data)
+        SELECT id, session_id, time_created, time_updated, '{"type":"text","text":"old"}' FROM message WHERE id LIKE 'old%'`)
+        .run();
+    closeQuietly(rawDb);
+    const db = createContextDb();
+    appendCompartments(
+        db,
+        sessionId,
+        Array.from({ length: 1500 }, (_, sequence) => ({
+            sequence,
+            startMessage: 1,
+            endMessage: 100000,
+            startMessageId: "old1",
+            endMessageId: "old100000",
+            title: "folded",
+            content: "x".repeat(2048),
+        })),
+    );
+    db.prepare(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000)
+        INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size)
+        SELECT ?, i, 'old'||i||':p0', 'message', 'dropped', 100 FROM n`).run(sessionId);
+    for (let index = 0; index < 282; index++) {
+        insertTag(db, sessionId, `tail${index}:p0`, "message", 100, 100001 + index);
+        updateTagStatus(db, sessionId, 100001 + index, "dropped");
+    }
+    const timing = new StateSyncTiming();
+    const bodies: Record<string, unknown>[] = [];
+    const budgets: number[] = [];
+    await syncModuleState({
+        state: syncState(),
+        force: true,
+        pass: { db, sessionId, nowMs: 1 },
+        projectRoot: "/tmp/project",
+        options: { timing },
+        client: {
+            getCachedStateSyncCapabilities: () => ({
+                state_sync_deltas: true,
+                state_sync_resume: true,
+            }),
+            async call(args) {
+                const body = args.body as Record<string, unknown>;
+                if (body.state_sync_inventory)
+                    return {
+                        state_sync_inventory: {
+                            generation: 1,
+                            max_compartment_sequence: 1499,
+                            boundary_id: "tail0#0",
+                        },
+                    };
+                if (args.method === "session.status") return { state_sync: null };
+                bodies.push(body);
+                budgets.push(args.timeoutMs ?? 0);
+                return { ok: true };
+            },
+        },
+    });
+    if (process.env.MC_STATE_SYNC_TIMING_FIXTURE === "1") {
+        flushLogger();
+        console.log(
+            readFileSync(getLogFilePath(), "utf8")
+                .split("\n")
+                .find((line) => line.includes("stage=rust.state_sync_detail")),
+        );
+    }
+    expect(bodies.flatMap((body) => body.compartments as unknown[])).toHaveLength(0);
+    const seeds = bodies.flatMap((body) => body.drop_seeds as Array<{ block_id: string }>);
+    expect(seeds).toHaveLength(282);
+    expect(seeds.every((seed) => seed.block_id.startsWith("tail"))).toBe(true);
+    expect(budgets).toEqual([17_104]);
+    expect(timing.rawReads).toBe(1);
+    expect(timing.rawMessages).toBe(770);
+    expect(timing.tags).toBe(282);
+    expect(timing.bytes).toBeLessThan(30000);
+    if (process.env.MC_STATE_SYNC_TIMING_FIXTURE === "1") {
+        flushLogger();
+        const line = readFileSync(getLogFilePath(), "utf8")
+            .split("\n")
+            .find((line) => line.includes("stage=rust.state_sync_detail"));
+        expect(line).toBeDefined();
+        expect(line).toContain(`collect_ms=${timing.collect.toFixed(3)}`);
+        expect(line).toContain(`serialize_ms=${timing.serialize.toFixed(3)}`);
+        expect(line).toContain(`page_build_ms=${timing.pageBuild.toFixed(3)}`);
+        expect(timing.collect).toBeGreaterThan(0);
+        expect(timing.serialize).toBeGreaterThan(0);
+        expect(timing.pageBuild).toBeGreaterThan(0);
+        console.log(line);
+    }
+});
+
+it("completed series receipts are reusable only in their module generation", async () => {
+    const db = createContextDb();
+    const sessionId = "ses-receipt-generation";
+    let receiptGeneration = 1;
+    let sends = 0;
+    const client = {
+        getCachedStateSyncCapabilities: () => ({
+            state_sync_deltas: true,
+            state_sync_resume: true,
+        }),
+        async call(args: { method: string; body: unknown }) {
+            const body = args.body as Record<string, unknown>;
+            if (body.state_sync_inventory) return {};
+            if (args.method === "session.status")
+                return {
+                    state_sync: {
+                        seed_id: body.state_sync_seed_id,
+                        generation: receiptGeneration,
+                        shadow_seq: 1,
+                        completed: true,
+                    },
+                };
+            sends++;
+            return { ok: true };
+        },
+    };
+    const run = () =>
+        syncModuleState({
+            client,
+            state: syncState(),
+            pass: { db, sessionId, nowMs: 1 },
+            projectRoot: "/tmp/project",
+            force: true,
+        });
+    await expect(run()).resolves.toMatchObject({ status: "acked" });
+    expect(sends).toBe(0);
+    receiptGeneration = 0;
+    await expect(run()).resolves.toMatchObject({ status: "acked" });
+    expect(sends).toBe(1);
+});
+
+it("a committed final-page deadline is adopted after adapter restart without reupload", async () => {
+    useTempDataHome("state-sync-final-receipt-");
+    const sessionId = "ses-final-receipt";
+    createOpenCodeDb(sessionId, [{ id: "m1", role: "user" }]);
+    const db = createContextDb();
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 1,
+            startMessageId: "m1",
+            endMessageId: "m1",
+            title: "seed",
+            content: "content",
+        },
+    ]);
+    let committedId: unknown;
+    let sends = 0;
+    const client = {
+        getCachedStateSyncCapabilities: () => ({
+            state_sync_deltas: true,
+            state_sync_resume: true,
+        }),
+        async call(args: { method: string; body: unknown }) {
+            const body = args.body as Record<string, unknown>;
+            if (body.state_sync_inventory)
+                return {
+                    state_sync_inventory: {
+                        generation: 1,
+                        max_compartment_sequence: committedId ? 0 : -1,
+                        boundary_id: committedId ? "m1#0" : null,
+                    },
+                };
+            if (args.method === "session.status")
+                return {
+                    state_sync: committedId
+                        ? { seed_id: committedId, generation: 1, shadow_seq: 1, completed: true }
+                        : null,
+                };
+            sends++;
+            committedId = body.seed_id;
+            await new Promise((_resolve, reject) =>
+                setTimeout(
+                    () =>
+                        reject(
+                            Object.assign(new Error("deadline after durable commit"), {
+                                code: "state_sync_timeout",
+                            }),
+                        ),
+                    1,
+                ),
+            );
+        },
+    };
+    const run = () =>
+        syncModuleState({
+            client,
+            state: syncState(),
+            pass: { db, sessionId, nowMs: 1 },
+            projectRoot: "/tmp/project",
+            force: true,
+        });
+    await expect(run()).rejects.toMatchObject({ code: "state_sync_timeout" });
+    await expect(run()).resolves.toMatchObject({ status: "acked" });
+    expect(sends).toBe(1);
+});
+
+it("an old module without state_sync_resume keeps the previous paged protocol", async () => {
+    const db = createContextDb();
+    for (const deltas of [true, false]) {
+        const calls: Record<string, unknown>[] = [];
+        await expect(
+            syncModuleState({
+                state: syncState(),
+                force: true,
+                pass: { db, sessionId: `ses-legacy-${deltas}`, nowMs: 1 },
+                projectRoot: "/tmp/project",
+                client: {
+                    getCachedStateSyncCapabilities: () => ({ state_sync_deltas: deltas }),
+                    async call(args) {
+                        expect(args.method).toBe("state_sync");
+                        calls.push(args.body as Record<string, unknown>);
+                        return { result: { shadow_seq: 1 } };
+                    },
+                },
+            }),
+        ).resolves.toMatchObject({ status: "acked" });
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+            seed_batch_index: 0,
+            seed_batch_total: 1,
+            seed_complete: true,
+            compartments: [],
+            memories: [],
+            memory_mutations: [],
+        });
+    }
+});
+
+it("a batched seed read refuses ordinal drift instead of overwriting the wire memo", async () => {
+    useTempDataHome("state-sync-batch-drift-");
+    const sessionId = "ses-batch-drift";
+    createOpenCodeDb(sessionId, [{ id: "m1", role: "user" }]);
+    const db = createContextDb();
+    const state = syncState();
+    state.idOrdinalMemo.set("m1", 99);
+    await expect(
+        buildModuleStateSyncPayload({
+            state,
+            pass: { db, sessionId, nowMs: 1 },
+            force: true,
+            options: { seedInventory: { maxCompartmentSequence: -1, boundaryId: "m1#0" } },
+        }),
+    ).resolves.toBe("mismatch");
+    expect(state.idOrdinalMemo.get("m1")).toBe(99);
 });

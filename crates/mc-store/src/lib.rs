@@ -6465,11 +6465,23 @@ fn materialize_drop_seed_units(
         }
     }
 
+    if candidates.is_empty() {
+        return skipped;
+    }
+    // Candidate keys are unique. Index the retained units once rather than scanning
+    // the growing vector for every tag in a large cold seed. Reverse collection keeps
+    // the first retained unit authoritative if legacy data contains duplicate keys.
+    let existing_by_key: std::collections::HashMap<_, _> = core
+        .frozen_units
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, unit)| (unit.key.clone(), index))
+        .collect();
     for (key, unit) in candidates {
-        if let Some(existing) = core
-            .frozen_units
-            .iter()
-            .find(|existing| existing.key == key)
+        if let Some(existing) = existing_by_key
+            .get(&key)
+            .map(|index| &core.frozen_units[*index])
         {
             if existing != &unit {
                 eprintln!(
@@ -6522,11 +6534,23 @@ fn materialize_strip_seed_units(
             reset_rule: String::new(),
         });
     }
+    if candidates.is_empty() {
+        return skipped;
+    }
+    // Candidate keys are unique. Index the retained units once rather than scanning
+    // the growing vector for every tag in a large cold seed. Reverse collection keeps
+    // the first retained unit authoritative if legacy data contains duplicate keys.
+    let existing_by_key: std::collections::HashMap<_, _> = core
+        .frozen_units
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, unit)| (unit.key.clone(), index))
+        .collect();
     for (key, unit) in candidates {
-        if let Some(existing) = core
-            .frozen_units
-            .iter()
-            .find(|existing| existing.key == key)
+        if let Some(existing) = existing_by_key
+            .get(&key)
+            .map(|index| &core.frozen_units[*index])
         {
             if existing != &unit {
                 eprintln!(
@@ -7322,6 +7346,32 @@ impl McStore {
                     .map_err(|e| McStoreError::Serde(e.to_string()))?,
                 row_version: Some(rv),
             }),
+        }
+    }
+
+    /// Read bootstrap cursors without hydrating frozen units or compartment summary bodies.
+    pub fn load_state_sync_inventory(
+        &self,
+        session_id: &str,
+        include_boundary: bool,
+    ) -> Result<(ModuleMeta, String, i64), McStoreError> {
+        let row = self.inner.with_conn(|conn| {
+            conn.query_row(
+                "SELECT meta, CASE WHEN ?2 THEN COALESCE(json_extract(core_state, '$.boundary_id'), '') ELSE '' END,
+                        (SELECT COALESCE(MAX(sequence), -1) FROM mc_compartments WHERE session_id = ?1)
+                 FROM mc_cache_state WHERE session_id = ?1",
+                params![session_id, include_boundary],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            ).optional()
+        })?;
+        match row {
+            Some((meta, boundary, sequence)) => Ok((
+                serde_json::from_str(&meta)
+                    .map_err(|error| McStoreError::Serde(error.to_string()))?,
+                boundary,
+                sequence,
+            )),
+            None => Ok((ModuleMeta::default(), String::new(), -1)),
         }
     }
 
@@ -9810,6 +9860,9 @@ impl McStore {
         &self,
         request: ModuleStateSyncRequest<'_>,
     ) -> Result<ModuleStateSyncResult, ModuleStateSyncError> {
+        let timing_started = std::time::Instant::now();
+        let mut drop_seed_units_ms = 0.0;
+        let mut import_ms = 0.0;
         let default_core_json = serde_json::to_string(&CoreState::default())
             .map_err(|e| ModuleStateSyncError::Serde(e.to_string()))?;
         let outcome = self.inner.with_conn_fenced(|tx| {
@@ -9899,12 +9952,14 @@ impl McStore {
                 }
             }
 
+            let drop_started = std::time::Instant::now();
             let drop_seeds_skipped = materialize_drop_seed_units(
                 &mut core,
                 request.session_id,
                 request.drop_seeds,
                 request.drop_seed_skipped,
             );
+            drop_seed_units_ms = drop_started.elapsed().as_secs_f64() * 1000.0;
             let mut pending_agent_drops_seeded = 0usize;
             let mut pending_agent_drops_skipped = request.pending_agent_drops_skipped;
             for seed in request.pending_agent_drops {
@@ -10091,6 +10146,7 @@ impl McStore {
                 params![request.session_id, next as i64, core_json, meta_json, current_time_ms()],
             )?;
 
+            import_ms = timing_started.elapsed().as_secs_f64() * 1000.0;
             Ok(ModuleStateSyncTxnOutcome::Committed(ModuleStateSyncResult {
                 shadow_generation: meta.shadow_generation,
                 shadow_seq: meta.shadow_seq,
@@ -10108,6 +10164,8 @@ impl McStore {
             }))
         })?;
 
+        let commit_ms = (timing_started.elapsed().as_secs_f64() * 1000.0 - import_ms).max(0.0);
+        eprintln!("mc-state-sync-timing side=store session={} import_ms={:.3} drop_seed_units_ms={:.3} commit_ms={:.3} compartments={} tags={}", request.session_id, import_ms, drop_seed_units_ms, commit_ms, request.compartments.len(), request.drop_seeds.len());
         match outcome {
             ModuleStateSyncTxnOutcome::Committed(result) => Ok(result),
             ModuleStateSyncTxnOutcome::NonRetryableStoreConstraint { detail } => {

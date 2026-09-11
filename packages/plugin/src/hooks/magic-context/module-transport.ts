@@ -240,11 +240,13 @@ export class SubcModuleTransport {
     private connectionGeneration = 0;
     private stateSyncCapabilityCache: {
         generation: number;
-        capabilities: { state_sync_deltas?: boolean };
+        capabilities: { state_sync_deltas?: boolean; state_sync_resume?: boolean };
     } | null = null;
 
     /** Returns the capability snapshot for the currently live SUBC connection. */
-    getCachedStateSyncCapabilities(): { state_sync_deltas?: boolean } | undefined {
+    getCachedStateSyncCapabilities():
+        | { state_sync_deltas?: boolean; state_sync_resume?: boolean }
+        | undefined {
         const cached = this.stateSyncCapabilityCache;
         if (!cached || cached.generation !== this.connectionGeneration) return undefined;
         return cached.capabilities;
@@ -258,7 +260,7 @@ export class SubcModuleTransport {
     async stateSyncCapabilities(args: {
         sessionId: string;
         projectRoot: string;
-    }): Promise<{ state_sync_deltas?: boolean }> {
+    }): Promise<{ state_sync_deltas?: boolean; state_sync_resume?: boolean }> {
         const cached = this.getCachedStateSyncCapabilities();
         if (cached) return cached;
         const response = await this.call({
@@ -270,7 +272,10 @@ export class SubcModuleTransport {
         const raw = isRecord(response) ? response : {};
         const value = isRecord(raw.result) ? raw.result : raw;
         const epochs = isRecord(value.epochs) ? value.epochs : {};
-        const capabilities = { state_sync_deltas: epochs.state_sync_deltas === true };
+        const capabilities = {
+            state_sync_deltas: epochs.state_sync_deltas === true,
+            ...(epochs.state_sync_resume === true ? { state_sync_resume: true } : {}),
+        };
         this.stateSyncCapabilityCache = { generation: this.connectionGeneration, capabilities };
         return capabilities;
     }
@@ -516,19 +521,36 @@ export class SubcModuleTransport {
             );
         } catch (error) {
             finishWrapupTracking();
+            if (args.method === "state_sync" && isDeadlineFailure(error)) {
+                const body = isRecord(args.body) ? args.body : {};
+                throw Object.assign(
+                    new Error(
+                        `state_sync timeout stage=correctness_lane page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
+                    ),
+                    {
+                        code: "state_sync_timeout",
+                        stage: "correctness_lane",
+                        page: body.seed_batch_index ?? 0,
+                        pages: body.seed_batch_total ?? 1,
+                        series: body.seed_id ?? null,
+                        cause: error,
+                    },
+                );
+            }
             throw error;
         }
-        let activeAttemptClient: SubcClient | null = null;
-        const onAbort = () => {
-            // The completed-series deadline is a pass budget, not evidence that the socket died.
-            // Closing it would relabel a slow execute as reconnect and make the caller re-upload.
-            if (args.attemptClass === "transform_series_execute") return;
-            this.invalidateConnection(activeAttemptClient ?? this.client);
-        };
+        let rejectAbort!: (reason: unknown) => void;
+        const aborted = new Promise<never>((_resolve, reject) => {
+            rejectAbort = reject;
+        });
+        aborted.catch(() => {});
+        // Cancellation abandons only this request. The shared socket may still be serving
+        // other sessions, and the module may durably finish the abandoned operation.
+        const onAbort = () =>
+            rejectAbort(args.signal?.reason ?? new Error("module transport call aborted"));
         args.signal?.addEventListener("abort", onAbort, { once: true });
         try {
             for (let attempt = 0; attempt < 2; attempt += 1) {
-                activeAttemptClient = null;
                 let ensuredRoute: EnsuredRoute | null = null;
                 try {
                     if (args.signal?.aborted) {
@@ -543,16 +565,18 @@ export class SubcModuleTransport {
                         attemptDeadlineMs,
                         args.signal,
                     );
-                    activeAttemptClient = ensuredRoute.client;
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
                     }
                     const response = await this.beforeDeadline(
-                        ensuredRoute.client.request(ensuredRoute.route, args.body, {
-                            priority: Priority.Background,
-                            admissionClass: AdmissionClass.Normal,
-                            timeoutMs: Math.max(1, attemptDeadlineMs - Date.now()),
-                        }),
+                        Promise.race([
+                            ensuredRoute.client.request(ensuredRoute.route, args.body, {
+                                priority: Priority.Background,
+                                admissionClass: AdmissionClass.Normal,
+                                timeoutMs: Math.max(1, attemptDeadlineMs - Date.now()),
+                            }),
+                            aborted,
+                        ]),
                         attemptDeadlineMs,
                         "waiting for the module response",
                     );
@@ -566,6 +590,23 @@ export class SubcModuleTransport {
                     }
                     return response;
                 } catch (error) {
+                    if (args.signal?.aborted) throw args.signal.reason ?? error;
+                    if (args.method === "state_sync" && isDeadlineFailure(error)) {
+                        const body = isRecord(args.body) ? args.body : {};
+                        throw Object.assign(
+                            new Error(
+                                `state_sync timeout stage=module_ack page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
+                            ),
+                            {
+                                code: "state_sync_timeout",
+                                stage: "module_ack",
+                                page: body.seed_batch_index ?? 0,
+                                pages: body.seed_batch_total ?? 1,
+                                series: body.seed_id ?? null,
+                                cause: error,
+                            },
+                        );
+                    }
                     if (
                         args.attemptClass === "transform_series_execute" &&
                         isDeadlineFailure(error)

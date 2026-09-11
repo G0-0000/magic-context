@@ -560,7 +560,9 @@ export function readRawSessionMessagePartsByIdFromDb(
     db: Database,
     sessionId: string,
     messageId: string,
+    onQuery?: () => void,
 ): RawMessageParts | null {
+    onQuery?.();
     const row = db
         .prepare(
             "SELECT id, data, time_created, time_updated FROM message WHERE session_id = ? AND id = ?",
@@ -570,6 +572,7 @@ export function readRawSessionMessagePartsByIdFromDb(
 
     const info = parseJsonRecord(row.data);
     if (!info || isRawCompactionSummaryInfo(info)) return null;
+    onQuery?.();
     const partRows = db
         .prepare(
             "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
@@ -680,4 +683,58 @@ export function readRawSessionMessageByIdFromDb(
         createdAt: row.time_created,
         version: row.time_updated ?? null,
     };
+}
+
+/** Read the canonical servable tail and its parts in one query, including its boundary row. */
+export function readRawSeedTailFromDb(
+    db: Database,
+    sessionId: string,
+    boundaryId: string | null,
+): Map<string, RawMessage> {
+    const rows = db
+        .prepare(`
+        WITH canonical AS (
+            SELECT id, time_created,
+                   ROW_NUMBER() OVER (ORDER BY time_created, id) AS ordinal
+            FROM message WHERE session_id = ?
+              AND NOT (CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.summary'), 0) ELSE 0 END = 1
+                AND CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.finish'), '') ELSE '' END = 'stop')
+        )
+        SELECT c.id, m.data, c.time_created, m.time_updated, c.ordinal,
+               p.data AS part_data, p.time_updated AS part_updated
+        FROM canonical c JOIN message m ON m.id = c.id
+        LEFT JOIN part p ON p.session_id = ? AND p.message_id = c.id
+        WHERE ? IS NULL OR c.ordinal >= (SELECT ordinal FROM canonical WHERE id = ?)
+        ORDER BY c.ordinal, p.time_created, p.id
+    `)
+        .all(sessionId, sessionId, boundaryId, boundaryId) as Array<
+        RawMessageRow & { ordinal: number; part_data: string | null; part_updated: number | null }
+    >;
+    const messages = new Map<string, RawMessage>();
+    for (const row of rows) {
+        if (!messages.has(row.id)) {
+            const info = parseJsonRecord(row.data);
+            if (!info) continue;
+            messages.set(row.id, {
+                id: row.id,
+                ordinal: row.ordinal,
+                role: typeof info.role === "string" ? info.role : "unknown",
+                createdAt: row.time_created,
+                version: row.time_updated,
+                parts: [],
+            });
+        }
+        if (row.part_data !== null)
+            messages
+                .get(row.id)
+                ?.parts.push(
+                    attachRawPartVersion(
+                        parseJsonUnknown(row.part_data),
+                        row.part_updated ?? undefined,
+                    ),
+                );
+    }
+    if (boundaryId !== null && !messages.has(boundaryId))
+        throw new Error("state_sync materialized boundary is missing from raw storage");
+    return messages;
 }

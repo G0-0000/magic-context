@@ -1904,8 +1904,27 @@ export function getTailHygieneTags(db: Database, sessionId: string): TagEntry[] 
  * Return only dropped tags for a session. The partial dropped-tag index avoids
  * loading active and compacted history when a force seed only needs drop state.
  */
-export function getDroppedTagsBySession(db: Database, sessionId: string): TagEntry[] {
-    const rows = getDroppedTagsBySessionStatement(db).all(sessionId).filter(isTagRow);
+export function getDroppedTagsBySession(
+    db: Database,
+    sessionId: string,
+    scope?: { ownerIds: readonly string[]; messageAddresses: readonly string[] },
+): TagEntry[] {
+    // Filter before hydrating tag rows: a long folded history can dwarf the servable tail.
+    const rows = (
+        scope
+            ? db
+                  .prepare(`SELECT ${TAG_SELECT_COLUMNS} FROM tags
+        WHERE session_id = ? AND status = 'dropped'
+          AND ((type = 'tool' AND tool_owner_message_id IN (SELECT value FROM json_each(?)))
+            OR (type != 'tool' AND message_id IN (SELECT value FROM json_each(?))))
+        ORDER BY tag_number ASC, id ASC`)
+                  .all(
+                      sessionId,
+                      JSON.stringify(scope.ownerIds),
+                      JSON.stringify(scope.messageAddresses),
+                  )
+            : getDroppedTagsBySessionStatement(db).all(sessionId)
+    ).filter(isTagRow);
     return rows.map(toTagEntry);
 }
 

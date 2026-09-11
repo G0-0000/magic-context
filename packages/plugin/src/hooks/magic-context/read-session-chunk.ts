@@ -19,12 +19,13 @@ import {
     type SessionChunkLine,
 } from "./read-session-formatting";
 import {
-    countRawSessionMessageOrdinalsFromDb,
-    countStoredRawSessionMessagesFromDb,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
+    countRawSessionMessageOrdinalsFromDb,
+    countStoredRawSessionMessagesFromDb,
+    readRawSeedTailFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
@@ -426,6 +427,7 @@ export function readRawSessionMessageIdOrdinals(sessionId: string): Map<string, 
 export function readRawSessionMessagePartsById(
     sessionId: string,
     messageId: string,
+    onQuery?: () => void,
 ): RawMessageParts | null {
     const provider = sessionProviders.get(sessionId);
     if (provider?.readMessagePartsById) return provider.readMessagePartsById(messageId);
@@ -435,7 +437,7 @@ export function readRawSessionMessagePartsById(
     }
     if (!openCodeDbExists()) return null;
     return withReadOnlySessionDb((db) =>
-        readRawSessionMessagePartsByIdFromDb(db, sessionId, messageId),
+        readRawSessionMessagePartsByIdFromDb(db, sessionId, messageId, onQuery),
     );
 }
 
@@ -856,4 +858,29 @@ export function getRawSessionMessageIdsThrough(sessionId: string, endOrdinal: nu
     return readRawSessionMessages(sessionId)
         .filter((message) => message.ordinal <= endOrdinal)
         .map((message) => message.id);
+}
+
+export function readRawSessionSeedTail(
+    sessionId: string,
+    boundaryId: string | null,
+    onQuery?: () => void,
+): Map<string, RawMessage> {
+    const provider = sessionProviders.get(sessionId);
+    if (provider) {
+        const messages = provider.readMessages();
+        const boundary =
+            boundaryId === null ? 0 : messages.findIndex((message) => message.id === boundaryId);
+        if (boundary < 0)
+            throw new Error("state_sync materialized boundary is missing from raw provider");
+        return new Map(messages.slice(boundary).map((message) => [message.id, message]));
+    }
+    if (!openCodeDbExists()) {
+        if (boundaryId !== null)
+            throw new Error("state_sync raw storage is unavailable for materialized boundary");
+        return new Map();
+    }
+    return withReadOnlySessionDb((db) => {
+        onQuery?.();
+        return readRawSeedTailFromDb(db, sessionId, boundaryId);
+    });
 }

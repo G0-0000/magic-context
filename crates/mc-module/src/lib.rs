@@ -44,6 +44,7 @@ mod retained_size;
 pub mod scheduler;
 pub mod selection;
 pub mod session_resolver;
+mod state_sync_timing;
 mod tail_hygiene;
 pub mod transform;
 
@@ -6437,6 +6438,67 @@ impl McHandler {
             Some(store) => store,
             None => return store_unavailable_error(),
         };
+        if request.get("state_sync_inventory").and_then(Value::as_bool) == Some(true) {
+            let (meta, boundary, sequence) =
+                match store.load_state_sync_inventory(&session_id, true) {
+                    Ok(inventory) => inventory,
+                    Err(error) => {
+                        return HandlerOutcome::Error {
+                            code: "store_load_failed".into(),
+                            message: error.to_string(),
+                        }
+                    }
+                };
+            return respond(json!({ "state_sync_inventory": {
+                "generation": meta.shadow_generation,
+                "max_compartment_sequence": if meta.initialized { sequence } else { -1 },
+                "boundary_id": if meta.initialized && !boundary.is_empty() { Some(boundary) } else { None },
+            }}));
+        }
+        if let Some(seed_id) = request.get("state_sync_seed_id").and_then(Value::as_str) {
+            let (meta, _, _) = match store.load_state_sync_inventory(&session_id, false) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    return HandlerOutcome::Error {
+                        code: "store_load_failed".into(),
+                        message: error.to_string(),
+                    }
+                }
+            };
+            let receipt = &meta.shadow_acked_watermarks;
+            if receipt.get("_state_sync_seed_id").and_then(Value::as_str) == Some(seed_id)
+                && receipt
+                    .get("_state_sync_seed_generation")
+                    .and_then(Value::as_u64)
+                    == Some(meta.shadow_generation)
+            {
+                return respond(json!({ "state_sync": {
+                    "seed_id": seed_id, "generation": meta.shadow_generation,
+                    "shadow_seq": meta.shadow_seq, "completed": true,
+                }}));
+            }
+            let mut seeds = self.state_sync_seeds.lock().expect("state sync seed mutex");
+            seeds.evict_stale_collectors(self.state_sync_seed_now());
+            let status = match seeds.sessions.get(&session_id).map(|state| &state.phase) {
+                Some(StateSyncSeedPhase::Collecting(pending))
+                    if pending.seed_id == seed_id
+                        && pending.generation == meta.shadow_generation
+                        && pending.expected_seq == meta.shadow_seq =>
+                {
+                    json!({
+                        "seed_id": seed_id, "generation": pending.generation, "shadow_seq": pending.expected_seq,
+                        "next_expected_index": pending.next_index, "completed": false,
+                    })
+                }
+                Some(StateSyncSeedPhase::Applying {
+                    seed_id: applying, ..
+                }) if applying == seed_id => json!({
+                    "seed_id": seed_id, "generation": meta.shadow_generation, "applying": true,
+                }),
+                _ => Value::Null,
+            };
+            return respond(json!({ "state_sync": status }));
+        }
         let include_compartments_after_seq = match request.get("include_compartments_after_seq") {
             Some(value) => {
                 let Some(after_sequence) = value.as_i64().filter(|value| *value >= -1) else {
@@ -6652,6 +6714,7 @@ impl McHandler {
                 "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                 "tagger_epoch": TAGGER_FEATURE_EPOCH,
                 "state_sync_deltas": true,
+                "state_sync_resume": true,
             },
             "usage": {
                 "current_total_input_tokens": loaded.meta.last_usage.as_ref().map_or(0, |usage| usage.current_total_input_tokens),
@@ -8165,6 +8228,7 @@ impl McHandler {
                         "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                         "tagger_epoch": TAGGER_FEATURE_EPOCH,
                         "state_sync_deltas": true,
+                        "state_sync_resume": true,
                     },
                     "storage_versions": storage_versions_block(&store),
                     "memory_holders": self.memory_holder_metrics(),
@@ -8231,6 +8295,7 @@ impl McHandler {
                 "profile_epoch": PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
                 "tagger_epoch": TAGGER_FEATURE_EPOCH,
                 "state_sync_deltas": true,
+                "state_sync_resume": true,
             },
             "storage_versions": storage_versions_block(&store),
         }))
@@ -9032,6 +9097,36 @@ impl McHandler {
     }
 
     fn handle_state_sync_value(&self, channel: u16, request: Value) -> HandlerOutcome {
+        let started = Instant::now();
+        let mut timing = state_sync_timing::StateSyncTiming {
+            session: request
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("bound")
+                .to_string(),
+            page: request
+                .get("seed_batch_index")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            pages: request
+                .get("seed_batch_total")
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
+            compartments: request
+                .get("compartments")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            tags: request
+                .get("drop_seeds")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            bytes: 0,
+            decode_ms: 0.0,
+            stage_page_ms: 0.0,
+            assemble_series_ms: 0.0,
+            import_ms: 0.0,
+            ack_started: None,
+        };
         const ENVELOPE_FIELDS: [&str; 5] = [
             "seed_id",
             "seed_generation",
@@ -9054,10 +9149,13 @@ impl McHandler {
                 return invalid_params_error(error.to_string());
             }
         };
+        timing.decode_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let staging_started = Instant::now();
         let binding = match self.state_sync_binding(channel, parsed.session_id.as_deref()) {
             Ok(binding) => binding,
             Err(outcome) => return outcome,
         };
+        timing.session = binding.session.clone();
         let store = match self.store.get() {
             Some(store) => Arc::clone(store),
             None => return store_unavailable_error(),
@@ -9086,7 +9184,12 @@ impl McHandler {
                     Some(StateSyncSeedPhase::Idle) | None => None,
                 }
             };
+            timing.bytes = serde_json::to_vec(&request).map_or(0, |bytes| bytes.len());
+            timing.stage_page_ms = staging_started.elapsed().as_secs_f64() * 1000.0;
+            let import_started = Instant::now();
             let outcome = self.apply_state_sync_wire(&binding, &store, parsed);
+            timing.import_ms = import_started.elapsed().as_secs_f64() * 1000.0;
+            timing.ack_started = Some(Instant::now());
             if let Some((generation, expected_seq)) = awaiting_attempt {
                 let mut seeds = self.state_sync_seeds.lock().expect("state sync seed mutex");
                 let still_same_attempt =
@@ -9205,6 +9308,7 @@ impl McHandler {
                 return invalid_params_error(error.to_string());
             }
         };
+        timing.bytes = batch_bytes;
         // Batch zero is checked against durable metadata before the process-local state is
         // touched. A stale retry therefore cannot evict or allocate another live attempt.
         if batch_index == 0 {
@@ -9460,6 +9564,8 @@ impl McHandler {
             }
         };
 
+        timing.stage_page_ms = staging_started.elapsed().as_secs_f64() * 1000.0;
+        timing.ack_started = Some(Instant::now());
         match action {
             StageAction::Ack(next_expected_index) => respond(json!({
                 "ok": true,
@@ -9474,8 +9580,19 @@ impl McHandler {
                 expected_seq,
                 total,
             } => {
-                let assembled = assemble_state_sync_seed(batches, generation, expected_seq);
+                let assemble_started = Instant::now();
+                let mut assembled = assemble_state_sync_seed(batches, generation, expected_seq);
+                timing.assemble_series_ms = assemble_started.elapsed().as_secs_f64() * 1000.0;
+                // The receipt shares the import transaction through the existing watermark JSON.
+                // A lost final response or daemon restart cannot erase a committed series identity.
+                if let Some(Value::Object(watermarks)) = assembled.acked_watermarks.as_mut() {
+                    watermarks.insert("_state_sync_seed_id".into(), json!(seed_id));
+                    watermarks.insert("_state_sync_seed_generation".into(), json!(generation));
+                }
+                let import_started = Instant::now();
                 let outcome = self.apply_state_sync_wire(&binding, &store, assembled);
+                timing.import_ms = import_started.elapsed().as_secs_f64() * 1000.0;
+                timing.ack_started = Some(Instant::now());
                 let completed_result = match &outcome {
                     HandlerOutcome::Response(bytes) => Some(bytes.clone()),
                     HandlerOutcome::Error { .. }
@@ -31640,6 +31757,117 @@ mod tests {
             object.insert("acked_watermarks".to_string(), json!({ "complete": true }));
         }
         batch
+    }
+
+    #[tokio::test]
+    async fn state_sync_receipt_is_generation_fenced_and_staged_progress_is_resumable() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let probe = json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "receipt-fixture" });
+        let read = || {
+            let outcome = handler.handle_session_status_value(7, &probe);
+            let HandlerOutcome::Response(bytes) = outcome else {
+                panic!("{outcome:?}")
+            };
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        };
+        let first = paged_seed_batch("ses", "receipt-fixture", 0, 0, 0, 2, vec![]);
+        assert!(matches!(
+            handler.dispatch_value(7, first).await,
+            HandlerOutcome::Response(_)
+        ));
+        assert_eq!(read()["state_sync"]["next_expected_index"], 1);
+        let last = paged_seed_batch("ses", "receipt-fixture", 0, 0, 1, 2, vec![]);
+        assert!(matches!(
+            handler.dispatch_value(7, last).await,
+            HandlerOutcome::Response(_)
+        ));
+        handler.state_sync_seeds.lock().unwrap().sessions.clear();
+        assert_eq!(read()["state_sync"]["completed"], true);
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.shadow_generation += 1;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        assert!(read()["state_sync"].is_null());
+    }
+
+    #[tokio::test]
+    async fn aft_sized_state_sync_timing_fixture() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let compartments = (0..1627)
+            .map(|sequence| state_sync_compartment(sequence, &"x".repeat(1024)))
+            .collect();
+        let mut first = paged_seed_batch("ses", "aft-fixture", 0, 0, 0, 2, compartments);
+        first.as_object_mut().unwrap().remove("session_id");
+        assert!(matches!(
+            handler.dispatch_value(7, first).await,
+            HandlerOutcome::Response(_)
+        ));
+        let mut last = paged_seed_batch("ses", "aft-fixture", 0, 0, 1, 2, vec![]);
+        last["drop_seeds"] = json!((0..148_070)
+            .map(|index| json!({ "block_id": format!("m{index}#0"), "drop_mode": "full" }))
+            .collect::<Vec<_>>());
+        assert!(matches!(
+            handler.dispatch_value(7, last).await,
+            HandlerOutcome::Response(_)
+        ));
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1627);
+        assert_eq!(store.load("ses").unwrap().core.frozen_units.len(), 148_070);
+        let response = handler.handle_session_status_value(
+            7,
+            &json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "aft-fixture" }),
+        );
+        let HandlerOutcome::Response(bytes) = response else {
+            panic!("receipt failed")
+        };
+        let status: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["state_sync"]["completed"], true);
+        // Dropping all collector state models a daemon restart; the receipt is in SQLite.
+        handler.state_sync_seeds.lock().unwrap().sessions.clear();
+        let response = handler.handle_session_status_value(
+            7,
+            &json!({ "v": 1, "session_id": "ses", "state_sync_seed_id": "aft-fixture" }),
+        );
+        let HandlerOutcome::Response(bytes) = response else {
+            panic!("durable receipt failed")
+        };
+        let status: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["state_sync"]["completed"], true);
+
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        let mut core = loaded.core;
+        meta.initialized = true;
+        meta.folded_compartment_seq = 1626;
+        core.boundary_id = "m1626#0".into();
+        store
+            .commit("ses", loaded.row_version, &core, &meta)
+            .unwrap();
+        let inventory = handler.handle_session_status_value(
+            7,
+            &json!({ "v": 1, "session_id": "ses", "state_sync_inventory": true }),
+        );
+        let HandlerOutcome::Response(bytes) = inventory else {
+            panic!("inventory failed")
+        };
+        let inventory: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            inventory["state_sync_inventory"]["max_compartment_sequence"],
+            1626
+        );
+        assert_eq!(inventory["state_sync_inventory"]["boundary_id"], "m1626#0");
+        let mut warm = paged_seed_batch("ses", "aft-warm", 0, 1, 0, 1, vec![]);
+        warm["drop_seeds"] = json!((147_788..148_070)
+            .map(|index| json!({ "block_id": format!("m{index}#0"), "drop_mode": "full" }))
+            .collect::<Vec<_>>());
+        assert!(matches!(
+            handler.dispatch_value(7, warm).await,
+            HandlerOutcome::Response(_)
+        ));
+        assert_eq!(store.load("ses").unwrap().core.frozen_units.len(), 148_070);
     }
 
     #[allow(clippy::too_many_arguments)]

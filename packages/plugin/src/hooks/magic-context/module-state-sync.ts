@@ -50,10 +50,12 @@ import { sessionLog } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 import { resolveTodowriteAvailability } from "./ctx-reduce-availability";
 import { isModuleTransportGenerationChangedResult } from "./module-transport";
+import { StateSyncTiming, timedStateSyncDatabase } from "./module-state-sync-timing";
 import { MODULE_PAGE_MAX_BYTES, moduleRawBlockMappings, moduleWireBodyBytes } from "./module-wire";
 import {
     readRawSessionMessageOrdinalById,
     readRawSessionMessagePartsById,
+    readRawSessionSeedTail,
 } from "./read-session-chunk";
 import type { RawMessageParts } from "./read-session-raw";
 import { formatDate } from "./temporal-awareness";
@@ -193,6 +195,8 @@ export interface ModuleStateSyncPass {
 }
 
 export interface ModuleStateSyncOptions {
+    timing?: StateSyncTiming;
+    seedInventory?: { maxCompartmentSequence: number; boundaryId: string | null };
     beforeSerializeCompartment?: () => void;
     yieldEveryCompartments?: number;
     shouldAbortSeed?: () => boolean;
@@ -843,14 +847,29 @@ function dropSeedForTag(args: {
 }
 
 function buildDropSeeds(args: {
+    eligibleTagAddresses?: string[];
+    eligibleMessageIds?: ReadonlySet<string>;
     db: ContextDatabase;
     sessionId: string;
     readRawById: (messageId: string) => RawMessageParts | null;
 }): { seeds: ModuleDropSeed[]; skipped: number } {
     const byBlock = new Map<string, ModuleDropSeed>();
     let skipped = 0;
-    for (const tag of getDroppedTagsBySession(args.db, args.sessionId)) {
+    for (const tag of getDroppedTagsBySession(
+        args.db,
+        args.sessionId,
+        args.eligibleMessageIds && args.eligibleTagAddresses
+            ? {
+                  ownerIds: [...args.eligibleMessageIds],
+                  messageAddresses: args.eligibleTagAddresses,
+              }
+            : undefined,
+    )) {
         if (tag.status !== "dropped") continue;
+        const ownerId =
+            tag.type === "tool" ? tag.toolOwnerMessageId : dropSeedAddress(tag)?.messageId;
+        if (args.eligibleMessageIds && (!ownerId || !args.eligibleMessageIds.has(ownerId)))
+            continue;
         const result = dropSeedForTag({ tag, readRawById: args.readRawById });
         if (!("seed" in result)) {
             skipped += 1;
@@ -874,6 +893,7 @@ function buildDropSeeds(args: {
 }
 
 function buildPendingDropSeeds(args: {
+    eligibleMessageIds?: ReadonlySet<string>;
     db: ContextDatabase;
     sessionId: string;
     readRawById: (messageId: string) => RawMessageParts | null;
@@ -898,6 +918,10 @@ function buildPendingDropSeeds(args: {
             );
             continue;
         }
+        const ownerId =
+            tag.type === "tool" ? tag.toolOwnerMessageId : dropSeedAddress(tag)?.messageId;
+        if (args.eligibleMessageIds && (!ownerId || !args.eligibleMessageIds.has(ownerId)))
+            continue;
         const result = dropSeedForTag({ tag, readRawById: args.readRawById });
         if (!("seed" in result)) {
             skipped += 1;
@@ -921,6 +945,7 @@ function buildPendingDropSeeds(args: {
 }
 
 function buildAutoSearchHintSeeds(args: {
+    eligibleMessageIds?: ReadonlySet<string>;
     db: ContextDatabase;
     sessionId: string;
     readRawById: (messageId: string) => RawMessageParts | null;
@@ -932,6 +957,7 @@ function buildAutoSearchHintSeeds(args: {
             skipped += 1;
             continue;
         }
+        if (args.eligibleMessageIds && !args.eligibleMessageIds.has(value.messageId)) continue;
         const mapping = moduleRawBlockMappings(args.readRawById(value.messageId)).find(
             (candidate) => candidate.kind === "text",
         );
@@ -1335,6 +1361,11 @@ export async function buildModuleStateSyncPayload(args: {
 }): Promise<
     ModuleStateSyncPayload | null | "m0_mutation" | "mismatch" | "unresolved" | "seed_budget"
 > {
+    if (args.options?.timing)
+        args = {
+            ...args,
+            pass: { ...args.pass, db: timedStateSyncDatabase(args.pass.db, args.options.timing) },
+        };
     const workspace = resolveModuleWorkspaceContext(args.pass.db, args.pass.projectPath);
     const sessionMeta = getOrCreateSessionMeta(args.pass.db, args.pass.sessionId);
     // One authority pool has one writer. While MODULE owns memories, this sender only mirrors
@@ -1380,10 +1411,58 @@ export async function buildModuleStateSyncPayload(args: {
               workspace_fingerprint: null,
               reasoning_cleared_through_tag: 0,
           });
-    const rawById = new Map<string, RawMessageParts | null>();
+    const timing = args.options?.timing;
+    const inventory = args.options?.seedInventory;
+    const rawStart = performance.now();
+    const tail =
+        args.force && inventory
+            ? readRawSessionSeedTail(
+                  args.pass.sessionId,
+                  inventory.boundaryId?.replace(/#\d+$/, "") ?? null,
+                  () => {
+                      if (timing) timing.rawReads += 1;
+                  },
+              )
+            : null;
+    if (tail && timing) {
+        timing.collect += performance.now() - rawStart;
+        timing.rawMessages += tail.size;
+    }
+    if (tail) {
+        if (args.state.idOrdinalMemoGeneration !== args.state.moduleGeneration) {
+            args.state.idOrdinalMemo.clear();
+            args.state.idOrdinalMemoGeneration = args.state.moduleGeneration;
+        }
+        for (const raw of tail.values()) {
+            const prior = args.state.idOrdinalMemo.get(raw.id);
+            if (prior !== undefined && prior !== raw.ordinal) return "mismatch";
+            args.state.idOrdinalMemo.set(raw.id, raw.ordinal);
+        }
+    }
+    const eligibleMessageIds = tail ? new Set(tail.keys()) : undefined;
+    const eligibleTagAddresses = tail
+        ? [...tail.values()].flatMap((raw) => [
+              raw.id,
+              ...raw.parts.flatMap((_part, index) => [
+                  `${raw.id}:p${index}`,
+                  `${raw.id}:file${index}`,
+              ]),
+          ])
+        : undefined;
+    const rawById = new Map<string, RawMessageParts | null>(tail);
     const readRawById = (messageId: string): RawMessageParts | null => {
         if (!rawById.has(messageId)) {
-            rawById.set(messageId, readRawSessionMessagePartsById(args.pass.sessionId, messageId));
+            rawById.set(
+                messageId,
+                timing
+                    ? timing.collectRead(() =>
+                          readRawSessionMessagePartsById(args.pass.sessionId, messageId, () => {
+                              timing.rawReads += 1;
+                          }),
+                      )
+                    : readRawSessionMessagePartsById(args.pass.sessionId, messageId),
+            );
+            if (timing && rawById.get(messageId)) timing.rawMessages += 1;
         }
         return rawById.get(messageId) ?? null;
     };
@@ -1412,7 +1491,13 @@ export async function buildModuleStateSyncPayload(args: {
     let serializedCount = 0;
     const compartmentsToSerialize = compartmentsChanged
         ? args.force
-            ? getCompartments(args.pass.db, args.pass.sessionId)
+            ? inventory
+                ? readCompartmentsAfterSequence(
+                      args.pass.db,
+                      args.pass.sessionId,
+                      inventory.maxCompartmentSequence,
+                  )
+                : getCompartments(args.pass.db, args.pass.sessionId)
             : readCompartmentsAfterSequence(
                   args.pass.db,
                   args.pass.sessionId,
@@ -1527,26 +1612,37 @@ export async function buildModuleStateSyncPayload(args: {
               }))
             : [];
     const pendingDropSeedState = args.force
-        ? buildPendingDropSeeds({ db: args.pass.db, sessionId: args.pass.sessionId, readRawById })
+        ? buildPendingDropSeeds({
+              db: args.pass.db,
+              sessionId: args.pass.sessionId,
+              readRawById,
+              eligibleMessageIds,
+          })
         : null;
     const noteNudgeAnchors = args.force
-        ? getNoteNudgeAnchors(args.pass.db, args.pass.sessionId).map((anchor) => ({
-              message_id: anchor.messageId,
-              text: anchor.text,
-          }))
+        ? getNoteNudgeAnchors(args.pass.db, args.pass.sessionId)
+              .filter((anchor) => !eligibleMessageIds || eligibleMessageIds.has(anchor.messageId))
+              .map((anchor) => ({
+                  message_id: anchor.messageId,
+                  text: anchor.text,
+              }))
         : undefined;
     const autoSearchHintSeedState = args.force
         ? buildAutoSearchHintSeeds({
               db: args.pass.db,
               sessionId: args.pass.sessionId,
               readRawById,
+              eligibleMessageIds,
           })
         : null;
     const persistedTodoAnchor = args.force
         ? getPersistedTodoSyntheticAnchor(args.pass.db, args.pass.sessionId)
         : null;
     const todoSyntheticAnchor =
-        persistedTodoAnchor === null
+        persistedTodoAnchor === null ||
+        (eligibleMessageIds &&
+            persistedTodoAnchor.messageId !== "__magic_context_todo_head__" &&
+            !eligibleMessageIds.has(persistedTodoAnchor.messageId))
             ? args.force
                 ? null
                 : undefined
@@ -1566,10 +1662,18 @@ export async function buildModuleStateSyncPayload(args: {
     // units already dropped before the first transform. Otherwise the transform
     // reads older raw data and needs another cache invalidation to process them.
     const dropSeedState = args.force
-        ? buildDropSeeds({ db: args.pass.db, sessionId: args.pass.sessionId, readRawById })
+        ? buildDropSeeds({
+              db: args.pass.db,
+              sessionId: args.pass.sessionId,
+              readRawById,
+              eligibleMessageIds,
+              eligibleTagAddresses,
+          })
         : null;
     const stripSeeds = args.force
-        ? buildStripSeeds({ db: args.pass.db, sessionId: args.pass.sessionId })
+        ? buildStripSeeds({ db: args.pass.db, sessionId: args.pass.sessionId }).filter(
+              (seed) => !eligibleMessageIds || eligibleMessageIds.has(seed.message_id),
+          )
         : undefined;
     const pendingMarker = args.force
         ? getPendingCompactionMarkerState(args.pass.db, args.pass.sessionId)
@@ -1637,7 +1741,9 @@ export async function buildModuleStateSyncPayload(args: {
         omitAuthorityMemorySections,
     };
     if (args.force) {
+        const pageStarted = performance.now();
         const wireBatches = buildPagedModuleStateSyncPayloads(payloadArgs);
+        if (timing) timing.pageBuild += performance.now() - pageStarted;
         return { ...wireBatches[0], wireBatches };
     }
     return {
@@ -1666,14 +1772,16 @@ export async function buildModuleStateSyncPayload(args: {
 
 export interface ModuleStateSyncClient {
     /** Synchronously exposes capabilities cached for the transport's live connection generation. */
-    getCachedStateSyncCapabilities?(): { state_sync_deltas?: boolean } | undefined;
+    getCachedStateSyncCapabilities?():
+        | { state_sync_deltas?: boolean; state_sync_resume?: boolean }
+        | undefined;
     /** Clears a capability snapshot when the module reports a restart-like signal. */
     invalidateStateSyncCapabilities?(): void;
     /** Capability probe is optional so older/test transports retain legacy wire semantics. */
     stateSyncCapabilities?(args: {
         sessionId: string;
         projectRoot: string;
-    }): Promise<{ state_sync_deltas?: boolean }>;
+    }): Promise<{ state_sync_deltas?: boolean; state_sync_resume?: boolean }>;
     call(args: {
         sessionId: string;
         projectRoot: string;
@@ -1767,103 +1875,270 @@ export async function syncModuleState(args: {
     force: boolean;
     options?: ModuleStateSyncOptions;
 }): Promise<ModuleStateSyncResult> {
-    let force = args.force;
-    if (
-        !force &&
-        args.options?.knownWatermarksUnchanged === true &&
-        args.state.lastAckedWatermarks !== null
-    ) {
-        return { status: "no_change" };
-    }
-    const adoption = args.options?.authoritySeqAdoption ?? { used: false };
-    const resolveStateSyncDeltas = async (afterGenerationChange = false): Promise<boolean> => {
-        let capability = afterGenerationChange ? undefined : args.options?.stateSyncDeltas;
-        capability ??= args.client.getCachedStateSyncCapabilities?.()?.state_sync_deltas;
-        if (capability === undefined && args.client.stateSyncCapabilities) {
+    const timing = args.options?.timing ?? new StateSyncTiming();
+    args = { ...args, options: { ...args.options, timing } };
+    try {
+        let force = args.force;
+        const probe = async (body: Record<string, unknown>): Promise<unknown> => {
+            const started = performance.now();
             try {
-                capability = (
-                    await args.client.stateSyncCapabilities({
-                        sessionId: args.pass.sessionId,
-                        projectRoot: args.projectRoot,
-                    })
-                ).state_sync_deltas;
-            } catch {
-                // If the capability check fails, assume the module does not support
-                // state_sync_deltas and send the older payload format with its state-sync
-                // fields always present.
-                capability = false;
-            }
-        }
-        return capability === true;
-    };
-    let stateSyncDeltas = await resolveStateSyncDeltas();
-    syncLoop: for (;;) {
-        const payload = await buildModuleStateSyncPayload({
-            state: args.state,
-            pass: args.pass,
-            force,
-            options: { ...args.options, stateSyncDeltas },
-        });
-        if (payload === null) return { status: "no_change" };
-        if (
-            payload === "m0_mutation" ||
-            payload === "mismatch" ||
-            payload === "unresolved" ||
-            payload === "seed_budget"
-        ) {
-            throw new Error(`module state sync ${payload}`);
-        }
-        try {
-            const batches = payload.wireBatches ?? [payload];
-            for (const batch of batches) {
-                const response = await args.client.call({
+                return await args.client.call({
                     sessionId: args.pass.sessionId,
                     projectRoot: args.projectRoot,
-                    method: "state_sync",
+                    method: "session.status",
                     body: {
-                        method: batch.method,
-                        ...batch.params,
+                        method: "session.status",
+                        v: 1,
+                        session_id: args.pass.sessionId,
+                        ...body,
                     },
-                    generationSensitive: stateSyncDeltas,
+                    generationSensitive: true,
                 });
-                if (isModuleTransportGenerationChangedResult(response)) {
-                    // The payload used the previous connection's capabilities. Re-probe the new
-                    // connection and rebuild before retrying because it may not support deltas.
+            } finally {
+                timing.status += performance.now() - started;
+            }
+        };
+        if (
+            !force &&
+            args.options?.knownWatermarksUnchanged === true &&
+            args.state.lastAckedWatermarks !== null
+        ) {
+            return { status: "no_change" };
+        }
+        const adoption = args.options?.authoritySeqAdoption ?? { used: false };
+        let resumable = false;
+        const resolveStateSyncDeltas = async (afterGenerationChange = false): Promise<boolean> => {
+            let capability = afterGenerationChange ? undefined : args.options?.stateSyncDeltas;
+            const cached = args.client.getCachedStateSyncCapabilities?.();
+            resumable = cached?.state_sync_resume === true;
+            capability ??= cached?.state_sync_deltas;
+            if (capability === undefined && args.client.stateSyncCapabilities) {
+                try {
+                    const probed = await args.client.stateSyncCapabilities({
+                        sessionId: args.pass.sessionId,
+                        projectRoot: args.projectRoot,
+                    });
+                    capability = probed.state_sync_deltas;
+                    resumable = probed.state_sync_resume === true;
+                } catch {
+                    // If the capability check fails, assume the module does not support
+                    // state_sync_deltas and send the older payload format with its state-sync
+                    // fields always present.
+                    capability = false;
+                }
+            }
+            return capability === true;
+        };
+        let stateSyncDeltas = await resolveStateSyncDeltas();
+        syncLoop: for (;;) {
+            if (force) args.options = { ...args.options, seedInventory: undefined };
+            if (force && resumable) {
+                const rawInventory = await probe({ state_sync_inventory: true });
+                if (isModuleTransportGenerationChangedResult(rawInventory)) {
                     stateSyncDeltas = await resolveStateSyncDeltas(true);
                     continue syncLoop;
                 }
+                const inventoryEnvelope =
+                    isRecord(rawInventory) && isRecord(rawInventory.result)
+                        ? rawInventory.result
+                        : rawInventory;
+                const inventory =
+                    isRecord(inventoryEnvelope) && isRecord(inventoryEnvelope.state_sync_inventory)
+                        ? inventoryEnvelope.state_sync_inventory
+                        : null;
                 if (
-                    args.options?.authority === true &&
-                    responseMemoriesSkipped(response) &&
-                    !args.state.authorityMemorySyncSkipLogged
+                    inventory &&
+                    inventory.generation === args.state.moduleGeneration &&
+                    Number.isSafeInteger(inventory.max_compartment_sequence) &&
+                    (inventory.max_compartment_sequence as number) >= -1 &&
+                    (inventory.boundary_id === null || typeof inventory.boundary_id === "string")
                 ) {
-                    args.state.authorityMemorySyncSkipLogged = true;
-                    sessionLog(
-                        args.pass.sessionId,
-                        "authority state sync skipped module-owned memory sections",
-                    );
+                    args.options = {
+                        ...args.options,
+                        seedInventory: {
+                            maxCompartmentSequence: inventory.max_compartment_sequence as number,
+                            boundaryId: inventory.boundary_id as string | null,
+                        },
+                    };
                 }
             }
-        } catch (error) {
-            if (isHistorianCompartmentSyncBusy(error)) {
-                // Return a distinct retry result when the snapshot-owning historian rejects
-                // compartment updates, preserving any forced initialization seed obligation.
-                return { status: "retry_busy" };
+            const buildStarted = performance.now();
+            const collectBefore = timing.collect;
+            const pagesBefore = timing.pageBuild;
+            const payload = await buildModuleStateSyncPayload({
+                state: args.state,
+                pass: args.pass,
+                force,
+                options: { ...args.options, stateSyncDeltas },
+            });
+            timing.serialize += Math.max(
+                0,
+                performance.now() -
+                    buildStarted -
+                    (timing.collect - collectBefore) -
+                    (timing.pageBuild - pagesBefore),
+            );
+            if (payload === null) return { status: "no_change" };
+            if (
+                payload === "m0_mutation" ||
+                payload === "mismatch" ||
+                payload === "unresolved" ||
+                payload === "seed_budget"
+            ) {
+                throw new Error(`module state sync ${payload}`);
             }
-            const durableSeq = args.options?.authority ? readAuthoritySeqMismatch(error) : null;
-            if (durableSeq === null || adoption.used) throw error;
-            adoption.used = true;
-            args.state.lastAckedSeq = durableSeq;
-            // A fresh authority process only knows its in-memory sequence. After adopting the
-            // durable sequence, discard sender watermarks and force a full rebuild because it
-            // cannot know which durable rows the sequence covers.
-            args.state.lastAckedWatermarks = null;
-            force = true;
-            continue;
+            try {
+                const batches = payload.wireBatches ?? [payload];
+                let nextIndex = 0;
+                if (resumable && payload.wireBatches) {
+                    const identityStarted = performance.now();
+                    // Content identity excludes transport sequence and the random attempt ID. A
+                    // restarted adapter can discover the same committed series without re-uploading.
+                    const identity: Record<string, unknown> = { watermarks: payload.watermarks };
+                    const transportFields = new Set([
+                        "seed_id",
+                        "expected_shadow_seq",
+                        "seed_batch_index",
+                        "seed_batch_total",
+                        "seed_complete",
+                        "seed_boundary_id",
+                        "compartments",
+                    ]);
+                    for (const batch of batches) {
+                        for (const [key, value] of Object.entries(batch.params)) {
+                            if (transportFields.has(key)) continue;
+                            if (Array.isArray(value))
+                                identity[key] = [
+                                    ...(Array.isArray(identity[key])
+                                        ? (identity[key] as unknown[])
+                                        : []),
+                                    ...value,
+                                ];
+                            else identity[key] = value;
+                        }
+                    }
+                    // Compartment identity is its sequence + mutation watermark, not the delta's
+                    // page split: inventory can grow when a final response was lost.
+                    const seedId = stableHash(canonicalSeedJson(identity));
+                    timing.serialize += performance.now() - identityStarted;
+                    for (const batch of batches) batch.params.seed_id = seedId;
+                    const raw = await probe({ state_sync_seed_id: seedId });
+                    if (isModuleTransportGenerationChangedResult(raw)) {
+                        stateSyncDeltas = await resolveStateSyncDeltas(true);
+                        continue syncLoop;
+                    }
+                    const envelope = isRecord(raw) && isRecord(raw.result) ? raw.result : raw;
+                    const receipt =
+                        isRecord(envelope) && isRecord(envelope.state_sync)
+                            ? envelope.state_sync
+                            : null;
+                    if (
+                        receipt?.seed_id === seedId &&
+                        receipt.generation === args.state.moduleGeneration
+                    ) {
+                        if (
+                            receipt.completed === true &&
+                            Number.isSafeInteger(receipt.shadow_seq) &&
+                            (receipt.shadow_seq as number) >= args.state.lastAckedSeq
+                        ) {
+                            args.state.lastAckedWatermarks = payload.watermarks;
+                            args.state.lastAckedSeq = receipt.shadow_seq as number;
+                            return { status: "acked", watermarks: payload.watermarks };
+                        }
+                        if (receipt.applying === true) return { status: "retry_busy" };
+                        if (
+                            receipt.shadow_seq === args.state.lastAckedSeq &&
+                            Number.isSafeInteger(receipt.next_expected_index) &&
+                            (receipt.next_expected_index as number) >= 0 &&
+                            (receipt.next_expected_index as number) < batches.length
+                        ) {
+                            nextIndex = receipt.next_expected_index as number;
+                        }
+                    }
+                }
+                const itemCount = batches.reduce(
+                    (count, batch) =>
+                        count +
+                        Object.values(batch.params).reduce<number>(
+                            (sum, value) => sum + (Array.isArray(value) ? value.length : 0),
+                            0,
+                        ),
+                    0,
+                );
+                const budgetMs = Math.min(90_000, 15_000 + 2 * (itemCount + timing.rawMessages));
+                for (const batch of batches.slice(nextIndex)) {
+                    const encodeStarted = performance.now();
+                    const pageBytes = Buffer.byteLength(
+                        JSON.stringify({ method: batch.method, ...batch.params }),
+                    );
+                    timing.serialize += performance.now() - encodeStarted;
+                    timing.bytes += pageBytes;
+                    timing.pages += 1;
+                    timing.compartments += batch.params.compartments.length;
+                    timing.tags += batch.params.drop_seeds?.length ?? 0;
+                    const transportStarted = performance.now();
+                    const response = await args.client
+                        .call({
+                            sessionId: args.pass.sessionId,
+                            projectRoot: args.projectRoot,
+                            method: "state_sync",
+                            body: {
+                                method: batch.method,
+                                ...batch.params,
+                            },
+                            generationSensitive: stateSyncDeltas,
+                            timeoutMs: budgetMs,
+                        })
+                        .finally(() => {
+                            const elapsed = performance.now() - transportStarted;
+                            timing.transport += elapsed;
+                            if (batch.params.seed_complete !== false) timing.moduleAck += elapsed;
+                            sessionLog(
+                                args.pass.sessionId,
+                                `transform stage: stage=rust.state_sync_page page=${batch.params.seed_batch_index ?? 0} pages=${batches.length} bytes=${pageBytes} elapsed=${elapsed.toFixed(3)}ms`,
+                            );
+                        });
+                    if (isModuleTransportGenerationChangedResult(response)) {
+                        // The payload used the previous connection's capabilities. Re-probe the new
+                        // connection and rebuild before retrying because it may not support deltas.
+                        stateSyncDeltas = await resolveStateSyncDeltas(true);
+                        continue syncLoop;
+                    }
+                    if (
+                        args.options?.authority === true &&
+                        responseMemoriesSkipped(response) &&
+                        !args.state.authorityMemorySyncSkipLogged
+                    ) {
+                        args.state.authorityMemorySyncSkipLogged = true;
+                        sessionLog(
+                            args.pass.sessionId,
+                            "authority state sync skipped module-owned memory sections",
+                        );
+                    }
+                }
+            } catch (error) {
+                if (isHistorianCompartmentSyncBusy(error)) {
+                    // Return a distinct retry result when the snapshot-owning historian rejects
+                    // compartment updates, preserving any forced initialization seed obligation.
+                    return { status: "retry_busy" };
+                }
+                const durableSeq = args.options?.authority ? readAuthoritySeqMismatch(error) : null;
+                if (durableSeq === null || adoption.used) throw error;
+                adoption.used = true;
+                args.state.lastAckedSeq = durableSeq;
+                // A fresh authority process only knows its in-memory sequence. After adopting the
+                // durable sequence, discard sender watermarks and force a full rebuild because it
+                // cannot know which durable rows the sequence covers.
+                args.state.lastAckedWatermarks = null;
+                force = true;
+                continue;
+            }
+            args.state.lastAckedWatermarks = payload.watermarks;
+            args.state.lastAckedSeq += 1;
+            return { status: "acked", watermarks: payload.watermarks };
         }
-        args.state.lastAckedWatermarks = payload.watermarks;
-        args.state.lastAckedSeq += 1;
-        return { status: "acked", watermarks: payload.watermarks };
+    } finally {
+        timing.log(args.pass.sessionId);
     }
 }
 
