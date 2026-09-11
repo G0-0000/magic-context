@@ -1,0 +1,66 @@
+[
+    {
+        "class": "unaccounted_defer_pass",
+        "input": { "decision": { "decision": "defer" } }
+    },
+    {
+        "class": "accounted_ctx_flush",
+        "input": { "decision": { "materialized": true, "materializeReason": "explicit_flush" } }
+    },
+    {
+        "class": "accounted_ctx_reduce",
+        "input": { "contentEvidence": "assistant tool name=ctx_reduce" }
+    },
+    {
+        "class": "accounted_force_band",
+        "input": { "decision": { "emergency": true, "droppedCount": 3 } }
+    },
+    {
+        "class": "accounted_hard_marker_drain",
+        "input": { "compactionSeam": true }
+    },
+    {
+        "class": "accounted_hard_model_change",
+        "input": { "decision": { "materialized": true, "materializeReason": "model_change" } }
+    },
+    {
+        "class": "accounted_hard_system_hash",
+        "input": { "decision": { "materialized": true, "materializeReason": "system_hash" } }
+    },
+    {
+        "class": "accounted_hard_epoch",
+        "input": {
+            "decision": { "materialized": true, "materializeReason": "project_memory_epoch" }
+        }
+    },
+    {
+        "class": "accounted_hard_pressure_refold",
+        "input": { "decision": { "materialized": true, "materializeReason": "pressure_refold" } }
+    },
+    {
+        "class": "accounted_soft_m1_execute",
+        "input": {
+            "decision": {
+                "decision": "execute",
+                "materialized": false,
+                "materializeReason": "m1_delta"
+            }
+        }
+    },
+    {
+        "class": "accounted_provider_system_prompt_change",
+        "input": { "previousProvider": "anthropic", "currentProvider": "openai" }
+    },
+    {
+        "class": "unaccounted_double_bust",
+        "input": { "divergenceIndex": 4, "previousBustDivergenceIndex": 4 }
+    },
+    {
+        "class": "unaccounted_tail_rewrite",
+        "input": { "divergenceIndex": 9, "previousMessageCount": 10 }
+    },
+    {
+        "class": "unaccounted_rewrite",
+        "input": { "divergenceIndex": 2, "previousMessageCount": 10 }
+    }
+]

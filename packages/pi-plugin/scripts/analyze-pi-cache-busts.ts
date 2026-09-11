@@ -4,9 +4,18 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
 import {
+	type AnalyzedCacheRequest,
+	type CacheBustDecisionAttribution,
+	type CacheBustDivergenceClass,
+	type CacheBustSessionAnalysis,
+	classifyCacheBust,
+	nearestCacheBustDecision,
+} from "../../plugin/scripts/cache-bust-attribution";
+import {
 	clippedBodyPairVersions,
 	describeBodyPair,
 	loadPiBodySnapshots,
+	type PiBodySnapshot,
 	resolvePiBodiesDirectory,
 } from "../../plugin/scripts/cache-bust-body-sources";
 import { getMagicContextStorageDir } from "../../plugin/src/shared/data-path";
@@ -36,6 +45,7 @@ interface SessionEntryMarker {
 	ordinal: number;
 	line: number;
 	type: string;
+	toolName?: string;
 }
 
 interface PiUsageRow {
@@ -50,9 +60,10 @@ interface PiUsageRow {
 	total: number;
 }
 
-interface PiSessionFile {
+export interface PiSessionFile {
 	sessionId: string;
 	path: string;
+	cwd?: string;
 	entries: SessionEntryMarker[];
 	usage: PiUsageRow[];
 }
@@ -63,7 +74,7 @@ interface JoinedPass {
 	intervening: SessionEntryMarker[];
 }
 
-interface AnalysisRow {
+export interface AnalysisRow {
 	current: JoinedPass;
 	previous?: JoinedPass;
 	verdict: Verdict;
@@ -72,6 +83,20 @@ interface AnalysisRow {
 	comparableRead?: number;
 	rewrittenTokens?: number;
 	attribution: string;
+	divergenceIndex: number;
+	divergenceClass?: CacheBustDivergenceClass;
+	decision?: CacheBustDecisionAttribution;
+}
+
+export interface PiCacheBustAnalysisOptions {
+	sessionId: string;
+	sinceExclusiveMs?: number;
+	untilInclusiveMs?: number;
+	piDir?: string;
+	ompDir?: string;
+	ledgerDir?: string;
+	bodiesDir?: string;
+	decisions?: readonly CacheBustDecisionAttribution[];
 }
 
 function asJson(value: unknown): Json | undefined {
@@ -103,6 +128,21 @@ function parseTimestamp(value: unknown): number {
 	if (Number.isFinite(numeric)) return numeric;
 	const parsed = Date.parse(value);
 	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function entryToolName(entry: Json): string | undefined {
+	const message = asJson(entry.message);
+	const content = Array.isArray(message?.content) ? message.content : [];
+	for (const part of content) {
+		const record = asJson(part);
+		for (const key of ["name", "toolName", "tool_name"] as const) {
+			if (typeof record?.[key] === "string") return record[key] as string;
+		}
+	}
+	for (const key of ["name", "command", "toolName", "tool_name"] as const) {
+		if (typeof entry[key] === "string") return entry[key] as string;
+	}
+	return undefined;
 }
 
 function resolveTimeBound(
@@ -178,6 +218,7 @@ function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
 		return undefined;
 	}
 	let sessionId = "";
+	let cwd: string | undefined;
 	const entries: SessionEntryMarker[] = [];
 	const usage: PiUsageRow[] = [];
 	let ordinal = 0;
@@ -191,11 +232,17 @@ function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
 			continue;
 		}
 		const type = typeof entry.type === "string" ? entry.type : "unknown";
-		const marker = { ordinal, line: lineIndex + 1, type };
+		const marker = {
+			ordinal,
+			line: lineIndex + 1,
+			type,
+			toolName: entryToolName(entry),
+		};
 		entries.push(marker);
 		ordinal += 1;
 		if (type === "session" && typeof entry.id === "string") {
 			sessionId = entry.id;
+			cwd = typeof entry.cwd === "string" ? entry.cwd : cwd;
 			continue;
 		}
 		if (type !== "message") continue;
@@ -233,7 +280,7 @@ function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
 		(left, right) =>
 			left.timestamp - right.timestamp || left.ordinal - right.ordinal,
 	);
-	return { sessionId, path: filePath, entries, usage };
+	return { sessionId, path: filePath, cwd, entries, usage };
 }
 
 async function discoverPiSessionFiles(
@@ -368,11 +415,24 @@ function digestAttribution(previous: JoinedPass, current: JoinedPass): string {
 	return `message[${divergence}]${seam}: ${previousVector} -> ${currentVector}`;
 }
 
-function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
+export function analyzeJoinedPasses(
+	joined: readonly JoinedPass[],
+	options: {
+		bodies?: ReadonlyMap<number, PiBodySnapshot>;
+		decisions?: readonly CacheBustDecisionAttribution[];
+	} = {},
+): AnalysisRow[] {
 	let previousBust = false;
+	let previousBustDivergenceIndex: number | undefined;
 	return joined.map((current, index) => {
+		const divergenceIndex = current.ledger.first_divergence_message_index ?? -1;
 		if (index === 0) {
-			return { current, verdict: "BASE", attribution: "first joined pass" };
+			return {
+				current,
+				verdict: "BASE",
+				attribution: "first joined pass",
+				divergenceIndex,
+			};
 		}
 		const previous = joined[index - 1];
 		const prevTotal = previous.usage.total;
@@ -384,6 +444,58 @@ function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
 			previousBust && current.usage.cacheRead <= previous.usage.cacheRead;
 		const bust = rebust || comparableRead < meterFloor;
 		previousBust = bust;
+		const previousBody = options.bodies?.get(previous.ledger.sequence);
+		const currentBody = options.bodies?.get(current.ledger.sequence);
+		const bodyDivergence =
+			previousBody && currentBody
+				? describeBodyPair(previousBody.messages, currentBody.messages)
+				: undefined;
+		const compactionSeam = current.intervening.some(
+			(entry) => entry.type === "compaction",
+		);
+		const seam = compactionSeam ? " (compaction seam)" : "";
+		const attribution = bodyDivergence
+			? `${bodyDivergence.description}${seam}`
+			: digestAttribution(previous, current);
+		const decision = nearestCacheBustDecision(
+			options.decisions ?? [],
+			current.usage.timestamp,
+			current.usage.messageId,
+		);
+		const firstDivergenceRole = bodyDivergence
+			? (
+					currentBody?.messages[bodyDivergence.index] ??
+					previousBody?.messages[bodyDivergence.index]
+				)?.role
+			: undefined;
+		const evidenceIndex = bodyDivergence?.index ?? divergenceIndex;
+		const contentEvidence = [
+			...([previousBody, currentBody] as const).flatMap(
+				(body) =>
+					body?.messages
+						.slice(
+							Math.max(0, evidenceIndex - 2),
+							Math.max(0, evidenceIndex + 4),
+						)
+						.map((message) => message.canonical) ?? [],
+			),
+			...current.intervening.map((entry) => entry.toolName ?? entry.type),
+		].join("\n");
+		const divergenceClass = bust
+			? classifyCacheBust({
+					divergenceIndex,
+					previousMessageCount:
+						previousBody?.messages.length ?? previous.ledger.message_count,
+					previousBustDivergenceIndex,
+					currentProvider: "pi",
+					previousProvider: "pi",
+					firstDivergenceRole,
+					contentEvidence,
+					compactionSeam,
+					decision,
+				})
+			: undefined;
+		previousBustDivergenceIndex = bust ? divergenceIndex : undefined;
 		return {
 			current,
 			previous,
@@ -396,9 +508,124 @@ function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
 				: bust
 					? prevTotal - current.usage.cacheRead
 					: undefined,
-			attribution: digestAttribution(previous, current),
+			attribution,
+			divergenceIndex,
+			divergenceClass,
+			decision,
 		};
 	});
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function piAnalyzerCommand(
+	row: AnalysisRow,
+	options: PiCacheBustAnalysisOptions,
+): string {
+	const args = [
+		"cd packages/pi-plugin && bun scripts/analyze-pi-cache-busts.ts",
+		"--session",
+		shellQuote(options.sessionId),
+		"--since",
+		shellQuote(row.previous?.usage.createdAt ?? row.current.usage.createdAt),
+		"--until",
+		shellQuote(row.current.usage.createdAt),
+		"--show-diff",
+		"--all-rows",
+	];
+	if (options.piDir) args.push("--pi-dir", shellQuote(options.piDir));
+	if (options.ompDir) args.push("--omp-dir", shellQuote(options.ompDir));
+	if (options.ledgerDir)
+		args.push("--ledger-dir", shellQuote(options.ledgerDir));
+	if (options.bodiesDir)
+		args.push("--bodies-dir", shellQuote(options.bodiesDir));
+	return args.join(" ");
+}
+
+/** Analyze one exact Pi/OMP session without printing or mutating any source store. */
+export async function analyzePiCacheBustSession(
+	options: PiCacheBustAnalysisOptions,
+): Promise<CacheBustSessionAnalysis> {
+	const roots = [
+		options.piDir ?? getPiSessionsRoot(),
+		options.ompDir ?? getOmpSessionsRoot(),
+	].filter((root, index, all) => all.indexOf(root) === index);
+	const candidates = (await discoverPiSessionFiles(roots))
+		.filter((session) => session.sessionId === options.sessionId)
+		.map((session) => {
+			const stat = statSync(session.path);
+			return { session, mtimeMs: stat.mtimeMs, size: stat.size };
+		})
+		.sort(
+			(left, right) =>
+				right.mtimeMs - left.mtimeMs ||
+				right.size - left.size ||
+				left.session.path.localeCompare(right.session.path),
+		);
+	const selected = candidates[0]?.session;
+	if (!selected) return { requests: [], highWaterMarkMs: null };
+	const ledgerDir = options.ledgerDir ?? getMagicContextStorageDir();
+	const ledgers = loadLedger(selected.sessionId, ledgerDir);
+	const bodiesDirectory = resolvePiBodiesDirectory(
+		selected.sessionId,
+		selected.path,
+		options.bodiesDir,
+	);
+	const bodies = loadPiBodySnapshots(bodiesDirectory);
+	const inWindow = (timestampMs: number): boolean =>
+		(options.sinceExclusiveMs === undefined ||
+			timestampMs > options.sinceExclusiveMs) &&
+		(options.untilInclusiveMs === undefined ||
+			timestampMs <= options.untilInclusiveMs);
+	const boundedJoined = joinPasses(ledgers, selected).filter(
+		(pass) =>
+			options.untilInclusiveMs === undefined ||
+			pass.usage.timestamp <= options.untilInclusiveMs,
+	);
+	const firstNewIndex = boundedJoined.findIndex((pass) =>
+		inWindow(pass.usage.timestamp),
+	);
+	const analysisJoined =
+		firstNewIndex < 0
+			? []
+			: boundedJoined.slice(
+					options.sinceExclusiveMs === undefined
+						? 0
+						: Math.max(0, firstNewIndex - 2),
+				);
+	const rows = analyzeJoinedPasses(analysisJoined, {
+		bodies,
+		decisions: options.decisions,
+	});
+	const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
+		const timestampMs = row.current.usage.timestamp;
+		if (!inWindow(timestampMs)) return [];
+		return [
+			{
+				session: selected.sessionId,
+				at: row.current.usage.createdAt,
+				timestampMs,
+				verdict: row.verdict,
+				rewrittenTokens: row.rewrittenTokens,
+				divergenceClass: row.divergenceClass,
+				firstDivergence: row.attribution,
+				analyzerCmd: piAnalyzerCommand(row, options),
+			},
+		];
+	});
+	const analyzedRequestTimestamps = selected.usage
+		.map((usage) => usage.timestamp)
+		.filter(inWindow);
+	return {
+		requests,
+		highWaterMarkMs:
+			analyzedRequestTimestamps.length > 0
+				? Math.max(...analyzedRequestTimestamps)
+				: null,
+		directory: selected.cwd,
+	};
 }
 
 function fmtTime(iso: string): string {
@@ -496,7 +723,7 @@ async function main(): Promise<void> {
 		options.bodiesDir,
 	);
 	const bodies = loadPiBodySnapshots(bodiesDirectory);
-	const rows = analyzeJoinedPasses(joinPasses(ledgers, session));
+	const rows = analyzeJoinedPasses(joinPasses(ledgers, session), { bodies });
 	console.log(`Session: ${session.sessionId}`);
 	console.log(`JSONL:   ${session.path}`);
 	console.log(
@@ -540,6 +767,9 @@ async function main(): Promise<void> {
 		console.log(
 			`${fmtTime(row.current.usage.createdAt).padEnd(21)} | ${row.verdict.padEnd(7)} | ${meterCell(row).padEnd(70)} | ${attribution}`,
 		);
+		if (row.divergenceClass) {
+			console.log(`          └─ divergence-class: ${row.divergenceClass}`);
+		}
 		if (options.showDiff && bodyDivergence) {
 			const versions = clippedBodyPairVersions(bodyDivergence);
 			console.log(`          └─ message diff @char ${versions.character}:`);

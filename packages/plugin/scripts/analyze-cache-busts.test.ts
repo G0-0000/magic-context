@@ -114,7 +114,9 @@ describe("analyze-cache-bust dump discovery", () => {
         });
         const rows = __test.analyzeSnapshots(snapshotsFor(dir, session));
         expect(rows.map(row => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
-        expect(rows[2]!.rewrittenTokens).toBe(173524);
+        expect(rows[1]?.divergenceClass).toBe("unaccounted_tail_rewrite");
+        expect(rows[2]?.divergenceClass).toBe("unaccounted_double_bust");
+        expect(rows[2]?.rewrittenTokens).toBe(173524);
     });
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-body-bytes-"));

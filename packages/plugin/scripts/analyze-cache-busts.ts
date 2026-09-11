@@ -29,6 +29,14 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+    type AnalyzedCacheRequest,
+    type CacheBustDecisionAttribution,
+    type CacheBustDivergenceClass,
+    type CacheBustSessionAnalysis,
+    classifyCacheBust,
+    nearestCacheBustDecision,
+} from "./cache-bust-attribution";
+import {
     type BodyProvider,
     describeNormalizedMessage,
     type NormalizedMessage,
@@ -87,7 +95,7 @@ interface Snapshot {
     sequence: number;
 }
 
-interface AnalysisRow {
+export interface AnalysisRow {
     current: Snapshot;
     previous?: Snapshot;
     divergenceIndex: number;
@@ -100,6 +108,17 @@ interface AnalysisRow {
     comparableRead?: number;
     shortRead?: boolean;
     rewrittenTokens?: number;
+    divergenceClass?: CacheBustDivergenceClass;
+    decision?: CacheBustDecisionAttribution;
+}
+
+export interface OpenCodeCacheBustAnalysisOptions {
+    sessionId: string;
+    sinceExclusiveMs?: number;
+    untilInclusiveMs?: number;
+    anthropicDir?: string;
+    openaiDir?: string;
+    decisions?: readonly CacheBustDecisionAttribution[];
 }
 
 interface DumpCandidate {
@@ -214,7 +233,10 @@ function sessionMatches(candidate: string, prefix: string): boolean {
     return candidate.startsWith(prefix) || prefix.startsWith(visibleHead);
 }
 
-function buildSegments(body: Json, provider?: BodyProvider): { provider: BodyProvider; segments: Segment[] } {
+function buildSegments(
+    body: Json,
+    provider?: BodyProvider,
+): { provider: BodyProvider; segments: Segment[] } {
     const normalized = normalizeRequestBody(body, provider);
     return {
         provider: normalized.provider,
@@ -226,10 +248,16 @@ function buildSegments(body: Json, provider?: BodyProvider): { provider: BodyPro
 }
 
 function asJson(value: unknown): Json | undefined {
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : undefined;
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Json)
+        : undefined;
 }
 
-function meterUsage(value: unknown, source: string, provider: BodyProvider): MeterUsage | undefined {
+function meterUsage(
+    value: unknown,
+    source: string,
+    provider: BodyProvider,
+): MeterUsage | undefined {
     const usage = asJson(value);
     if (!usage) return undefined;
     if (provider === "openai") {
@@ -260,7 +288,8 @@ function meterUsage(value: unknown, source: string, provider: BodyProvider): Met
     const cacheRead = usage.cache_read_input_tokens;
     const cacheCreation = usage.cache_creation_input_tokens;
     if (
-        (cacheRead !== undefined && (typeof cacheRead !== "number" || !Number.isFinite(cacheRead))) ||
+        (cacheRead !== undefined &&
+            (typeof cacheRead !== "number" || !Number.isFinite(cacheRead))) ||
         (cacheCreation !== undefined &&
             (typeof cacheCreation !== "number" || !Number.isFinite(cacheCreation)))
     ) {
@@ -348,7 +377,11 @@ function loadMeterUsage(
     }
 }
 
-function artifactPaths(source: DumpSource, metaFile: string, meta: Json): {
+function artifactPaths(
+    source: DumpSource,
+    metaFile: string,
+    meta: Json,
+): {
     bodyPath?: string;
     responsePath?: string;
 } {
@@ -362,7 +395,10 @@ function artifactPaths(source: DumpSource, metaFile: string, meta: Json): {
               ? adjacentBodyPath
               : undefined;
     const referencedResponsePath = typeof files?.response === "string" ? files.response : undefined;
-    const adjacentResponsePath = join(source.dir, metaFile.replace(/\.meta\.json$/, ".response.json"));
+    const adjacentResponsePath = join(
+        source.dir,
+        metaFile.replace(/\.meta\.json$/, ".response.json"),
+    );
     const responsePath =
         referencedResponsePath && existsSync(referencedResponsePath)
             ? referencedResponsePath
@@ -378,7 +414,9 @@ function discoverDumpCandidates(opts: Args): DumpCandidate[] {
     const until = resolveTimeBound(opts.until);
     for (const source of opts.sources) {
         if (!existsSync(source.dir)) continue;
-        for (const metaFile of readdirSync(source.dir).filter((file) => file.endsWith(".meta.json"))) {
+        for (const metaFile of readdirSync(source.dir).filter((file) =>
+            file.endsWith(".meta.json"),
+        )) {
             const parsedName = parseDumpFilename(metaFile);
             let meta: Json;
             try {
@@ -426,7 +464,9 @@ function loadCandidateSnapshots(candidate: DumpCandidate, opts: Args): Snapshot[
     const since = resolveTimeBound(opts.since);
     const until = resolveTimeBound(opts.until);
     const snapshots: Snapshot[] = [];
-    for (const metaFile of readdirSync(candidate.source.dir).filter((file) => file.endsWith(".meta.json"))) {
+    for (const metaFile of readdirSync(candidate.source.dir).filter((file) =>
+        file.endsWith(".meta.json"),
+    )) {
         const dumpName = parseDumpFilename(metaFile);
         if (dumpName && dumpName.session !== candidate.session) continue;
         let meta: Json;
@@ -492,6 +532,127 @@ function loadSnapshots(opts: Args): Snapshot[] {
     return loadSnapshotSelection(opts).snapshots;
 }
 
+function shellQuote(value: string): string {
+    return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function openCodeAnalyzerCommand(
+    row: AnalysisRow,
+    options: OpenCodeCacheBustAnalysisOptions,
+): string {
+    const args = [
+        "cd packages/plugin && bun scripts/analyze-cache-busts.ts",
+        "--session",
+        shellQuote(options.sessionId),
+        "--since",
+        shellQuote(row.previous?.createdAt ?? row.current.createdAt),
+        "--until",
+        shellQuote(row.current.createdAt),
+        "--show-diff",
+        "--all-rows",
+    ];
+    if (options.anthropicDir) {
+        args.push("--anthropic-dir", shellQuote(options.anthropicDir));
+    }
+    if (options.openaiDir) {
+        args.push("--openai-dir", shellQuote(options.openaiDir));
+    }
+    return args.join(" ");
+}
+
+/** Analyze one exact OpenCode session without printing or mutating any source store. */
+export function analyzeOpenCodeCacheBustSession(
+    options: OpenCodeCacheBustAnalysisOptions,
+): CacheBustSessionAnalysis {
+    const sources: DumpSource[] = [
+        {
+            provider: "anthropic",
+            dir:
+                options.anthropicDir ??
+                process.env.OPENCODE_ANTHROPIC_AUTH_DUMP_DIR ??
+                join(tmpdir(), "opencode-anthropic-auth-dumps"),
+            label: "anthropic-auth",
+        },
+        {
+            provider: "openai",
+            dir:
+                options.openaiDir ??
+                process.env.OPENCODE_OPENAI_AUTH_DUMP_DIR ??
+                join(tmpdir(), "opencode-openai-auth-dumps"),
+            label: "openai-auth",
+        },
+    ];
+    const args: Args = {
+        sessionPrefix: options.sessionId,
+        sources,
+        showDiff: false,
+        allBusts: false,
+        allRows: true,
+        help: false,
+    };
+    const snapshots = discoverDumpCandidates(args)
+        .filter((candidate) => candidate.session === options.sessionId)
+        .flatMap((candidate) => loadCandidateSnapshots(candidate, args));
+    snapshots.sort(
+        (left, right) =>
+            left.orderCreatedAt.localeCompare(right.orderCreatedAt) ||
+            left.sequence - right.sequence ||
+            left.file.localeCompare(right.file),
+    );
+    const inWindow = (timestampMs: number): boolean =>
+        (options.sinceExclusiveMs === undefined || timestampMs > options.sinceExclusiveMs) &&
+        (options.untilInclusiveMs === undefined || timestampMs <= options.untilInclusiveMs);
+    const boundedSnapshots = snapshots.filter((snapshot) => {
+        const timestampMs = Date.parse(snapshot.createdAt);
+        return (
+            Number.isFinite(timestampMs) &&
+            (options.untilInclusiveMs === undefined || timestampMs <= options.untilInclusiveMs)
+        );
+    });
+    const firstNewIndex = boundedSnapshots.findIndex((snapshot) =>
+        inWindow(Date.parse(snapshot.createdAt)),
+    );
+    const analysisSnapshots =
+        firstNewIndex < 0
+            ? []
+            : boundedSnapshots.slice(
+                  options.sinceExclusiveMs === undefined ? 0 : Math.max(0, firstNewIndex - 2),
+              );
+    const rows = analyzeSnapshots(analysisSnapshots, options.decisions);
+    const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
+        const timestampMs = Date.parse(row.current.createdAt);
+        if (!Number.isFinite(timestampMs) || !inWindow(timestampMs)) return [];
+        const segment =
+            row.divergenceIndex < 0
+                ? undefined
+                : (row.current.segments[row.divergenceIndex] ??
+                  row.previous?.segments[row.divergenceIndex]);
+        return [
+            {
+                session: row.current.session,
+                at: row.current.createdAt,
+                timestampMs,
+                verdict: row.verdict,
+                rewrittenTokens: row.rewrittenTokens,
+                divergenceClass: row.divergenceClass,
+                firstDivergence:
+                    row.verdict === "BASE"
+                        ? "(first request)"
+                        : (segment?.id ?? "(identical normalized prefix)"),
+                analyzerCmd: openCodeAnalyzerCommand(row, options),
+            },
+        ];
+    });
+    const analyzedRequestTimestamps = boundedSnapshots
+        .map((snapshot) => Date.parse(snapshot.createdAt))
+        .filter(inWindow);
+    return {
+        requests,
+        highWaterMarkMs:
+            analyzedRequestTimestamps.length > 0 ? Math.max(...analyzedRequestTimestamps) : null,
+    };
+}
+
 /** First wire-order segment index where prev/cur diverge (added/removed/changed). */
 function firstDivergence(prev: Segment[], cur: Segment[]): number {
     const n = Math.min(prev.length, cur.length);
@@ -525,10 +686,19 @@ function lastBreakpointIndex(segs: Segment[]): number {
     return last;
 }
 
-function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
+export function analyzeSnapshots(
+    snaps: readonly Snapshot[],
+    decisions: readonly CacheBustDecisionAttribution[] = [],
+): AnalysisRow[] {
     let previousShortRead = false;
-    return snaps.map((current, index) => {
-        if (index === 0) return { current, divergenceIndex: -1, verdict: "BASE" };
+    let previousBustDivergenceIndex: number | undefined;
+    const rows: AnalysisRow[] = [];
+    for (let index = 0; index < snaps.length; index += 1) {
+        const current = snaps[index];
+        if (index === 0) {
+            rows.push({ current, divergenceIndex: -1, verdict: "BASE" });
+            continue;
+        }
         const previous = snaps[index - 1];
         const divergenceIndex = firstDivergence(previous.segments, current.segments);
         // Anthropic exposes explicit breakpoints. OpenAI's cache is an implicit prefix,
@@ -536,18 +706,21 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
         const byteBust =
             current.provider === "openai"
                 ? divergenceIndex >= 0 && divergenceIndex < previous.segments.length
-                : divergenceIndex !== -1 && divergenceIndex <= lastBreakpointIndex(current.segments);
+                : divergenceIndex !== -1 &&
+                  divergenceIndex <= lastBreakpointIndex(current.segments);
         const byteVerdict: ByteVerdict = byteBust ? "BUST" : "STABLE";
         if (!current.usage || !previous.usage) {
             previousShortRead = false;
-            return {
+            previousBustDivergenceIndex = undefined;
+            rows.push({
                 current,
                 previous,
                 divergenceIndex,
                 byteVerdict,
                 verdict: "UNMETERED",
                 meterVsBytes: "UNMETERED",
-            };
+            });
+            continue;
         }
         const prevTotal = previous.usage.total;
         const epsilon = Math.max(64, previous.usage.input);
@@ -561,8 +734,9 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
                 : current.usage.cacheRead + current.usage.input;
         // A rewrite cannot use the prior rewrite's direct input as forgiveness
         // while cacheRead remains at the same floor.
-        const rebust = previousShortRead && current.usage.cacheRead <= previous.usage.cacheRead;
-        const shortRead = rebust || comparableRead < meterFloor;
+        const rebust: boolean =
+            previousShortRead && current.usage.cacheRead <= previous.usage.cacheRead;
+        const shortRead: boolean = rebust || comparableRead < meterFloor;
         previousShortRead = shortRead;
         const verdict: MeterVerdict = shortRead
             ? byteVerdict === "BUST"
@@ -575,7 +749,35 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
                 : verdict === "STABLE" && byteVerdict === "BUST"
                   ? "BYTES-ONLY"
                   : "AGREE";
-        return {
+        const timestampMs = Date.parse(current.createdAt);
+        const decision = nearestCacheBustDecision(decisions, timestampMs);
+        const divergentSegment =
+            divergenceIndex < 0
+                ? undefined
+                : (current.segments[divergenceIndex] ?? previous.segments[divergenceIndex]);
+        const divergenceClass =
+            verdict === "BUST"
+                ? classifyCacheBust({
+                      divergenceIndex,
+                      previousMessageCount: previous.segments.length,
+                      previousBustDivergenceIndex,
+                      previousProvider: previous.provider,
+                      currentProvider: current.provider,
+                      firstDivergenceRole: divergentSegment?.role,
+                      contentEvidence: [previous, current]
+                          .flatMap((snapshot) =>
+                              snapshot.segments.slice(
+                                  Math.max(0, divergenceIndex - 2),
+                                  Math.max(0, divergenceIndex + 4),
+                              ),
+                          )
+                          .map((segment) => segment.canonical)
+                          .join("\n"),
+                      decision,
+                  })
+                : undefined;
+        previousBustDivergenceIndex = verdict === "BUST" ? divergenceIndex : undefined;
+        rows.push({
             current,
             previous,
             divergenceIndex,
@@ -589,10 +791,15 @@ function analyzeSnapshots(snaps: Snapshot[]): AnalysisRow[] {
             shortRead,
             rewrittenTokens:
                 verdict === "BUST" || verdict === "LATENCY"
-                    ? rebust ? current.usage.input : prevTotal - current.usage.cacheRead
+                    ? rebust
+                        ? current.usage.input
+                        : prevTotal - current.usage.cacheRead
                     : undefined,
-        };
-    });
+            divergenceClass,
+            decision,
+        });
+    }
+    return rows;
 }
 
 function fmtTime(iso: string): string {
@@ -621,7 +828,8 @@ function printSegmentDiff(previous: Snapshot, current: Snapshot, index: number):
     const prevText = segmentText(previous, index) ?? "(segment absent)";
     const curText = segmentText(current, index) ?? "(segment absent)";
     let start = 0;
-    while (start < prevText.length && start < curText.length && prevText[start] === curText[start]) start += 1;
+    while (start < prevText.length && start < curText.length && prevText[start] === curText[start])
+        start += 1;
     let prevEnd = prevText.length;
     let curEnd = curText.length;
     while (prevEnd > start && curEnd > start && prevText[prevEnd - 1] === curText[curEnd - 1]) {
@@ -636,7 +844,10 @@ function printSegmentDiff(previous: Snapshot, current: Snapshot, index: number):
 function meterCell(row: AnalysisRow): string {
     if (row.verdict === "UNMETERED") return `unavailable; bytes=${row.byteVerdict}`;
     const read = row.current.usage?.cacheRead ?? 0;
-    const rewritten = row.rewrittenTokens === undefined ? "" : `; rewritten≈${row.rewrittenTokens.toLocaleString()}`;
+    const rewritten =
+        row.rewrittenTokens === undefined
+            ? ""
+            : `; rewritten≈${row.rewrittenTokens.toLocaleString()}`;
     const directInput = row.current.usage?.input ?? 0;
     const comparable =
         row.current.provider === "openai"
@@ -722,7 +933,9 @@ function main(): void {
     for (const row of rows) {
         if (row.verdict === "BASE") {
             if (opts.allRows) {
-                console.log(`${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`);
+                console.log(
+                    `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | BASE             |                                                        |              | (first request)                 |                             |`,
+                );
             }
             continue;
         }
@@ -738,7 +951,8 @@ function main(): void {
 
         const previous = row.previous as Snapshot;
         const index = row.divergenceIndex;
-        const segment = index < 0 ? undefined : row.current.segments[index] ?? previous.segments[index];
+        const segment =
+            index < 0 ? undefined : (row.current.segments[index] ?? previous.segments[index]);
         const attribution = segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
             : `(identical; bytes ${row.byteVerdict})`;
@@ -751,6 +965,9 @@ function main(): void {
         console.log(
             `${fmtTime(row.current.createdAt)} | ${String(row.current.segments.length).padStart(4)} | ${verdictLabel.padEnd(16)} | ${meterCell(row).padEnd(54)} | ${(row.meterVsBytes ?? "").padEnd(12)} | ${attribution.padEnd(31)} | ${byteDelta.padEnd(27)} | ${currentPrefix.at} (${currentPrefix.bytes.toLocaleString()}B)`,
         );
+        if (row.divergenceClass) {
+            console.log(`          └─ divergence-class: ${row.divergenceClass}`);
+        }
 
         if (
             (opts.showDiff || opts.allBusts) &&
@@ -762,14 +979,17 @@ function main(): void {
                 const count = Math.max(previous.segments.length, row.current.segments.length);
                 for (let diffIndex = index; diffIndex < count; diffIndex += 1) {
                     if (
-                        previous.segments[diffIndex]?.hash !== row.current.segments[diffIndex]?.hash ||
+                        previous.segments[diffIndex]?.hash !==
+                            row.current.segments[diffIndex]?.hash ||
                         previous.segments[diffIndex]?.id !== row.current.segments[diffIndex]?.id
                     ) {
                         diffs.push(diffIndex);
                     }
                 }
                 for (const diffIndex of diffs) {
-                    console.log(`          └─ diverge @${diffIndex}: prev=${previous.segments[diffIndex]?.id ?? "—"}/${previous.segments[diffIndex]?.hash ?? "—"}  cur=${row.current.segments[diffIndex]?.id ?? "—"}/${row.current.segments[diffIndex]?.hash ?? "—"}`);
+                    console.log(
+                        `          └─ diverge @${diffIndex}: prev=${previous.segments[diffIndex]?.id ?? "—"}/${previous.segments[diffIndex]?.hash ?? "—"}  cur=${row.current.segments[diffIndex]?.id ?? "—"}/${row.current.segments[diffIndex]?.hash ?? "—"}`,
+                    );
                 }
             }
             if (opts.showDiff) printSegmentDiff(previous, row.current, index);
@@ -780,13 +1000,19 @@ function main(): void {
     if (bustCount === 0) {
         console.log(`No metered busts across ${snaps.length} request(s).`);
     } else {
-        console.log(`${bustCount} metered bust(s) across ${snaps.length} request(s).${opts.allRows ? "" : " (STABLE rows hidden; pass --all-rows to show them.)"}`);
+        console.log(
+            `${bustCount} metered bust(s) across ${snaps.length} request(s).${opts.allRows ? "" : " (STABLE rows hidden; pass --all-rows to show them.)"}`,
+        );
     }
     if (latencyCount > 0) {
-        console.log(`${latencyCount} latency-only short read(s) had no reusable-prefix byte divergence.`);
+        console.log(
+            `${latencyCount} latency-only short read(s) had no reusable-prefix byte divergence.`,
+        );
     }
     if (unmeteredBustCount > 0) {
-        console.log(`${unmeteredBustCount} unmetered byte-attributed bust candidate(s); response usage was unavailable.`);
+        console.log(
+            `${unmeteredBustCount} unmetered byte-attributed bust candidate(s); response usage was unavailable.`,
+        );
     }
 }
 

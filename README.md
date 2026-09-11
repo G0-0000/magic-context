@@ -406,6 +406,25 @@ Dream execution requires a live OpenCode server (the dreamer creates ephemeral c
 
 ---
 
+### Cache-bust sentinel
+
+`packages/plugin/scripts/cache-bust-sentinel.ts` audits recent OpenCode and Pi/OMP provider requests for cache busts that are not explained by Magic Context's fold, refresh, reduction, flush, force-band, or provider/system-prompt contracts. It opens `context.db`, OpenCode's database, auth-plugin dumps, Pi/OMP JSONL, and `.pi/pi-llm-debugging`/served-array artifacts read-only. Its only local write is the high-water/dedup state file at `~/.local/share/cortexkit/magic-context/cache-bust-sentinel-state.json` (or the resolved `MAGIC_CONTEXT_STORAGE_DIR`).
+
+Run a single dry pass from the repository root; each new unaccounted bust window is printed as one JSON line:
+
+```sh
+bun packages/plugin/scripts/cache-bust-sentinel.ts --once
+```
+
+Omit `--once` for the built-in one-minute loop, or invoke `--once` from cron/launchd every 1–5 minutes. The template at `packages/plugin/scripts/launchd/com.cortexkit.magic-context.cache-bust-sentinel.plist` uses a five-minute cadence, deliberately has `RunAtLoad=false`, and is not installed automatically. Replace its `__BUN_PATH__`, `__REPO_ROOT__`, and `__LOG_DIR__` placeholders before loading it. A cron equivalent is:
+
+```cron
+*/5 * * * * cd /path/to/magic-context && /path/to/bun packages/plugin/scripts/cache-bust-sentinel.ts --once >> /path/to/cache-bust-sentinel.jsonl 2>> /path/to/cache-bust-sentinel.log
+```
+
+`--send` switches from JSON-line dry-run output to the `prefrontal` module's `wake.event_record` subc operation. Do not enable it until that operation is deployed. Known dispositions (`accepted`, `unowned_session`, `dedup`, and `superseded`) are counted and logged; malformed replies fail the run. Use `--connection-file`, `--wake-module-id`, `--state-file`, or `--db` only when the corresponding runtime location is non-default.
+
+---
 ## Contributing
 
 Bug reports and pull requests are welcome. For larger changes, open an issue first to discuss the approach. Run `bun run format` before submitting; CI rejects unformatted code.
