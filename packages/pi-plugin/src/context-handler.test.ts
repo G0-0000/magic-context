@@ -3692,7 +3692,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("stamps the stable-id scheme only after a successful cutover pass", async () => {
+	it("retries a failed stable-id cutover, then executes and materializes exactly one successful new-scheme pass", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-cutover-staged-stamp";
 		const cutoverAttempts: boolean[] = [];
@@ -3705,7 +3705,10 @@ describe("registerPiContextHandler", () => {
 			});
 		try {
 			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, { db });
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				injection: { injectionBudgetTokens: 10_000 },
+			});
 			const handler = fake.handlers.get("context") as (
 				event: { messages: never[] },
 				ctx: never,
@@ -3733,7 +3736,13 @@ describe("registerPiContextHandler", () => {
 			);
 
 			expect(await runPass()).toBeDefined();
-			expect(cutoverAttempts).toEqual([true, true]);
+			expect(
+				getOrCreateSessionMeta(db, sessionId).cachedM0Bytes,
+			).not.toBeNull();
+			expect(getOrCreateSessionMeta(db, sessionId).piStableIdScheme).toBe(1);
+
+			expect(await runPass()).toBeDefined();
+			expect(cutoverAttempts).toEqual([true, true, false]);
 			expect(getOrCreateSessionMeta(db, sessionId).piStableIdScheme).toBe(1);
 		} finally {
 			restoreHook();

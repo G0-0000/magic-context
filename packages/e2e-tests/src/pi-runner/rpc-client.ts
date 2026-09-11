@@ -240,6 +240,10 @@ export class PiRpcClient {
         "--mode",
         "rpc",
         "--no-extensions",
+        ...(this.options.extensionsBeforeMagicContext ?? []).flatMap((extension) => [
+          "--extension",
+          extension,
+        ]),
         "--extension",
         this.env.pluginDir,
         "--extension",

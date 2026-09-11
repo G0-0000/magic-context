@@ -76,8 +76,10 @@ export function registerPiFailClosedSurface(
 
 	const tryRecover = (): Promise<boolean> => recoverWith(args.tryReopen);
 
-	// Keep cancelling native compaction while MC is enabled but inoperable —
-	// otherwise Pi's threshold/overflow compact runs with zero MC signal.
+	// Keep cancelling native compaction while MC is enabled but inoperable.
+	// Pi's ExtensionRunner ignores undefined results and stops at the first truthy
+	// `cancel`, so recovery can leave this listener registered without weakening
+	// the full runtime listener's veto, regardless of registration order.
 	pi.on("session_before_compact", async () => {
 		if (recovered) return;
 		log(
