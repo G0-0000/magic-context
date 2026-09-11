@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -13,6 +13,7 @@ import {
     getOverflowState,
     recordOverflowDetected,
 } from "../../features/magic-context/storage-meta-persisted";
+import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import type { Channel1State } from "./ctx-reduce-nudge";
@@ -911,6 +912,7 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
             db,
             channel1StateBySession: new Map([[sessionId, state]]),
         });
+        const sessionLog = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
 
         try {
             const first = { output: "first output" };
@@ -946,7 +948,26 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
             await hook({ tool: "bash", sessionID: sessionId }, regrown);
             expect(regrown.output).toContain("Reminder:");
             expect(regrown.output).not.toContain("a ctx_reduce pass is due");
+            const evaluations = sessionLog.mock.calls
+                .filter(
+                    (call) =>
+                        call[0] === sessionId && String(call[1]).startsWith("channel1 evaluation:"),
+                )
+                .map((call) => String(call[1]));
+            expect(evaluations).toHaveLength(4);
+            for (const evaluation of evaluations) {
+                expect(evaluation).toContain(" U=");
+                expect(evaluation).toContain(" T=");
+                expect(evaluation).toContain(" ratio=");
+                expect(evaluation).toContain(" band=");
+                expect(evaluation).toContain(" growth_threshold=");
+                expect(evaluation).toContain(" sticky_floor_turns_remaining=");
+                expect(evaluation).toContain(" dampening=");
+                expect(evaluation).toContain(" verdict=");
+                expect(evaluation).toContain(" reason=");
+            }
         } finally {
+            sessionLog.mockRestore();
             closeQuietly(db);
         }
     });

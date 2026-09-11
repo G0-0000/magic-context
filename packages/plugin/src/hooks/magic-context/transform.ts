@@ -36,6 +36,9 @@ import {
     clearHistorianFailureState,
     clearPersistedReasoningWatermark,
     clearThinkingBindingRecoveryIf,
+    getChannel1NudgeState,
+    getChannel2NudgeState,
+    getLastNudgeUndropped,
     getOverflowState,
     loadTransformPassStateSnapshot,
     recordOverflowDetected,
@@ -70,7 +73,12 @@ import {
     resolveTodowriteAvailabilityFromMessages,
     type ToolAvailabilityVerdict,
 } from "./ctx-reduce-availability";
-import { evaluateChannel2 } from "./ctx-reduce-nudge";
+import {
+    decideChannel1,
+    evaluateChannel2,
+    formatChannel1Evaluation,
+    formatChannel2Evaluation,
+} from "./ctx-reduce-nudge";
 import { deriveTriggerBudget } from "./derive-budgets";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
@@ -2623,25 +2631,53 @@ export function createTransform(deps: TransformDeps) {
         }
 
         // The final-array walk runs inside runPostTransformPhase after its last
-        // byte mutation. This site only uses the persisted baseline to reset
-        // cadence and run the existing Channel-2 lease logic.
+        // byte mutation. Report both channel verdicts from that same baseline;
+        // only Channel 2 mutates its lease here because Channel 1 delivers at a
+        // later tool-result boundary.
         const channelBaseline = deps.channel1StateBySession?.get(sessionId);
         if (ctxReduceCallable && !compactionOff && channelBaseline) {
-            if (
-                channelBaseline.evaluable &&
-                !channelBaseline.generationInvalidated &&
-                !channelBaseline.reducedSinceRefresh
-            ) {
+            try {
+                const channel1State = getChannel1NudgeState(db, sessionId);
+                const channel1Decision = decideChannel1({
+                    ...channelBaseline,
+                    lastNudgeUndropped: getLastNudgeUndropped(db, sessionId),
+                    lastNudgeLevel: channel1State.level,
+                    lastFireOrdinal: channel1State.ordinal,
+                    currentRealUserTurnCount: channelBaseline.realUserTurnCount,
+                    hasRecentReduce: channelBaseline.reducedSinceRefresh,
+                    agentDropsAppliedThisPass: channelBaseline.agentDropsAppliedThisPass,
+                    postReduceGracePending: channel1State.postReduceGracePending,
+                    postReduceGraceBaselineU: channel1State.postReduceGraceBaselineU,
+                    postReduceGracePreLevel: channel1State.postReduceGracePreLevel,
+                });
+                sessionLog(sessionId, formatChannel1Evaluation(channel1Decision));
+
                 const channel2Evaluation = evaluateChannel2(channelBaseline);
-                try {
+                const leaseBefore = getChannel2NudgeState(db, sessionId);
+                if (
+                    channelBaseline.evaluable &&
+                    !channelBaseline.generationInvalidated &&
+                    !channelBaseline.reducedSinceRefresh
+                ) {
                     if (channel2Evaluation.shouldTrigger) {
                         casChannel2NudgeState(db, sessionId, "", "pending");
                     } else {
                         casChannel2NudgeState(db, sessionId, "pending", "");
                     }
-                } catch (error) {
-                    sessionLog(sessionId, "channel2 trigger CAS failed (ignored):", error);
                 }
+                const leaseAfter = getChannel2NudgeState(db, sessionId);
+                sessionLog(
+                    sessionId,
+                    formatChannel2Evaluation(channel2Evaluation, {
+                        leaseBefore,
+                        leaseAfter,
+                        gateHoldReason: channelBaseline.reducedSinceRefresh
+                            ? "recent-reduce-refresh"
+                            : undefined,
+                    }),
+                );
+            } catch (error) {
+                sessionLog(sessionId, "nudge evaluation/CAS failed (ignored):", error);
             }
         }
 

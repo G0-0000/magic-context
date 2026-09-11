@@ -36,6 +36,7 @@ import {
     CHANNEL1_SENTINEL,
     type Channel1State,
     decideChannel1,
+    formatChannel1Evaluation,
     reclaimableToolOutputCount,
     toolOutputTokens,
 } from "./ctx-reduce-nudge";
@@ -550,8 +551,6 @@ function maybeInjectChannel1Nudge(
     // inside the recency reserve, so it grows T but not U.
     state.turnDeltaT += toolOutputTokens(out.output);
 
-    if (state.reducedSinceRefresh || state.agentDropsAppliedThisPass) return;
-
     const nudgeState = getChannel1NudgeState(args.db, sessionId);
     const decision = decideChannel1({
         baselineU: state.baselineU,
@@ -562,13 +561,15 @@ function maybeInjectChannel1Nudge(
         lastNudgeLevel: nudgeState.level,
         lastFireOrdinal: nudgeState.ordinal,
         currentRealUserTurnCount: state.realUserTurnCount,
-        hasRecentReduce: false,
+        hasRecentReduce: state.reducedSinceRefresh,
+        agentDropsAppliedThisPass: state.agentDropsAppliedThisPass,
         postReduceGracePending: nudgeState.postReduceGracePending,
         postReduceGraceBaselineU: nudgeState.postReduceGraceBaselineU,
         postReduceGracePreLevel: nudgeState.postReduceGracePreLevel,
         evaluable: state.evaluable,
         generationInvalidated: state.generationInvalidated,
     });
+    sessionLog(sessionId, formatChannel1Evaluation(decision));
 
     // Store the cadence level and dampening ordinal together so one persisted state stays in sync.
     setLastNudgeUndropped(args.db, sessionId, decision.nextLastNudge);

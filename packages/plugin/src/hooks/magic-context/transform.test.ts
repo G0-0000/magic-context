@@ -1,7 +1,7 @@
 import { drainNotifications, registerNotificationSink } from "../../shared/rpc-notifications";
 /// <reference types="bun-types" />
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,6 +54,7 @@ import {
 import type { ContextUsage } from "../../features/magic-context/types";
 import { buildSidebarSnapshot } from "../../plugin/rpc-handlers";
 import type { PluginContext } from "../../plugin/types";
+import * as loggerModule from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -153,6 +154,71 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("logs both nudge gate verdicts on every evaluable TypeScript pass", async () => {
+        useTempDataHome("context-transform-nudge-observability-");
+        const sessionId = "ses-nudge-observability";
+        const sessionLog = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => "defer" },
+            contextUsageMap: new Map(),
+            db: openDatabase(),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+            channel1StateBySession: new Map(),
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "nudge-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "inspect the gates" }],
+            },
+            {
+                info: { id: "nudge-assistant", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "call-nudge",
+                        state: { output: "spent output" },
+                    },
+                ],
+            },
+        ];
+
+        try {
+            await transform({}, { messages: structuredClone(messages) });
+            await transform({}, { messages: structuredClone(messages) });
+
+            const lines = sessionLog.mock.calls
+                .filter((call) => call[0] === sessionId)
+                .map((call) => String(call[1]));
+            const channel1 = lines.filter((line) => line.startsWith("channel1 evaluation:"));
+            const channel2 = lines.filter((line) => line.startsWith("channel2 evaluation:"));
+            expect(channel1).toHaveLength(2);
+            expect(channel2).toHaveLength(2);
+            for (const line of [...channel1, ...channel2]) {
+                expect(line).toContain(" U=");
+                expect(line).toContain(" T=");
+                expect(line).toContain(" ratio=");
+                expect(line).toContain(" band=");
+                expect(line).toContain(" verdict=");
+                expect(line).toContain(" reason=");
+            }
+            expect(channel1.every((line) => line.includes("growth_threshold="))).toBe(true);
+            expect(channel1.every((line) => line.includes("sticky_floor_turns_remaining="))).toBe(
+                true,
+            );
+            expect(channel1.every((line) => line.includes("dampening="))).toBe(true);
+            expect(channel2.every((line) => line.includes("lease="))).toBe(true);
+        } finally {
+            sessionLog.mockRestore();
+        }
+    });
+
     it("hydrates only dropped rows for visible-target replay with 98% active tags", async () => {
         useTempDataHome("context-transform-replay-rows-");
         const realDb = openDatabase();

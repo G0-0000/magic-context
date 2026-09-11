@@ -11,6 +11,8 @@ import {
     channel1RefireTokens,
     decideChannel1,
     evaluateChannel2,
+    formatChannel1Evaluation,
+    formatChannel2Evaluation,
     shouldUseStickyChannel1Reminder,
 } from "./ctx-reduce-nudge";
 
@@ -218,6 +220,46 @@ describe("decideChannel1 — agent-tail hygiene ratio", () => {
                 postReduceGracePreLevel: undefined,
             }).fire,
         ).toBe(true);
+    });
+
+    it("reports the live-session incident gates from tail T, not the whole-prompt anchor", () => {
+        const decision = decideChannel1({
+            ...base,
+            baselineU: 113_218,
+            baselineT: 166_724,
+            lastNudgeUndropped: 61_387,
+            lastNudgeLevel: "firm",
+            lastFireOrdinal: 269,
+            currentRealUserTurnCount: 72,
+            postReduceGraceBaselineU: 27_972,
+            postReduceGracePreLevel: "firm",
+        });
+
+        expect(decision).toMatchObject({
+            fire: true,
+            band: "urgent",
+            graceBaselineU: 27_972,
+            graceGrowth: 85_246,
+            growthThreshold: 25_000,
+            stickyTurnsRemaining: 0,
+            dampeningState: "none",
+            verdictReason: "post-reduce-regrowth-reached",
+        });
+        expect(formatChannel1Evaluation(decision)).toBe(
+            "channel1 evaluation: ctx_reduce=callable U=113218 T=166724 ratio=0.6791 band=urgent grace_baseline_u=27972 grace_growth=85246 growth_threshold=25000 sticky_floor_turns_remaining=0 dampening=none verdict=fire reason=post-reduce-regrowth-reached",
+        );
+
+        const channel2 = evaluateChannel2({
+            baselineU: 113_218,
+            baselineT: 166_724,
+            turnDeltaU: 0,
+            turnDeltaT: 0,
+            evaluable: true,
+            generationInvalidated: false,
+        });
+        expect(formatChannel2Evaluation(channel2, { leaseBefore: "" })).toBe(
+            "channel2 evaluation: ctx_reduce=callable U=113218 T=166724 ratio=0.6791 band=urgent lease=empty->empty verdict=hold reason=ratio-below-ceiling",
+        );
     });
 
     it("breaks grace on a band escalation while Channel 2 remains independent", () => {
