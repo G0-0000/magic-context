@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { open, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -249,6 +249,65 @@ let modelCacheDirForRuntime = () => join(getMagicContextStorageDir(), "models");
 let logForRuntime: (message: string, data?: unknown) => void = log;
 let injectWasmOrtForRuntime: () => Promise<boolean> = injectWasmOrt;
 
+interface LoadedLocalEmbeddingRuntime {
+    model: string;
+    runtime: "native" | "wasm";
+    rssDeltaAtLoad: number;
+    externalDeltaAtLoad: number;
+    arrayBuffersDeltaAtLoad: number;
+}
+
+const loadedLocalEmbeddingRuntimes = new Map<number, LoadedLocalEmbeddingRuntime>();
+let nextLocalEmbeddingRuntimeId = 1;
+
+export interface LocalEmbeddingNativeMemoryStats {
+    loaded: boolean;
+    providerCount: number;
+    models: string[];
+    runtimes: Array<"native" | "wasm">;
+    modelCacheBytes: number | null;
+    rssDeltaAtLoad: number;
+    externalDeltaAtLoad: number;
+    arrayBuffersDeltaAtLoad: number;
+}
+
+function directoryBytes(path: string): number | null {
+    let total = 0;
+    try {
+        for (const entry of readdirSync(path, { withFileTypes: true })) {
+            const entryPath = join(path, entry.name);
+            if (entry.isDirectory()) {
+                const childBytes = directoryBytes(entryPath);
+                if (childBytes === null) return null;
+                total += childBytes;
+            } else if (entry.isFile()) {
+                total += statSync(entryPath).size;
+            }
+        }
+        return total;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
+    }
+}
+
+/** ONNX does not expose arena residency; report loaded runtimes and serialized model bytes. */
+export function getLocalEmbeddingNativeMemoryStats(): LocalEmbeddingNativeMemoryStats {
+    const loaded = [...loadedLocalEmbeddingRuntimes.values()];
+    return {
+        loaded: loaded.length > 0,
+        providerCount: loaded.length,
+        models: [...new Set(loaded.map((entry) => entry.model))].sort(),
+        runtimes: [...new Set(loaded.map((entry) => entry.runtime))].sort(),
+        modelCacheBytes: loaded.length > 0 ? directoryBytes(modelCacheDirForRuntime()) : 0,
+        rssDeltaAtLoad: loaded.reduce((sum, entry) => sum + entry.rssDeltaAtLoad, 0),
+        externalDeltaAtLoad: loaded.reduce((sum, entry) => sum + entry.externalDeltaAtLoad, 0),
+        arrayBuffersDeltaAtLoad: loaded.reduce(
+            (sum, entry) => sum + entry.arrayBuffersDeltaAtLoad,
+            0,
+        ),
+    };
+}
+
 /** Test-only seams keep native-loader failures reproducible without loading a real addon. */
 export function __setLocalEmbeddingTestHooks(hooks: LocalEmbeddingTestHooks): void {
     localEmbeddingHostForRuntime = hooks.host ?? (() => ({ isElectron: false, isBun: false }));
@@ -278,6 +337,7 @@ export function __resetLocalEmbeddingForTests(): void {
     modelCacheDirForRuntime = () => join(getMagicContextStorageDir(), "models");
     logForRuntime = log;
     injectWasmOrtForRuntime = injectWasmOrt;
+    loadedLocalEmbeddingRuntimes.clear();
 }
 
 const importWasmOrtForRuntimeDefault = importWasmOrtForRuntime;
@@ -639,6 +699,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     readonly modelId: string;
     readonly maxInputTokens: number;
 
+    private readonly memoryStatsId = nextLocalEmbeddingRuntimeId++;
     private readonly model: string;
     private readonly dtype: LocalEmbeddingDtype;
     private readonly runtimePreference: LocalEmbeddingRuntime;
@@ -695,6 +756,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
             return this.pipeline !== null;
         }
 
+        const memoryBeforeLoad = process.memoryUsage();
         this.initPromise = (async () => {
             try {
                 if (this.disposing) {
@@ -821,6 +883,16 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                     if (this.pipeline) {
                         this.lastFailureReason = null;
                         localEmbeddingProcessFailure = null;
+                        const memoryAfterLoad = process.memoryUsage();
+                        loadedLocalEmbeddingRuntimes.set(this.memoryStatsId, {
+                            model: this.model,
+                            runtime: this.usesWasm ? "wasm" : "native",
+                            rssDeltaAtLoad: memoryAfterLoad.rss - memoryBeforeLoad.rss,
+                            externalDeltaAtLoad:
+                                memoryAfterLoad.external - memoryBeforeLoad.external,
+                            arrayBuffersDeltaAtLoad:
+                                memoryAfterLoad.arrayBuffers - memoryBeforeLoad.arrayBuffers,
+                        });
                         log(`[magic-context] embedding model loaded: ${this.model}`);
                     } else if (this.disposing) {
                         return;
@@ -1009,6 +1081,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
             const pipelineToDispose = this.pipeline;
             this.pipeline = null;
             this.initPromise = null;
+            loadedLocalEmbeddingRuntimes.delete(this.memoryStatsId);
             if (!pipelineToDispose) {
                 return;
             }

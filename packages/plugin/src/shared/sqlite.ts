@@ -39,6 +39,7 @@
  * `run()` → {changes,lastInsertRowid}) is identical and was verified directly.
  */
 
+import { statSync } from "node:fs";
 // Type import only — runtime is loaded dynamically below. @types/better-sqlite3
 // has the richest definitions and is a structural superset of the API surface
 // we use, so calls typed against BetterSqlite3 work under bun:sqlite and
@@ -158,6 +159,88 @@ const DatabaseImpl: typeof BetterSqlite3 = isBun
     ? (sqliteModule.Database as typeof BetterSqlite3)
     : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
 
+interface TrackedSqliteConnection {
+    sequence: number;
+    filename: string;
+    readonly: boolean;
+    reference: WeakRef<BetterSqlite3.Database>;
+}
+
+export interface SqliteConnectionMemoryStats {
+    sequence: number;
+    filename: string;
+    readonly: boolean;
+    pageSize: number | null;
+    pageCount: number | null;
+    freelistCount: number | null;
+    cacheSize: number | null;
+    cacheSizeUnit: "pages" | "kib" | null;
+    cacheUpperBoundBytes: number | null;
+    mmapSizeBytes: number | null;
+    walFileBytes: number | null;
+    shmFileBytes: number | null;
+    fts5TableCount: number | null;
+    journalMode: string | null;
+}
+
+export interface SqliteMemoryStats {
+    connectionCount: number;
+    cacheUpperBoundBytes: number;
+    mmapUpperBoundBytes: number;
+    walFileBytes: number;
+    shmFileBytes: number;
+    sqliteStatusApi: "unavailable";
+    connections: SqliteConnectionMemoryStats[];
+}
+
+const trackedSqliteConnections = new Map<number, TrackedSqliteConnection>();
+let nextSqliteConnectionSequence = 1;
+
+function trackSqliteConnection(
+    db: BetterSqlite3.Database,
+    filename: unknown,
+    options: unknown,
+): BetterSqlite3.Database {
+    const originalClose = db.close.bind(db) as (...args: unknown[]) => unknown;
+    const sequence = nextSqliteConnectionSequence++;
+    const metadata = {
+        sequence,
+        filename:
+            typeof filename === "string"
+                ? filename
+                : Buffer.isBuffer(filename)
+                  ? "<buffer>"
+                  : ":memory:",
+        readonly:
+            Boolean(options) &&
+            typeof options === "object" &&
+            ((options as { readonly?: unknown }).readonly === true ||
+                (options as { readOnly?: unknown }).readOnly === true),
+    };
+    Object.defineProperty(db, "close", {
+        configurable: true,
+        value: (...args: unknown[]) => {
+            try {
+                return originalClose(...args);
+            } finally {
+                trackedSqliteConnections.delete(sequence);
+            }
+        },
+    });
+    trackedSqliteConnections.set(sequence, {
+        ...metadata,
+        reference: new WeakRef(db),
+    });
+    return db;
+}
+
+const TrackedDatabase = new Proxy(DatabaseImpl, {
+    construct(target, args) {
+        const db = Reflect.construct(target, args, target) as BetterSqlite3.Database;
+        return trackSqliteConnection(db, args[0], args[1]);
+    },
+}) as typeof BetterSqlite3;
+
 /**
  * Wrap node:sqlite's `DatabaseSync` so it presents the better-sqlite3/bun
  * surface the rest of the codebase calls:
@@ -259,7 +342,108 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
     return NodeSqliteDatabase as unknown as typeof BetterSqlite3;
 }
 
-export const Database: typeof BetterSqlite3 = DatabaseImpl;
+export const Database: typeof BetterSqlite3 = TrackedDatabase;
+
+function pragmaValue(db: BetterSqlite3.Database, name: string): unknown {
+    const row = db.prepare(`PRAGMA ${name}`).get() as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return row[name] ?? Object.values(row)[0];
+}
+
+function pragmaNumber(db: BetterSqlite3.Database, name: string): number | null {
+    try {
+        const value = pragmaValue(db, name);
+        return typeof value === "number" && Number.isFinite(value) ? value : null;
+    } catch {
+        return null;
+    }
+}
+
+function pragmaString(db: BetterSqlite3.Database, name: string): string | null {
+    try {
+        const value = pragmaValue(db, name);
+        return typeof value === "string" ? value : null;
+    } catch {
+        return null;
+    }
+}
+
+function sqliteSidecarBytes(filename: string, suffix: "-wal" | "-shm"): number | null {
+    if (filename === ":memory:" || filename === "<buffer>") return 0;
+    try {
+        return statSync(`${filename}${suffix}`).size;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
+    }
+}
+
+function fts5TableCount(db: BetterSqlite3.Database): number | null {
+    try {
+        const row = db
+            .prepare(
+                "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND sql LIKE '%USING fts5%'",
+            )
+            .get() as { count?: unknown } | undefined;
+        return typeof row?.count === "number" ? row.count : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Read the SQLite memory bounds that Bun/node:sqlite expose without native FFI.
+ * SQLite's sqlite3_status()/sqlite3_db_status() counters are not surfaced by
+ * either runtime, so cache and mmap values are configured upper bounds rather
+ * than resident-byte measurements.
+ */
+export function getSqliteMemoryStats(): SqliteMemoryStats {
+    const connections: SqliteConnectionMemoryStats[] = [];
+    for (const [sequence, tracked] of trackedSqliteConnections) {
+        const db = tracked.reference.deref();
+        if (!db) {
+            trackedSqliteConnections.delete(sequence);
+            continue;
+        }
+        const pageSize = pragmaNumber(db, "page_size");
+        const cacheSize = pragmaNumber(db, "cache_size");
+        const cacheSizeUnit = cacheSize === null ? null : cacheSize < 0 ? "kib" : "pages";
+        const cacheUpperBoundBytes =
+            cacheSize === null
+                ? null
+                : cacheSize < 0
+                  ? Math.abs(cacheSize) * 1024
+                  : pageSize === null
+                    ? null
+                    : cacheSize * pageSize;
+        connections.push({
+            sequence: tracked.sequence,
+            filename: tracked.filename,
+            readonly: tracked.readonly,
+            pageSize,
+            pageCount: pragmaNumber(db, "page_count"),
+            freelistCount: pragmaNumber(db, "freelist_count"),
+            cacheSize,
+            cacheSizeUnit,
+            cacheUpperBoundBytes,
+            mmapSizeBytes: pragmaNumber(db, "mmap_size"),
+            walFileBytes: sqliteSidecarBytes(tracked.filename, "-wal"),
+            shmFileBytes: sqliteSidecarBytes(tracked.filename, "-shm"),
+            fts5TableCount: fts5TableCount(db),
+            journalMode: pragmaString(db, "journal_mode"),
+        });
+    }
+    const sumKnown = (select: (connection: SqliteConnectionMemoryStats) => number | null): number =>
+        connections.reduce((sum, connection) => sum + (select(connection) ?? 0), 0);
+    return {
+        connectionCount: connections.length,
+        cacheUpperBoundBytes: sumKnown((connection) => connection.cacheUpperBoundBytes),
+        mmapUpperBoundBytes: sumKnown((connection) => connection.mmapSizeBytes),
+        walFileBytes: sumKnown((connection) => connection.walFileBytes),
+        shmFileBytes: sumKnown((connection) => connection.shmFileBytes),
+        sqliteStatusApi: "unavailable",
+        connections,
+    };
+}
 
 /** Instance type alias used by helpers and storage modules. */
 export type Database = BetterSqlite3.Database;

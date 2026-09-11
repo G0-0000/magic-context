@@ -79,6 +79,7 @@ class MagicContextMessageIndexHeapHolder {
     readonly incrementalTimers = new Map<string, ReturnType<typeof setTimeout>>();
     readonly pendingIncrementalKeys = new Set<string>();
     readonly completedIncrementalKeys = new Set<string>();
+    readonly activeReconcilerBuffers = new Map<string, readonly RawMessage[]>();
 }
 
 const heapHolder = new MagicContextMessageIndexHeapHolder();
@@ -153,6 +154,14 @@ function logIndexingError(sessionId: string, action: string, error: unknown): vo
     log(`[message-index-async] ${action} failed for ${sessionId}:`, error);
 }
 
+function serializedMessageBytes(messages: readonly RawMessage[]): number {
+    try {
+        return Buffer.byteLength(JSON.stringify(messages));
+    } catch {
+        return 0;
+    }
+}
+
 async function reconcileSessionIndex(
     db: Database,
     sessionId: string,
@@ -162,39 +171,45 @@ async function reconcileSessionIndex(
         if (heapHolder.reconciledSessions.has(sessionId)) return;
 
         let fallbackSnapshot: RawMessage[] | null = null;
-        const finalWatermark = readMessages.getCount
-            ? readMessages.getCount(sessionId)
-            : (fallbackSnapshot = readMessages(sessionId)).length;
-        let cursor = getMessageIndexReconciliationStartOrdinal(db, sessionId);
+        try {
+            const finalWatermark = readMessages.getCount
+                ? readMessages.getCount(sessionId)
+                : (fallbackSnapshot = readMessages(sessionId)).length;
+            let cursor = getMessageIndexReconciliationStartOrdinal(db, sessionId);
 
-        while (cursor < finalWatermark) {
-            const pageEnd = Math.min(finalWatermark, cursor + RECONCILIATION_BATCH_SIZE);
-            const messages = readMessages.readPage
-                ? readMessages.readPage(
-                      sessionId,
-                      cursor,
-                      RECONCILIATION_BATCH_SIZE,
-                      finalWatermark,
-                  )
-                : (fallbackSnapshot ?? []).filter(
-                      (message) => message.ordinal > cursor && message.ordinal <= pageEnd,
-                  );
+            while (cursor < finalWatermark) {
+                const pageEnd = Math.min(finalWatermark, cursor + RECONCILIATION_BATCH_SIZE);
+                const messages = readMessages.readPage
+                    ? readMessages.readPage(
+                          sessionId,
+                          cursor,
+                          RECONCILIATION_BATCH_SIZE,
+                          finalWatermark,
+                      )
+                    : (fallbackSnapshot ?? []).filter(
+                          (message) => message.ordinal > cursor && message.ordinal <= pageEnd,
+                      );
+                const retainedMessages = fallbackSnapshot ?? messages;
+                heapHolder.activeReconcilerBuffers.set(sessionId, retainedMessages);
 
-            indexMessagesAfterOrdinal(db, sessionId, messages, cursor, pageEnd);
-            const nextCursor = getMessageIndexReconciliationStartOrdinal(db, sessionId);
-            if (nextCursor <= cursor) break;
-            cursor = nextCursor;
+                indexMessagesAfterOrdinal(db, sessionId, messages, cursor, pageEnd);
+                const nextCursor = getMessageIndexReconciliationStartOrdinal(db, sessionId);
+                if (nextCursor <= cursor) break;
+                cursor = nextCursor;
 
-            if (cursor < finalWatermark) {
-                // One bounded page is the maximum synchronous work per event-loop
-                // turn. The timer-backed await lets host I/O run before the next
-                // source read and writer transaction.
-                await yieldToEventLoop();
+                if (cursor < finalWatermark) {
+                    // One bounded page is the maximum synchronous work per event-loop
+                    // turn. The timer-backed await lets host I/O run before the next
+                    // source read and writer transaction.
+                    await yieldToEventLoop();
+                }
             }
-        }
 
-        if (isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
-            heapHolder.reconciledSessions.add(sessionId);
+            if (isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
+                heapHolder.reconciledSessions.add(sessionId);
+            }
+        } finally {
+            heapHolder.activeReconcilerBuffers.delete(sessionId);
         }
     });
 }
@@ -316,6 +331,8 @@ export interface MessageIndexQueueHeapStats {
     pendingIncremental: number;
     activeSessionLocks: number;
     completedIncrementalKeys: number;
+    activeBufferMessages: number;
+    activeBufferBytes: number;
 }
 
 /** Live async-index holder counts used by the opt-in heap diagnostic RPC. */
@@ -330,6 +347,14 @@ export function getMessageIndexQueueHeapStats(): MessageIndexQueueHeapStats {
         pendingIncremental: heapHolder.pendingIncrementalKeys.size,
         activeSessionLocks: heapHolder.sessionLocks.size,
         completedIncrementalKeys: heapHolder.completedIncrementalKeys.size,
+        activeBufferMessages: [...heapHolder.activeReconcilerBuffers.values()].reduce(
+            (sum, messages) => sum + messages.length,
+            0,
+        ),
+        activeBufferBytes: [...heapHolder.activeReconcilerBuffers.values()].reduce(
+            (sum, messages) => sum + serializedMessageBytes(messages),
+            0,
+        ),
     };
 }
 
@@ -341,6 +366,7 @@ export function clearSessionTracking(sessionId: string): void {
     heapHolder.reconciledSessions.delete(sessionId);
     heapHolder.reconciliationScheduledSessions.delete(sessionId);
     heapHolder.sessionLocks.delete(sessionId);
+    heapHolder.activeReconcilerBuffers.delete(sessionId);
 
     const prefix = `${sessionId}\u0000`;
     for (const [key, timer] of heapHolder.incrementalTimers) {
@@ -370,4 +396,5 @@ export function __resetMessageIndexAsyncForTests(): void {
     heapHolder.incrementalTimers.clear();
     heapHolder.pendingIncrementalKeys.clear();
     heapHolder.completedIncrementalKeys.clear();
+    heapHolder.activeReconcilerBuffers.clear();
 }

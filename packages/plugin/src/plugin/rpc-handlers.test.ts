@@ -26,6 +26,7 @@ import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import {
     buildCompartmentCount,
+    buildDebugMemoryUsage,
     buildSidebarSnapshot,
     buildSidebarSnapshotRpcResponse,
     buildStatusDetail,
@@ -67,6 +68,25 @@ afterEach(() => {
 });
 
 describe("debug RPC guard", () => {
+    test("reports process and readable native allocation counters", () => {
+        const memory = buildDebugMemoryUsage();
+        expect(memory.memoryUsage).toMatchObject({
+            rss: expect.any(Number),
+            external: expect.any(Number),
+            arrayBuffers: expect.any(Number),
+        });
+        expect(memory.native.sqlite).toMatchObject({
+            connectionCount: expect.any(Number),
+            cacheUpperBoundBytes: expect.any(Number),
+            sqliteStatusApi: "unavailable",
+        });
+        expect(memory.native.tokenizer.loaded).toBeTypeOf("boolean");
+        expect(memory.native.localEmbedding.loaded).toBeTypeOf("boolean");
+        expect(memory.native.quickJs.loaded).toBeTypeOf("boolean");
+        expect(memory.holders.lkgSlots.totalBytes).toBeTypeOf("number");
+        expect(memory.holders.messageIndexQueue.activeBufferBytes).toBeTypeOf("number");
+    });
+
     test("does not register heap diagnostics when the flag is off by default", () => {
         const previous = process.env.MAGIC_CONTEXT_DEBUG_RPC;
         delete process.env.MAGIC_CONTEXT_DEBUG_RPC;

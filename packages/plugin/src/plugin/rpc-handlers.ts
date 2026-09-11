@@ -15,12 +15,14 @@ import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklogMap,
 } from "../features/magic-context/dreamer/task-registry";
+import { getLocalEmbeddingNativeMemoryStats } from "../features/magic-context/memory/embedding-local";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getMessageIndexQueueHeapStats } from "../features/magic-context/message-index-async";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
 import { getProtectionWindowForSession } from "../features/magic-context/protection-window";
 import { parseCacheTtl } from "../features/magic-context/scheduler";
+import { getQuickJsNativeMemoryStats } from "../features/magic-context/smart-notes/sandbox-runner";
 import {
     type ContextDatabase as Database,
     openDatabase,
@@ -55,6 +57,7 @@ import {
     openCodeDbExists,
     withReadOnlySessionDb,
 } from "../hooks/magic-context/read-session-db";
+import { getTokenizerNativeMemoryStats } from "../hooks/magic-context/read-session-formatting";
 import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
 import {
@@ -81,6 +84,7 @@ import type {
     SidebarSnapshot,
     StatusDetail,
 } from "../shared/rpc-types";
+import { getSqliteMemoryStats } from "../shared/sqlite";
 import { shouldEnforcePrivateStoragePermissions } from "../shared/storage-permissions";
 import {
     resolveTailHygieneStatus,
@@ -989,11 +993,13 @@ interface RuntimeDebugMemoryHolders {
     wireCache?: {
         snapshots: number;
         rawContentSnapshots: number;
+        estimatedBytes: number;
         sessions: Array<{
             sessionId: string;
             rawMessages: number;
             wireMessages: number;
             rawContentSnapshots: number;
+            estimatedBytes: number;
         }>;
     };
 }
@@ -1009,6 +1015,7 @@ const EMPTY_TAGGER_HEAP_STATS = {
 const EMPTY_WIRE_HEAP_STATS = {
     snapshots: 0,
     rawContentSnapshots: 0,
+    estimatedBytes: 0,
     sessions: [],
 } satisfies NonNullable<RuntimeDebugMemoryHolders["wireCache"]>;
 
@@ -1040,6 +1047,7 @@ export function buildDebugMemoryUsage(
                 wireRawMessages: 0,
                 wireMessages: 0,
                 wireContentSnapshots: 0,
+                wireEstimatedBytes: 0,
             };
             sessions.set(sessionId, current);
         }
@@ -1056,6 +1064,7 @@ export function buildDebugMemoryUsage(
         target.wireRawMessages += entry.rawMessages;
         target.wireMessages += entry.wireMessages;
         target.wireContentSnapshots += entry.rawContentSnapshots;
+        target.wireEstimatedBytes += entry.estimatedBytes;
     }
 
     return {
@@ -1071,6 +1080,12 @@ export function buildDebugMemoryUsage(
             external: usage.external,
             arrayBuffers: usage.arrayBuffers,
         },
+        native: {
+            sqlite: getSqliteMemoryStats(),
+            tokenizer: getTokenizerNativeMemoryStats(),
+            localEmbedding: getLocalEmbeddingNativeMemoryStats(),
+            quickJs: getQuickJsNativeMemoryStats(),
+        },
         holders: {
             lkgSlots: { count: lkg.count, totalBytes: lkg.totalBytes },
             taggerCache: {
@@ -1082,6 +1097,7 @@ export function buildDebugMemoryUsage(
             wireCache: {
                 snapshots: wire.snapshots,
                 rawContentSnapshots: wire.rawContentSnapshots,
+                estimatedBytes: wire.estimatedBytes,
             },
             compartmentMirrors: { entries: mirrors.entries },
             messageIndexQueue,

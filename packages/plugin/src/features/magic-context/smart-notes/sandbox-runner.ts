@@ -33,6 +33,12 @@ import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
  * never at plugin import time. See the file-header note for the cold-start reason.
  */
 let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
+let asyncModuleLoaded = false;
+
+export function getQuickJsNativeMemoryStats(): { loadAttempted: boolean; loaded: boolean } {
+    return { loadAttempted: asyncModulePromise !== null, loaded: asyncModuleLoaded };
+}
+
 function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
     asyncModulePromise ??= (async () => {
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
@@ -40,7 +46,9 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
                 import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
                 import("quickjs-emscripten"),
             ]);
-        return newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+        const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+        asyncModuleLoaded = true;
+        return module;
     })();
     return asyncModulePromise;
 }

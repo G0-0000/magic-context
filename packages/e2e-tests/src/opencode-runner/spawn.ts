@@ -91,7 +91,7 @@ export interface SpawnOptions {
     /** Pre-create the isolated Magic Context DB unless the test expects the plugin to stay disabled. */
     prepareContextDatabase?: boolean;
     /** Expected Magic Context state after startup; readiness waits for this state. Defaults to enabled. */
-    expectedMagicContextState?: "enabled" | "conflict-disabled";
+    expectedMagicContextState?: "enabled" | "configured-disabled" | "conflict-disabled";
     /**
      * Reuse a pre-created isolated env instead of allocating a fresh one. The
      * Rust-mode harness creates the env first so a hermetic subc daemon can
@@ -384,7 +384,7 @@ function writeConfigs(
 }
 
 export interface ReadinessOptions {
-    expectedMagicContextState?: "enabled" | "conflict-disabled";
+    expectedMagicContextState?: "enabled" | "configured-disabled" | "conflict-disabled";
     pluginLogPath?: string;
     pluginLogStartOffset?: number;
     mockProviderID?: string;
@@ -507,7 +507,7 @@ export async function waitForReady(
                 throw new Error("Magic Context conflict-disable verdict is not ready");
             }
         });
-    } else {
+    } else if (expectedMagicContextState === "enabled") {
         await waitForStage("magicContext", async () => {
             const toolIds = await fetchJson(toolsUrl, "plugin tools");
             if (!Array.isArray(toolIds) || !toolIds.includes("ctx_search")) {

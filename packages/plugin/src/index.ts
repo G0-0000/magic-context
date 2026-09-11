@@ -58,7 +58,7 @@ import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
 import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
-import { registerRpcHandlers } from "./plugin/rpc-handlers";
+import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
 import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
@@ -603,6 +603,25 @@ const server: Plugin = async (ctx) => {
         // obviously bad cache value, but normal operation is one-shot.
         setTimeout(() => {
             void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
+        }, 0);
+    }
+
+    // An explicitly enabled debug RPC remains available when the MC hooks are
+    // disabled, allowing the hermetic A/B harness to sample the same host process.
+    if (!pluginConfig.enabled && isDebugRpcEnabled(pluginConfig)) {
+        rpcServer = new MagicContextRpcServer(storageDir, ctx.directory);
+        registerRpcHandlers(rpcServer, {
+            directory: ctx.directory,
+            config: pluginConfig,
+            client: ctx.client,
+            liveSessionState,
+            rustModeModuleClient,
+            storageDir,
+        });
+        setTimeout(() => {
+            rpcServer?.start().catch((err) => {
+                log(`[magic-context] debug-only RPC server failed to start: ${err}`);
+            });
         }, 0);
     }
 

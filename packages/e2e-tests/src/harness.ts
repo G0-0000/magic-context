@@ -31,6 +31,8 @@ export interface TestHarnessOptions {
     modelContextLimit?: number;
     /** Set false only when the test intentionally verifies conflict-based self-disable behavior. */
     expectMagicContext?: boolean;
+    /** Debug harnesses may boot the plugin with hooks configured off while retaining diagnostics. */
+    expectedMagicContextState?: "enabled" | "configured-disabled" | "conflict-disabled";
     /**
      * Default response used when the mock queue is empty. Lets tests send extra
      * prompts without worrying about scripting every one.
@@ -108,14 +110,17 @@ export class TestHarness {
         // Always install a default so unexpected extra requests don't 500.
         mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
 
-        const expectMagicContext = options.expectMagicContext !== false;
+        const expectedMagicContextState =
+            options.expectedMagicContextState ??
+            (options.expectMagicContext === false ? "conflict-disabled" : "enabled");
+        const expectMagicContext = expectedMagicContextState === "enabled";
         const spawnOpts: SpawnOptions = {
             mockProviderURL: baseURL,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
             modelContextLimit: options.modelContextLimit,
             prepareContextDatabase: expectMagicContext,
-            expectedMagicContextState: expectMagicContext ? "enabled" : "conflict-disabled",
+            expectedMagicContextState,
         };
         let opencode: SpawnedOpencode | undefined;
         try {
