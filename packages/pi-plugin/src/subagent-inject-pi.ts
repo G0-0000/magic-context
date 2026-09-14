@@ -129,6 +129,7 @@ import {
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import { tokenizePiMessages } from "./tokenize-pi-messages";
 
 export type AgentMessage = ContextEvent["messages"][number];
 
@@ -412,61 +413,16 @@ export function buildInjectPayload(args: {
 	return `\n\n${INJECT_TAG_OPEN}\n${lines.join("\n")}\n${INJECT_TAG_CLOSE}`;
 }
 
-type WirePart = {
-	type?: unknown;
-	text?: unknown;
-	thinking?: unknown;
-	data?: unknown;
-	name?: unknown;
-	arguments?: unknown;
-};
-
-function estimateWirePartTokens(part: WirePart): number {
-	switch (part.type) {
-		case "text":
-			return typeof part.text === "string" ? estimateTokens(part.text) : 0;
-		case "thinking":
-			return typeof part.thinking === "string"
-				? estimateTokens(part.thinking)
-				: 0;
-		case "toolCall":
-			return (
-				estimateTokens(typeof part.name === "string" ? part.name : "") +
-				estimateTokens(JSON.stringify(part.arguments ?? {}))
-			);
-		case "image":
-			// Base64 payload as sent on the wire. This over-estimates versus
-			// provider per-image pricing — the safe direction for a guard that
-			// must refuse rather than allow an overflow.
-			return typeof part.data === "string" ? estimateTokens(part.data) : 0;
-		default:
-			return 0;
-	}
-}
-
 /**
- * Estimate the tokens the CURRENT wire will occupy: every message's content
- * in every shape — user/assistant text, thinking parts, tool calls, tool
- * results, and image payloads (the Pi `Message` union). Used as the
- * baseline for the pre-submit capacity check — the check must measure the
- * outgoing messages, not the pre-transform usage reading.
+ * Tokens the CURRENT wire will occupy, per Pi's own accounting
+ * (`tokenizePiMessages` — the same counter /ctx-status and the compaction
+ * budget use, so "our count" and "Pi's count" cannot drift apart).
+ * Used as the baseline for the pre-submit capacity check — the check must
+ * measure the outgoing messages, not the pre-transform usage reading.
  */
 function estimateMessagesTokens(messages: AgentMessage[]): number {
-	let total = 0;
-	for (const message of messages) {
-		const content = (message as { content?: unknown }).content;
-		if (typeof content === "string") {
-			total += estimateTokens(content);
-			continue;
-		}
-		if (!Array.isArray(content)) continue;
-		for (const part of content as WirePart[]) {
-			if (part && typeof part === "object") {
-				total += estimateWirePartTokens(part);
-			}
-		}
-	}
-	return total;
+	const counts = tokenizePiMessages(messages as unknown[]);
+	return counts.conversation + counts.toolCall;
 }
 
 /**
@@ -604,9 +560,10 @@ export async function runSubagentInjectForPi(args: {
 
 	// Pre-submit hard capacity check (P1-4): bypassing the memory budget
 	// must not overflow the model window. The baseline is the CURRENT wire
-	// (everything earlier transforms appended this pass included), not the
-	// pre-transform usage reading. Unknown/garbage window → cannot check;
-	// proceed (downstream overflow protection is untouched).
+	// counted by Pi's own tokenizer (everything earlier transforms appended
+	// this pass included), not the pre-transform usage reading.
+	// Unknown/garbage window → cannot check; proceed (downstream overflow
+	// protection is untouched).
 	const contextLimit = args.capacity?.contextLimit;
 	if (
 		typeof contextLimit === "number" &&

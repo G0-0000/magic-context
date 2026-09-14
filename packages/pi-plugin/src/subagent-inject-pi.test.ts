@@ -373,23 +373,12 @@ describe("runSubagentInjectForPi — idempotency, replay, lifecycle (§8.3)", ()
 		expect(textOf(retried[0])).toContain("retry-body");
 	});
 
-	it("capacity baseline counts images, thinking, and tool calls on the wire", async () => {
+	it("capacity baseline counts image payloads on the wire (Pi tokenizer accounting)", async () => {
 		const m = seedMemory("media-body");
-		// Text alone is tiny; the base64 image dominates the wire. A guard that
-		// only counted text would allow the payload — it must refuse. Use
-		// deterministic high-entropy base64 (runs of one char tokenize too
-		// efficiently and would defeat a real tokenizer).
-		let state = 12345;
-		const rand = () => {
-			state = (state * 1103515245 + 12345) % 2147483648;
-			return state / 2147483648;
-		};
-		const B64 =
-			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-		const bigImage = Array.from(
-			{ length: 20000 },
-			() => B64[Math.floor(rand() * 64)],
-		).join("");
+		// Text alone is tiny; Pi counts an image part as a fixed 1200 tokens
+		// regardless of payload bytes. A guard that only counted text would
+		// allow the payload — it must refuse.
+		const bigImage = "aGVsbG8gd29ybGQ=";
 		const messages = [
 			userMessage(
 				[
@@ -405,7 +394,9 @@ describe("runSubagentInjectForPi — idempotency, replay, lifecycle (§8.3)", ()
 			messages,
 			entryIds: ["e1"],
 			options: baseOptions,
-			capacity: { contextLimit: 5000 },
+			// Pi counts an image part as a fixed 1200 tokens; the marker text
+			// and payload push the wire just over a 1100 window.
+			capacity: { contextLimit: 1100 },
 			now: 1_700_000_000_000,
 		});
 		expect(textOf(messages[0])).not.toContain("media-body");
@@ -435,6 +426,66 @@ describe("runSubagentInjectForPi — idempotency, replay, lifecycle (§8.3)", ()
 			now: 1_700_000_000_000,
 		});
 		expect(textOf(messages2[0])).toContain("media-body");
+	});
+
+	it("capacity baseline counts thinking, tool calls, and tool results", async () => {
+		const m = seedMemory("tc-body");
+		let state = 999;
+		const rand = () => {
+			state = (state * 1103515245 + 12345) % 2147483648;
+			return state / 2147483648;
+		};
+		const ALPH =
+			"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+		const noise = (n: number) =>
+			Array.from(
+				{ length: n },
+				() => ALPH[Math.floor(rand() * ALPH.length)],
+			).join("");
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: noise(2500),
+					thinkingSignature: noise(200),
+				},
+				{
+					type: "toolCall",
+					id: "call-1",
+					name: "read",
+					arguments: { path: noise(2500) },
+				},
+			],
+			timestamp: 1,
+		} as unknown as Parameters<typeof run>[0][number];
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: noise(2500) }],
+			timestamp: 2,
+		} as unknown as Parameters<typeof run>[0][number];
+		const messages = [
+			assistantMsg,
+			toolResultMsg,
+			userMessage(`⟦mc-mem: ${m.id}⟧`, 3),
+		];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages,
+			entryIds: ["a", "t", "e1"],
+			options: baseOptions,
+			// The marker text alone is a handful of tokens; only thinking +
+			// signatures + tool call args + tool result push the wire over.
+			capacity: { contextLimit: 1500 },
+			now: 1_700_000_000_000,
+		});
+		expect(textOf(messages[2])).not.toContain("tc-body");
+		expect(getSubagentInjectDecisions(db, SES)).toEqual([
+			{ messageId: "e1", decision: "no-inject", reason: "capacity-exceeded" },
+		]);
 	});
 
 	it("refuses oversized payloads explicitly (capacity-exceeded) instead of truncating", async () => {
