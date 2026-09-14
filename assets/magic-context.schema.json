@@ -2404,6 +2404,9 @@
           "enabled": false,
           "since_days": 365,
           "max_commits": 2000
+        },
+        "subagent_inject": {
+          "enabled": true
         }
       },
       "description": "Cross-session memory configuration",
@@ -2489,6 +2492,20 @@
               "type": "number",
               "minimum": 100,
               "maximum": 20000
+            }
+          }
+        },
+        "subagent_inject": {
+          "default": {
+            "enabled": true
+          },
+          "description": "Task-requested memory injection (Pi-only v1): when a real user task message carries a ⟦mc-mem: …⟧ marker, fetch the named memories by ID and append their full content in a <ctx-subagent-inject> snapshot block to the end of that message. Up to 10 deduplicated IDs per task; missing/unauthorized/ineligible IDs get an explicit unavailable note (no metadata leak); oversized payloads fail explicitly instead of truncating. The snapshot is frozen at first decision and replayed byte-identically for as long as the original message stays visible; it never moves into m[0]/m[1] or a newer message. Bypasses injection_budget_tokens but NOT the model hard context window. Not supported on the compaction-off path; OpenCode is not implemented in v1.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Append the FULL content of memories explicitly named in a user task via the ⟦mc-mem: 11, 55⟧ marker (Pi-only v1). On by default; set false to stop NEW injections (already-persisted per-task snapshots still replay — this is not a privacy-revocation switch). Independent of memory.enabled.",
+              "type": "boolean"
             }
           }
         }

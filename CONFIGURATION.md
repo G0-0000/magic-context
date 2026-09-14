@@ -710,6 +710,38 @@ Opt-in (default off; independent of `memory.enabled`). When enabled, Magic Conte
 - **Non-blocking.** Initial sweep runs at startup; incremental tick runs every 15 minutes from the dream timer. The sweep skips already-indexed SHAs.
 - **ctx_search integration.** Results appear as a `git_commit` source alongside `memory`, `session_fact`, and `message_history`. Each result carries the SHA, short SHA, author, and commit timestamp.
 
+### `memory.subagent_inject`
+
+| Key | Type | Default |
+|-----|------|---------|
+| `memory.subagent_inject.enabled` | `boolean` | `true` |
+
+**Pi-only v1; OpenCode is not implemented yet.** On by default (independent of `memory.enabled`; set `enabled: false` to opt out of NEW injections — already-persisted per-task snapshots still replay; this is not a privacy-revocation switch).
+
+When a **real user task message** carries an explicit `⟦mc-mem: 11, 55, 44⟧` marker, Magic Context fetches those memories **by ID** and appends their **full content** to the end of that message in a `<ctx-subagent-inject>` snapshot block — no `ctx_search` call, no embedding cost, and no dependence on the memory injection budget. Typical use: a parent session already knows exactly which memory IDs a subagent task needs and wants them present verbatim next to the task.
+
+```
+Please follow the deploy SOP ⟦mc-mem: 11, 55⟧
+```
+
+```xml
+<ctx-subagent-inject>
+Task-requested memory snapshot (requested IDs: 11, 55; first read at 2026-09-14T10:00:00.000Z).
+- [ID 11] [PROJECT_RULES] deploys happen only via the staging gate ...
+- [ID 55] [CONFIG_VALUES] dashboard token budget is 8000 ...
+</ctx-subagent-inject>
+```
+
+**Marker contract.** Markers are single-line, never recognized inside fenced code, inline code, blockquotes, or memory content itself. IDs are positive integers (optional leading `#`), separated by spaces, tabs, or ASCII commas; up to **10 deduplicated IDs per task** (over-limit IDs are reported as unprocessed, never silently dropped). A malformed marker is abandoned wholesale — never partially interpreted. To show the marker literally in a task, wrap it in backticks or a code fence. Full-width punctuation and look-alike Unicode brackets are never normalized into a marker.
+
+**Snapshot semantics.** The injection is a **frozen per-task snapshot**: the first read decides availability (archived, expired, missing, or out-of-scope IDs are reported as an opaque `Unavailable` note — no metadata leak), the read time is recorded in the block header, and the rendered bytes persist and replay identically for as long as the original message stays visible. Later update/archive/expire of the memory does NOT refresh or retract an old task's snapshot; a NEW task naming the same ID re-reads at its own first-decision time. If the original message leaves the context, the snapshot is discarded — it never migrates into the memory block or a newer message.
+
+**Capacity.** The injection bypasses the `injection_budget_tokens` memory budget but NOT the model's hard context window: if the payload does not fit the live model window, the injection fails explicitly (observable decision, nothing truncated, retried state unchanged).
+
+**Ordering.** Runs after the auto-search hint on the same message (auto-search first, then this snapshot). A message already carrying any augmentation block (search hint, auto block, or this snapshot) does not receive a fresh auto-search hint.
+
+**Not supported on the compaction-off path** (same gate as auto-search). Not gated on `isSubagent`: Pi cannot reliably see that flag, and the primary scenario (pi-subagents children running the full entry point) is exactly where markers appear in ordinary user task messages.
+
 ### `memory.auto_search`
 
 | Key | Type | Default |
@@ -863,7 +895,8 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "injection_budget_tokens": 4000,
     "auto_promote": true,
     "auto_search": { "enabled": true, "score_threshold": 0.6, "min_prompt_chars": 20 },
-    "git_commit_indexing": { "enabled": false, "since_days": 365, "max_commits": 2000 }
+    "git_commit_indexing": { "enabled": false, "since_days": 365, "max_commits": 2000 },
+    "subagent_inject": { "enabled": true }
   },
 }
 ```

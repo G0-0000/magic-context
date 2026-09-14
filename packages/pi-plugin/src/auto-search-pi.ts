@@ -147,7 +147,11 @@ function collectUserPromptParts(message: UserMessage): string {
 function hasStackedAugmentation(rawText: string): boolean {
 	return (
 		rawText.includes("<ctx-search-hint>") ||
-		rawText.includes("<ctx-search-auto>")
+		rawText.includes("<ctx-search-auto>") ||
+		// Task-requested memory injection (subagent-inject-pi.ts) appends after
+		// auto-search; its block counts as augmentation so a message already
+		// carrying it never gets a fresh auto-search hint (§4.1 ordering).
+		rawText.includes("<ctx-subagent-inject>")
 	);
 }
 

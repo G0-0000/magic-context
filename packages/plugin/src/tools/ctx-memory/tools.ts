@@ -33,6 +33,7 @@ import {
     hasMemoryClassifiedAtColumn,
     hasMemoryShareableColumn,
 } from "../../features/magic-context/memory/storage-memory";
+import { createMemoryVisibilityFilter } from "../../features/magic-context/memory/visibility-filter";
 import {
     normalizeStoredProjectPath,
     queueMemoryMutation,
@@ -42,8 +43,6 @@ import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
-    resolveWorkspaceShareCategories,
-    storedPathBelongsToWorkspace,
 } from "../../features/magic-context/workspaces";
 import {
     isRustAuthorityDrainingError,
@@ -586,10 +585,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 deps.db,
                 workspaceIdentitySet.identities,
             );
-            const workspaceVisibleIdentities =
-                workspaceIdentitySet.identities.length > 1
-                    ? expandedWorkspace.expandedIdentities
-                    : workspaceIdentitySet.identities;
             const targetIdentityForStoredPath = (rawProjectPath: string) =>
                 workspaceIdentitySet.identities.length > 1
                     ? (resolveStoredPathWorkspaceIdentity(
@@ -601,39 +596,16 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // The workspace's share-category policy matches the render path.
             // null means there is no workspace filter; a workspaced caller gets
             // an explicit list where [] shares no foreign categories.
-            const toolShareCategories =
-                workspaceIdentitySet.identities.length > 1
-                    ? resolveWorkspaceShareCategories(deps.db, projectPath)
-                    : null;
             // Visibility is the READ contract: own memories are visible in every
             // category, while foreign workspace memories are visible only in
             // categories the workspace explicitly shares. Mutations by primary
             // agents use memoryOwnedByTool below so shared visibility never
             // grants write access to another project.
-            const memoryVisibleToTool = (memory: Memory): boolean => {
-                if (workspaceIdentitySet.identities.length <= 1) {
-                    return memoryBelongsToProject(memory, projectPath);
-                }
-                if (
-                    !storedPathBelongsToWorkspace(
-                        memory.projectPath,
-                        workspaceIdentitySet.identities,
-                        workspaceVisibleIdentities,
-                        expandedWorkspace.canonicalIdentityByStoredPath,
-                    )
-                ) {
-                    return false;
-                }
-                const isOwn = targetIdentityForStoredPath(memory.projectPath) === projectPath;
-                if (isOwn) return true;
-                return (
-                    (memory.status === "active" || memory.status === "permanent") &&
-                    (memory.expiresAt === null || memory.expiresAt > Date.now()) &&
-                    memory.shareable === 1 &&
-                    ["project", "ecosystem", "universe"].includes(memory.scope) &&
-                    (toolShareCategories?.includes(memory.category) ?? false)
-                );
-            };
+            //
+            // The predicate itself is the shared `createMemoryVisibilityFilter`
+            // helper (also used by Pi's task-requested memory injection) — the
+            // logic is identical to the former inline closure.
+            const memoryVisibleToTool = createMemoryVisibilityFilter(deps.db, projectPath);
             const memoryOwnedByTool = (memory: Memory): boolean =>
                 workspaceIdentitySet.identities.length > 1
                     ? targetIdentityForStoredPath(memory.projectPath) === projectPath

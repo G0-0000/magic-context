@@ -131,6 +131,45 @@ export type AppendAutoSearchHintOutcome =
     | { ok: true; kind: "already-present"; decision: AutoSearchHintDecision }
     | { ok: false; kind: "cas-exhausted" };
 
+export type SubagentInjectNoInjectReason = "invalid-marker" | "capacity-exceeded";
+
+const SUBAGENT_INJECT_NO_INJECT_REASONS = new Set<string>(["invalid-marker", "capacity-exceeded"]);
+
+/**
+ * Per-message persistence for Pi's task-requested memory injection
+ * (`⟦mc-mem: …⟧` markers). Independent namespace from
+ * `auto_search_hint_decisions` — the two features stack side by side and
+ * must never share a decision slot.
+ *
+ * "inject" / "unavailable" carry the COMPLETE rendered wire payload
+ * (`text`) so replay is byte-for-byte restoration of the first decision,
+ * frozen at `readAt`; "no-inject" records deterministic failures
+ * (malformed marker, hard-capacity refusal) so they are not re-evaluated
+ * (and not misreported) on every later pass. Transient failures (e.g. DB
+ * errors) are NEVER persisted — they retry on the next pass.
+ */
+export type SubagentInjectDecision =
+    | {
+          messageId: string;
+          decision: "inject";
+          text: string;
+          ids: number[];
+          readAt: number;
+      }
+    | {
+          messageId: string;
+          decision: "unavailable";
+          text: string;
+          ids: number[];
+          readAt: number;
+      }
+    | { messageId: string; decision: "no-inject"; reason: SubagentInjectNoInjectReason };
+
+export type AppendSubagentInjectOutcome =
+    | { ok: true; kind: "appended"; decision: SubagentInjectDecision }
+    | { ok: true; kind: "already-present"; decision: SubagentInjectDecision }
+    | { ok: false; kind: "cas-exhausted" };
+
 export interface PersistedTodoSyntheticAnchor {
     callId: string;
     messageId: string;
@@ -289,6 +328,28 @@ function isValidAutoSearchHintDecision(value: unknown): value is AutoSearchHintD
     }
     if (row.decision === "no-hint") {
         return typeof row.reason === "string" && AUTO_SEARCH_NO_HINT_REASONS.has(row.reason);
+    }
+    return false;
+}
+
+function isValidSubagentInjectDecision(value: unknown): value is SubagentInjectDecision {
+    if (value === null || typeof value !== "object") return false;
+    const row = value as Record<string, unknown>;
+    if (typeof row.messageId !== "string" || row.messageId.length === 0) return false;
+    if (row.decision === "inject" || row.decision === "unavailable") {
+        return (
+            typeof row.text === "string" &&
+            row.text.length > 0 &&
+            Array.isArray(row.ids) &&
+            row.ids.every(
+                (id) => typeof id === "number" && Number.isSafeInteger(id) && (id as number) > 0,
+            ) &&
+            typeof row.readAt === "number" &&
+            Number.isFinite(row.readAt)
+        );
+    }
+    if (row.decision === "no-inject") {
+        return typeof row.reason === "string" && SUBAGENT_INJECT_NO_INJECT_REASONS.has(row.reason);
     }
     return false;
 }
@@ -1551,10 +1612,20 @@ export function getAutoSearchHintDecisions(
     return parseJsonArray(row?.auto_search_hint_decisions, isValidAutoSearchHintDecision);
 }
 
+export function getSubagentInjectDecisions(
+    db: Database,
+    sessionId: string,
+): SubagentInjectDecision[] {
+    const row = db
+        .prepare("SELECT subagent_inject_decisions FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { subagent_inject_decisions?: string | null } | undefined;
+    return parseJsonArray(row?.subagent_inject_decisions, isValidSubagentInjectDecision);
+}
+
 function casUpdateJsonArrayColumn<T>(
     db: Database,
     sessionId: string,
-    column: "note_nudge_anchors" | "auto_search_hint_decisions",
+    column: "note_nudge_anchors" | "auto_search_hint_decisions" | "subagent_inject_decisions",
     validator: (value: unknown) => value is T,
     mutate: (current: T[]) => T[] | null,
     options?: { ensureRow?: boolean },
@@ -1563,7 +1634,11 @@ function casUpdateJsonArrayColumn<T>(
     // UPDATE SQL below; the TS union is the only compile-time guard, so a
     // future JS-interop or untyped caller could otherwise inject SQL. Throw on
     // any column outside the known set so interpolation is always safe.
-    if (column !== "note_nudge_anchors" && column !== "auto_search_hint_decisions") {
+    if (
+        column !== "note_nudge_anchors" &&
+        column !== "auto_search_hint_decisions" &&
+        column !== "subagent_inject_decisions"
+    ) {
         throw new Error(`casUpdateJsonArrayColumn: refusing unknown column "${column}"`);
     }
     if (options?.ensureRow === false) {
@@ -1746,6 +1821,82 @@ export function pruneAutoSearchHintDecisions(
         },
     );
     return pruned;
+}
+
+export function appendSubagentInjectDecision(
+    db: Database,
+    sessionId: string,
+    entry: SubagentInjectDecision,
+): AppendSubagentInjectOutcome {
+    if (!entry.messageId) return { ok: false, kind: "cas-exhausted" };
+    let staged: { kind: "appended" | "already-present"; decision: SubagentInjectDecision } | null =
+        null;
+    const casOk = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "subagent_inject_decisions",
+        isValidSubagentInjectDecision,
+        (current) => {
+            const existing = current.find((decision) => decision.messageId === entry.messageId);
+            if (existing) {
+                staged = { kind: "already-present", decision: existing };
+                return null;
+            }
+            staged = { kind: "appended", decision: entry };
+            return [...current, entry];
+        },
+    );
+    if (!casOk) return { ok: false, kind: "cas-exhausted" };
+    const committed = staged as {
+        kind: "appended" | "already-present";
+        decision: SubagentInjectDecision;
+    } | null;
+    if (!committed) {
+        sessionLog(sessionId, "subagent-inject: CAS reported success with no staged outcome");
+        return { ok: false, kind: "cas-exhausted" };
+    }
+    return { ok: true, kind: committed.kind, decision: committed.decision };
+}
+
+export function pruneSubagentInjectDecisions(
+    db: Database,
+    sessionId: string,
+    visibleMessageIds: Set<string>,
+): number {
+    let pruned = 0;
+    casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "subagent_inject_decisions",
+        isValidSubagentInjectDecision,
+        (current) => {
+            const next = current.filter((decision) => visibleMessageIds.has(decision.messageId));
+            pruned = current.length - next.length;
+            return pruned > 0 ? next : null;
+        },
+    );
+    return pruned;
+}
+
+export function removeSubagentInjectDecisionByMessageId(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): boolean {
+    let removed = false;
+    const ok = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "subagent_inject_decisions",
+        isValidSubagentInjectDecision,
+        (current) => {
+            const next = current.filter((decision) => decision.messageId !== messageId);
+            removed = next.length !== current.length;
+            return removed ? next : null;
+        },
+        { ensureRow: false },
+    );
+    return ok && removed;
 }
 
 export function removeNoteNudgeAnchorByMessageId(

@@ -1003,6 +1003,16 @@ export interface MagicContextConfig {
             /** Minimum user message length in characters (skip short prompts). */
             min_prompt_chars: number;
         };
+        /** Appends the FULL content of memories explicitly named in a user task
+         *  via the `⟦mc-mem: 11, 55⟧` marker (Pi-only v1). The injection is a
+         *  per-task snapshot persisted with the first decision and replayed
+         *  byte-identically; it bypasses the `injection_budget_tokens` memory
+         *  budget but NOT the model's hard context window (oversized payloads
+         *  fail explicitly instead of truncating). Independent of
+         *  `memory.enabled`. Not supported on the compaction-off path. */
+        subagent_inject: {
+            enabled: boolean;
+        };
         /** Index git commit messages from HEAD into a new ctx_search source so
          *  agents can recall recent regressions, fixes, and decisions from
          *  commit history without running git log manually. Graduated from
@@ -1467,6 +1477,19 @@ export const MagicContextConfigSchema = z
                     .describe(
                         "Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled.",
                     ),
+                subagent_inject: z
+                    .object({
+                        enabled: z
+                            .boolean()
+                            .default(true)
+                            .describe(
+                                "Append the FULL content of memories explicitly named in a user task via the ⟦mc-mem: 11, 55⟧ marker (Pi-only v1). On by default; set false to stop NEW injections (already-persisted per-task snapshots still replay — this is not a privacy-revocation switch). Independent of memory.enabled.",
+                            ),
+                    })
+                    .default({ enabled: true })
+                    .describe(
+                        "Task-requested memory injection (Pi-only v1): when a real user task message carries a ⟦mc-mem: …⟧ marker, fetch the named memories by ID and append their full content in a <ctx-subagent-inject> snapshot block to the end of that message. Up to 10 deduplicated IDs per task; missing/unauthorized/ineligible IDs get an explicit unavailable note (no metadata leak); oversized payloads fail explicitly instead of truncating. The snapshot is frozen at first decision and replayed byte-identically for as long as the original message stays visible; it never moves into m[0]/m[1] or a newer message. Bypasses injection_budget_tokens but NOT the model hard context window. Not supported on the compaction-off path; OpenCode is not implemented in v1.",
+                    ),
             })
             .default({
                 enabled: true,
@@ -1475,6 +1498,7 @@ export const MagicContextConfigSchema = z
                 retrieval_count_promotion_threshold: 3,
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
+                subagent_inject: { enabled: true },
             })
             .describe("Cross-session memory configuration"),
     })

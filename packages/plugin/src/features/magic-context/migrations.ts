@@ -2925,6 +2925,26 @@ export const MIGRATIONS: Migration[] = [
             ensureColumn(db, "session_meta", "protected_tokens_pre_snapshot", "TEXT");
         },
     },
+    {
+        version: 85,
+        description:
+            "add subagent_inject_decisions JSON column for task-requested memory injection",
+        up(db: Database): void {
+            // Pi-only v1 feature; additive JSON array column with the same
+            // shape contract as auto_search_hint_decisions. Old builds simply
+            // never read the column (additive-only state, rollback-safe).
+            if (!tableExists(db, "session_meta")) return;
+            ensureColumn(
+                db,
+                "session_meta",
+                "subagent_inject_decisions",
+                "TEXT NOT NULL DEFAULT '[]'",
+            );
+            db.exec(
+                "UPDATE session_meta SET subagent_inject_decisions = '[]' WHERE subagent_inject_decisions IS NULL",
+            );
+        },
+    },
 ];
 
 /**

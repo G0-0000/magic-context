@@ -238,6 +238,18 @@ function assertV84SessionMetaArm(db: DatabaseType): void {
     expect(getPersistedEpochFloor(db, V84_SESSION_ID)).toBeNull();
 }
 
+const V85_SESSION_ID = "armed-replay-session-meta-v85";
+
+function assertV85SessionMetaArm(db: DatabaseType): void {
+    // v85 is an additive NOT-NULL TEXT column with an '[]' default; the arm
+    // claim is that freshly stepped-through rows expose the column ready for
+    // the Pi subagent-inject decision namespace.
+    const row = db
+        .prepare("SELECT subagent_inject_decisions FROM session_meta WHERE session_id = ?")
+        .get(V85_SESSION_ID) as { subagent_inject_decisions?: string } | undefined;
+    expect(row?.subagent_inject_decisions ?? "[]").toBe("[]");
+}
+
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
     if (!state.contextStoreUuid) throw new Error("armed replay has no context store identity");
 
@@ -417,6 +429,12 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
         case 84:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             assertV84SessionMetaArm(db);
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 85:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            getOrCreateSessionMeta(db, V85_SESSION_ID);
+            assertV85SessionMetaArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
         default:
