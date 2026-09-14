@@ -373,6 +373,70 @@ describe("runSubagentInjectForPi — idempotency, replay, lifecycle (§8.3)", ()
 		expect(textOf(retried[0])).toContain("retry-body");
 	});
 
+	it("capacity baseline counts images, thinking, and tool calls on the wire", async () => {
+		const m = seedMemory("media-body");
+		// Text alone is tiny; the base64 image dominates the wire. A guard that
+		// only counted text would allow the payload — it must refuse. Use
+		// deterministic high-entropy base64 (runs of one char tokenize too
+		// efficiently and would defeat a real tokenizer).
+		let state = 12345;
+		const rand = () => {
+			state = (state * 1103515245 + 12345) % 2147483648;
+			return state / 2147483648;
+		};
+		const B64 =
+			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const bigImage = Array.from(
+			{ length: 20000 },
+			() => B64[Math.floor(rand() * 64)],
+		).join("");
+		const messages = [
+			userMessage(
+				[
+					{ type: "text", text: `⟦mc-mem: ${m.id}⟧` },
+					{ type: "image", data: bigImage, mimeType: "image/png" },
+				],
+				1,
+			),
+		];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages,
+			entryIds: ["e1"],
+			options: baseOptions,
+			capacity: { contextLimit: 5000 },
+			now: 1_700_000_000_000,
+		});
+		expect(textOf(messages[0])).not.toContain("media-body");
+		expect(getSubagentInjectDecisions(db, SES)).toEqual([
+			{ messageId: "e1", decision: "no-inject", reason: "capacity-exceeded" },
+		]);
+
+		// Same wire, generous window: the payload fits and injects.
+		resetDb();
+		const m2 = seedMemory("media-body");
+		const messages2 = [
+			userMessage(
+				[
+					{ type: "text", text: `⟦mc-mem: ${m2.id}⟧` },
+					{ type: "image", data: bigImage, mimeType: "image/png" },
+				],
+				1,
+			),
+		];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages: messages2,
+			entryIds: ["e1"],
+			options: baseOptions,
+			capacity: { contextLimit: 50000 },
+			now: 1_700_000_000_000,
+		});
+		expect(textOf(messages2[0])).toContain("media-body");
+	});
+
 	it("refuses oversized payloads explicitly (capacity-exceeded) instead of truncating", async () => {
 		const m = seedMemory("capacity-body");
 		const messages = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
@@ -501,6 +565,15 @@ describe("review regression — generated blocks, disable semantics, contention 
 		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(0);
 	});
 
+	it("honors a marker inside a user-authored instruction block", async () => {
+		const m = seedMemory("user-authored-body");
+		const withInstruction = `task\n\n<instruction name="custom_check">verify ⟦mc-mem: ${m.id}⟧</instruction>`;
+		const messages = [userMessage(withInstruction, 1)];
+		await run(messages, ["e1"]);
+		expect(textOf(messages[0])).toContain("user-authored-body");
+		expect(getSubagentInjectDecisions(db, SES)[0]?.decision).toBe("inject");
+	});
+
 	it("disabling stops NEW decisions but still replays persisted snapshots", async () => {
 		const m = seedMemory("replay-when-disabled-body");
 		const first = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
@@ -531,9 +604,10 @@ describe("review regression — generated blocks, disable semantics, contention 
 		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
 	});
 
-	it("strips the local snapshot when a concurrent no-inject decision wins CAS", async () => {
+	it("an existing no-inject decision replays nothing to the wire", async () => {
 		const m = seedMemory("contended-body");
-		// Simulate the winner: a no-inject decision already persisted for e1.
+		// A no-inject decision already persisted for e1: the fresh-decision
+		// step early-returns and replay adds no bytes.
 		appendSubagentInjectDecision(db, SES, {
 			messageId: "e1",
 			decision: "no-inject",
@@ -544,6 +618,38 @@ describe("review regression — generated blocks, disable semantics, contention 
 		expect(textOf(messages[0])).not.toContain("contended-body");
 		expect(textOf(messages[0])).not.toContain("<ctx-subagent-inject>");
 		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
+	});
+
+	it("strips the local snapshot when a concurrent no-inject decision wins CAS", async () => {
+		const m = seedMemory("contended-body");
+		const spy = spyOn(
+			storagePersisted,
+			"appendSubagentInjectDecision",
+		).mockReturnValue({
+			ok: true,
+			kind: "already-present",
+			decision: {
+				messageId: "e1",
+				decision: "no-inject",
+				reason: "capacity-exceeded",
+			},
+		});
+		// Hide the winner from the initial read so the runner builds and
+		// appends a local snapshot first, then must realign to the CAS winner.
+		const messages = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages,
+			entryIds: ["e1"],
+			options: baseOptions,
+			now: 1_700_000_000_000,
+			decisions: [],
+		});
+		spy.mockRestore();
+		expect(textOf(messages[0])).not.toContain("contended-body");
+		expect(textOf(messages[0])).not.toContain("<ctx-subagent-inject>");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(0);
 	});
 
 	it("persistence failure rolls the wire back and retries cleanly next pass", async () => {

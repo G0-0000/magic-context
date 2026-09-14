@@ -160,9 +160,11 @@ const COARSE_MARKER_RE = /⟦mc-mem:[^\n\r⟧]{0,199}⟧/g;
 
 // Regions that never count as marker context: fenced code blocks, inline
 // code spans, blockquote lines, augmentation blocks OTHER transforms append
-// (auto-search hints / search-auto / note-nudge instructions — a memory
-// fragment quoted inside a generated hint must not be re-interpreted as a
-// user request), and blocks this module already appended.
+// (auto-search hints / search-auto — a memory fragment quoted inside a
+// generated hint must not be re-interpreted as a user request), the
+// GENERATED deferred_notes instruction block (note-nudge), and blocks this
+// module already appended. User-authored <instruction> blocks are part of
+// the task text, so markers inside them still count.
 const FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
 const INLINE_CODE_RE = /`[^`\n]*`/g;
 const BLOCKQUOTE_LINE_RE = /^[ \t]*>.*$/gm;
@@ -172,7 +174,8 @@ const PRIOR_SEARCH_HINT_BLOCK_RE =
 	/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g;
 const PRIOR_SEARCH_AUTO_BLOCK_RE =
 	/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g;
-const PRIOR_INSTRUCTION_BLOCK_RE = /<instruction[^>]*>[\s\S]*?<\/instruction>/g;
+const PRIOR_INSTRUCTION_BLOCK_RE =
+	/<instruction\s+name=["']deferred_notes["'][^>]*>[\s\S]*?<\/instruction>/g;
 
 // Strict inner grammar: tokens of `#?digits` separated by space/tab runs or
 // a single ASCII comma with optional padding. Trailing padding allowed;
@@ -409,11 +412,44 @@ export function buildInjectPayload(args: {
 	return `\n\n${INJECT_TAG_OPEN}\n${lines.join("\n")}\n${INJECT_TAG_CLOSE}`;
 }
 
+type WirePart = {
+	type?: unknown;
+	text?: unknown;
+	thinking?: unknown;
+	data?: unknown;
+	name?: unknown;
+	arguments?: unknown;
+};
+
+function estimateWirePartTokens(part: WirePart): number {
+	switch (part.type) {
+		case "text":
+			return typeof part.text === "string" ? estimateTokens(part.text) : 0;
+		case "thinking":
+			return typeof part.thinking === "string"
+				? estimateTokens(part.thinking)
+				: 0;
+		case "toolCall":
+			return (
+				estimateTokens(typeof part.name === "string" ? part.name : "") +
+				estimateTokens(JSON.stringify(part.arguments ?? {}))
+			);
+		case "image":
+			// Base64 payload as sent on the wire. This over-estimates versus
+			// provider per-image pricing — the safe direction for a guard that
+			// must refuse rather than allow an overflow.
+			return typeof part.data === "string" ? estimateTokens(part.data) : 0;
+		default:
+			return 0;
+	}
+}
+
 /**
- * Estimate the tokens the CURRENT wire will occupy: every message's text
- * (string content or text parts, any role) plus assistant reasoning text.
- * Used as the baseline for the pre-submit capacity check — the check must
- * measure the outgoing messages, not the pre-transform usage reading.
+ * Estimate the tokens the CURRENT wire will occupy: every message's content
+ * in every shape — user/assistant text, thinking parts, tool calls, tool
+ * results, and image payloads (the Pi `Message` union). Used as the
+ * baseline for the pre-submit capacity check — the check must measure the
+ * outgoing messages, not the pre-transform usage reading.
  */
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let total = 0;
@@ -421,15 +457,14 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 		const content = (message as { content?: unknown }).content;
 		if (typeof content === "string") {
 			total += estimateTokens(content);
-		} else if (Array.isArray(content)) {
-			for (const part of content as Array<{ type?: unknown; text?: unknown }>) {
-				if (part && part.type === "text" && typeof part.text === "string") {
-					total += estimateTokens(part.text);
-				}
+			continue;
+		}
+		if (!Array.isArray(content)) continue;
+		for (const part of content as WirePart[]) {
+			if (part && typeof part === "object") {
+				total += estimateWirePartTokens(part);
 			}
 		}
-		const reasoning = (message as { reasoning?: unknown }).reasoning;
-		if (typeof reasoning === "string") total += estimateTokens(reasoning);
 	}
 	return total;
 }
