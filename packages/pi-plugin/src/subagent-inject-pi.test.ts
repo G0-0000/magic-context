@@ -9,6 +9,7 @@ import {
 	insertMemory,
 	updateMemoryStatus,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import * as storagePersisted from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	appendSubagentInjectDecision,
 	getSubagentInjectDecisions,
@@ -227,7 +228,11 @@ describe("runSubagentInjectForPi — fresh injection (§8.1/§8.2)", () => {
 		const text = textOf(messages[0]);
 		expect(text).toContain("body-0");
 		expect(text).toContain("body-9");
-		expect(text).not.toContain("body-10]");
+		// Bare-content assertions: injected lines END with the content, so a
+		// trailing-"]" pattern would be vacuous. "body-1" is a prefix of
+		// "body-10"/"body-11" but toContain needs the full literal.
+		expect(text).not.toContain("body-10");
+		expect(text).not.toContain("body-11");
 		expect(text).toContain(
 			`${over.join(", ")} (over the ${MAX_TASK_MEMORY_IDS}-memory per-task limit; not processed)`,
 		);
@@ -377,7 +382,9 @@ describe("runSubagentInjectForPi — idempotency, replay, lifecycle (§8.3)", ()
 			messages,
 			entryIds: ["e1"],
 			options: baseOptions,
-			capacity: { contextLimit: 50, currentInputTokens: 49 },
+			// The baseline is the outgoing wire, not a pre-transform reading —
+			// a tiny window trips regardless of usage stats.
+			capacity: { contextLimit: 10 },
 			now: 1_700_000_000_000,
 		});
 		expect(textOf(messages[0])).not.toContain("capacity-body");
@@ -473,6 +480,90 @@ describe("append guard regression (§5.4)", () => {
 		const text = textOf(pass2[0]);
 		expect(text).toContain("blocked-body");
 		expect(getSubagentInjectDecisions(db, SES)[0]?.decision).toBe("inject");
+	});
+});
+
+describe("review regression — generated blocks, disable semantics, contention (§5.1/§5.3/§5.4)", () => {
+	it("ignores a marker quoted inside an auto-search hint or instruction block", async () => {
+		seedMemory("quoted-body");
+		const withHint =
+			"task\n\n<ctx-search-hint>\nYour memory may contain: ⟦mc-mem: 1⟧\n</ctx-search-hint>";
+		const messages = [userMessage(withHint, 1)];
+		await run(messages, ["e1"]);
+		expect(textOf(messages[0])).not.toContain("quoted-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(0);
+
+		const withInstruction =
+			'task\n\n<instruction name="deferred_notes">see ⟦mc-mem: 1⟧</instruction>';
+		const messages2 = [userMessage(withInstruction, 1)];
+		await run(messages2, ["e2"]);
+		expect(textOf(messages2[0])).not.toContain("quoted-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(0);
+	});
+
+	it("disabling stops NEW decisions but still replays persisted snapshots", async () => {
+		const m = seedMemory("replay-when-disabled-body");
+		const first = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await run(first, ["e1"]);
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
+
+		const disabled = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages: disabled,
+			entryIds: ["e1"],
+			options: { enabled: false, projectPath: PROJECT },
+		});
+		expect(textOf(disabled[0])).toContain("replay-when-disabled-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
+
+		// A NEW marker-bearing task while disabled: no decision, no injection.
+		const fresh = [userMessage(`⟦mc-mem: ${m.id}⟧`, 2)];
+		await runSubagentInjectForPi({
+			sessionId: SES,
+			db,
+			messages: fresh,
+			entryIds: ["e2"],
+			options: { enabled: false, projectPath: PROJECT },
+		});
+		expect(textOf(fresh[0])).not.toContain("replay-when-disabled-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
+	});
+
+	it("strips the local snapshot when a concurrent no-inject decision wins CAS", async () => {
+		const m = seedMemory("contended-body");
+		// Simulate the winner: a no-inject decision already persisted for e1.
+		appendSubagentInjectDecision(db, SES, {
+			messageId: "e1",
+			decision: "no-inject",
+			reason: "capacity-exceeded",
+		});
+		const messages = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await run(messages, ["e1"]);
+		expect(textOf(messages[0])).not.toContain("contended-body");
+		expect(textOf(messages[0])).not.toContain("<ctx-subagent-inject>");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
+	});
+
+	it("persistence failure rolls the wire back and retries cleanly next pass", async () => {
+		const m = seedMemory("rollback-body");
+		const spy = spyOn(
+			storagePersisted,
+			"appendSubagentInjectDecision",
+		).mockImplementation(() => {
+			throw new Error("db busy");
+		});
+		const failing = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await run(failing, ["e1"]);
+		spy.mockRestore();
+		expect(textOf(failing[0])).not.toContain("rollback-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(0);
+
+		const retried = [userMessage(`⟦mc-mem: ${m.id}⟧`, 1)];
+		await run(retried, ["e1"]);
+		expect(textOf(retried[0])).toContain("rollback-body");
+		expect(getSubagentInjectDecisions(db, SES)).toHaveLength(1);
 	});
 });
 

@@ -3441,7 +3441,11 @@ export function registerPiContextHandler(
 			// Same gate family as auto-search: not supported on the
 			// compaction-off path (v1, documented in CONFIGURATION.md).
 			const tSubagentInject = performance.now();
-			if (options.subagentInject?.enabled && !options.compactionOff) {
+			if (!options.compactionOff) {
+				// Mounted whenever the option block exists. The runner always
+				// replays persisted snapshots (disabling the config stops NEW
+				// injections only — never retracts history) and gates fresh
+				// decisions on enabled internally.
 				try {
 					outputMessages = await runSubagentInjectForPi({
 						sessionId,
@@ -3454,10 +3458,9 @@ export function registerPiContextHandler(
 						decisions: postTransformSnapshot?.subagentInjectDecisions,
 						capacity: {
 							contextLimit: usageContextLimit,
-							currentInputTokens: usageInputTokens,
 						},
 						options: {
-							enabled: true,
+							enabled: options.subagentInject?.enabled === true,
 							projectPath: projectIdentity,
 						},
 					});

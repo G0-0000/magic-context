@@ -90,25 +90,30 @@
  * Auto-search runs FIRST, this injection SECOND (the context handler
  * mounts them in that order, and replay preserves it: note-nudge/auto-search
  * replay happens in `applyNoteNudges`, this module's replay runs after).
- * `<ctx-subagent-inject>` is part of auto-search's stacked-augmentation
- * detection list, so a message already carrying our block never gets a
- * fresh auto-search hint. The payload appends to the message's LAST text
- * part (or a new trailing text part), preserving image/other parts — never
- * to the first text part like the legacy helper. First-time append and
- * replay produce byte-identical results because both paths go through
+ * Our block is deliberately NOT in auto-search's stacked-augmentation
+ * detection list: the snapshot lands after auto-search has already run (or
+ * after a retryable auto-search timeout), so treating it as stacked would
+ * permanently swallow the hint for a message whose search merely failed
+ * once. The payload appends to the message's LAST text part (or a new
+ * trailing text part), preserving image/other parts — never to the first
+ * text part like the legacy helper. First-time append and replay produce
+ * byte-identical results because both paths go through
  * `appendPayloadToMessage` with the persisted payload.
  *
  * ## Capacity (P1-4)
  *
  * Bypassing the 8000-token memory injection budget does NOT bypass the
  * model's hard context window. Before a fresh payload is appended we check
- * `currentInputTokens + estimateTokens(payload)` against the live sane-
- * bounded model window; if it does not fit we persist an explicit
- * `capacity-exceeded` no-inject decision, log it, and append NOTHING —
- * never a silent truncation and never a fake "必达". When no sane window
- * is known we cannot pre-check; the payload is still bounded by the same
- * per-task ID cap and row content, and the existing overflow/fail-closed
- * pipeline semantics downstream are left untouched.
+ * `estimateTokens(current wire) + estimateTokens(payload)` against the
+ * live sane-bounded model window — the baseline is the outgoing messages
+ * at our mount point (so auto-search hints and note nudges appended
+ * earlier in the same pass are counted), not a pre-transform usage
+ * reading. If it does not fit we persist an explicit `capacity-exceeded`
+ * no-inject decision, log it, and append NOTHING — never a silent
+ * truncation and never a fake "必达". When no sane window is known we
+ * cannot pre-check; the payload is still bounded by the same per-task ID
+ * cap and row content, and the existing overflow/fail-closed pipeline
+ * semantics downstream are left untouched.
  */
 
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
@@ -116,6 +121,7 @@ import { getMemoriesByIds } from "@magic-context/core/features/magic-context/mem
 import type { Memory } from "@magic-context/core/features/magic-context/memory/types";
 import { createMemoryVisibilityFilter } from "@magic-context/core/features/magic-context/memory/visibility-filter";
 import {
+	type AppendSubagentInjectOutcome,
 	appendSubagentInjectDecision,
 	getSubagentInjectDecisions,
 	type SubagentInjectDecision,
@@ -153,12 +159,20 @@ const INJECT_TAG_CLOSE = "</ctx-subagent-inject>";
 const COARSE_MARKER_RE = /⟦mc-mem:[^\n\r⟧]{0,199}⟧/g;
 
 // Regions that never count as marker context: fenced code blocks, inline
-// code spans, blockquote lines, and blocks this module already appended.
+// code spans, blockquote lines, augmentation blocks OTHER transforms append
+// (auto-search hints / search-auto / note-nudge instructions — a memory
+// fragment quoted inside a generated hint must not be re-interpreted as a
+// user request), and blocks this module already appended.
 const FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
 const INLINE_CODE_RE = /`[^`\n]*`/g;
 const BLOCKQUOTE_LINE_RE = /^[ \t]*>.*$/gm;
 const PRIOR_INJECT_BLOCK_RE =
 	/<ctx-subagent-inject>[\s\S]*?<\/ctx-subagent-inject>/g;
+const PRIOR_SEARCH_HINT_BLOCK_RE =
+	/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g;
+const PRIOR_SEARCH_AUTO_BLOCK_RE =
+	/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g;
+const PRIOR_INSTRUCTION_BLOCK_RE = /<instruction[^>]*>[\s\S]*?<\/instruction>/g;
 
 // Strict inner grammar: tokens of `#?digits` separated by space/tab runs or
 // a single ASCII comma with optional padding. Trailing padding allowed;
@@ -210,6 +224,9 @@ export function scanTextPartForIds(text: string): {
 	const stripped = text
 		.replace(FENCED_CODE_RE, "")
 		.replace(PRIOR_INJECT_BLOCK_RE, "")
+		.replace(PRIOR_SEARCH_HINT_BLOCK_RE, "")
+		.replace(PRIOR_SEARCH_AUTO_BLOCK_RE, "")
+		.replace(PRIOR_INSTRUCTION_BLOCK_RE, "")
 		.replace(INLINE_CODE_RE, "")
 		.replace(BLOCKQUOTE_LINE_RE, "");
 	COARSE_MARKER_RE.lastIndex = 0;
@@ -393,7 +410,37 @@ export function buildInjectPayload(args: {
 }
 
 /**
+ * Estimate the tokens the CURRENT wire will occupy: every message's text
+ * (string content or text parts, any role) plus assistant reasoning text.
+ * Used as the baseline for the pre-submit capacity check — the check must
+ * measure the outgoing messages, not the pre-transform usage reading.
+ */
+function estimateMessagesTokens(messages: AgentMessage[]): number {
+	let total = 0;
+	for (const message of messages) {
+		const content = (message as { content?: unknown }).content;
+		if (typeof content === "string") {
+			total += estimateTokens(content);
+		} else if (Array.isArray(content)) {
+			for (const part of content as Array<{ type?: unknown; text?: unknown }>) {
+				if (part && part.type === "text" && typeof part.text === "string") {
+					total += estimateTokens(part.text);
+				}
+			}
+		}
+		const reasoning = (message as { reasoning?: unknown }).reasoning;
+		if (typeof reasoning === "string") total += estimateTokens(reasoning);
+	}
+	return total;
+}
+
+/**
  * Run task-requested memory injection against the current message array.
+ *
+ * Replay ALWAYS runs — disabling the feature stops NEW first-decisions but
+ * never retracts snapshots already persisted for still-visible tasks (the
+ * switch is not a privacy-revocation mechanism). Fresh first-decisions are
+ * gated on `options.enabled`.
  *
  * Replay first (byte restoration from persisted decisions for every
  * still-visible message), then at most ONE fresh first-decision — and only
@@ -411,12 +458,11 @@ export async function runSubagentInjectForPi(args: {
 	/** Per-context projection so replay reads session_meta once. */
 	decisions?: readonly SubagentInjectDecision[];
 	/** Live model-window accounting for the pre-submit capacity check. */
-	capacity?: { contextLimit: number | undefined; currentInputTokens: number };
+	capacity?: { contextLimit: number | undefined };
 	/** Test hook: freeze the first-read timestamp. */
 	now?: number;
 }): Promise<AgentMessage[]> {
 	const { sessionId, db, messages, options, entryIdByRef } = args;
-	if (!options.enabled) return messages;
 	const entryIds: readonly (string | undefined)[] =
 		args.entryIds === undefined || args.entryIds === null
 			? messages.map((message, index) => {
@@ -429,6 +475,9 @@ export async function runSubagentInjectForPi(args: {
 	if (resolved.length === 0) return messages;
 
 	const existing = args.decisions ?? getSubagentInjectDecisions(db, sessionId);
+	// Cheap exit for the common case: feature disabled (or never configured)
+	// and nothing persisted to replay.
+	if (!options.enabled && existing.length === 0) return messages;
 	const decisionByMessageId = new Map(existing.map((d) => [d.messageId, d]));
 
 	// --- Replay: byte restoration for every still-visible decided message. ---
@@ -441,7 +490,10 @@ export async function runSubagentInjectForPi(args: {
 		// "no-inject" decisions persist nothing to the wire by design.
 	}
 
-	// --- Fresh first-decision: only for the live tail message. ---
+	// --- Fresh first-decision: only for the live tail message, and only
+	// while the feature is enabled. Disabled stops NEW decisions; replay
+	// above already restored whatever was persisted. ---
+	if (!options.enabled) return messages;
 	const tail = resolved[resolved.length - 1];
 	if (!tail || tail.index !== messages.length - 1) return messages;
 	if (decisionByMessageId.has(tail.messageId)) return messages;
@@ -516,16 +568,18 @@ export async function runSubagentInjectForPi(args: {
 	});
 
 	// Pre-submit hard capacity check (P1-4): bypassing the memory budget
-	// must not overflow the model window. Unknown/garbage window → cannot
-	// check; proceed (downstream overflow protection is untouched).
+	// must not overflow the model window. The baseline is the CURRENT wire
+	// (everything earlier transforms appended this pass included), not the
+	// pre-transform usage reading. Unknown/garbage window → cannot check;
+	// proceed (downstream overflow protection is untouched).
 	const contextLimit = args.capacity?.contextLimit;
 	if (
 		typeof contextLimit === "number" &&
 		Number.isFinite(contextLimit) &&
 		contextLimit > 0
 	) {
-		const current = args.capacity?.currentInputTokens ?? 0;
-		if (current + estimateTokens(payload) > contextLimit) {
+		const wireTokens = estimateMessagesTokens(messages);
+		if (wireTokens + estimateTokens(payload) > contextLimit) {
 			appendSubagentInjectDecision(db, sessionId, {
 				messageId: tail.messageId,
 				decision: "no-inject",
@@ -533,7 +587,7 @@ export async function runSubagentInjectForPi(args: {
 			});
 			sessionLog(
 				sessionId,
-				`subagent-inject: payload does not fit the model context window (${current} + ~${estimateTokens(payload)} > ${contextLimit}); refusing to truncate`,
+				`subagent-inject: payload does not fit the model context window (wire ~${wireTokens} + payload ~${estimateTokens(payload)} > ${contextLimit}); refusing to truncate`,
 			);
 			return messages;
 		}
@@ -569,7 +623,20 @@ export async function runSubagentInjectForPi(args: {
 		);
 		return messages;
 	}
-	const outcome = appendSubagentInjectDecision(db, sessionId, decision);
+	let outcome: AppendSubagentInjectOutcome;
+	try {
+		outcome = appendSubagentInjectDecision(db, sessionId, decision);
+	} catch (error) {
+		// Persistence is a transient-failure boundary too: roll the wire bytes
+		// back, persist NOTHING, and let the next pass retry — otherwise a
+		// reused pass would append a second snapshot next time.
+		stripPayloadSuffix(tail.message, payload);
+		sessionLog(
+			sessionId,
+			`subagent-inject: WARN decision persistence failed for ${tail.messageId} (${error instanceof Error ? error.message : String(error)}); rolled back wire append, retrying next pass`,
+		);
+		return messages;
+	}
 	if (!outcome.ok) {
 		// CAS exhausted: roll the wire bytes back so a half-persisted injection
 		// cannot replay differently on the next pass. Retry next pass instead.
@@ -580,17 +647,22 @@ export async function runSubagentInjectForPi(args: {
 		);
 		return messages;
 	}
-	// First-writer-wins: under contention the COMMITTED decision's payload is
-	// what replays forever. If a concurrent writer won with different bytes
-	// (its own frozen readAt), realign this pass's wire to the winner so first
-	// pass and replays stay byte-identical.
+	// First-writer-wins: under contention the COMMITTED decision is what
+	// replays forever. Realign this pass's wire to the winner — whether it
+	// carries different bytes (its own frozen readAt) or NO bytes at all
+	// (a concurrent no-inject winner must not leave our snapshot stranded
+	// on the wire).
 	if (
-		(outcome.decision.decision === "inject" ||
-			outcome.decision.decision === "unavailable") &&
+		outcome.decision.decision === "no-inject" ||
 		outcome.decision.text !== payload
 	) {
 		if (stripPayloadSuffix(tail.message, payload)) {
-			appendPayloadToMessage(tail.message, outcome.decision.text);
+			if (
+				outcome.decision.decision === "inject" ||
+				outcome.decision.decision === "unavailable"
+			) {
+				appendPayloadToMessage(tail.message, outcome.decision.text);
+			}
 		}
 	}
 	sessionLog(

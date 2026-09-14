@@ -105,6 +105,50 @@ describe("runAutoSearchHintForPi", () => {
 		}
 	});
 
+	it("does not let a subagent-inject snapshot permanently swallow a retry after a transient timeout", async () => {
+		const db = createTestDb();
+		let calls = 0;
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			async () => {
+				calls += 1;
+				// Pass 1 behaves like the 3s embedding timeout (retryable: no
+				// decision persisted). Pass 2 succeeds with a strong hit.
+				return calls === 1 ? null : [memoryResult()];
+			},
+		);
+		try {
+			const messages = [
+				userMessage("explain the historian cache wiring in detail please", 1),
+			];
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages,
+				options: baseOptions,
+			});
+			// The snapshot landed after the timed-out pass (subagent-inject runs
+			// after auto-search). It must NOT count as stacked augmentation.
+			(messages[0] as { content: string }).content +=
+				"\n\n<ctx-subagent-inject>\nsnap\n</ctx-subagent-inject>";
+
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages,
+				options: baseOptions,
+			});
+
+			expect(calls).toBe(2);
+			expect(textOf(messages[0])).toContain("<ctx-search-hint>");
+			const decisions = getAutoSearchHintDecisions(db, "ses-auto");
+			expect(decisions).toHaveLength(1);
+			expect(decisions[0]?.decision).toBe("hint");
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
 	it("replays persisted hints but skips fresh decisions when strict entry ids fail", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(

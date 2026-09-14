@@ -738,7 +738,7 @@ Task-requested memory snapshot (requested IDs: 11, 55; first read at 2026-09-14T
 
 **Capacity.** The injection bypasses the `injection_budget_tokens` memory budget but NOT the model's hard context window: if the payload does not fit the live model window, the injection fails explicitly (observable decision, nothing truncated, retried state unchanged).
 
-**Ordering.** Runs after the auto-search hint on the same message (auto-search first, then this snapshot). A message already carrying any augmentation block (search hint, auto block, or this snapshot) does not receive a fresh auto-search hint.
+**Ordering.** Runs after the auto-search hint on the same message (auto-search first, then this snapshot — first pass and replay preserve that order). A message carrying a `<ctx-subagent-inject>` snapshot is NOT search-suppressed: the snapshot lands after auto-search has already run (or after a retryable auto-search timeout), so auto-search still evaluates the message and may append its hint; the snapshot only ever follows.
 
 **Not supported on the compaction-off path** (same gate as auto-search). Not gated on `isSubagent`: Pi cannot reliably see that flag, and the primary scenario (pi-subagents children running the full entry point) is exactly where markers appear in ordinary user task messages.
 
@@ -775,7 +775,7 @@ Run ctx_search to retrieve full context if relevant.
 
 **Suppression rules.** The hint is not appended when:
 
-1. `<ctx-search-hint>` or `<ctx-search-auto>` is already present on the user message (avoids double-nudging).
+1. `<ctx-search-hint>` or `<ctx-search-auto>` is already present on the user message (avoids double-nudging). A `<ctx-subagent-inject>` snapshot does NOT suppress the hint — that block is appended after auto-search runs, so treating it as stacked would permanently swallow the hint for a message whose search merely timed out once.
 2. The user message is shorter than `min_prompt_chars`.
 3. No result clears the threshold.
 4. An earlier pass already appended a hint for this message id (replayed verbatim on defer passes for cache safety).
