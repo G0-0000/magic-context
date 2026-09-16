@@ -963,7 +963,7 @@ export function initializeDatabase(
       p1_embedding BLOB,
       p1_embedding_model_id TEXT,
       legacy INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
@@ -982,7 +982,7 @@ export function initializeDatabase(
       model_id TEXT NOT NULL,
       dims INTEGER NOT NULL,
       vector BLOB NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       UNIQUE(compartment_id, model_id, window_index)
     );
     CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
@@ -1005,7 +1005,7 @@ export function initializeDatabase(
       kind TEXT NOT NULL,
       at_compartment INTEGER,
       fields_json TEXT NOT NULL DEFAULT '{}',
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
     CREATE INDEX IF NOT EXISTS idx_compartment_events_session
@@ -1034,7 +1034,7 @@ export function initializeDatabase(
       session_id TEXT NOT NULL,
       category TEXT NOT NULL,
       content TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       updated_at INTEGER NOT NULL,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
@@ -1053,7 +1053,7 @@ export function initializeDatabase(
       source_message_time INTEGER NOT NULL,
       question_embedding BLOB,
       question_embedding_model_id TEXT,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       UNIQUE(project_path, harness, session_id, source_start_message_id, source_end_message_id)
     );
     CREATE INDEX IF NOT EXISTS idx_primer_candidates_project_time
@@ -1076,7 +1076,7 @@ export function initializeDatabase(
       answer_refreshed_at INTEGER,
       source_candidate_ids TEXT NOT NULL DEFAULT '[]',
       source_candidate_provenance TEXT,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_primers_project_status_observed
@@ -1129,7 +1129,7 @@ export function initializeDatabase(
       seen_count INTEGER DEFAULT 1,
       retrieval_count INTEGER DEFAULT 0,
       first_seen_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       updated_at INTEGER NOT NULL,
       last_seen_at INTEGER NOT NULL,
       last_retrieved_at INTEGER,
@@ -1189,7 +1189,7 @@ export function initializeDatabase(
       job_id TEXT,
       cursor TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT 0, -- epoch ms (Date.now())
       updated_at INTEGER NOT NULL DEFAULT 0,
       UNIQUE(session_id, request_key)
     );
@@ -1230,7 +1230,7 @@ export function initializeDatabase(
       shadow_epoch INTEGER NOT NULL DEFAULT 0,
       corpus_hash TEXT NOT NULL DEFAULT '',
       coverage_json TEXT NOT NULL DEFAULT '{}',
-      created_at INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT 0, -- epoch ms (Date.now())
       UNIQUE(dedup_key, cohort_key)
     );
     CREATE INDEX IF NOT EXISTS idx_embedding_measurement_session
@@ -1384,7 +1384,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TABLE IF NOT EXISTS workspaces (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       updated_at INTEGER NOT NULL,
       share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
     );
@@ -1655,7 +1655,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       importance_avg REAL,
       discarded_last INTEGER NOT NULL DEFAULT 0,
       legacy INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL -- epoch ms (Date.now())
     );
     CREATE INDEX IF NOT EXISTS idx_historian_runs_session
       ON historian_runs(session_id, created_at DESC);
@@ -1708,7 +1708,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       importance INTEGER NOT NULL DEFAULT 50,
       episode_type TEXT,
       pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
@@ -1719,7 +1719,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, -- epoch ms (Date.now())
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
@@ -2100,7 +2100,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       CREATE TABLE IF NOT EXISTS workspaces (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, -- epoch ms (Date.now())
         updated_at INTEGER NOT NULL,
         share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
       );
