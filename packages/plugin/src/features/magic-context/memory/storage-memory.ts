@@ -42,10 +42,13 @@ export const COLUMN_MAP: Record<keyof Memory, string> = {
 };
 
 const MEMORY_CATEGORY_LOOKUP = {
-    // v2 world taxonomy
-    PROJECT_RULES: true,
-    ARCHITECTURE: true,
+    // v2 world taxonomy (six categories)
+    OPS_RULES: true,
+    ENV_STATE: true,
     CONFIG_VALUES: true,
+    INCIDENTS: true,
+    RESEARCH: true,
+    MODEL_KNOWLEDGE: true,
     // legacy 9-cat (accept-both bridge until E3 recategorization)
     ARCHITECTURE_DECISIONS: true,
     CONSTRAINTS: true,

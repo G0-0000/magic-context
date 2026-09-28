@@ -58,23 +58,21 @@ Acorn Suite made JWT tenant_id the single tenant authority across REST, GraphQL,
 <p4>requireTenantContext; JWT tenant_id only; acme_lab beta_works</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * All tenant-scoped Acorn Suite handlers must call requireTenantContext(req) and fail closed; do not recover missing tenant_id from orgSlug or X-Org-Slug.
 * Acorn Suite auth changes must include both REST and GraphQL tenant-boundary tests before merge.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Acorn Suite uses JWT tenant_id as the single tenant authority so REST, GraphQL, and Prisma filters share one isolation model.
 * Platform support bypass is modeled as a service actor, not as a tenant wildcard.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* X-Org-Slug and route orgSlug are presentation hints only; using them as tenant authority can produce cross-tenant reads when cached dashboard URLs are stale.
-</CONSTRAINTS>
-<CONFIG_VALUES>
+</OPS_RULES>
+<ENV_STATE>
 * Acorn Suite tenant-boundary fixtures live under apps/api/test/tenant-boundary/ and use seed tenants acme_lab and beta_works.
-</CONFIG_VALUES>
-<NAMING>
+</ENV_STATE>
+<CONFIG_VALUES>
 * The shared auth helper is named requireTenantContext; "resolveTenantMaybe" was rejected because it implied fallback behavior.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* X-Org-Slug and route orgSlug are presentation hints only; using them as tenant authority can produce cross-tenant reads when cached dashboard URLs are stale.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="1">
@@ -118,19 +116,13 @@ OpLog; SnapshotCache; vector_clock; max_ops_before_compact=10000; crates/chorus-
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<OPS_RULES>
 * Chorus document state is defined by the op log in causal order (vector clocks); materialized snapshots are derived-on-read cache entries, not the source of truth.
-</ARCHITECTURE>
-<CONSTRAINTS>
 * Chorus SnapshotCache invalidation must be synchronous on new op arrival; async invalidation causes stale reads visible to concurrent editing clients (observed: up to 200 ms staleness in async prototype).
-</CONSTRAINTS>
-<PROJECT_RULES>
 * Never mutate a Chorus materialized snapshot directly; always append an op to the log and re-derive the snapshot.
-</PROJECT_RULES>
-<NAMING>
-* Chorus core types: OpLog (crates/chorus-core/src/log.rs), SnapshotCache (crates/chorus-core/src/snapshot.rs).
-</NAMING>
+</OPS_RULES>
 <CONFIG_VALUES>
+* Chorus core types: OpLog (crates/chorus-core/src/log.rs), SnapshotCache (crates/chorus-core/src/snapshot.rs).
 * Chorus compaction threshold: max_ops_before_compact=10000 per document.
 </CONFIG_VALUES>
 </facts>
@@ -172,24 +164,20 @@ The durable decision was to allow standby replicas to do read-heavy reconcile wo
 <p4>LeaseGuard; observe/plan/commit; status.observedPlan; finalizer waits for ServiceExport cleanup</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Reconciler code may compute desired state before lease acquisition, but every status or finalizer write must pass through LeaseGuard.
 * Any new cleanup step must be idempotent across repeated reconcile loops before it is attached to finalizer removal.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * The controller is split into observe, plan, and commit so standby replicas can do expensive reads without risking conflicting writes.
 * Status carries an observedPlan hash so downstream tools can detect desired-versus-applied drift without diffing child resources.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* In a multi-control-plane cluster, standby reconciles can race with the active leader; unrestricted status writes make object health lie even when spec is unchanged.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Leader election lease name: workspacemesh-controller-lock.
 * Drift hash status field: status.observedPlan.
-</CONFIG_VALUES>
-<NAMING>
 * The controller write gate wrapper is named LeaseGuard.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* In a multi-control-plane cluster, standby reconciles can race with the active leader; unrestricted status writes make object health lie even when spec is unchanged.
+</RESEARCH>
 </facts>
 
 <!-- seed #4 | imp=94 | design | opus-4-7 (run1) -->
@@ -222,22 +210,20 @@ RLS on tenant_id; SET LOCAL app.current_tenant; BYPASSRLS = analytics_admin only
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
-* Tenant isolation is enforced at the database layer via Postgres RLS keyed on `tenant_id`, not via schema separation. Chosen because `SET LOCAL` is transaction-scoped and survives pgbouncer transaction-mode pooling, where session-scoped `search_path` switching does not.
-</ARCHITECTURE>
-<PROJECT_RULES>
+<OPS_RULES>
 * Every tenant-scoped table must declare `tenant_id uuid not null` and `ENABLE ROW LEVEL SECURITY` with a policy referencing `current_setting('app.current_tenant')`.
 * Application code must never call `SET ROLE` or use `BYPASSRLS` roles. `tools/sqllint/` enforces this in CI.
-</PROJECT_RULES>
-<CONSTRAINTS>
-* `SET search_path` is session-scoped and is silently lost between transactions when running behind pgbouncer in transaction pooling mode — making schema-per-tenant impractical for our deployment.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Per-request tenant context is set via `SET LOCAL app.current_tenant = '<uuid>'` inside the request transaction opened by `internal/db/tenant.go`.
-</CONFIG_VALUES>
-<NAMING>
 * The privileged analytics role is `analytics_admin` (the only role with `BYPASSRLS`); used exclusively by the scheduled aggregation job.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* Tenant isolation is enforced at the database layer via Postgres RLS keyed on `tenant_id`, not via schema separation. Chosen because `SET LOCAL` is transaction-scoped and survives pgbouncer transaction-mode pooling, where session-scoped `search_path` switching does not.
+</RESEARCH>
+<MODEL_KNOWLEDGE>
+* `SET search_path` is session-scoped and is silently lost between transactions when running behind pgbouncer in transaction pooling mode — making schema-per-tenant impractical for our deployment.
+</MODEL_KNOWLEDGE>
 </facts>
 <events>
 <trajectory_correction at_compartment="3">
@@ -278,24 +264,20 @@ Tenant authorization now flows from membership state rather than browser-selecte
 <p4>active_membership_id; TenantGuard; TenantContextResolver; x-ledgerleaf-tenant-id</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * New authenticated handlers must derive tenant access from server-resolved membership state, never from request body, query, or cookie tenant IDs.
 * Any endpoint bypassing TenantGuard needs an explicit integration test covering membership revocation.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Session tokens carry user_id and active_membership_id; tenant and role are rehydrated server-side so revocation and membership changes apply without waiting for session expiry.
 * Billing, files, and audit services consume a middleware-built TenantContext instead of parsing auth material independently.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Browser-supplied orgId values are unsafe for tenant authorization because users can belong to multiple tenants and stale tabs can replay old selections.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Internal tenant hop header: x-ledgerleaf-tenant-id.
 * Auth claim name: active_membership_id.
-</CONFIG_VALUES>
-<NAMING>
 * The auth boundary middleware is named TenantGuard and the resolver behind it is TenantContextResolver.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* Browser-supplied orgId values are unsafe for tenant authorization because users can belong to multiple tenants and stale tabs can replay old selections.
+</RESEARCH>
 </facts>
 <user_observations>
 * User frames security questions as trust-boundary rules and wants the unsafe source named explicitly.
@@ -327,18 +309,16 @@ internal/leaderelection/release.go shim removed; PreStop hook; lease 30s / retry
 </p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Do not wrap or shim controller-runtime leader-election internals — extend via its config surface only. Package `internal/leaderelection/` is CODEOWNERS-locked for this reason.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Leader-election release path must run unobstructed during SIGTERM so the kube-apiserver can transfer the lease before the pod's Node disappears.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Suppressing errors during graceful shutdown can mask actual API calls in flight; the suppression boundary must be drawn around logging, not around the network call itself.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Operator leader-election: lease duration 30s, retry period 5s, PreStop hook 5s.
 </CONFIG_VALUES>
+<RESEARCH>
+* Suppressing errors during graceful shutdown can mask actual API calls in flight; the suppression boundary must be drawn around logging, not around the network call itself.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="1">
@@ -377,21 +357,17 @@ run_id; pipeline_run; IntegrityError; idempotent retry; {pipeline_name}_{YYYYMMD
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<OPS_RULES>
 * All Luminary ETL pipeline loads are idempotent via run_id deduplication; any run can be safely retried without risk of double-counting or partial loads.
-</ARCHITECTURE>
-<PROJECT_RULES>
 * Every Luminary pipeline run must generate and log a run_id to the pipeline_run table before any target writes begin.
-</PROJECT_RULES>
-<CONSTRAINTS>
-* Luminary run_id uniqueness is enforced by a DB unique constraint on (target_table, run_id); a duplicate run_id raises IntegrityError, not a silent skip — retry logic must catch IntegrityError explicitly.
-</CONSTRAINTS>
-<NAMING>
-* Luminary idempotency primitives: run_id (string dedup key), pipeline_run (dedup table), orchestrator/runner.py (retry logic with IntegrityError handling).
-</NAMING>
+</OPS_RULES>
 <CONFIG_VALUES>
+* Luminary idempotency primitives: run_id (string dedup key), pipeline_run (dedup table), orchestrator/runner.py (retry logic with IntegrityError handling).
 * Luminary run_id format: {pipeline_name}_{YYYYMMDD}_{uuid4_prefix8} (e.g., orders_daily_20250523_a3f92c11).
 </CONFIG_VALUES>
+<RESEARCH>
+* Luminary run_id uniqueness is enforced by a DB unique constraint on (target_table, run_id); a duplicate run_id raises IntegrityError, not a silent skip — retry logic must catch IntegrityError explicitly.
+</RESEARCH>
 </facts>
 
 <!-- seed #8 | imp=91 | design,infra,feature | gpt-5-5-xhigh (run1) -->
@@ -412,22 +388,18 @@ Harborlight sharding is namespace-scoped: one operator binary can run cluster-wi
 <p4>QueueShard; observedLeaseUID; harborlight-queueshard Lease</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Harborlight CRD changes must regenerate manifests, deepcopy code, RBAC, and envtest fixtures before merge.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Harborlight uses one controller process with per-namespace Lease objects so failover does not move unrelated tenants.
 * QueueShard.status.observedLeaseUID records reconciler-observed lease identity; QueueShard.spec remains user intent only.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Kubernetes Lease renewTime is unreliable for Harborlight ownership decisions under node clock skew.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Harborlight QueueShard lease timing is duration 18s, renew deadline 12s, retry period 3s.
-</CONFIG_VALUES>
-<NAMING>
 * The Harborlight CRD kind is QueueShard; "WorkPartition" was rejected as too generic.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* Kubernetes Lease renewTime is unreliable for Harborlight ownership decisions under node clock skew.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="5">
@@ -459,15 +431,15 @@ CAN RX no longer allocates or sends BLE notifications inside the ISR; frames are
 <p4>can_rx_ring; can_notify_work; nRF52840 SoftDevice</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Pawprint firmware ISR paths must not allocate; enqueue to can_rx_ring and wake deferred work instead.
-</PROJECT_RULES>
-<CONSTRAINTS>
-* nRF52840 BLE notification from IRQ context can trigger supervisor reset when SoftDevice holds the radio lock.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Pawprint can_rx_ring depth is 32 frames, with overflow counted by can_rx_ring_overrun.
 </CONFIG_VALUES>
+<RESEARCH>
+* nRF52840 BLE notification from IRQ context can trigger supervisor reset when SoftDevice holds the radio lock.
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="3">
@@ -501,12 +473,10 @@ unscale_ → clip_grad_norm_ → step
 </p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
+<MODEL_KNOWLEDGE>
 * `torch.nn.utils.clip_grad_norm_` called on still-scaled fp16 gradients overflows silently, returns inf, drives the clip ratio to 0, and zeros parameters on the next optimizer step.
-</CONSTRAINTS>
-<ARCHITECTURE>
 * In mixed-precision training, gradient clipping is computed against TRUE gradient magnitudes — `scaler.unscale_(optimizer)` must run before any norm-based clipping.
-</ARCHITECTURE>
+</MODEL_KNOWLEDGE>
 </facts>
 <events>
 <causal_incident at_compartment="2">
@@ -542,15 +512,13 @@ LoomDoc wraps Y.Doc; HLC (physical_ms, logical, node_id); skew cap 300s
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<OPS_RULES>
 * Document conflict resolution uses a two-layer model: Yjs handles concurrent per-character positioning, while a hybrid logical clock on top orders structural operations across regions. The split exists because Yjs's intrinsic ordering doesn't carry cross-region semantics for whole-node operations.
-</ARCHITECTURE>
-<CONSTRAINTS>
 * Incoming HLC values whose physical component is more than 300 seconds ahead of local are rejected — clients with worse skew can't participate in collaboration until they correct.
-</CONSTRAINTS>
-<NAMING>
+</OPS_RULES>
+<CONFIG_VALUES>
 * CRDT library: Yjs (rejected Automerge for merge-cost scaling on ~50k-char documents). Our wrapper type is `LoomDoc`.
-</NAMING>
+</CONFIG_VALUES>
 </facts>
 
 <!-- seed #12 | imp=86 | design,feature,release | gpt-5-5-xhigh (run1) -->
@@ -571,23 +539,19 @@ Billetto made proration credits auditable by storing them in its own ledger tabl
 <p4>account_credit_entries; subscription_version; proration idempotency key</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Billetto billing migrations must include a rollback dry-run against test/fixtures/billing-ledger/.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Billetto represents credits as account_credit_entries tied to invoice_line_id, not as Stripe metadata.
 * Billetto proration calculation is idempotent around subscription_version and reuses existing ledger entries on retry.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Stripe invoice metadata is not a durable Billetto credit ledger because dashboard edits can mutate it outside the app.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Billetto credit_kind enum values are unused_time, plan_downgrade, and manual_adjustment.
 * Billetto Stripe idempotency key format for proration is proration:{account_id}:{subscription_version}:{invoice_id}.
-</CONFIG_VALUES>
-<NAMING>
 * The Billetto credit ledger table is named account_credit_entries; "negative_invoice_lines" was rejected.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* Stripe invoice metadata is not a durable Billetto credit ledger because dashboard edits can mutate it outside the app.
+</RESEARCH>
 </facts>
 
 <!-- seed #13 | imp=82 | investigation,bug | gpt-5-5-xhigh (run1) -->
@@ -606,12 +570,12 @@ Nereid contrastive training stabilized after restoring per-worker augmentation s
 <p4>worker_init_fn; augmentation_seed; runs/2026-05-08/a100-bf16-rerun</p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
-* Nereid's contrastive trainer can diverge if augmentation_seed is shared across dataloader workers.
-</CONSTRAINTS>
 <CONFIG_VALUES>
 * Nereid worker augmentation seed formula is base_seed + worker_id + epoch * 1009.
 </CONFIG_VALUES>
+<MODEL_KNOWLEDGE>
+* Nereid's contrastive trainer can diverge if augmentation_seed is shared across dataloader workers.
+</MODEL_KNOWLEDGE>
 </facts>
 <events>
 <causal_incident at_compartment="2">
@@ -647,21 +611,17 @@ billing.stripe_event_idempotency; key = event.id; TTL 90d
 </p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Idempotency for any external webhook source must key on the provider's event identifier (e.g. Stripe `event.id`), never on delivery-level signatures or timestamps. Stored response body+status is returned on duplicate.
-</PROJECT_RULES>
-<CONSTRAINTS>
-* Stripe webhook signatures and timestamps are regenerated per delivery attempt — they CANNOT be used as idempotency keys because retries of the same event produce different signatures.
-</CONSTRAINTS>
-<ARCHITECTURE>
 * Webhook idempotency uses a write-through pattern: the handler's full response is captured inside the same transaction that records the event_id, so replays return byte-identical responses without re-executing side effects.
-</ARCHITECTURE>
+</OPS_RULES>
 <CONFIG_VALUES>
 * `billing.stripe_event_idempotency` table; primary key on `event_id`; row TTL 90 days; wrapper in `internal/billing/webhooks/idempotent.go`.
-</CONFIG_VALUES>
-<NAMING>
 * Webhook idempotency table is `billing.stripe_event_idempotency`. Future provider-specific tables follow the pattern `<provider>_event_idempotency`.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* Stripe webhook signatures and timestamps are regenerated per delivery attempt — they CANNOT be used as idempotency keys because retries of the same event produce different signatures.
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="8">
@@ -701,15 +661,15 @@ JWT refresh; tenant_roles; access_token_ttl=900s; refresh_token_ttl=86400s; auth
 </p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
-* Tethys JWT access tokens carry tenant_roles at issue time; role changes do not invalidate existing tokens — a revoked role remains usable until token expiry (up to access_token_ttl=900 s for clients that don't refresh).
-</CONSTRAINTS>
-<PROJECT_RULES>
+<OPS_RULES>
 * Tethys token refresh must always re-fetch tenant_roles from the DB; never carry role claims forward from the incoming token.
-</PROJECT_RULES>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Tethys token TTLs: access_token_ttl=900 s, refresh_token_ttl=86400 s.
 </CONFIG_VALUES>
+<RESEARCH>
+* Tethys JWT access tokens carry tenant_roles at issue time; role changes do not invalidate existing tokens — a revoked role remains usable until token expiry (up to access_token_ttl=900 s for clients that don't refresh).
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="15">
@@ -746,12 +706,12 @@ segment_%09d.ts; transcoder/hls/
 </p4>
 </compartment>
 <facts>
+<OPS_RULES>
+* HLS segment indices must be zero-padded to a width sufficient for at least one year of continuous output at the minimum supported segment duration. Lexicographic sortability is required for CDN purge globbing.
+</OPS_RULES>
 <CONFIG_VALUES>
 * HLS segment filename format: `segment_%09d.ts` (writer in `transcoder/hls/segmenter.go`, manifest builder in `transcoder/hls/playlist.go`).
 </CONFIG_VALUES>
-<PROJECT_RULES>
-* HLS segment indices must be zero-padded to a width sufficient for at least one year of continuous output at the minimum supported segment duration. Lexicographic sortability is required for CDN purge globbing.
-</PROJECT_RULES>
 </facts>
 <events>
 <causal_incident at_compartment="5">
@@ -781,18 +741,16 @@ Partition membership changes now fence planner statistics through partition_epoc
 <p4>Partition topology changes now fence planner stats through partition_epoch instead of relying on coarse cache clears.</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Any catalog change affecting partition membership needs a planner regression under tests/sql/partition_pruning_regress.slt.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Planner stats cache keys include partition_epoch so partition topology changes invalidate selectivity estimates without clearing the whole cache.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Child partition attach and detach can make NDV and selectivity data unsafe even when the parent table schema is unchanged.
-</CONSTRAINTS>
+</OPS_RULES>
 <CONFIG_VALUES>
 * New planner cache key field: partition_epoch.
 </CONFIG_VALUES>
+<RESEARCH>
+* Child partition attach and detach can make NDV and selectivity data unsafe even when the parent table schema is unchanged.
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="13">
@@ -824,15 +782,15 @@ CollabPad CRDT ordering now follows document clocks rather than server receive t
 <p4>lamport site_id; receivedAt telemetry only; reconnect replay</p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<OPS_RULES>
 * CollabPad orders CRDT operations by (lamport, site_id); server receivedAt is telemetry only.
-</ARCHITECTURE>
-<CONSTRAINTS>
-* WebRTC reconnect can deliver buffered CollabPad ops older than a websocket ack, so receivedAt cannot be used as causal order.
-</CONSTRAINTS>
-<NAMING>
+</OPS_RULES>
+<CONFIG_VALUES>
 * CollabPad's editing-site field is named site_id rather than clientId because multiple browser contexts can share one account.
-</NAMING>
+</CONFIG_VALUES>
+<RESEARCH>
+* WebRTC reconnect can deliver buffered CollabPad ops older than a websocket ack, so receivedAt cannot be used as causal order.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="10">
@@ -866,12 +824,12 @@ bond_table partition 0x7E000–0x7FFFF; pm_static.yml
 </p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
-* nRF SDK 2.6.0 bond manager (with `NRF_FSTORAGE_API_FDS`) writes its bond table to the top 8KB of flash regardless of the partition manifest — the SDK does not consult `pm_static.yml`.
-</CONSTRAINTS>
 <CONFIG_VALUES>
 * `bond_table` partition reserved at 0x7E000–0x7FFFF in `pm_static.yml`. OTA pre-swap erase range narrowed to 0x70000–0x7DFFF.
 </CONFIG_VALUES>
+<RESEARCH>
+* nRF SDK 2.6.0 bond manager (with `NRF_FSTORAGE_API_FDS`) writes its bond table to the top 8KB of flash regardless of the partition manifest — the SDK does not consult `pm_static.yml`.
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="6">
@@ -905,9 +863,9 @@ leader election; Lease resource; VESPER_LEASE_DURATION_S; VESPER_RENEW_INTERVAL_
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<OPS_RULES>
 * Vesper controller uses Kubernetes Lease-based leader election; non-holder replicas skip the reconcile loop entirely and only run health probes.
-</ARCHITECTURE>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Vesper leader election defaults: VESPER_LEASE_DURATION_S=30, VESPER_RENEW_INTERVAL_S=10, VESPER_ACQUIRE_DEADLINE_S=8 (all overridable via env).
 </CONFIG_VALUES>
@@ -939,15 +897,15 @@ onPreInstall; onPostInstall; onRemove; schema_version; dependency-declaration or
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
-* boltpkg plugin hooks execute in plugin dependency-declaration order, not registration order; deterministic and matches user expectations about dependency sequencing.
-</ARCHITECTURE>
-<NAMING>
-* boltpkg plugin lifecycle hooks: onPreInstall, onPostInstall, onRemove (src/plugin/types.ts).
-</NAMING>
-<PROJECT_RULES>
+<OPS_RULES>
 * boltpkg plugin manifests must include schema_version; the loader rejects manifests with unrecognized schema versions to prevent silently running mismatched plugins.
-</PROJECT_RULES>
+</OPS_RULES>
+<CONFIG_VALUES>
+* boltpkg plugin lifecycle hooks: onPreInstall, onPostInstall, onRemove (src/plugin/types.ts).
+</CONFIG_VALUES>
+<RESEARCH>
+* boltpkg plugin hooks execute in plugin dependency-declaration order, not registration order; deterministic and matches user expectations about dependency sequencing.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="17">
@@ -976,18 +934,14 @@ Subscription MRR history moved into a daily fact table instead of being reconstr
 <p4>fct_subscription_day; dbt incremental; MRR daily snapshot</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Northstar DW subscription backfills should use the backfill_subscription_day dbt macro instead of ad hoc DELETE and INSERT queries.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Northstar DW answers historical MRR from fct_subscription_day daily snapshots rather than replaying raw billing events at query time.
-</ARCHITECTURE>
+</OPS_RULES>
 <CONFIG_VALUES>
 * fct_subscription_day is materialized incrementally with unique key account_id, subscription_id, and date_day.
-</CONFIG_VALUES>
-<NAMING>
 * The subscription daily snapshot model is named fct_subscription_day.
-</NAMING>
+</CONFIG_VALUES>
 </facts>
 
 <!-- seed #23 | imp=67 | feature | opus-4-7 (run1) -->
@@ -1012,12 +966,12 @@ bucket width 50; K=24; asymmetric expansion down-only first 60s
 </p4>
 </compartment>
 <facts>
+<OPS_RULES>
+* Matchmaking expands the candidate bucket asymmetrically (down-only first) for high-rank players because the skill distribution is right-truncated — there are no buckets above them to expand into, and expanding symmetrically produces visible mismatches.
+</OPS_RULES>
 <CONFIG_VALUES>
 * Matchmaking: bucket width 50 MMR, K-factor 24, native-bucket wait 60s, down-only expansion phase 60s, symmetric expansion after 120s.
 </CONFIG_VALUES>
-<ARCHITECTURE>
-* Matchmaking expands the candidate bucket asymmetrically (down-only first) for high-rank players because the skill distribution is right-truncated — there are no buckets above them to expand into, and expanding symmetrically produces visible mismatches.
-</ARCHITECTURE>
 </facts>
 <user_observations>
 * User cites public/community signal (subreddit, social) as concrete evidence when arguing for a design choice, treating it as a real constraint rather than noise.
@@ -1037,9 +991,9 @@ PDF page rotation is captured before OCR rasterization so Tesseract sees the cor
 <p4>pdfinfo rotation; JBIG2 masks; normalizePageBitmap</p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
+<RESEARCH>
 * QuillOCR cannot rely on pdfimages output for page rotation when Poppler emits JBIG2 masks; rotation must be read from pdfinfo before rasterization.
-</CONSTRAINTS>
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="8">
@@ -1067,15 +1021,13 @@ Synonym edits are now shipped by building and promoting a shadow index, not by r
 <p4>products_live; products_next; shadow-index synonym rollout</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Search schema changes and synonym changes ship through the same shadow-index promotion workflow.
-</PROJECT_RULES>
-<ARCHITECTURE>
 * Synonym changes are applied by building a shadow index and swapping aliases, not by reloading the hot index in place.
-</ARCHITECTURE>
-<NAMING>
+</OPS_RULES>
+<ENV_STATE>
 * The paired search aliases are products_live and products_next.
-</NAMING>
+</ENV_STATE>
 </facts>
 
 <!-- seed #26 | imp=54 | feature | gpt-5-5-xhigh (run1) -->
@@ -1094,9 +1046,9 @@ Ranked duo matchmaking now preserves parties even when it increases queue time.
 <p4>ranked_duo; party_id hard constraint; duo_wait_curves</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Arcade Relay matchmaker must not split a party_id across ranked lobbies; widen match criteria before breaking party constraints.
-</PROJECT_RULES>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Arcade Relay ranked_duo MMR window widens by 75 every 15s up to 450.
 </CONFIG_VALUES>
@@ -1120,9 +1072,9 @@ snapshots/dim_customer.sql; strategy=timestamp on updated_at
 </p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<RESEARCH>
 * Type-2 SCD modeling uses dbt snapshots with the `timestamp` strategy. Hand-rolled SCD via triggers/UDFs is not permitted because it has no race-free coordination across concurrent upstream loads.
-</PROJECT_RULES>
+</RESEARCH>
 </facts>
 
 <!-- seed #28 | imp=48 | bug | opus-4-7 (run1) -->
@@ -1162,9 +1114,9 @@ tesseract=5.3.3; docker/ocr/Dockerfile; upstream #4117
 <CONFIG_VALUES>
 * `docker/ocr/Dockerfile` pins `tesseract-ocr=5.3.3` with apt version + SHA pin. Unpin only after upstream #4117 resolves.
 </CONFIG_VALUES>
-<CONSTRAINTS>
+<INCIDENTS>
 * Tesseract 5.3.4 regresses multi-column layout detection (column-detection heuristic in LSTM postprocessing changed). Single-column accuracy is unaffected.
-</CONSTRAINTS>
+</INCIDENTS>
 </facts>
 <events>
 <causal_incident at_compartment="10">
@@ -1196,10 +1148,8 @@ Snapbench recording examples became runnable instead of descriptive only.
 <facts>
 <CONFIG_VALUES>
 * Snapbench's default snapshot directory is .snapbench/.
-</CONFIG_VALUES>
-<NAMING>
 * The Snapbench capture subcommand is named snapbench record.
-</NAMING>
+</CONFIG_VALUES>
 </facts>
 <user_observations>
 * User prefers runnable commands over prose-only explanations when validating developer tooling.
@@ -1239,9 +1189,9 @@ HLS; pts discontinuity; last_pts; -copyts; hls.go
 </p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
+<RESEARCH>
 * Meridian's ffmpeg HLS mux requires the -copyts flag when chaining segments; without it pts is rescaled per-segment and playback gaps appear at boundaries under some codec configurations.
-</CONSTRAINTS>
+</RESEARCH>
 </facts>
 <events>
 <causal_incident at_compartment="8">
@@ -1273,9 +1223,9 @@ post_bulk_load hook; internal/storage/loader.go
 </p4>
 </compartment>
 <facts>
-<ARCHITECTURE>
+<RESEARCH>
 * Bulk-load paths are responsible for refreshing planner statistics on the tables they touch — the planner does not auto-trigger ANALYZE on bulk-loaded tables, and stale stats cause it to choose sequential scans over covering indexes.
-</ARCHITECTURE>
+</RESEARCH>
 </facts>
 
 <!-- seed #34 | imp=36 | bug | gpt-5-5-xhigh (run1) -->
@@ -1330,9 +1280,9 @@ The SKU importer now defaults to a safe preview workflow instead of assuming liv
 <p4>sku-import; preview default; --apply</p4>
 </compartment>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * New operational import commands should default to preview mode unless an explicit apply flag is present.
-</PROJECT_RULES>
+</OPS_RULES>
 <CONFIG_VALUES>
 * Destructive execution flag: --apply; preview mode is the default when it is absent.
 </CONFIG_VALUES>
@@ -1365,9 +1315,9 @@ Invalid IoT telemetry is retained in a DLQ instead of silently disappearing.
 <p4>telemetry.raw.dlq.v2; parse_failure_sample_rate</p4>
 </compartment>
 <facts>
-<CONFIG_VALUES>
+<ENV_STATE>
 * BeaconMesh malformed raw telemetry is routed to Kafka topic telemetry.raw.dlq.v2.
-</CONFIG_VALUES>
+</ENV_STATE>
 </facts>
 
 <!-- seed #38 | imp=27 | feature,design | gpt-5-5-xhigh (run1) -->
@@ -1386,9 +1336,9 @@ Mobile offline sync shipped with a narrow notes-only scope.
 <p4>offlineScope.ts; notes only; attachments online-only</p4>
 </compartment>
 <facts>
-<CONFIG_VALUES>
+<ENV_STATE>
 * Harbor Notes offline sync MVP includes note title and body only; attachments and comment threads remain online-only.
-</CONFIG_VALUES>
+</ENV_STATE>
 </facts>
 
 <!-- seed #39 | imp=27 | feature,bug | gpt-5-4-high (run1) -->
@@ -1411,12 +1361,12 @@ Low-confidence scan rotation is now handled through a manual override path, with
 <p4>PageRotationOverride; upload manifest override; angle_confidence threshold</p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
-* OCR angle predictions below a high confidence threshold are not reliable enough for unattended page rotation on messy multi-scan uploads.
-</CONSTRAINTS>
 <CONFIG_VALUES>
 * Automatic rotation threshold: angle_confidence 0.98 or higher.
 </CONFIG_VALUES>
+<RESEARCH>
+* OCR angle predictions below a high confidence threshold are not reliable enough for unattended page rotation on messy multi-scan uploads.
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="19">
@@ -1528,9 +1478,9 @@ README install path fixed for Apple Silicon.
 <p4/>
 </compartment>
 <facts>
-<NAMING>
+<ENV_STATE>
 * On darwin-arm64 (Apple Silicon), the installed binary path is `/opt/homebrew/bin/loomctl`. On darwin-x86_64 and Linux, it remains `/usr/local/bin/loomctl`.
-</NAMING>
+</ENV_STATE>
 </facts>
 
 <!-- seed #45 | imp=17 | refactor | opus-4-7 (run1) -->
@@ -1547,9 +1497,9 @@ Naming cleanup in the billing service.
 <p4/>
 </compartment>
 <facts>
-<NAMING>
+<CONFIG_VALUES>
 * Billing math helpers live in package `invoiceMath` (rounding, proration, tax-base computation). The prior name `bilUtil` is deprecated.
-</NAMING>
+</CONFIG_VALUES>
 </facts>
 
 <!-- seed #46 | imp=14 | investigation | opus-4-7 (run1) -->
@@ -1643,9 +1593,9 @@ False start: attempted-and-reverted controller-runtime cache bypass.
 <p4/>
 </compartment>
 <facts>
-<CONSTRAINTS>
+<RESEARCH>
 * controller-runtime's cache is itself informer-backed; "going direct to informers" doesn't remove any indirection and gives no latency benefit.
-</CONSTRAINTS>
+</RESEARCH>
 </facts>
 <events>
 <trajectory_correction at_compartment="18">
@@ -1761,9 +1711,9 @@ Captured high-load CAN bus limitation in firmware docs.
 <p4>can-driver; 80% bus load; arbitration collapse</p4>
 </compartment>
 <facts>
-<CONSTRAINTS>
+<RESEARCH>
 * CAN bus arbitration on the current MCU fails under >80% bus load; requires priority inversion mitigation in the driver.
-</CONSTRAINTS>
+</RESEARCH>
 </facts>
 
 <!-- seed #58 | imp=3 | bug | opus-4-7 (run1) -->
@@ -1808,7 +1758,7 @@ Docs examples section was renamed.
 <p4/>
 </compartment>
 <facts>
-<NAMING>
+<CONFIG_VALUES>
 * AstraKit's docs navigation label for examples is "Cookbook", not "Recipes".
-</NAMING>
+</CONFIG_VALUES>
 </facts>

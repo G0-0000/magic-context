@@ -1133,7 +1133,7 @@ export const MagicContextConfigSchema = z
                     '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
                     "historian, dreamer, and the agent-guidance block instruct the model to " +
                     "write its PROSE in this language while keeping all structural tokens (XML tags, " +
-                    "the five memory category names, code identifiers, file paths) in English. " +
+                    "the six memory category names, code identifiers, file paths) in English. " +
                     "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
                     "behavior (model mirrors the conversation; English scaffolding). Changing it " +
                     "triggers one cache re-materialization; existing compartments/memories keep their " +

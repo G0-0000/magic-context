@@ -1594,7 +1594,7 @@ export const MIGRATIONS: Migration[] = [
                     name TEXT NOT NULL UNIQUE,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
-                    share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
+                    share_categories TEXT NOT NULL DEFAULT '[]'
                 );
             `);
             // ensureColumn (not a guarded raw ALTER): its re-check-on-failure
@@ -1605,11 +1605,11 @@ export const MIGRATIONS: Migration[] = [
                 db,
                 "workspaces",
                 "share_categories",
-                `TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`,
+                `TEXT NOT NULL DEFAULT '[]'`,
             );
             db.prepare(
                 `UPDATE workspaces
-                    SET share_categories = '["CONSTRAINTS"]'
+                    SET share_categories = '[]'
                   WHERE share_categories IS NULL OR share_categories = ''`,
             ).run();
 
