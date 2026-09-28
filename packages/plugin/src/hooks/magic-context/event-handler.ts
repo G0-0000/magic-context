@@ -30,6 +30,7 @@ import {
     removeAutoSearchHintDecisionByMessageId,
     removeNoteNudgeAnchorByMessageId,
     removeStrippedPlaceholderId,
+    removeSubagentInjectDecisionByMessageId,
     setPersistedReasoningWatermark,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -245,6 +246,18 @@ function cleanupRemovedMessageState(
                 removedAutoSearchDecision
                     ? `event message.removed: pruned auto-search decision for ${messageId}`
                     : `event message.removed: auto-search decision unchanged for ${messageId}`,
+            );
+
+            const removedSubagentInjectDecision = removeSubagentInjectDecisionByMessageId(
+                deps.db,
+                sessionId,
+                messageId,
+            );
+            sessionLog(
+                sessionId,
+                removedSubagentInjectDecision
+                    ? `event message.removed: pruned subagent-inject decision for ${messageId}`
+                    : `event message.removed: subagent-inject decision unchanged for ${messageId}`,
             );
 
             const currentWatermark = getPersistedReasoningWatermark(deps.db, sessionId);

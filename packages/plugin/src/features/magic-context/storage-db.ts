@@ -1629,6 +1629,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       note_nudge_sticky_message_id TEXT DEFAULT '',
       note_nudge_anchors TEXT NOT NULL DEFAULT '[]',
       auto_search_hint_decisions TEXT NOT NULL DEFAULT '[]',
+      subagent_inject_decisions TEXT NOT NULL DEFAULT '[]',
       last_todo_state TEXT DEFAULT '',
       todo_permission_denied INTEGER NOT NULL DEFAULT 2,
       todo_synthetic_call_id TEXT DEFAULT '',
@@ -1957,6 +1958,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "note_nudge_sticky_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_anchors", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn(db, "session_meta", "auto_search_hint_decisions", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn(db, "session_meta", "subagent_inject_decisions", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn(db, "session_meta", "last_todo_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "todo_permission_denied", "INTEGER NOT NULL DEFAULT 2");
     ensureColumn(db, "session_meta", "todo_synthetic_call_id", "TEXT DEFAULT ''");

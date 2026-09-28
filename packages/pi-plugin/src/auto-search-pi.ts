@@ -146,6 +146,11 @@ function collectUserPromptParts(message: UserMessage): string {
 }
 
 function hasStackedAugmentation(rawText: string): boolean {
+	// Only search-owned tags count. A `<ctx-subagent-inject>` snapshot is
+	// appended AFTER auto-search ran (or after a retryable auto-search
+	// failure), so it must never trigger the stacked suppression: doing so
+	// would permanently record no-hint for a message whose search simply
+	// timed out once.
 	return (
 		rawText.includes("<ctx-search-hint>") ||
 		rawText.includes("<ctx-search-auto>")
@@ -188,6 +193,10 @@ function extractUserPromptText(message: UserMessage): string {
 			// Plugin-owned injected blocks should be removed with their content.
 			.replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
 			.replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")
+			// Task-requested memory snapshots (subagent-inject-pi.ts): strip so
+			// a retry after an auto-search timeout embeds the ORIGINAL prompt,
+			// not the injected memory bytes.
+			.replace(/<ctx-subagent-inject>[\s\S]*?<\/ctx-subagent-inject>/g, "")
 			.replace(/<instruction[^>]*>[\s\S]*?<\/instruction>/g, "")
 			// Generic XML/HTML tags — opening, closing, and self-closing.
 			// Preserve text between paired tags so pasted content still embeds.
