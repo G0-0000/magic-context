@@ -478,6 +478,7 @@ export function applyPiHeuristicCleanup(
 					: staleReduce.bareCallIds.has(tag.messageId);
 				if (!matched) continue;
 				const target = targets.get(tag.tagNumber);
+				if (target?.canDrop?.() === false) continue;
 				const { result, mode } = applyNewToolDrop(target, { inWindow: false });
 				if (result === "incomplete") continue;
 				updateTagDropMode(db, sessionId, tag.tagNumber, mode);
@@ -581,6 +582,7 @@ export function applyPiHeuristicCleanup(
 				for (let i = 0; i < group.length - 1; i++) {
 					const tag = group[i];
 					const target = targets.get(tag.tagNumber);
+					if (target?.canDrop?.() === false) continue;
 					// Deduplication stays full-drop; only emergency recent arcs keep
 					// skeletons. A call that cannot be removed keeps real arguments.
 					const { result, mode } = applyNewToolDrop(target, {

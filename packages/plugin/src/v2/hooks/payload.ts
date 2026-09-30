@@ -235,6 +235,12 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 input: structuredClone(call?.input ?? {}),
                 status: result ? "completed" : "running",
                 ...(result ? { output } : {}),
+                // OpenCode 2 omits the user's answers in state.metadata.answers from its
+                // LLM context event. Mark built-in question results as answers until the
+                // host forwards that metadata, so automatic reclaim cannot erase them.
+                ...(result && (call?.name ?? result.part.name) === "question"
+                    ? { metadata: { userAnswer: true } }
+                    : {}),
                 ...(files ? { attachments: contentValueAttachments(files) } : {}),
             },
         };

@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { toolPartHasUserAnswer } from "../../shared/user-answer";
 import { isSentinel, makeSentinel } from "./sentinel";
 import type { MessageLike } from "./tag-messages";
 
@@ -128,7 +129,8 @@ export function dropStaleReduceCalls(
             detect &&
             i < protectedStart &&
             id !== undefined &&
-            messageHasReducePart(message);
+            messageHasReducePart(message) &&
+            !message.parts.some(toolPartHasUserAnswer);
 
         if (!inFrozen && !isNewDetection) continue;
 

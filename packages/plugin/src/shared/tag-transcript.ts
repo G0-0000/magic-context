@@ -1275,7 +1275,7 @@ function buildAggregateTarget(
             return any ? "truncated" : "absent";
         },
         // Open invocations still belong to the current turn; only complete arcs reclaim.
-        canDrop: complete,
+        canDrop: () => complete() && !occurrences.some((occ) => occ.part.hasUserAnswer?.()),
         requiresToolArcSkeleton,
         // Non-mutating read of the invocation input (the tool_use occurrence
         // carries the arguments). Used by smart-drops supersession selection.
@@ -1375,6 +1375,9 @@ function buildToolTarget(
         // drop() replaces an invocation part's arguments with a marker, so a
         // new drop of one keeps its real arguments instead.
         cannotRemove: () => part.setToolInput !== undefined,
+        // Without a paired tool call, an answer marker can forbid automatic dropping,
+        // but must not make ordinary results newly eligible for automatic reclaim.
+        ...(part.hasUserAnswer?.() ? { canDrop: () => false } : {}),
         inputStringBytes(): number | null {
             return part.setToolInput ? toolInputStringBytes(part.getToolInput?.() ?? null) : 0;
         },

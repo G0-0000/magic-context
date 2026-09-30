@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { toolPartHasUserAnswer } from "../../shared/user-answer";
 import { droppedInputMarker } from "./dropped-input-guard";
 import { applyEditMarkerToInput } from "./edit-marker";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
@@ -639,7 +640,12 @@ export function createToolDropTarget(
         },
         canDrop: (): boolean => {
             const entry = index.get(compositeKey);
-            return !!entry && entry.occurrences.length > 0 && entry.hasResult;
+            return (
+                !!entry &&
+                entry.occurrences.length > 0 &&
+                entry.hasResult &&
+                !entry.occurrences.some((occurrence) => toolPartHasUserAnswer(occurrence.part))
+            );
         },
         requiresToolArcSkeleton:
             thinkingParts.length > 0 ||

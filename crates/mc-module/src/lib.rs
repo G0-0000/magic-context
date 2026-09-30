@@ -42938,3 +42938,5 @@ mod todo_verdict_probe_tests {
         assert!(!unprobed_todo_bust(Some(false), "DEFER"));
     }
 }
+
+mod user_answer;

@@ -651,3 +651,20 @@ describe("adaptPayload", () => {
         });
     });
 });
+
+it("OpenCode 2 question fallback vetoes automatic drops but preserves explicit reduction", () => {
+    const payload = draft(toolTurn("m", "q", "question", "user decision"));
+    const mapped = adaptPayload(payload);
+    const message = mapped.messages.find((m) => indexMessage(m).has("q"))!;
+    const target = createToolDropTarget(
+        "q",
+        [],
+        indexMessage(message),
+        new ToolMutationBatch(mapped.messages),
+        1,
+    );
+    expect(target.canDrop()).toBe(false);
+    expect(target.skeletonReal()).toBe("truncated");
+    mapped.commit();
+    expect(JSON.stringify(payload.messages)).toContain("[dropped §1§]");
+});
