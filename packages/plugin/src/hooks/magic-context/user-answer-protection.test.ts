@@ -9,7 +9,7 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
-import { applyPendingOperations } from "./apply-operations";
+import { applyFlushedStatuses, applyPendingOperations } from "./apply-operations";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { buildSupersessionReclaimOps } from "./supersession-reclaim";
 import type { MessageLike, TagTarget } from "./tag-messages";
@@ -119,6 +119,16 @@ describe("user-answer automatic protection", () => {
         queuePendingOp(db, session, 1, "drop");
         expect(applyPendingOperations(session, db, targets, new Set())).toBe(true);
         expect(getTagsBySession(db, session)[0].status).toBe("dropped");
+        expect(JSON.stringify(messages)).toContain("[dropped §1§]");
+    });
+
+    it("previously dropped answers remain dropped on defer replay", () => {
+        add(1, "question", true);
+        db.query(
+            "UPDATE tags SET status = 'dropped', drop_mode = 'skeleton_real' WHERE session_id = ?",
+        ).run(session);
+        expect(targets.get(1)?.canDrop?.()).toBe(false);
+        expect(applyFlushedStatuses(session, db, targets)).toBe(true);
         expect(JSON.stringify(messages)).toContain("[dropped §1§]");
     });
 
