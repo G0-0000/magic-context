@@ -1,6 +1,7 @@
 import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
 import { log } from "../../../shared/logger";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
+import { CHUNK_WINDOW_SAFETY_RATIO } from "../compartment-chunk-embedding";
 import type { EmbeddingFailure, EmbeddingFailureClass } from "./embedding-failure";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { embeddingModelsMatch, resolveEmbeddingTextPrefixes } from "./embedding-model-match";
@@ -36,9 +37,17 @@ interface EmbeddingResponseBody {
     model?: string;
 }
 
-function capEmbeddingInput(input: string, maxInputTokens: number): string {
-    // Use 90% of the maximum as a safety margin, counting any instruction prefix.
-    const budget = Math.max(1, Math.floor(maxInputTokens * 0.9));
+function capEmbeddingInput(
+    input: string,
+    maxInputTokens: number,
+    purpose: EmbeddingPurpose | undefined,
+): string {
+    // Queries are raw user text, so they get the chunker's safety margin. Documents
+    // were already chunked to that margin without counting the instruction prefix,
+    // so they are only cut at the full limit: a full-size chunk plus a short prefix
+    // must reach the model whole.
+    const ratio = purpose === "query" ? CHUNK_WINDOW_SAFETY_RATIO : 1;
+    const budget = Math.max(1, Math.floor(maxInputTokens * ratio));
     if (estimateTokens(input) <= budget) return input;
     // Search tasks are usually stated first, so preserve the useful beginning.
     let low = 0;
@@ -224,7 +233,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         const textPrefix = purpose === "query" ? this.queryPrefix : this.documentPrefix;
         const requestTexts = texts.map((text) => {
             const input = `${textPrefix}${text.trim().length === 0 ? " " : text}`;
-            const capped = capEmbeddingInput(input, this.maxInputTokens);
+            const capped = capEmbeddingInput(input, this.maxInputTokens, purpose);
             if (
                 purpose === "query" &&
                 capped.length < input.length &&
