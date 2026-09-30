@@ -1,3 +1,4 @@
+import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
 import { log } from "../../../shared/logger";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
 import type { EmbeddingFailure, EmbeddingFailureClass } from "./embedding-failure";
@@ -33,6 +34,27 @@ interface EmbeddingResponseBody {
      *  they ACTUALLY ran, which can differ from the request when the requested
      *  model isn't loaded and the server substitutes a loaded one. */
     model?: string;
+}
+
+function capEmbeddingInput(input: string, maxInputTokens: number): string {
+    // Use 90% of the maximum as a safety margin, counting any instruction prefix.
+    const budget = Math.max(1, Math.floor(maxInputTokens * 0.9));
+    if (estimateTokens(input) <= budget) return input;
+    // Search tasks are usually stated first, so preserve the useful beginning.
+    let low = 0;
+    let high = input.length;
+    while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (estimateTokens(input.slice(0, mid)) <= budget) low = mid;
+        else high = mid - 1;
+    }
+    // UTF-16 slicing can otherwise leave an unmatched high surrogate.
+    if (low > 0 && low < input.length) {
+        const last = input.charCodeAt(low - 1);
+        const next = input.charCodeAt(low);
+        if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) low -= 1;
+    }
+    return input.slice(0, low);
 }
 
 function normalizeEndpoint(endpoint?: string): string {
@@ -100,6 +122,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
      *  to true is allowed to make a real HTTP call; everyone else short-
      *  circuits as if the circuit were still OPEN. */
     private halfOpenProbeInFlight = false;
+    private queryTruncationLogged = false;
 
     constructor(options: OpenAICompatibleEmbeddingProviderOptions) {
         this.endpoint = normalizeEndpoint(options.endpoint);
@@ -199,9 +222,21 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         // sending empty content where possible, but this is the single chokepoint
         // that guarantees a stray empty string can't 400 the request.
         const textPrefix = purpose === "query" ? this.queryPrefix : this.documentPrefix;
-        const requestTexts = texts.map(
-            (text) => `${textPrefix}${text.trim().length === 0 ? " " : text}`,
-        );
+        const requestTexts = texts.map((text) => {
+            const input = `${textPrefix}${text.trim().length === 0 ? " " : text}`;
+            const capped = capEmbeddingInput(input, this.maxInputTokens);
+            if (
+                purpose === "query" &&
+                capped.length < input.length &&
+                !this.queryTruncationLogged
+            ) {
+                log(
+                    `[magic-context] embedding query truncated from ${input.length} to ${capped.length} characters to fit max_input_tokens`,
+                );
+                this.queryTruncationLogged = true;
+            }
+            return capped;
+        });
 
         if (!(await this.initialize())) {
             return Array.from({ length: texts.length }, () => null);
