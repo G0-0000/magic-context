@@ -310,6 +310,7 @@ export function applyHeuristicCleanup(
                 for (let i = 0; i < group.length - 1; i++) {
                     const tag = group[i];
                     const target = targets.get(tag.tagNumber);
+                    if (target?.canDrop?.() === false) continue;
                     // Deduplication remains a full drop; only the emergency newest-window
                     // arm preserves skeleton bytes. A call that cannot be removed keeps
                     // its real arguments.

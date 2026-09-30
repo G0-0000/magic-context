@@ -194,6 +194,8 @@ pub struct SelItem {
     pub kind: SelKind,
     /// True = the model's own SERVER-side tool (stays verbatim; never targeted).
     pub provider_executed: bool,
+    /// Host-owned marker: automatic selection must preserve user decisions.
+    pub user_answer: bool,
     /// Bytes this block contributes to reclaim accounting (output/content bytes).
     pub byte_size: usize,
     /// Persisted tag-token estimate for this block, when one exists.
@@ -1510,6 +1512,11 @@ pub(crate) fn select_reductions_with_outcome(
         .map(|arc| arc.arc_id.as_str())
         .collect::<HashSet<_>>();
     let reasoning_ineligible_arcs = reasoning_ineligible_arc_ids(items);
+    let user_answer_arcs: HashSet<&str> = items
+        .iter()
+        .filter(|item| item.user_answer)
+        .filter_map(|item| item.arc_id.as_deref())
+        .collect();
     let arc_by_block_id: HashMap<&str, &str> = items
         .iter()
         .filter_map(|item| Some((item.id.as_str(), item.arc_id.as_deref()?)))
@@ -1533,6 +1540,7 @@ pub(crate) fn select_reductions_with_outcome(
         .filter(|a| {
             !a.reduced
                 && !a.provider_executed
+                && !user_answer_arcs.contains(a.arc_id.as_str())
                 && !incomplete_arc_ids.contains(a.arc_id.as_str())
                 && !reasoning_ineligible_arcs.contains(&a.arc_id)
         })
@@ -1866,6 +1874,7 @@ mod tests {
     ) -> SelItem {
         let id = call_block_id(mid);
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.clone(),
             ordinal,
@@ -1883,6 +1892,7 @@ mod tests {
 
     fn tool_result(mid: &str, ordinal: u64, name: &str, bytes: usize) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: result_block_id(mid),
             ordinal,
@@ -1899,6 +1909,7 @@ mod tests {
 
     fn reasoning(mid: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: reasoning_block_id(mid),
             ordinal,
@@ -1913,6 +1924,7 @@ mod tests {
 
     fn reasoning_with_id(id: &str, arc_id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.to_string(),
             ordinal,
@@ -1927,6 +1939,7 @@ mod tests {
 
     fn text_with_id(id: &str, ordinal: u64, bytes: usize) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.to_string(),
             ordinal,
@@ -1948,6 +1961,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.to_string(),
             ordinal,
@@ -1971,6 +1985,7 @@ mod tests {
         bytes: usize,
     ) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.to_string(),
             ordinal,
@@ -2290,6 +2305,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_answers_survive_every_automatic_selector_but_allow_agent_drops() {
+        let mut items = vec![
+            tool_call("answer", 1, "todowrite", serde_json::json!({}), 100),
+            tool_result("answer", 2, "todowrite", 32_000),
+            tool_call("ordinary", 3, "todowrite", serde_json::json!({}), 100),
+            tool_result("ordinary", 4, "todowrite", 16_000),
+            tool_call("latest", 5, "todowrite", serde_json::json!({}), 100),
+            tool_result("latest", 6, "todowrite", 16_000),
+        ];
+        items[1].user_answer = true;
+        for pass in [PassClass::Execute, PassClass::EmergencyForce] {
+            let mut ctx = base_ctx(pass);
+            ctx.current_total_input_tokens = 16_000.0;
+            ctx.ceiling_tokens = 12_000.0;
+            ctx.last_execute_ordinal = 100;
+            ctx.pass_already_busting = true;
+            ctx.supersession_ride_available = true;
+            let outcome = select_reductions_with_outcome(
+                &items,
+                &HashSet::new(),
+                &ctx,
+                &SelectionConfig::default(),
+            );
+            assert!(!outcome.decisions.is_empty());
+            assert!(outcome
+                .decisions
+                .iter()
+                .all(|d| !d.target_id.starts_with("answer#")));
+        }
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.agent_drop_ids = vec![result_block_id("answer")];
+        ctx.pass_already_busting = true;
+        let outcome = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig::default(),
+        );
+        assert!(outcome
+            .decisions
+            .iter()
+            .any(|d| d.target_id == result_block_id("answer")));
+        assert!(select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &base_ctx(PassClass::Defer),
+            &SelectionConfig::default()
+        )
+        .decisions
+        .is_empty());
+    }
+
     fn base_ctx(pass: PassClass) -> SelectionContext {
         SelectionContext {
             calibration: None,
@@ -2314,6 +2382,7 @@ mod tests {
     #[test]
     fn natural_bust_drains_a_single_command_remainder() {
         let items = vec![SelItem {
+            user_answer: false,
             served_token_count: None,
             id: "drop".to_string(),
             ordinal: 1,
@@ -2512,6 +2581,7 @@ mod tests {
                         SelMessageRole::NonAssistant
                     };
                     SelItem {
+                        user_answer: false,
                         served_token_count: None,
                         id: i.id.clone(),
                         ordinal: i.ordinal,
@@ -2916,6 +2986,7 @@ mod tests {
         }
         items.push(text_with_id("heavy-text#0", 7, 30_000));
         items.push(SelItem {
+            user_answer: false,
             served_token_count: None,
             id: "heavy-reasoning#0".to_string(),
             ordinal: 8,
@@ -2927,6 +2998,7 @@ mod tests {
             arc_id: None,
         });
         items.push(SelItem {
+            user_answer: false,
             served_token_count: None,
             id: "irreducible-system#0".to_string(),
             ordinal: 9,
@@ -2965,6 +3037,7 @@ mod tests {
                 4_000,
             ));
             items.push(SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: format!("{mid}#3"),
                 ordinal,
@@ -3807,6 +3880,7 @@ mod tests {
 
     fn user_text(mid: &str, ordinal: u64) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: format!("{mid}#0"),
             ordinal,
@@ -3960,6 +4034,7 @@ mod tests {
         arc: Option<&str>,
     ) -> SelItem {
         SelItem {
+            user_answer: false,
             served_token_count: None,
             id: id.to_string(),
             ordinal,
@@ -4329,6 +4404,7 @@ mod tests {
     #[test]
     fn held_agent_drop_never_trickles_when_the_window_slides() {
         let items = vec![SelItem {
+            user_answer: false,
             served_token_count: None,
             id: "held#0".to_string(),
             ordinal: 1,
@@ -4356,6 +4432,7 @@ mod tests {
     fn different_commands_wait_for_a_single_ride_opportunity() {
         let items = vec![
             SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: "held#0".to_string(),
                 ordinal: 1,
@@ -4367,6 +4444,7 @@ mod tests {
                 arc_id: None,
             },
             SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: "new#0".to_string(),
                 ordinal: 2,
@@ -4404,6 +4482,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, kind)| SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: format!("carrier#{index}"),
                 ordinal: 1,
@@ -4631,6 +4710,7 @@ mod tests {
         let items = vec![
             reasoning_with_id("left#0", "left#2", 1, 50),
             SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: "left#1".to_string(),
                 ordinal: 1,
@@ -4645,6 +4725,7 @@ mod tests {
             tool_call_with_ids("left#3", "left#3", 1, "mcp_read", args, 50),
             tool_result_with_ids("older-result#0", "left#2", 2, "mcp_read", 300),
             SelItem {
+                user_answer: false,
                 served_token_count: None,
                 id: "right#0".to_string(),
                 ordinal: 3,

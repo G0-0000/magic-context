@@ -77,6 +77,7 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
+import { hasUserAnswerMetadata } from "@magic-context/core/shared/user-answer";
 import {
 	canRemoveNativeToolCall,
 	removeNativeToolCall,
@@ -946,6 +947,11 @@ function createPiToolResultPart(
 				inputByteSize: 0,
 				inputTokenCount: 0,
 			};
+		},
+		hasUserAnswer(): boolean {
+			return hasUserAnswerMetadata(
+				(working[messageIndex] as PiToolResultMessage).details,
+			);
 		},
 		replaceWithSentinel(sentinelText: string): boolean {
 			const current = (working[messageIndex] as PiToolResultMessage).content;

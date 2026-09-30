@@ -4587,6 +4587,7 @@ fn apply_once(
     let mut tail_for_selection =
         tail_sel_items(&live, loaded.meta.coverage_ordinal, &tag_tokens_by_block);
     attach_edit_input_key_orders(&mut tail_for_selection, &req.tool_input_key_orders);
+    attach_user_answer_markers(&mut tail_for_selection, &req.messages);
     // Todo state is deferred work just like an m1 or reduction delta: it may ride an
     // independently scheduled bust, but it never authorizes provider-visible bytes by itself.
     // Compute only the call-id transition here; the complete pair is built after classification.
@@ -8529,6 +8530,7 @@ fn sel_item_from_flat_with_estimator(
         ck_wire::CkKind::Opaque(_) => SelKind::Opaque,
     };
     SelItem {
+        user_answer: false,
         // Media and opaque carriers are excluded from calibrated floor accounting and
         // cannot be tool reclaim candidates. Their token counts are never consumed;
         // estimating them would repeatedly BPE-tokenize untagged image data on defers.
@@ -42802,5 +42804,63 @@ pub(crate) mod tests {
             channel2_directive_id("ses", 1),
             channel2_directive_id("other", 1)
         );
+    }
+}
+
+fn attach_user_answer_markers(items: &mut [SelItem], messages: &[CkIngressMessage]) {
+    let answer_ids: HashSet<String> = messages
+        .iter()
+        .flat_map(|message| {
+            message
+                .ck
+                .provider_extras
+                .values()
+                .filter_map(|extra| {
+                    extra
+                        .get("user_answer_block_indices")
+                        .and_then(Value::as_array)
+                })
+                .flatten()
+                .filter_map(Value::as_u64)
+                .map(|index| format!("{}#{}", message.mid, index))
+        })
+        .collect();
+    for item in items {
+        item.user_answer = answer_ids.contains(&item.id);
+    }
+}
+
+#[cfg(test)]
+mod user_answer_marker_tests {
+    use super::*;
+
+    #[test]
+    fn host_answer_sidecars_protect_selection_without_changing_block_bytes() {
+        let answered = serde_json::json!({ "info": { "id": "m", "role": "assistant" }, "parts": [{ "type": "tool", "tool": "renamed-question", "callID": "q", "state": { "status": "completed", "input": {}, "output": "answer", "metadata": { "answers": [["yes"]] } } }] });
+        let mut ordinary = answered.clone();
+        ordinary["parts"][0]["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata");
+        let decoded = crate::codec::opencode::decode_opencode(&[answered]);
+        let control = crate::codec::opencode::decode_opencode(&[ordinary]);
+        assert_eq!(
+            decoded.messages[0].ck.content,
+            control.messages[0].ck.content
+        );
+        let projection = crate::ck_wire::project_messages(&decoded.messages).unwrap();
+        let live: Vec<_> = projection.blocks.iter().collect();
+        let mut items = tail_sel_items(&live, None, &HashMap::new());
+        attach_user_answer_markers(&mut items, &decoded.messages);
+        assert!(items.iter().any(|item| item.user_answer));
+
+        let pi_entry = serde_json::json!({"type": "message", "id": "p", "message": {"role": "toolResult", "toolCallId": "q", "toolName": "ask", "content": [{"type": "text", "text": "yes"}], "details": {"selectedOptions": ["yes"]}, "isError": false, "timestamp": 1}});
+        let pi_call = serde_json::json!({"type": "message", "id": "call", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "q", "name": "ask", "arguments": {}}], "timestamp": 0}});
+        let decoded = crate::codec::pi::decode_pi(&[pi_call, pi_entry]);
+        let projection = crate::ck_wire::project_messages(&decoded.messages).unwrap();
+        let live: Vec<_> = projection.blocks.iter().collect();
+        let mut items = tail_sel_items(&live, None, &HashMap::new());
+        attach_user_answer_markers(&mut items, &decoded.messages);
+        assert!(items.iter().any(|item| item.user_answer));
     }
 }
