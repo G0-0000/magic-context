@@ -209,6 +209,47 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         expect(body.input).toEqual([" ", " ", "real text", " "]);
     });
 
+    test("caps long query inputs including the instruction prefix", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            queryInstruction: "Q: ",
+            maxInputTokens: 8,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embed("a".repeat(200), undefined, "query");
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]?.startsWith("Q: ")).toBe(true);
+        expect(body.input[0]?.length).toBeLessThan(203);
+    });
+
+    test("keeps inputs under the cap byte for byte", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            maxInputTokens: 20,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch(["short text"]);
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]).toBe("short text");
+    });
+
+    test("does not split a surrogate pair at the cap boundary", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "test-model",
+            maxInputTokens: 2,
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch(["ab😀z"]);
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        expect(body.input[0]).toBe("ab");
+    });
+
     test("purpose query sends queryInputType when configured (#155)", async () => {
         const provider = new OpenAICompatibleEmbeddingProvider({
             endpoint: "http://127.0.0.1:65535",
