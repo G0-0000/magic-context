@@ -11,5 +11,5 @@ Actions:
 - archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
 - merge: collapse duplicates into one (ids: [two or more], content).
 - get: fetch by id (ids: 1–20), readable in every status.
-Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale"`;
+Examples: category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode" · category="INCIDENTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale"`;
 export const DEFAULT_SEARCH_LIMIT = 10;

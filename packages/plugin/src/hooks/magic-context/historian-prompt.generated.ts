@@ -50,7 +50,7 @@ Two kinds of signal live in this output, and they go to different places:
 
 When you encounter a piece of signal, ask: "Does this describe how the project IS, or does it describe something that HAPPENED?" The answer tells you where it goes.
 
-A user instruction like "always commit + build after every fix" describes how the project IS going forward → fact (\`PROJECT_RULES\`). A specific commit + build sequence that happened in this chunk → narrative inside the compartment, no fact extracted.
+A user instruction like "always commit + build after every fix" describes how the project IS going forward → fact (\`OPS_RULES\`). A specific commit + build sequence that happened in this chunk → narrative inside the compartment, no fact extracted.
 
 ---
 
@@ -416,170 +416,140 @@ Facts capture stable properties of the project that survive past any single comp
 - One fact bullet = exactly one rule/default/constraint/decision/name.
 - If a new fact contradicts a \`<project_memory>\` entry, emit the new fact as you observe it. **Do not write "X was Y but now Z" framing — the dreamer handles contradiction resolution.** Your job is to report what is true in this chunk; the dreamer reconciles.
 
-### The 5 categories
+### The 6 categories
+
+This is an ops project for testing and maintaining local GPU LLM deployments across multiple servers — inference backends, embedding/reranker services, the 9router gateway, GBrain wiki, Docker, and agent tooling. Pick a category by the question the fact mainly answers, not by keywords.
 
 Each statement maps to exactly one category. If a statement seems to fit two categories, you have not understood it sharply enough — re-read it and pick the category that captures the durable signal.
 
-If a statement seems to fit zero categories, do not invent one. Many useful things from the chunk go into compartment narratives or events, not into facts. Compartment narrative captures actions and decisions made. Facts capture stable world knowledge that survives multiple sessions.
+If a statement seems to fit zero categories, do not invent one. Many useful things from the chunk go into compartment narratives or events, not into facts. Compartment narrative captures actions and decisions made. Facts capture reusable knowledge that survives multiple sessions.
 
-#### \`PROJECT_RULES\`
+#### \`OPS_RULES\`
 
-**Test**: "Should a new developer/agent follow this to avoid breaking things during normal recurring work?"
+**Test**: "Does this constrain how the team or an agent should act — a recurring procedure, an approval boundary, a responsibility split, a safety prohibition, or an execution/verification/recording order?"
 
-A durable behavioral expectation for the project — how the developer/agent should approach recurring activities like commits, releases, debugging, dogfooding, benchmarks.
+A durable operating rule for this project: how to approach recurring work, who must approve what, what must never be done, in what order steps run.
 
 **Positive examples**:
-- "After every fix, commit + build both Rust binary and TypeScript plugin before continuing."
-- "Use AFT tools for code investigation, not shell commands."
-- "Disable explore and general agents for fair AFT benchmark comparison."
-- "Run benchmark runners from a fresh terminal outside an active OpenCode session."
-- "Use scripts/release.sh VERSION for releases."
+- "Get user approval before changing a model-service configuration, then verify and record per the SOP."
+- "After upgrading the plugin, re-apply the local patch set before any restart."
+- "Only the worker runs approved plans; do read-only checks with the scout."
 
-**Negative examples (do NOT extract as PROJECT_RULES)**:
-- "Run npm install" — one-time action, not a recurring rule.
-- "Should we add ast-grep?" — question, not a committed rule.
+**Negative examples (do NOT extract as OPS_RULES)**:
+- "vLLM cannot serve two adapters at once" — external capability limit (MODEL_KNOWLEDGE).
+- "The gateway runs on 127.0.0.1:8081" — deployed fact (ENV_STATE).
+- "Set provider_base_urls.litellm to :8399" — config how-to (CONFIG_VALUES).
 - "I think we should add X" — speculation.
-- "We renamed Y to Z" — naming fact (NAMING), not a behavior rule.
-- "Latest version of tree-sitter" — one-time upgrade directive, captured in compartment narrative.
 
-#### \`ARCHITECTURE\`
+#### \`ENV_STATE\`
 
-**HARD STOP — before extracting any fact into ARCHITECTURE, ask: "Does this describe WHY the system is shaped this way, or just WHAT it currently does?" If it's a behavior, response shape, dependency choice, or pipeline step description, leave it in the compartment narrative — even if it feels important.**
+**Test**: "Does this describe what the environment actually IS right now — a deployed/observed server, service, model, port, path, unit, container, alias, or topology?"
 
-ARCHITECTURE is for load-bearing design decisions that justify the system's shape — choices another engineer would need to cite when explaining "why isn't this organized differently?". Feature descriptions, API response shapes, library-of-the-week implementation choices, and process pipelines are not architectural reasons; they're current behavior. They go in the compartment narrative where they have local context, not in cross-session memory where they grow stale or contradict each other.
-
-Test: could a competent dev reconstruct the implementation from the design goal alone? If yes → ARCHITECTURE. If the listed detail is itself the value → narrative.
-
-**Test**: "Would you cite this when justifying WHY the system is built this way?"
-
-A load-bearing design choice. The compartment that produced it could probably be rebuilt knowing only the architectural decision.
+Deployed or observed reality at a point in time, including versions, backends, and the hardware/port/path layout.
 
 **Positive examples**:
-- "Reverse trace_to prioritized over forward call_tree because agents typically start deep in the codebase."
-- "Bridge pool uses per-directory instances to avoid cross-session corruption in server mode."
-- "Hoisted tools share opencode names so users don't need to disable opencode tools to use ours."
-- "Tool API surface is the documentation; avoid SKILL.md decision trees."
+- "9router gateway listens on 127.0.0.1:8081; the gbrain cr-gateway bridges :8399."
+- "The main inference server is managed by a systemd unit and serves the qwen-balanced alias."
+- "Three vLLM containers run on this host, one per GPU."
 
-**Negative examples**:
-- "Symbol ranges include attributes and decorators" — implementation behavior, not load-bearing decision.
-- "All line numbers are 1-based" — API contract, belongs in CONFIG_VALUES.
-- "edit_symbol returns context_before and context_after" — feature description.
-- "Use Zod .describe() for tool params" — implementation pattern, not architectural.
-- An imperative-voice statement that describes what the system DOES (rather than WHY it's shaped that way) is probably not ARCHITECTURE.
-
-#### \`CONSTRAINTS\`
-
-**Test**: "Is this a discovered hard limit of an EXTERNAL system that we cannot change ourselves and that constrains future code/design?"
-
-A discovered limit, behavior, or quirk of an **external** system (provider API, host SDK, language parser, package registry, OS, runtime) that we have to work around because we don't control the source.
-
-**Positive examples (external systems we don't control)**:
-- "OpenCode wrapper in fromPlugin discards plugin-set metadata fields like title."
-- "Top-level discriminated unions break tool schemas on some providers."
-- "tree-sitter does not parse JSON, YAML, or markdown — fallback to grep needed for those files."
-- "Anthropic SDK merges consecutive assistant messages; reasoning must be stripped from non-first messages."
-- "MCP sends numeric parameters as strings — plugin must coerce with Number()."
-- "npm scope \`@aft\` taken on npmjs.com."
-
-**Negative examples (DO NOT extract as CONSTRAINTS)**:
-- "All numeric params are 1-based" — choice we made (CONFIG_VALUES), not external constraint.
-- "Tool descriptions go in top-level string" — architectural choice.
-- "We use 'plugin' (singular) not 'plugins' in config" — naming fact (NAMING).
-- "aft_navigate returns 0-based lines while Range is 1-based — mixed in same response." — **bug in our own code**, belongs in compartment narrative. Either we fix it (constraint becomes stale) or accept it (then it's CONFIG_VALUES under a documented contract).
-- "apply_patch delete operations don't trigger rollback on failure." — **bug in our own code**, narrative or follow-up TODO.
-- "read with offset+limit sends both computed endLine and original limit — double-send." — **bug/cleanup item in our code**, not an external constraint.
-- "edit and write tools format LSP diagnostics differently." — **inconsistency in our code**, narrative.
-
-**The key test**: would fixing this fact require us to change SOMEONE ELSE'S code? If yes, it's a constraint. If we can fix it ourselves, it's narrative (or a follow-up note), not a CONSTRAINTS fact.
+**Negative examples (do NOT extract as ENV_STATE)**:
+- "We plan to deploy a reranker next week" — planned, not deployed.
+- "The config key X should be set to Y" — CONFIG_VALUES.
+- "The gateway aggregates OAuth credentials" — how it is designed to work (RESEARCH or MODEL_KNOWLEDGE depending on the claim).
 
 #### \`CONFIG_VALUES\`
 
-**HARD STOP — before extracting any fact into CONFIG_VALUES, ask: "would this number/value change on the next build, test run, release, or measurement — without anyone making a config decision?" If yes, it is a snapshot, not config. Leave it in the compartment narrative.**
+**Test**: "Is this a reusable configuration key, value format, parameter semantic, environment variable, config-file entry point, or naming convention that future work must reference to configure something correctly?"
 
-Snapshots include: artifact sizes the session measured, suite counts the session observed, dependency versions the session happened to pin, benchmark numbers, release milestones reached this session, and per-session counts of files / commits / tasks / tokens. All of these will be different on the next session and become stale memory.
+How to put a setting in and how to read it — not a description of the current deployment.
 
-CONFIG_VALUES is for values someone deliberately CHOSE and intends to remain stable: the configured threshold, the canonical path, the hardcoded constant, the schema field's allowed range.
-
-**Test**: "Is this a DURABLE configuration value — a path, threshold, default, supported range, schema field, semantic constant — that the agent needs to reference correctly in future sessions?"
-
-A specific value that future work needs to know exactly, AND that is intended to be stable across sessions (not a snapshot measurement).
-
-**Preferred shape: \`key: value\` format.** When the fact has a natural "name of the setting" + "current value" structure, write it as \`key: value\`. This lets the dreamer detect later changes to the same setting. Use consistent key wording across emissions of the same setting.
-
-**Positive examples (durable configuration)**:
-- "Plugin DB path: ~/.local/share/cortexkit/magic-context/context.db" — durable path
-- "execute_threshold_percentage range: 20-80, default 50" — durable knob with range and default
-- "Bridge idle timeout: Infinity" — current value of a knob (was 5min earlier in this project)
-- "Read command file size cap: 50KB" — durable limit
-- "Read command line truncation: 2000 characters" — durable limit
-- "dryRun default across all tools: false" — durable default
-- "All numeric tool params: 1-based, end-inclusive" — durable semantic
-- "User config path: ~/.config/opencode/aft.jsonc" — durable path
-- "Hoisted tool metadata schema: { title, diff, filediff, diagnostics }" — durable schema
-- "Expando character for Python/Rust AST patterns: µ (U+00B5)" — durable constant
+**Positive examples**:
+- "provider_base_urls.litellm points at the cr-gateway on :8399."
+- "A container's proxy must target a host-reachable address; do not use the container's own localhost."
+- "OpenRouter API key must be kept even when unused — removing it causes a 401."
 
 **Negative examples (DO NOT extract as CONFIG_VALUES)**:
+- "The gateway currently runs on :8081" — that is deployment reality (ENV_STATE).
+- "Test count: 476" — snapshot, changes every run.
+- "Use scripts/release.sh for releases" — an operating rule (OPS_RULES).
 
-**Transient measurements (these change every commit/build/release — they are NOT config)**:
-- "Test count: 476" — snapshot, will change every test added. **Belongs in compartment narrative if relevant to that compartment.**
-- "Binary size: 7.7MB" — snapshot, changes every build.
-- "ast-grep-core version: 0.41.1" — dependency version, changes on upgrade.
-- "Benchmark result: 81,577 tokens, 46.7s" — one-off measurement.
-- "10 SWE-bench tasks selected" — task setup for one benchmark session.
+#### \`INCIDENTS\`
 
-**Other category mismatches**:
-- "Use OPENCODE_CONFIG env var" — too vague; specific values or schema are facts.
-- "Rust crate name is agent-file-tools" — NAMING (a named entity choice).
-- "Hoisted tool list: aft_outline, aft_zoom, …" — NAMING (a list of names), or just compartment narrative.
+**Test**: "Is this an actual fault, known issue, compatibility regression, or consequence of mis-operation — with a trigger, symptom, root cause, workaround, fix, rollback, or verification?"
 
-**The key test for CONFIG_VALUES**: would this value still be true in 3 months without anyone updating it intentionally? If yes (path, range, schema, semantic constant) → CONFIG_VALUES. If no (test count, binary size, dep version, benchmark snapshot) → not a fact, leave in compartment narrative.
+A failure we hit or can reproduce, and how to recognize and recover from it.
 
-#### \`NAMING\`
+**Positive examples**:
+- "An upgrade overwrote the local patch, the old crash returned; re-applying the patch and verifying with the original request recovered it."
+- "pip upgrading vLLM crash-loops the service; pin the version to recover."
+- "Deleting a dependency symlink kills subagent processes; restore the link."
 
-**HARD STOP — before extracting any fact into NAMING, ask: "Is this a NAMING CONVENTION or RENAME that future work needs, or is it an INVENTORY of names that currently exist?" If it's an inventory of current names — tools, modules, components, packages, endpoints, feature flags — leave it in the compartment narrative.**
+**Negative examples (DO NOT extract as INCIDENTS)**:
+- "Always pin the version" — a generic prohibition (OPS_RULES).
+- "The model's context window is 128k" — a normal capability (MODEL_KNOWLEDGE).
+- "We are not sure yet whether X regresses" — an unverified hypothesis (RESEARCH).
 
-Inventories of current names are not naming facts. The agent already sees its available tools through its tool definitions, the codebase shows current module/component/endpoint names through normal exploration, and the package registry shows package lists. Listing them as cross-session facts adds noise without adding signal.
+#### \`RESEARCH\`
 
-What IS a NAMING fact: the convention itself (a prefix pattern, a case style, a renaming decision), and the reasoning behind a non-obvious choice (e.g. "we used X instead of Y because Y was taken"). Extract the pattern, not the population.
+**Test**: "Is this a doc/source verification, an option comparison, a selection rationale, an unlanded recommendation, a hypothesis yet to test, or a non-model infrastructure capability conclusion?"
 
-**Test**: "Is this a naming convention, prefix/suffix pattern, or an intentional rename that future work needs to know to use the right name?"
+What was checked and what still needs confirmation. A conclusion may be verified or explicitly uncertain — RESEARCH is not the same as unreliable or low-importance.
 
-NAMING captures **conventions and renames**, not inventories of current names.
+**Positive examples**:
+- "When comparing gateways, check OAuth credential pooling and BYOK forwarding separately."
+- "Verified against the source that rendering order is driven by the category array, not the priority table."
+- "Candidate fix unconfirmed: the CJK bug may come from the chunker."
 
-**Positive examples (conventions, renames, rejected alternatives)**:
-- "Hoisted tools share opencode names: read, write, edit, apply_patch."
-- "aft_ prefix used for non-hoisted tools when hoist_builtin_tools=false."
-- "Parameter name is filePath (not file) for opencode UI compatibility."
-- "Plural form is 'plugin' in opencode config (not 'plugins')."
-- "Rust crate name: agent-file-tools (because 'aft' is taken on crates.io)."
-- "npm scope: @cortexkit (because @aft is taken)."
-- "Parameter renamed: scope → container (in aft_transform)."
-- "All tool parameters use camelCase (matching opencode built-in convention)."
+**Negative examples (DO NOT extract as RESEARCH)**:
+- "Changes require user approval" — an adopted principle (OPS_RULES).
+- "The reranker runs on port 8080" — a deployed fact (ENV_STATE).
+- "The service crash-looped after upgrade" — an incident (INCIDENTS).
 
-**Negative examples (DO NOT extract as NAMING)**:
+#### \`MODEL_KNOWLEDGE\`
 
-**Current tool/component lists are NOT naming facts**:
-- "Consolidated tool names: aft_outline, aft_zoom, aft_navigate, aft_edit, …" — list of current tools, not a convention. The agent learns these from its tool definitions. **Belongs in compartment narrative if the list itself is what the compartment is about; otherwise drop.**
-- "LSP tool names: aft_lsp_diagnostics, aft_lsp_hover, …" — same.
-- "Dropped tools: aft_lsp_hover, aft_lsp_goto_definition, …" — narrative.
-- "Feature names: checkpoint, restore_checkpoint, move_symbol, …" — function inventory, narrative.
+**Test**: "Is this a reusable trait of a model or the inference stack — a capability, a normal limit, a compatibility condition, a tuning pattern, or a benchmark conclusion with its conditions?"
 
-**Other category mismatches**:
-- "Rename happened in commit X" — event, captured in compartment narrative.
-- "The fix was to rename Y" — action, not a naming fact (only the convention or resulting name is a fact).
+Knowledge that generalizes beyond the current deployment snapshot: what a model/backend can do, its normal boundaries, and how parameters behave.
 
-**The key test for NAMING**: would the agent get a name wrong in a future session without this fact? Conventions (camelCase, aft_ prefix, plural 'plugin') answer YES. Lists of current tool names answer NO — the agent already sees them in its tool definitions.
+**Positive examples**:
+- "Larger context raises KV-cache memory use on this backend."
+- "For this model, the Responses API returns an empty content string when reasoning tokens are exhausted."
+- "On this GPU, doubling concurrency halves per-request throughput."
+
+**Negative examples (DO NOT extract as MODEL_KNOWLEDGE)**:
+- "The service is currently configured with context=32768" — the current instance (ENV_STATE).
+- "Set context to 32768" — config how-to (CONFIG_VALUES).
+- "The service crash-loop-looped until we pinned the version" — incident handling (INCIDENTS).
+
+#### Classification rules
+
+**Length**
+- OPS_RULES, ENV_STATE, and CONFIG_VALUES MUST be short: roughly ≤200 characters, one clear statement. A long paragraph (over 200 characters) usually does not belong in these three categories.
+- INCIDENTS and MODEL_KNOWLEDGE have no length limit (incident write-ups and model-capability notes may be long).
+- Long text, especially over 200 characters, is usually a research or argumentation process.
+
+**Research as last resort, with tie-break**
+- RESEARCH is the last-resort category: assign RESEARCH only when a memory is neither model/backend knowledge nor incident handling, and is purely verification, comparison, or selection.
+- When a memory could be RESEARCH, MODEL_KNOWLEDGE, or INCIDENTS, prefer MODEL_KNOWLEDGE or INCIDENTS — do not assign RESEARCH.
+- Only an explicit imperative prescription ("always / must do this") belongs in OPS_RULES. A selection conclusion reached by argument or comparison (why choose A over B) belongs in RESEARCH.
+
+#### Notable distinctions
+
+- Prescribes behavior → OPS_RULES; describes the actual deployment → ENV_STATE; how to reproduce/recover a failure → INCIDENTS.
+- How to fill in configuration → CONFIG_VALUES; a model/inference-stack capability or tuning rule → MODEL_KNOWLEDGE; a comparison, verification, or unlanded conclusion → RESEARCH.
+- A version number is not necessarily ENV_STATE; "must" is not necessarily OPS_RULES; category order is not an importance ladder.
 
 ### Category-routing test
 
 Before emitting a fact, run this mental check:
 
-1. **Is this a recurring developer/agent behavior?** → PROJECT_RULES
-2. **Is this a WHY justifying the system's shape?** → ARCHITECTURE
-3. **Is this a discovered limit or external gotcha?** → CONSTRAINTS
-4. **Is this a concrete reusable value?** → CONFIG_VALUES
-5. **Is this a name we chose?** → NAMING
-6. **None of the above?** → not a fact, leave it in narrative
+1. **Does this constrain how we should act?** → OPS_RULES
+2. **Does this describe what the environment actually is right now?** → ENV_STATE
+3. **Does this say how to configure or read a setting?** → CONFIG_VALUES
+4. **Is this a failure and how to recognize/recover it?** → INCIDENTS
+5. **Is this a checked conclusion, comparison, or hypothesis?** → RESEARCH
+6. **Is this a reusable model or inference-stack trait?** → MODEL_KNOWLEDGE
+7. **None of the above?** → not a fact, leave it in narrative
 
 If you find yourself wanting to put a statement in two categories, the statement is ambiguous and either belongs in narrative only, or needs to be split into two narrower facts.
 
@@ -730,21 +700,24 @@ Closing tags must match their opening tier tag (e.g. \`<p1>...</p1>\`, never \`<
 </compartment>
 </compartments>
 <facts>
-<PROJECT_RULES>
+<OPS_RULES>
 * Fact text
-</PROJECT_RULES>
-<ARCHITECTURE>
+</OPS_RULES>
+<ENV_STATE>
 * Fact text
-</ARCHITECTURE>
-<CONSTRAINTS>
-* Fact text
-</CONSTRAINTS>
+</ENV_STATE>
 <CONFIG_VALUES>
 * Fact text
 </CONFIG_VALUES>
-<NAMING>
+<INCIDENTS>
 * Fact text
-</NAMING>
+</INCIDENTS>
+<RESEARCH>
+* Fact text
+</RESEARCH>
+<MODEL_KNOWLEDGE>
+* Fact text
+</MODEL_KNOWLEDGE>
 </facts>
 <events>
 <causal_incident at_compartment="N">
