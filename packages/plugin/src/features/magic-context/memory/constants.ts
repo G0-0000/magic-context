@@ -7,11 +7,12 @@ import type { MemoryCategory } from "./types";
  * (CATEGORY_PRIORITY) for pre-v2 rows but are not accepted for new writes.
  */
 export const V2_MEMORY_CATEGORIES = [
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
+    "OPS_RULES",
+    "ENV_STATE",
     "CONFIG_VALUES",
-    "NAMING",
+    "INCIDENTS",
+    "RESEARCH",
+    "MODEL_KNOWLEDGE",
 ] as const satisfies readonly MemoryCategory[];
 
 export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
