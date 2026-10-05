@@ -1,13 +1,16 @@
 export type MemoryCategory =
-    // v2 world taxonomy (the 5 categories the historian emits). CONSTRAINTS and
-    // NAMING are shared with the legacy set; PROJECT_RULES/ARCHITECTURE/
-    // CONFIG_VALUES are new in v2.
-    | "PROJECT_RULES"
-    | "ARCHITECTURE"
+    // v2 world taxonomy (the 6 categories the historian emits) — local six-category
+    // rework (OPS_RULES/ENV_STATE/CONFIG_VALUES/INCIDENTS/RESEARCH/MODEL_KNOWLEDGE).
+    // Legacy names below remain readable, not writable.
+    | "OPS_RULES"
+    | "ENV_STATE"
     | "CONFIG_VALUES"
+    | "INCIDENTS"
+    | "RESEARCH"
+    | "MODEL_KNOWLEDGE"
     // Legacy 9-cat taxonomy — retained as an accept-both bridge so the existing
     // memory store (pre-v2 rows) keeps full ordering/TTL/rendering. The dreamer's
-    // curate task maps such a row into the 5-cat set when it next touches it; the
+    // curate task maps such a row into the 6-cat set when it next touches it; the
     // historian no longer emits these.
     | "ARCHITECTURE_DECISIONS"
     | "CONSTRAINTS"
