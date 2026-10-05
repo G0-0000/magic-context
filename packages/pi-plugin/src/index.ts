@@ -162,6 +162,7 @@ import {
 	type PiAutoSearchHandlerOptions,
 	type PiContextHandlerOptions,
 	type PiHistorianOptions,
+	type PiSubagentInjectHandlerOptions,
 	recordPiLiveModel,
 	registerPiContextHandler,
 	signalPiDeferredHistoryRefresh,
@@ -1148,6 +1149,13 @@ function resolveAutoSearchFromConfig(
 	};
 }
 
+function resolveSubagentInjectFromConfig(
+	config: MagicContextConfig,
+): PiSubagentInjectHandlerOptions {
+	const inject = config.memory.subagent_inject;
+	return { enabled: inject?.enabled ?? false };
+}
+
 export function resolveDreamerFromConfig(
 	config: MagicContextConfig,
 ): DreamerConfig | undefined {
@@ -1494,6 +1502,7 @@ async function startPiMagicContextRuntime(
 		config: MagicContextConfig;
 		historianConfig: PiHistorianOptions | undefined;
 		autoSearchConfig: PiAutoSearchHandlerOptions;
+		subagentInjectConfig: PiSubagentInjectHandlerOptions;
 		contextOptions: PiContextHandlerOptions;
 		dreamerConfig: DreamerConfig | undefined;
 		dreamerEnabled: boolean;
@@ -1542,6 +1551,7 @@ async function startPiMagicContextRuntime(
 		cfg: MagicContextConfig,
 		hist: PiHistorianOptions | undefined,
 		auto: PiAutoSearchHandlerOptions,
+		subagentInject: PiSubagentInjectHandlerOptions,
 	): PiContextHandlerOptions => ({
 		db: database,
 		cacheTtlConfig: cfg.cache_ttl,
@@ -1575,6 +1585,7 @@ async function startPiMagicContextRuntime(
 		historian: hist,
 		language: cfg.language,
 		autoSearch: auto,
+		subagentInject,
 		resolveForProject: resolveContextOptionsForProject,
 		todowriteEnabled: cfg.todowrite.enabled,
 		compactionOff,
@@ -1618,13 +1629,15 @@ async function startPiMagicContextRuntime(
 			};
 		}
 		const auto = resolveAutoSearchFromConfig(cfg);
+		const subagentInject = resolveSubagentInjectFromConfig(cfg);
 		return {
 			projectDir: dir,
 			projectIdentity: identity,
 			config: cfg,
 			historianConfig: hist,
 			autoSearchConfig: auto,
-			contextOptions: buildContextOptions(cfg, hist, auto),
+			subagentInjectConfig: subagentInject,
+			contextOptions: buildContextOptions(cfg, hist, auto, subagentInject),
 			dreamerConfig: resolveDreamerFromConfig(cfg),
 			dreamerEnabled: isDreamerRunnable(cfg),
 			configParseFailures: loadMetadata.configParseFailures,
@@ -2082,6 +2095,12 @@ async function startPiMagicContextRuntime(
 		bootProjectDeps.autoSearchConfig.enabled
 			? `registered auto-search hint (threshold=${bootProjectDeps.autoSearchConfig.scoreThreshold}, minChars=${bootProjectDeps.autoSearchConfig.minPromptChars})`
 			: "registered auto-search hint: DISABLED (memory.auto_search.enabled=false)",
+	);
+
+	info(
+		bootProjectDeps.subagentInjectConfig.enabled
+			? "registered task-requested memory injection (memory.subagent_inject.enabled=true)"
+			: "registered task-requested memory injection: DISABLED (memory.subagent_inject.enabled=false)",
 	);
 
 	// Register the shared renderer before any command can append a status entry.

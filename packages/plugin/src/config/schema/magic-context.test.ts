@@ -173,6 +173,9 @@ describe("MagicContextConfigSchema", () => {
                         since_days: 365,
                         max_commits: 2000,
                     },
+                    subagent_inject: {
+                        enabled: false,
+                    },
                 },
                 pi: {
                     subagent_extensions: ["@example/provider", "./extensions/local.ts"],
@@ -185,6 +188,16 @@ describe("MagicContextConfigSchema", () => {
             const result = MagicContextConfigSchema.parse(input);
 
             expect(result).toEqual({ ...input, protected_tools: { todowrite: 1, ctx_reduce: 3 } });
+        });
+
+        it("defaults memory.subagent_inject to enabled and accepts opt-out", () => {
+            expect(MagicContextConfigSchema.parse({}).memory.subagent_inject).toEqual({
+                enabled: true,
+            });
+            expect(
+                MagicContextConfigSchema.parse({ memory: { subagent_inject: { enabled: false } } })
+                    .memory.subagent_inject.enabled,
+            ).toBe(false);
         });
 
         it("accepts a boolean storage permission policy and rejects non-booleans", () => {
