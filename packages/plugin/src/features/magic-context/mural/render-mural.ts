@@ -68,10 +68,14 @@ export interface MuralRenderResult {
 }
 
 const CATEGORY_COLORS: Record<string, readonly [number, number, number]> = {
+    OPS_RULES: [24, 58, 112],
+    ENV_STATE: [0, 88, 92],
+    INCIDENTS: [126, 76, 16],
+    RESEARCH: [28, 98, 58],
+    MODEL_KNOWLEDGE: [150, 90, 20],
     PROJECT_RULES: [24, 58, 112],
     ARCHITECTURE: [0, 88, 92],
     CONSTRAINTS: [126, 76, 16],
-    CONFIG_VALUES: [88, 52, 132],
     NAMING: [28, 98, 58],
 };
 const BODY_INK: readonly [number, number, number] = [18, 20, 24];

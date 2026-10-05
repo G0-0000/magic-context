@@ -17,7 +17,7 @@ export const replayHint = {
     content: "Independent search-only hint",
     score: 0.95,
     memoryId: 9000,
-    category: "ARCHITECTURE",
+    category: "RESEARCH",
     matchType: "fts" as const,
 };
 
@@ -45,7 +45,7 @@ export function createAutoSearchReplayFixture(
     runMigrations(db);
     insertMemory(db, {
         projectPath,
-        category: "ARCHITECTURE",
+        category: "RESEARCH",
         content: "Pair baseline distinct from hint.",
         importance: 50,
     });

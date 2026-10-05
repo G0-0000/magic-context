@@ -1629,7 +1629,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       name TEXT NOT NULL UNIQUE,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
+      share_categories TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS workspace_members (
@@ -2455,7 +2455,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         name TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
+        share_categories TEXT NOT NULL DEFAULT '[]'
       );
       CREATE TABLE IF NOT EXISTS workspace_members (
         workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -2543,7 +2543,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       CREATE INDEX IF NOT EXISTS idx_message_history_index_orphan_sweep
         ON message_history_index(harness, session_id, updated_at);
     `);
-    ensureColumn(db, "workspaces", "share_categories", `TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`);
+    ensureColumn(db, "workspaces", "share_categories", `TEXT NOT NULL DEFAULT '[]'`);
     // notes table is created by migration v1 (not initializeDatabase). It
     // exists by the time runMigrations() returns, but ensureColumn's PRAGMA
     // table_info check needs the table to exist. Order: initializeDatabase()

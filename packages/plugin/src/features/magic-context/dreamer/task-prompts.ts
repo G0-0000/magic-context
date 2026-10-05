@@ -21,18 +21,30 @@ export interface CuratePromptMemory {
 // task's instructions.
 export const DREAMER_SYSTEM_PROMPT = `You are a background maintenance agent for the magic-context system, running during a scheduled dream window. Your task and its full instructions arrive in the message below. Never read or quote secrets from .env, credentials, or key files, and never commit — the user handles git.`;
 
-// The 5-category project-memory taxonomy, shared by the tasks that actually touch
+// The 6-category project-memory taxonomy, shared by the tasks that actually touch
 // project memories (curate). Kept as one constant so the wording can't drift.
-const PROJECT_MEMORY_TAXONOMY = `## Memory taxonomy (5 categories)
+// (Local six-category rework — definitions per 配置/magic-context-六类改造备份-20260911/六类判据-定稿.md)
+const PROJECT_MEMORY_TAXONOMY = `## Memory taxonomy (6 categories)
 
-Project memory uses exactly 5 categories. Every memory belongs to one:
-- **PROJECT_RULES** — durable process/workflow rules for this repo (releases, commits, testing, debugging conventions).
-- **ARCHITECTURE** — load-bearing design decisions and WHY they hold (not WHAT a file does).
-- **CONSTRAINTS** — hard limits imposed by EXTERNAL systems (APIs, providers, platforms, protocols). Not our own code's behavior.
-- **CONFIG_VALUES** — stable configuration keys/values and conventions. Not transient measurements (test counts, sizes, versions).
-- **NAMING** — naming conventions and canonical names. Not inventories.
+Project memory uses exactly 6 categories. Every memory belongs to one, chosen by the question it mainly answers:
+- **OPS_RULES** — how we should operate: durable operating procedures, approval boundaries, responsibility splits, safety prohibitions, execution/verification/recording order, naming conventions. Constraints that bind the team's or an agent's actions. Excludes: what a third party cannot do is capability knowledge or an incident; specific configuration values are not rules.
+- **ENV_STATE** — what the environment actually is at a point in time: deployed/observed servers, services, and models, including versions, backends, containers, units, aliases, ports, paths, hardware, topology. Excludes: a planned deployment is not deployed; configuration how-to belongs to CONFIG_VALUES.
+- **CONFIG_VALUES** — what to put in configuration and how to read it: reusable config keys, value formats, parameter semantics, environment variables, config-file entry points, naming conventions. Excludes: describing the current deployment reality belongs to ENV_STATE; an SOP pointer is not this.
+- **INCIDENTS** — what broke and how to recognize/recover: actual faults, known issues, compatibility regressions, consequences of mis-operation, plus trigger conditions, symptoms, root cause, workaround, fix, rollback, verification. Excludes: a pure generic prohibition belongs to OPS_RULES; a model's normal capability boundary belongs to MODEL_KNOWLEDGE.
+- **RESEARCH** — what was checked and what is still to be confirmed: doc/source verification, option comparisons, selection rationale, unlanded recommendations, hypotheses yet to test, non-model infrastructure capability conclusions. Excludes: an adopted principle we must keep following belongs to OPS_RULES; a deployed fact belongs to ENV_STATE.
+- **MODEL_KNOWLEDGE** — reusable traits of models and the inference stack: capabilities, normal limits, compatibility conditions, tuning patterns, benchmark conclusions with their conditions. Excludes: the current parameter instance belongs to ENV_STATE; key-value how-to belongs to CONFIG_VALUES; incident handling belongs to INCIDENTS.
 
-**Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with \`action="update"\` (or \`merge\`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit. USER_DIRECTIVES / USER_PREFERENCES are NOT project categories. Do not compare project memories with the global user profile or use it to justify an archive.`;
+## Classification rules
+
+### Length
+- OPS_RULES, ENV_STATE, and CONFIG_VALUES MUST be short: roughly ≤200 characters, one clear statement. A long paragraph (over 200 characters) usually does not belong in these three categories.
+- INCIDENTS and MODEL_KNOWLEDGE have no length limit (incident write-ups and model-capability notes may be long).
+- Long text, especially over 200 characters, is usually a research or argumentation process.
+
+### Research as last resort, with tie-break
+- RESEARCH is the last-resort category: assign RESEARCH only when a memory is neither model/backend knowledge nor incident handling, and is purely verification, comparison, or selection.
+- When a memory could be RESEARCH, MODEL_KNOWLEDGE, or INCIDENTS, prefer MODEL_KNOWLEDGE or INCIDENTS — do not assign RESEARCH.
+- Only an explicit imperative prescription ("always / must do this") belongs in OPS_RULES. A selection conclusion reached by argument or comparison (why choose A over B) belongs in RESEARCH.`;
 
 // curate: memory-pool hygiene only. It edits the memory store via ctx_memory and
 // never reads code (a separate verify task owns memory-vs-code correctness), so
@@ -119,7 +131,7 @@ Rewrite narrative/historical → operational present tense ("X uses Y because Z"
 
 ### Phase C — Archive only into a surviving project memory
 Archive a redundant memory only when a better ACTIVE memory in the same project and category preserves its information; name that survivor with \`superseded_by\`. A bare "redundant" verdict is deletion and will be refused. Leave standalone low-value or stale entries unchanged for a human to review. The global user profile describes the operator and is never a substitute for project knowledge, so it cannot justify an archive.
-KEEP (overrides archive): constraint/rule language (must/never/always) · explains WHY (because/so that/to prevent) · EXTERNAL-system limit (CONSTRAINTS: archive only if word-for-word duplicated) · path/config WITH context · retrieval_count>0 · priority/philosophy.
+KEEP (overrides archive): constraint/rule language (must/never/always) · explains WHY (because/so that/to prevent) · external-system limit (MODEL_KNOWLEDGE: archive only if word-for-word duplicated) · path/config WITH context · retrieval_count>0 · priority/philosophy.
 
 ### Cross-chunk duplicate candidates (normalized content matches)
 ${args.crossChunkCandidates?.join("\n") || "(none)"}
@@ -237,13 +249,13 @@ ${renderRetrospectiveEvents(args.events)}
 - Write actionable present-tense corrections for future agents.
 - Do NOT quote the user, include dates, or preserve anger/frustration wording.
 - Write in plain prose with NO quotation marks at all — not around the user's words, and not around illustrative trigger words. Describe trigger conditions directly (write: when the user asks you to investigate or diagnose without requesting a fix — not: when the user says "investigate"). A learning containing any quotation marks is rejected.
-- Use route="memory" for project-specific agent behavior/rules, with category one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.
+- Use route="memory" for project-specific agent behavior/rules, with category one of OPS_RULES, ENV_STATE, CONFIG_VALUES, INCIDENTS, RESEARCH, MODEL_KNOWLEDGE.
 - Use route="observation" only for recurring user workflow/preferences that belong in the global user profile.
 - Zero learnings is acceptable and should be represented by an empty learnings block.
 
 Return only XML in this exact shape:
 <learnings>
-  <learning route="memory" category="PROJECT_RULES">one durable actionable correction</learning>
+  <learning route="memory" category="OPS_RULES">one durable actionable correction</learning>
   <learning route="observation">one recurring user preference</learning>
 </learnings>`;
 }
@@ -299,7 +311,7 @@ export function buildDreamTaskPrompt(
         case "curate":
             return buildCuratePrompt({
                 projectPath: args.projectPath,
-                category: args.curate?.category ?? "PROJECT_RULES",
+                category: args.curate?.category ?? "OPS_RULES",
                 memories: args.curate?.memories ?? [],
                 crossChunkCandidates: args.curate?.crossChunkCandidates,
             });
