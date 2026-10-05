@@ -124,7 +124,9 @@ import {
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
 	pruneNoteNudgeAnchors,
+	pruneSubagentInjectDecisions,
 	resolveEpochFloorForPass,
+	type SubagentInjectDecision,
 	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
@@ -493,6 +495,7 @@ import {
 } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { stripPiProcessedImages } from "./strip-processed-images-pi";
+import { runSubagentInjectForPi } from "./subagent-inject-pi";
 import {
 	adoptPiCompactionSystemSnapshot,
 	isPiSystemEntry,
@@ -1619,6 +1622,17 @@ export interface PiAutoSearchHandlerOptions {
 	minPromptChars: number;
 }
 
+/**
+ * Optional task-requested memory injection wiring (Step 4b.4, mounted right
+ * after auto-search). When enabled, a real user task message carrying a
+ * `⟦mc-mem: …⟧` marker gets the named memories' full content appended as a
+ * `<ctx-subagent-inject>` snapshot. Pi-only v1; not supported on the
+ * compaction-off path (same gate as auto-search).
+ */
+export interface PiSubagentInjectHandlerOptions {
+	enabled: boolean;
+}
+
 /** Heuristic-cleanup config — tiered emergency drop, dedup, strips system injections. */
 export interface PiHeuristicsOptions {
 	caveman?: {
@@ -1717,6 +1731,13 @@ export interface PiContextHandlerOptions {
 	 * the cortexkit DB with OpenCode, so memories ARE cross-harness.
 	 */
 	autoSearch?: PiAutoSearchHandlerOptions;
+	/**
+	 * Optional task-requested memory injection wiring (Step 4b.4). Mounted
+	 * AFTER auto-search so the wire order is always auto-search hint first,
+	 * then the `<ctx-subagent-inject>` snapshot. Same per-project resolver
+	 * contract as `autoSearch`.
+	 */
+	subagentInject?: PiSubagentInjectHandlerOptions;
 	/**
 	 * Per-project config resolver (Pi `/cd` / multi-root). Pi can switch
 	 * projects mid-process; a switched-into checkout may carry its own
@@ -6023,6 +6044,44 @@ export function registerPiContextHandler(
 				}
 			}
 			logTransformTiming(sessionId, "autoSearch", tAutoSearch);
+
+			// Step 4b.4 (cont.): task-requested memory injection. Mounted AFTER
+			// auto-search so first-time and replay wire order is always
+			// auto-search hint first, then the `<ctx-subagent-inject>` snapshot.
+			// Same gate family as auto-search: not supported on the
+			// compaction-off path (v1, documented in CONFIGURATION.md).
+			const tSubagentInject = performance.now();
+			if (!options.compactionOff) {
+				// Mounted whenever the option block exists. The runner always
+				// replays persisted snapshots (disabling the config stops NEW
+				// injections only — never retracts history) and gates fresh
+				// decisions on enabled internally.
+				try {
+					outputMessages = await runSubagentInjectForPi({
+						sessionId,
+						db: options.db,
+						messages: outputMessages,
+						entryIds: strictEntryIds,
+						// Use the map produced after commits and splices because those operations
+						// can change the final message-reference to entry-ID mapping.
+						entryIdByRef: result.postCommitEntryIdByRef,
+						decisions: postTransformSnapshot?.subagentInjectDecisions,
+						capacity: {
+							contextLimit: usageContextLimit,
+						},
+						options: {
+							enabled: options.subagentInject?.enabled === true,
+							projectPath: projectIdentity,
+						},
+					});
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`subagent-inject failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+			logTransformTiming(sessionId, "subagentInject", tSubagentInject);
 
 			// Synthetic todowrite injection — Pi parity with OpenCode's
 			// transform-postprocess-phase.ts B7. On cache-busting passes,
@@ -11656,6 +11715,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 interface PiPostTransformSnapshot {
 	noteAnchors: NoteNudgeAnchor[];
 	autoSearchDecisions: AutoSearchHintDecision[];
+	subagentInjectDecisions: SubagentInjectDecision[];
 	noteTriggerPending: boolean;
 }
 
@@ -11709,6 +11769,40 @@ function isAutoSearchHintDecision(
 	);
 }
 
+const SUBAGENT_INJECT_NO_INJECT_REASONS = new Set<string>([
+	"invalid-marker",
+	"capacity-exceeded",
+]);
+
+function isSubagentInjectDecision(
+	value: unknown,
+): value is SubagentInjectDecision {
+	if (!value || typeof value !== "object") return false;
+	const row = value as Record<string, unknown>;
+	if (typeof row.messageId !== "string" || row.messageId.length === 0)
+		return false;
+	if (row.decision === "inject" || row.decision === "unavailable") {
+		return (
+			typeof row.text === "string" &&
+			row.text.length > 0 &&
+			Array.isArray(row.ids) &&
+			row.ids.every(
+				(id) =>
+					typeof id === "number" &&
+					Number.isSafeInteger(id) &&
+					(id as number) > 0,
+			) &&
+			typeof row.readAt === "number" &&
+			Number.isFinite(row.readAt)
+		);
+	}
+	return (
+		row.decision === "no-inject" &&
+		typeof row.reason === "string" &&
+		SUBAGENT_INJECT_NO_INJECT_REASONS.has(row.reason)
+	);
+}
+
 /** Keys of the sticky reminders a pass appends to user messages. */
 function piStickyInjectionKeys(snapshot: PiPostTransformSnapshot): Set<string> {
 	const keys = new Set<string>();
@@ -11730,6 +11824,7 @@ function loadPiPostTransformSnapshot(
 	const row = db
 		.prepare(
 			`SELECT note_nudge_anchors, auto_search_hint_decisions,
+			        subagent_inject_decisions,
 			        note_nudge_trigger_pending
 			   FROM session_meta
 			  WHERE session_id = ?`,
@@ -11738,6 +11833,7 @@ function loadPiPostTransformSnapshot(
 		| {
 				note_nudge_anchors?: unknown;
 				auto_search_hint_decisions?: unknown;
+				subagent_inject_decisions?: unknown;
 				note_nudge_trigger_pending?: unknown;
 		  }
 		| undefined;
@@ -11746,6 +11842,10 @@ function loadPiPostTransformSnapshot(
 		autoSearchDecisions: parseStoredArray(
 			row?.auto_search_hint_decisions,
 			isAutoSearchHintDecision,
+		),
+		subagentInjectDecisions: parseStoredArray(
+			row?.subagent_inject_decisions,
+			isSubagentInjectDecision,
 		),
 		noteTriggerPending: row?.note_nudge_trigger_pending === 1,
 	};
@@ -11967,6 +12067,10 @@ function applyNoteNudges(args: {
 			// prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
 			// may flush them to storage, while cached-prefix replay must not write them.
 			// Today's visible IDs are not proof of deletion.
+			// Task-requested injection snapshots share the same safe boundary:
+			// a decision whose original message left the visible wire is pruned
+			// and NEVER migrated to m[0]/m[1] or a newer user message.
+			pruneSubagentInjectDecisions(db, sessionId, visibleIds);
 		}
 	}
 
