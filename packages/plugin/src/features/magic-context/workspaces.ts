@@ -30,7 +30,7 @@ interface WorkspaceShareCategoriesRow {
 }
 
 const VALID_SHARE_CATEGORIES = new Set<string>(V2_MEMORY_CATEGORIES);
-const DEFAULT_WORKSPACE_SHARE_CATEGORIES = ["CONSTRAINTS"] as const;
+const DEFAULT_WORKSPACE_SHARE_CATEGORIES = [] as const;
 
 function tableExists(db: Database, tableName: string): boolean {
     const row = db
