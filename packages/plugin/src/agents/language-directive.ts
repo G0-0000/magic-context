@@ -62,7 +62,7 @@ export function buildContentLanguageDirective(
         "- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.",
         "",
         "These literal values must remain English when used:",
-        "PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;",
+        "OPS_RULES, ENV_STATE, CONFIG_VALUES, INCIDENTS, RESEARCH, MODEL_KNOWLEDGE;",
         "causal_incident, trajectory_correction;",
         "feature, design, docs, release, investigation, bug, refactor, infra;",
         "memory, observation; true, false; No relevant memories found.",
