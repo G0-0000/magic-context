@@ -513,7 +513,11 @@ describe("OpenCode 2 hidden child completion", () => {
         }
     });
     test("sends the exact calibrated pair with options and provider usage", async () => {
-        const state = await setup();
+        const state = await setup("host-generation-1", {
+            modelCatalog: async () => [
+                { id: "cheap", providerID: "mock", capabilities: { temperature: true } },
+            ],
+        });
         try {
             const handle = await state.executor.open(run);
             await state.executor.attempt(handle, request("cheap", { temperature: 0.25 }));
@@ -1172,5 +1176,75 @@ describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
         });
         const [refused] = messages as { parts: { state: { status: string } }[] }[];
         expect(refused?.parts[0]?.state.status).toBe("error");
+    });
+});
+
+describe("hidden completion temperature capabilities", () => {
+    test("OpenCode 2 decides per selected model and honours zero only with positive metadata", async () => {
+        const state = await setup("temperature-metadata", {
+            modelCatalog: async () => ({
+                data: [
+                    { id: "cheap", providerID: "mock", capabilities: { temperature: true } },
+                    { id: "fallback", providerID: "mock", capabilities: { temperature: false } },
+                ],
+            }),
+        });
+        try {
+            const handle = await state.executor.open(run);
+            await state.executor.attempt(handle, request("cheap", { temperature: 0 }));
+            await state.executor.attempt(handle, request("fallback", { temperature: 0.1 }));
+            await state.executor.attempt(handle, request("unknown", { temperature: 0.1 }));
+            expect(state.requests.map((draft) => draft.options)).toEqual([
+                { temperature: 0 },
+                {},
+                {},
+            ]);
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("OpenCode 2 Codex-shaped provider receives no temperature and needs no retry or fallback", async () => {
+        const state = await setup("temperature-codex");
+        const prompt = state.host.prompt;
+        let calls = 0;
+        state.host.prompt = async (input) => {
+            calls++;
+            await prompt(input);
+            if (state.requests.at(-1)?.options.temperature !== undefined)
+                throw new Error("Codex error: Unsupported parameter: temperature");
+        };
+        try {
+            const handle = await state.executor.open(run);
+            await state.executor.attempt(handle, request("cheap", { temperature: 0.1 }));
+            expect((await state.executor.collect(handle)).text).toBe("editor completion");
+            expect(calls).toBe(1);
+            expect(state.switches).toHaveLength(0);
+            expect(state.requests[0]?.options).not.toHaveProperty("temperature");
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("OpenCode 2 rejection despite positive metadata is an ordinary provider error without replay", async () => {
+        const state = await setup("temperature-wrong-metadata", {
+            modelCatalog: async () => [
+                { id: "cheap", providerID: "mock", capabilities: { temperature: true } },
+            ],
+        });
+        try {
+            const handle = await state.executor.open(run);
+            state.setPromptError(new Error("Codex error: Unsupported parameter: temperature"));
+            await expect(
+                state.executor.attempt(handle, request("cheap", { temperature: 0.1 })),
+            ).rejects.toThrow("Unsupported parameter: temperature");
+            expect(state.requests).toHaveLength(1);
+            expect(state.requests[0]?.options.temperature).toBe(0.1);
+            await close(state.executor, handle, false);
+        } finally {
+            state.db.close();
+        }
     });
 });

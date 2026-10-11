@@ -194,3 +194,139 @@ it("does not apply historian sampling calibration to provenance-only dreamer chi
 		else process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE = temperature;
 	}
 });
+
+async function withCalibrationHook(
+	temperature: string,
+	check: (
+		hook: (event: { payload: unknown }, ctx: { model?: unknown }) => unknown,
+		notices: string[],
+	) => void,
+): Promise<void> {
+	const { spyOn } = await import("bun:test");
+	const { __temperatureTest } = await import(
+		"../../plugin/src/shared/subagent-temperature"
+	);
+	const { default: extension } = await import(
+		"./historian-calibration-extension"
+	);
+	const keys = [
+		"MAGIC_CONTEXT_HISTORIAN_TEMPERATURE",
+		"MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS",
+		"MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY",
+		"MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE",
+	];
+	const previous = keys.map((key) => process.env[key]);
+	const notices: string[] = [];
+	const output = spyOn(process.stdout, "write").mockImplementation((line) => {
+		notices.push(String(line));
+		return true;
+	});
+	__temperatureTest.reset();
+	try {
+		process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE = temperature;
+		process.env.MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS = "32000";
+		delete process.env.MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY;
+		delete process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
+		let hook:
+			| ((event: { payload: unknown }, ctx: { model?: unknown }) => unknown)
+			| undefined;
+		extension({
+			on(name: string, handler: typeof hook) {
+				if (name === "before_provider_request") hook = handler;
+			},
+		} as never);
+		if (!hook) throw new Error("provider hook was not registered");
+		check(hook, notices);
+	} finally {
+		output.mockRestore();
+		keys.forEach((key, index) => {
+			if (previous[index] === undefined) delete process.env[key];
+			else process.env[key] = previous[index];
+		});
+		__temperatureTest.reset();
+	}
+}
+
+for (const [host, field] of [
+	["Pi", "supportsTemperature"],
+	["OMP", "supportsSamplingParams"],
+] as const) {
+	it(`${host} calibrates each resolved model only on affirmative metadata, including fallbacks`, async () => {
+		await withCalibrationHook("0.1", (hook, notices) => {
+			for (const [id, compat, expected] of [
+				["flash", { [field]: true }, 0.1],
+				["fallback", { [field]: false }, undefined],
+				["unknown", {}, undefined],
+			] as const) {
+				for (const payload of [
+					{ max_output_tokens: 4096, temperature: 0.9 },
+					{ generationConfig: { temperature: 0.9, maxOutputTokens: 4096 } },
+					{ inferenceConfig: { temperature: 0.9, maxTokens: 4096 } },
+				]) {
+					const result = hook(
+						{ payload },
+						{ model: { provider: host, id, compat } },
+					) as Record<string, unknown>;
+					const options = (result.generationConfig ??
+						result.inferenceConfig ??
+						result) as Record<string, unknown>;
+					expect(options.temperature).toBe(expected);
+					if (expected === undefined)
+						expect("temperature" in options).toBe(false);
+					expect(
+						options.max_output_tokens ??
+							options.maxOutputTokens ??
+							options.maxTokens,
+					).toBe(32000);
+				}
+			}
+			expect(notices.map((line) => JSON.parse(line).reason)).toEqual([
+				"no",
+				"missing",
+			]);
+		});
+	});
+}
+
+it("Codex-shaped provider never receives temperature when metadata is missing", async () => {
+	await withCalibrationHook("0.1", (hook) => {
+		let calls = 0;
+		const provider = (payload: Record<string, unknown>) => {
+			calls++;
+			if ("temperature" in payload)
+				throw new Error("Codex error: Unsupported parameter: temperature");
+			return "historian manifest";
+		};
+		const model = {
+			provider: "openai-codex",
+			id: "gpt-6.1-sol",
+			api: "openai-codex-responses",
+			reasoning: true,
+		};
+		for (let run = 0; run < 2; run++) {
+			const payload = hook(
+				{ payload: { max_output_tokens: 4096 } },
+				{ model },
+			) as Record<string, unknown>;
+			expect(provider(payload)).toBe("historian manifest");
+			expect(payload).not.toHaveProperty("temperature");
+		}
+		expect(calls).toBe(2);
+	});
+});
+
+it("provider hook honours explicit zero on a supported model", async () => {
+	await withCalibrationHook("0", (hook) => {
+		const result = hook(
+			{ payload: {} },
+			{
+				model: {
+					provider: "mock",
+					id: "zero",
+					compat: { supportsTemperature: true },
+				},
+			},
+		);
+		expect(result).toEqual({ temperature: 0 });
+	});
+});
