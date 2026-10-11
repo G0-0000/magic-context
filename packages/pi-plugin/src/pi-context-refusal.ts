@@ -7,7 +7,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { findPiTagIdentityConflict } from "@magic-context/core/features/magic-context/storage-tags";
 import { log } from "@magic-context/core/shared/logger";
 import { withSqliteTransformPass } from "@magic-context/core/shared/sqlite";
-import { isOmpSideContext } from "./omp-request-kind";
+import {
+	isOmpAdvisorRequest,
+	isOmpSideContext,
+	isOmpUnmanagedCaptureRequest,
+} from "./omp-request-kind";
 import { PiContextBudget } from "./pi-context-budget";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
@@ -19,6 +23,7 @@ export class PiContextSupersededError extends Error {}
 
 interface Operation {
 	pass?: PiContextBudget;
+	started: boolean;
 	ready: boolean;
 	refused: boolean;
 	ended: boolean;
@@ -68,6 +73,7 @@ export function registerPiGuardedContext(
 	// after cache eviction or reload: OMP still erases side-request attribution.
 	// Only per-turn completion records are invalidated by cache cleanup.
 	const newOperation = (): Operation => ({
+		started: false,
 		ready: false,
 		refused: false,
 		ended: false,
@@ -117,7 +123,17 @@ export function registerPiGuardedContext(
 	};
 	if (fenceEnabled) {
 		pi.on("agent_start", (_event, ctx) => {
-			operations.set(operationKey(ctx), newOperation());
+			const key = operationKey(ctx);
+			const pending = operations.get(key);
+			// OMP forwards lifecycle events asynchronously. A preceding extension
+			// can delay agent_start until this run's context pass has already finished.
+			// Adopt that pass on its first start, not a receipt from an earlier run.
+			const active =
+				pending && !pending.started && !pending.ended
+					? pending
+					: newOperation();
+			active.started = true;
+			operations.set(key, active);
 		});
 		pi.on("agent_end", (_event, ctx) => {
 			const key = operationKey(ctx);
@@ -135,8 +151,13 @@ export function registerPiGuardedContext(
 		// OMP supplies session identity, but no provider-attempt ID. The latest
 		// context pass is the receipt for this operation, including payload retries.
 		// No awaits, DB access or payload hashing are allowed in this backstop.
-		pi.on("before_provider_request", (_event, ctx) => {
+		pi.on("before_provider_request", (event, ctx) => {
 			if (options.compactionOff?.(ctx)) return;
+			// Advisors inherit the payload hook, but review formatted copies of
+			// new messages in their own agent. They neither consume nor grant the
+			// receipt that authorizes the main conversation's managed messages.
+			const payload = (event as { payload?: unknown }).payload;
+			if (isOmpAdvisorRequest(payload)) return;
 			const key = operationKey(ctx);
 			// OMP erases the ephemeral request's attribution before this hook. Its
 			// abort API is session-wide, so after seeing OMP's attributed reminder
@@ -151,14 +172,22 @@ export function registerPiGuardedContext(
 			}
 			const active = operation;
 			const isCurrent = () => operations.get(key) === active;
-			const budget = active.pass ?? new PiContextBudget();
+			const capture = isOmpUnmanagedCaptureRequest(payload);
+			const budget =
+				(capture ? undefined : active.pass) ?? new PiContextBudget();
 			try {
+				if (capture)
+					throw new Error(
+						"no context pass ran for OMP auto-learn capture; raw conversation refused",
+					);
+				if (!active.pass)
+					throw new Error("no context pass ran for this operation");
 				// A context result completed before the preparation deadline remains
 				// valid on provider retries. Ownership, refusal and turn end still apply.
 				budget.assertOwner();
 				if (!budget.completed) budget.assertOutcome();
 				if (!active.ready || active.refused || active.ended || budget.abandoned)
-					throw new Error("missing managed context receipt");
+					throw new Error("context pass ran without a managed context receipt");
 			} catch (error) {
 				active.refused = true;
 				budget.stage = "provider dispatch";
@@ -188,7 +217,7 @@ export function registerPiGuardedContext(
 		}
 		const owner = operations.get(key);
 		let operation = operations.get(key);
-		if (budget.sideTurn || !operation || !fenceEnabled) {
+		if (budget.sideTurn || !operation || operation.ended || !fenceEnabled) {
 			operation = newOperation();
 			if (!budget.sideTurn) operations.set(key, operation);
 		}

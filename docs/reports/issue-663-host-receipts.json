@@ -1,0 +1,3679 @@
+{
+  "host": "Oh My Pi 18.8.6",
+  "runs": [
+    {
+      "name": "main-baseline",
+      "version": "omp/18.8.6",
+      "mode": "main",
+      "baseline": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim",
+      "pid": 55526,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-HyWqim/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12caa-e231-77cb-bd52-15e6d202540d",
+          "child": false
+        },
+        {
+          "ms": 5495,
+          "phase": "context",
+          "session": "01a12caa-e231-77cb-bd52-15e6d202540d",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 5495,
+          "phase": "context-end"
+        },
+        {
+          "ms": 5566,
+          "phase": "before_provider_request",
+          "session": "01a12caa-e231-77cb-bd52-15e6d202540d",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 5569,
+          "phase": "wire"
+        },
+        {
+          "ms": 5783,
+          "phase": "agent_end",
+          "session": "01a12caa-e231-77cb-bd52-15e6d202540d",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 5569,
+          "completedMs": 5570,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "late-start-baseline",
+      "version": "omp/18.8.6",
+      "mode": "late-start",
+      "baseline": true,
+      "fullPlugin": false,
+      "responses": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj",
+      "pid": 336,
+      "requests": 0,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-aguxQj/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "start-blocked"
+        },
+        {
+          "ms": 23,
+          "phase": "context",
+          "session": "01a12cc3-de7c-7667-a4b1-c263e655839b",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 23,
+          "phase": "managed-context-ready"
+        },
+        {
+          "ms": 23,
+          "phase": "start-released"
+        },
+        {
+          "ms": 24,
+          "phase": "agent_start",
+          "session": "01a12cc3-de7c-7667-a4b1-c263e655839b",
+          "child": false
+        },
+        {
+          "ms": 151,
+          "phase": "context-end"
+        },
+        {
+          "ms": 171,
+          "phase": "before_provider_request",
+          "session": "01a12cc3-de7c-7667-a4b1-c263e655839b",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 172,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (missing managed context receipt)"
+        },
+        {
+          "ms": 172,
+          "phase": "abort"
+        },
+        {
+          "ms": 186,
+          "phase": "agent_end",
+          "session": "01a12cc3-de7c-7667-a4b1-c263e655839b",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": []
+    },
+    {
+      "name": "advisor-baseline",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT",
+      "pid": 8667,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-79NqLT/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb2-7afd-7318-9b4c-6ff018dc6948",
+          "child": false
+        },
+        {
+          "ms": 2181,
+          "phase": "context",
+          "session": "01a12cb2-7afd-7318-9b4c-6ff018dc6948",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 2181,
+          "phase": "context-end"
+        },
+        {
+          "ms": 2216,
+          "phase": "before_provider_request",
+          "session": "01a12cb2-7afd-7318-9b4c-6ff018dc6948",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 2219,
+          "phase": "wire"
+        },
+        {
+          "ms": 2262,
+          "phase": "agent_end",
+          "session": "01a12cb2-7afd-7318-9b4c-6ff018dc6948",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 2442,
+          "phase": "before_provider_request",
+          "session": "01a12cb2-7afd-7318-9b4c-6ff018dc6948",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 2442,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=261ms recovery=no managed result; refused (Pi context pass superseded before writer admission)"
+        },
+        {
+          "ms": 2443,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 2219,
+          "completedMs": 2219,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-baseline",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f",
+      "pid": 9030,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-1s363f/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb2-8f70-72c6-a97b-4083b0d744a1",
+          "child": false
+        },
+        {
+          "ms": 2151,
+          "phase": "context",
+          "session": "01a12cb2-8f70-72c6-a97b-4083b0d744a1",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 2152,
+          "phase": "context-end"
+        },
+        {
+          "ms": 2172,
+          "phase": "before_provider_request",
+          "session": "01a12cb2-8f70-72c6-a97b-4083b0d744a1",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 2175,
+          "phase": "wire"
+        },
+        {
+          "ms": 2191,
+          "phase": "agent_end",
+          "session": "01a12cb2-8f70-72c6-a97b-4083b0d744a1",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 2331,
+          "phase": "before_provider_request",
+          "session": "01a12cb2-8f70-72c6-a97b-4083b0d744a1",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 2331,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=179ms recovery=no managed result; refused (Pi context pass superseded before writer admission)"
+        },
+        {
+          "ms": 2332,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 2175,
+          "completedMs": 2175,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "advisor-responses-baseline",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": true,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy",
+      "pid": 75003,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GFGSWy/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb9-9aa0-704b-8395-b10c33ba7e67",
+          "child": false
+        },
+        {
+          "ms": 124,
+          "phase": "context",
+          "session": "01a12cb9-9aa0-704b-8395-b10c33ba7e67",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 125,
+          "phase": "context-end"
+        },
+        {
+          "ms": 135,
+          "phase": "before_provider_request",
+          "session": "01a12cb9-9aa0-704b-8395-b10c33ba7e67",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 138,
+          "phase": "wire"
+        },
+        {
+          "ms": 152,
+          "phase": "agent_end",
+          "session": "01a12cb9-9aa0-704b-8395-b10c33ba7e67",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 154,
+          "phase": "before_provider_request",
+          "session": "01a12cb9-9aa0-704b-8395-b10c33ba7e67",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 155,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=30ms recovery=no managed result; refused (Pi context pass superseded before writer admission)"
+        },
+        {
+          "ms": 155,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 138,
+          "completedMs": 138,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-responses-baseline",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": true,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ",
+      "pid": 75977,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-f7sVyJ/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb9-a185-7206-bba8-5091c364ed25",
+          "child": false
+        },
+        {
+          "ms": 142,
+          "phase": "context",
+          "session": "01a12cb9-a185-7206-bba8-5091c364ed25",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 143,
+          "phase": "context-end"
+        },
+        {
+          "ms": 157,
+          "phase": "before_provider_request",
+          "session": "01a12cb9-a185-7206-bba8-5091c364ed25",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 161,
+          "phase": "wire"
+        },
+        {
+          "ms": 260,
+          "phase": "agent_end",
+          "session": "01a12cb9-a185-7206-bba8-5091c364ed25",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 285,
+          "phase": "before_provider_request",
+          "session": "01a12cb9-a185-7206-bba8-5091c364ed25",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 286,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=143ms recovery=no managed result; refused (Pi context pass superseded before writer admission)"
+        },
+        {
+          "ms": 287,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 160,
+          "completedMs": 161,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "main-fixed",
+      "version": "omp/18.8.6",
+      "mode": "main",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX",
+      "pid": 38157,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ecKHqX/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb5-b6f2-71ab-9927-d9ae9fbd71e7",
+          "child": false
+        },
+        {
+          "ms": 397,
+          "phase": "context",
+          "session": "01a12cb5-b6f2-71ab-9927-d9ae9fbd71e7",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 398,
+          "phase": "context-end"
+        },
+        {
+          "ms": 417,
+          "phase": "before_provider_request",
+          "session": "01a12cb5-b6f2-71ab-9927-d9ae9fbd71e7",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 419,
+          "phase": "wire"
+        },
+        {
+          "ms": 437,
+          "phase": "agent_end",
+          "session": "01a12cb5-b6f2-71ab-9927-d9ae9fbd71e7",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 419,
+          "completedMs": 419,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "late-start-fixed",
+      "version": "omp/18.8.6",
+      "mode": "late-start",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp",
+      "pid": 38577,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-dwH7kp/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "start-blocked"
+        },
+        {
+          "ms": 24,
+          "phase": "context",
+          "session": "01a12cb5-bf2c-72a8-a18f-f792964e6b9b",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 154,
+          "phase": "start-released"
+        },
+        {
+          "ms": 160,
+          "phase": "agent_start",
+          "session": "01a12cb5-bf2c-72a8-a18f-f792964e6b9b",
+          "child": false
+        },
+        {
+          "ms": 316,
+          "phase": "context-end"
+        },
+        {
+          "ms": 343,
+          "phase": "before_provider_request",
+          "session": "01a12cb5-bf2c-72a8-a18f-f792964e6b9b",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 346,
+          "phase": "wire"
+        },
+        {
+          "ms": 383,
+          "phase": "agent_end",
+          "session": "01a12cb5-bf2c-72a8-a18f-f792964e6b9b",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 346,
+          "completedMs": 347,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "skip-fixed",
+      "version": "omp/18.8.6",
+      "mode": "skip",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb",
+      "pid": 38845,
+      "requests": 0,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ALxmyb/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb5-c75d-70a7-a534-099978c39fce",
+          "child": false
+        },
+        {
+          "ms": 147,
+          "phase": "context",
+          "session": "01a12cb5-c75d-70a7-a534-099978c39fce",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 148,
+          "phase": "skipped-context"
+        },
+        {
+          "ms": 166,
+          "phase": "before_provider_request",
+          "session": "01a12cb5-c75d-70a7-a534-099978c39fce",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 167,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+        },
+        {
+          "ms": 167,
+          "phase": "abort"
+        },
+        {
+          "ms": 179,
+          "phase": "agent_end",
+          "session": "01a12cb5-c75d-70a7-a534-099978c39fce",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": []
+    },
+    {
+      "name": "no-result-fixed",
+      "version": "omp/18.8.6",
+      "mode": "no-result",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl",
+      "pid": 39066,
+      "requests": 0,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-V2YLNl/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb5-cfc9-7232-8b68-de0401f84091",
+          "child": false
+        },
+        {
+          "ms": 383,
+          "phase": "context",
+          "session": "01a12cb5-cfc9-7232-8b68-de0401f84091",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 383,
+          "phase": "context-end"
+        },
+        {
+          "ms": 402,
+          "phase": "before_provider_request",
+          "session": "01a12cb5-cfc9-7232-8b68-de0401f84091",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 402,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=19ms recovery=no managed result; refused (context pass ran without a managed context receipt)"
+        },
+        {
+          "ms": 403,
+          "phase": "abort"
+        },
+        {
+          "ms": 417,
+          "phase": "agent_end",
+          "session": "01a12cb5-cfc9-7232-8b68-de0401f84091",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": []
+    },
+    {
+      "name": "advisor-fixed",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE",
+      "pid": 48477,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-4K9hFE/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-4a12-7004-95bc-b773c84a7c63",
+          "child": false
+        },
+        {
+          "ms": 157,
+          "phase": "context",
+          "session": "01a12cb6-4a12-7004-95bc-b773c84a7c63",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 158,
+          "phase": "context-end"
+        },
+        {
+          "ms": 175,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-4a12-7004-95bc-b773c84a7c63",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 177,
+          "phase": "wire"
+        },
+        {
+          "ms": 283,
+          "phase": "agent_end",
+          "session": "01a12cb6-4a12-7004-95bc-b773c84a7c63",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 286,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-4a12-7004-95bc-b773c84a7c63",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 288,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 177,
+          "completedMs": 177,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 288,
+          "completedMs": 288,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user"
+          ],
+          "advisor": true,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-fixed",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22",
+      "pid": 51320,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-SrBC22/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-7953-7131-902a-5dc63502145a",
+          "child": false
+        },
+        {
+          "ms": 406,
+          "phase": "context",
+          "session": "01a12cb6-7953-7131-902a-5dc63502145a",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 410,
+          "phase": "context-end"
+        },
+        {
+          "ms": 427,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-7953-7131-902a-5dc63502145a",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 430,
+          "phase": "wire"
+        },
+        {
+          "ms": 465,
+          "phase": "agent_end",
+          "session": "01a12cb6-7953-7131-902a-5dc63502145a",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 469,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-7953-7131-902a-5dc63502145a",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 469,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for OMP auto-learn capture; raw conversation refused)"
+        },
+        {
+          "ms": 470,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 430,
+          "completedMs": 430,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "retry-fixed",
+      "version": "omp/18.8.6",
+      "mode": "retry",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh",
+      "pid": 51592,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-weChnh/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-81d0-77e2-971c-c9c1f9443a6f",
+          "child": false
+        },
+        {
+          "ms": 693,
+          "phase": "context",
+          "session": "01a12cb6-81d0-77e2-971c-c9c1f9443a6f",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 693,
+          "phase": "context-end"
+        },
+        {
+          "ms": 711,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-81d0-77e2-971c-c9c1f9443a6f",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 713,
+          "phase": "wire"
+        },
+        {
+          "ms": 1144,
+          "phase": "wire"
+        },
+        {
+          "ms": 1176,
+          "phase": "agent_end",
+          "session": "01a12cb6-81d0-77e2-971c-c9c1f9443a6f",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 713,
+          "completedMs": 714,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 1144,
+          "completedMs": 1144,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "side-fixed",
+      "version": "omp/18.8.6",
+      "mode": "side",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg",
+      "pid": 51897,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-6nwEUg/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false
+        },
+        {
+          "ms": 110,
+          "phase": "context",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 111,
+          "phase": "context-end"
+        },
+        {
+          "ms": 123,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 125,
+          "phase": "wire"
+        },
+        {
+          "ms": 132,
+          "phase": "context",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 133,
+          "phase": "context-end"
+        },
+        {
+          "ms": 138,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 139,
+          "phase": "wire"
+        },
+        {
+          "ms": 158,
+          "phase": "agent_end",
+          "session": "01a12cb6-8c51-7685-ba3e-1b775282223a",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 1128,
+          "phase": "side-done"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 125,
+          "completedMs": 1127,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": false,
+          "sideMarker": true,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 139,
+          "completedMs": 140,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "steer-fixed",
+      "version": "omp/18.8.6",
+      "mode": "steer",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP",
+      "pid": 52229,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-As6LDP/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false
+        },
+        {
+          "ms": 213,
+          "phase": "context",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 213,
+          "phase": "context-end"
+        },
+        {
+          "ms": 228,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 230,
+          "phase": "wire"
+        },
+        {
+          "ms": 1264,
+          "phase": "context",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false,
+          "messages": 3
+        },
+        {
+          "ms": 1264,
+          "phase": "context-end"
+        },
+        {
+          "ms": 1271,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 1272,
+          "phase": "wire"
+        },
+        {
+          "ms": 1276,
+          "phase": "agent_end",
+          "session": "01a12cb6-96e8-70af-b74b-67114adec487",
+          "child": false,
+          "messages": 4
+        }
+      ],
+      "wire": [
+        {
+          "ms": 230,
+          "completedMs": 1233,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 1272,
+          "completedMs": 1272,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": true,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "task-fixed",
+      "version": "omp/18.8.6",
+      "mode": "task",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl",
+      "pid": 52547,
+      "requests": 4,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-S4N1Dl/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false
+        },
+        {
+          "ms": 131,
+          "phase": "context",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 132,
+          "phase": "context-end"
+        },
+        {
+          "ms": 150,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 153,
+          "phase": "wire"
+        },
+        {
+          "ms": 288,
+          "phase": "context",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "messages": 3
+        },
+        {
+          "ms": 288,
+          "phase": "context-end"
+        },
+        {
+          "ms": 291,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 293,
+          "phase": "wire"
+        },
+        {
+          "ms": 298,
+          "phase": "agent_end",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "messages": 4
+        },
+        {
+          "ms": 336,
+          "phase": "agent_start",
+          "session": "01a12cb6-a3d6-76cd-9835-f614fa9cd928",
+          "child": true
+        },
+        {
+          "ms": 511,
+          "phase": "context",
+          "session": "01a12cb6-a3d6-76cd-9835-f614fa9cd928",
+          "child": true,
+          "messages": 1
+        },
+        {
+          "ms": 511,
+          "phase": "context-end"
+        },
+        {
+          "ms": 518,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-a3d6-76cd-9835-f614fa9cd928",
+          "child": true,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 520,
+          "phase": "wire"
+        },
+        {
+          "ms": 526,
+          "phase": "agent_end",
+          "session": "01a12cb6-a3d6-76cd-9835-f614fa9cd928",
+          "child": true,
+          "messages": 3
+        },
+        {
+          "ms": 533,
+          "phase": "agent_start",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false
+        },
+        {
+          "ms": 657,
+          "phase": "context",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "messages": 5
+        },
+        {
+          "ms": 657,
+          "phase": "context-end"
+        },
+        {
+          "ms": 660,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 661,
+          "phase": "wire"
+        },
+        {
+          "ms": 663,
+          "phase": "agent_end",
+          "session": "01a12cb6-a23b-706c-bafc-ace32360340f",
+          "child": false,
+          "messages": 6
+        }
+      ],
+      "wire": [
+        {
+          "ms": 153,
+          "completedMs": 153,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 293,
+          "completedMs": 293,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 520,
+          "completedMs": 520,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": false,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 661,
+          "completedMs": 661,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "title-fixed",
+      "version": "omp/18.8.6",
+      "mode": "title",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU",
+      "pid": 52819,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/history.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/history.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-5J8rSU/.omp/agent/history.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-aaf8-7656-992e-41bf4e6fd4db",
+          "child": false
+        },
+        {
+          "ms": 214,
+          "phase": "context",
+          "session": "01a12cb6-aaf8-7656-992e-41bf4e6fd4db",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 214,
+          "phase": "context-end"
+        },
+        {
+          "ms": 228,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-aaf8-7656-992e-41bf4e6fd4db",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 231,
+          "phase": "wire"
+        },
+        {
+          "ms": 245,
+          "phase": "agent_end",
+          "session": "01a12cb6-aaf8-7656-992e-41bf4e6fd4db",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 250,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 231,
+          "completedMs": 233,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 250,
+          "completedMs": 250,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": true,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "compact-fixed",
+      "version": "omp/18.8.6",
+      "mode": "compact",
+      "baseline": false,
+      "fullPlugin": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul",
+      "pid": 52948,
+      "requests": 5,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-YdFaul/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false
+        },
+        {
+          "ms": 240,
+          "phase": "context",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 241,
+          "phase": "context-end"
+        },
+        {
+          "ms": 259,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 261,
+          "phase": "wire"
+        },
+        {
+          "ms": 272,
+          "phase": "agent_end",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 275,
+          "phase": "agent_start",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false
+        },
+        {
+          "ms": 413,
+          "phase": "context",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "messages": 3
+        },
+        {
+          "ms": 413,
+          "phase": "context-end"
+        },
+        {
+          "ms": 417,
+          "phase": "before_provider_request",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 418,
+          "phase": "wire"
+        },
+        {
+          "ms": 420,
+          "phase": "agent_end",
+          "session": "01a12cb6-b1b7-73a0-974d-335d25431474",
+          "child": false,
+          "messages": 4
+        },
+        {
+          "ms": 426,
+          "phase": "wire"
+        },
+        {
+          "ms": 426,
+          "phase": "wire"
+        },
+        {
+          "ms": 427,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 261,
+          "completedMs": 261,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 418,
+          "completedMs": 418,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 426,
+          "completedMs": 426,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": true,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 426,
+          "completedMs": 426,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": false,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": true,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 427,
+          "completedMs": 427,
+          "path": "/v1/messages",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": false,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": true,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "advisor-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": false,
+      "fullPlugin": false,
+      "responses": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC",
+      "pid": 83728,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-90dHwC/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cc2-b590-75fe-8923-917263e4f0b5",
+          "child": false
+        },
+        {
+          "ms": 298,
+          "phase": "context",
+          "session": "01a12cc2-b590-75fe-8923-917263e4f0b5",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 299,
+          "phase": "context-end"
+        },
+        {
+          "ms": 313,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-b590-75fe-8923-917263e4f0b5",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 317,
+          "phase": "wire"
+        },
+        {
+          "ms": 335,
+          "phase": "agent_end",
+          "session": "01a12cc2-b590-75fe-8923-917263e4f0b5",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 338,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-b590-75fe-8923-917263e4f0b5",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 339,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 317,
+          "completedMs": 318,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 339,
+          "completedMs": 339,
+          "path": "/responses",
+          "roles": [
+            "user",
+            "user"
+          ],
+          "advisor": true,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": false,
+      "fullPlugin": false,
+      "responses": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY",
+      "pid": 85117,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-jV7SKY/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cc2-e2ec-7124-bf00-88b9daffc4ce",
+          "child": false
+        },
+        {
+          "ms": 2379,
+          "phase": "context",
+          "session": "01a12cc2-e2ec-7124-bf00-88b9daffc4ce",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 2380,
+          "phase": "context-end"
+        },
+        {
+          "ms": 2390,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-e2ec-7124-bf00-88b9daffc4ce",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 2393,
+          "phase": "wire"
+        },
+        {
+          "ms": 2403,
+          "phase": "agent_end",
+          "session": "01a12cc2-e2ec-7124-bf00-88b9daffc4ce",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 2406,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-e2ec-7124-bf00-88b9daffc4ce",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 2406,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for OMP auto-learn capture; raw conversation refused)"
+        },
+        {
+          "ms": 2407,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 2392,
+          "completedMs": 2393,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "main-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "main",
+      "baseline": false,
+      "fullPlugin": false,
+      "responses": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy",
+      "pid": 85219,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-daMMXy/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cc2-f1b4-7085-86fc-9c92916ce2d0",
+          "child": false
+        },
+        {
+          "ms": 252,
+          "phase": "context",
+          "session": "01a12cc2-f1b4-7085-86fc-9c92916ce2d0",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 252,
+          "phase": "context-end"
+        },
+        {
+          "ms": 264,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-f1b4-7085-86fc-9c92916ce2d0",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 267,
+          "phase": "wire"
+        },
+        {
+          "ms": 291,
+          "phase": "agent_end",
+          "session": "01a12cc2-f1b4-7085-86fc-9c92916ce2d0",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 267,
+          "completedMs": 268,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "late-start-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "late-start",
+      "baseline": false,
+      "fullPlugin": false,
+      "responses": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R",
+      "pid": 85243,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-29vt5R/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "start-blocked"
+        },
+        {
+          "ms": 23,
+          "phase": "context",
+          "session": "01a12cc2-f847-71ee-b9f5-5ae5397555e3",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 177,
+          "phase": "start-released"
+        },
+        {
+          "ms": 178,
+          "phase": "agent_start",
+          "session": "01a12cc2-f847-71ee-b9f5-5ae5397555e3",
+          "child": false
+        },
+        {
+          "ms": 327,
+          "phase": "context-end"
+        },
+        {
+          "ms": 338,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-f847-71ee-b9f5-5ae5397555e3",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 341,
+          "phase": "wire"
+        },
+        {
+          "ms": 388,
+          "phase": "agent_end",
+          "session": "01a12cc2-f847-71ee-b9f5-5ae5397555e3",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 341,
+          "completedMs": 341,
+          "path": "/responses",
+          "roles": [
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": true,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "skip-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "skip",
+      "baseline": false,
+      "fullPlugin": false,
+      "responses": true,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp",
+      "pid": 85262,
+      "requests": 0,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-GchWZp/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 0,
+          "phase": "agent_start",
+          "session": "01a12cc2-ff6d-76f3-ad11-c1a0d4f8ed3a",
+          "child": false
+        },
+        {
+          "ms": 211,
+          "phase": "context",
+          "session": "01a12cc2-ff6d-76f3-ad11-c1a0d4f8ed3a",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 211,
+          "phase": "skipped-context"
+        },
+        {
+          "ms": 224,
+          "phase": "before_provider_request",
+          "session": "01a12cc2-ff6d-76f3-ad11-c1a0d4f8ed3a",
+          "child": false,
+          "requestRoles": [
+            "user"
+          ]
+        },
+        {
+          "ms": 224,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+        },
+        {
+          "ms": 224,
+          "phase": "abort"
+        },
+        {
+          "ms": 234,
+          "phase": "agent_end",
+          "session": "01a12cc2-ff6d-76f3-ad11-c1a0d4f8ed3a",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": []
+    },
+    {
+      "name": "main-plugin-fixed",
+      "version": "omp/18.8.6",
+      "mode": "main",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": false,
+      "isolatedEnvironment": {
+        "XDG_DATA_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data",
+        "XDG_CONFIG_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/config",
+        "XDG_STATE_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/state",
+        "XDG_RUNTIME_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/runtime",
+        "OPENCODE_DB": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/opencode/opencode.db",
+        "MAGIC_CONTEXT_STORAGE_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/cortexkit/magic-context"
+      },
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB",
+      "pid": 92736,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-Ja78YB/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 186,
+          "phase": "agent_start",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false
+        },
+        {
+          "ms": 512,
+          "phase": "agent_start",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false
+        },
+        {
+          "ms": 774,
+          "phase": "context",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 869,
+          "phase": "context-end"
+        },
+        {
+          "ms": 888,
+          "phase": "before_provider_request",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 892,
+          "phase": "wire"
+        },
+        {
+          "ms": 929,
+          "phase": "agent_end",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 929,
+          "phase": "agent_end",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 931,
+          "phase": "agent_end",
+          "session": "01a12cda-e235-74c2-a0b4-1e313e2ddc33",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 892,
+          "completedMs": 893,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "late-start-plugin-fixed",
+      "version": "omp/18.8.6",
+      "mode": "late-start",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": false,
+      "isolatedEnvironment": {
+        "XDG_DATA_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data",
+        "XDG_CONFIG_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/config",
+        "XDG_STATE_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/state",
+        "XDG_RUNTIME_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/runtime",
+        "OPENCODE_DB": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/opencode/opencode.db",
+        "MAGIC_CONTEXT_STORAGE_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/cortexkit/magic-context"
+      },
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY",
+      "pid": 92908,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-b7zzDY/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 172,
+          "phase": "start-blocked"
+        },
+        {
+          "ms": 262,
+          "phase": "context",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 330,
+          "phase": "managed-context-ready"
+        },
+        {
+          "ms": 330,
+          "phase": "start-released"
+        },
+        {
+          "ms": 330,
+          "phase": "agent_start",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false
+        },
+        {
+          "ms": 444,
+          "phase": "agent_start",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false
+        },
+        {
+          "ms": 552,
+          "phase": "context-end"
+        },
+        {
+          "ms": 571,
+          "phase": "before_provider_request",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 575,
+          "phase": "wire"
+        },
+        {
+          "ms": 634,
+          "phase": "agent_end",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 634,
+          "phase": "agent_end",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 635,
+          "phase": "agent_end",
+          "session": "01a12cda-ec7f-759d-880e-90b094826d6b",
+          "child": false,
+          "messages": 2
+        }
+      ],
+      "wire": [
+        {
+          "ms": 575,
+          "completedMs": 576,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "advisor-plugin-fixed",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN",
+      "pid": 803,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-bSf6nN/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 237,
+          "phase": "agent_start",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false
+        },
+        {
+          "ms": 352,
+          "phase": "agent_start",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false
+        },
+        {
+          "ms": 635,
+          "phase": "context",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 721,
+          "phase": "context-end"
+        },
+        {
+          "ms": 739,
+          "phase": "before_provider_request",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 744,
+          "phase": "wire"
+        },
+        {
+          "ms": 786,
+          "phase": "agent_end",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 787,
+          "phase": "agent_end",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 788,
+          "phase": "agent_end",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 790,
+          "phase": "before_provider_request",
+          "session": "01a12cc3-f219-758c-b68e-cb515d1319c3",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 792,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 743,
+          "completedMs": 744,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 792,
+          "completedMs": 793,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user"
+          ],
+          "advisor": true,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-plugin-fixed",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": false,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx",
+      "pid": 1458,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-qHDNGx/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 188,
+          "phase": "agent_start",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false
+        },
+        {
+          "ms": 297,
+          "phase": "agent_start",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false
+        },
+        {
+          "ms": 533,
+          "phase": "context",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 611,
+          "phase": "context-end"
+        },
+        {
+          "ms": 627,
+          "phase": "before_provider_request",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 632,
+          "phase": "wire"
+        },
+        {
+          "ms": 668,
+          "phase": "agent_end",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 668,
+          "phase": "agent_end",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 670,
+          "phase": "agent_end",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 672,
+          "phase": "before_provider_request",
+          "session": "01a12cc4-2231-7558-a1f2-f9cd76c3ae14",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 673,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for OMP auto-learn capture; raw conversation refused)"
+        },
+        {
+          "ms": 673,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 632,
+          "completedMs": 632,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "task-plugin-fixed",
+      "version": "omp/18.8.6",
+      "mode": "task",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": false,
+      "isolatedEnvironment": {
+        "XDG_DATA_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data",
+        "XDG_CONFIG_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/config",
+        "XDG_STATE_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/state",
+        "XDG_RUNTIME_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/runtime",
+        "OPENCODE_DB": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/opencode/opencode.db",
+        "MAGIC_CONTEXT_STORAGE_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/cortexkit/magic-context"
+      },
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy",
+      "pid": 93010,
+      "requests": 4,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-MtJqWy/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 181,
+          "phase": "agent_start",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false
+        },
+        {
+          "ms": 285,
+          "phase": "agent_start",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false
+        },
+        {
+          "ms": 501,
+          "phase": "context",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 565,
+          "phase": "context-end"
+        },
+        {
+          "ms": 580,
+          "phase": "before_provider_request",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 585,
+          "phase": "wire"
+        },
+        {
+          "ms": 630,
+          "phase": "context",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 3
+        },
+        {
+          "ms": 651,
+          "phase": "context-end"
+        },
+        {
+          "ms": 654,
+          "phase": "before_provider_request",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 655,
+          "phase": "wire"
+        },
+        {
+          "ms": 692,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 4
+        },
+        {
+          "ms": 693,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 4
+        },
+        {
+          "ms": 694,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 4
+        },
+        {
+          "ms": 718,
+          "phase": "agent_start",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true
+        },
+        {
+          "ms": 824,
+          "phase": "agent_start",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true
+        },
+        {
+          "ms": 929,
+          "phase": "context",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true,
+          "messages": 1
+        },
+        {
+          "ms": 943,
+          "phase": "context-end"
+        },
+        {
+          "ms": 945,
+          "phase": "before_provider_request",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 947,
+          "phase": "wire"
+        },
+        {
+          "ms": 956,
+          "phase": "agent_end",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true,
+          "messages": 3
+        },
+        {
+          "ms": 957,
+          "phase": "agent_end",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true,
+          "messages": 3
+        },
+        {
+          "ms": 957,
+          "phase": "agent_end",
+          "session": "01a12cda-f84b-73a2-ab55-620e0d6913a5",
+          "child": true,
+          "messages": 3
+        },
+        {
+          "ms": 964,
+          "phase": "agent_start",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false
+        },
+        {
+          "ms": 1075,
+          "phase": "agent_start",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false
+        },
+        {
+          "ms": 1248,
+          "phase": "context",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 5
+        },
+        {
+          "ms": 1263,
+          "phase": "context-end"
+        },
+        {
+          "ms": 1265,
+          "phase": "before_provider_request",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 1268,
+          "phase": "wire"
+        },
+        {
+          "ms": 1271,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 6
+        },
+        {
+          "ms": 1271,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 6
+        },
+        {
+          "ms": 1271,
+          "phase": "agent_end",
+          "session": "01a12cda-f578-7114-b004-f9df8797e03e",
+          "child": false,
+          "messages": 6
+        }
+      ],
+      "wire": [
+        {
+          "ms": 585,
+          "completedMs": 585,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 655,
+          "completedMs": 656,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 947,
+          "completedMs": 947,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": false,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 1268,
+          "completedMs": 1268,
+          "path": "/v1/messages",
+          "roles": [
+            "user",
+            "user",
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "advisor-plugin-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "advisor",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": true,
+      "isolatedEnvironment": {
+        "XDG_DATA_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data",
+        "XDG_CONFIG_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/config",
+        "XDG_STATE_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/state",
+        "XDG_RUNTIME_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/runtime",
+        "OPENCODE_DB": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/opencode/opencode.db",
+        "MAGIC_CONTEXT_STORAGE_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/cortexkit/magic-context"
+      },
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ",
+      "pid": 56689,
+      "requests": 2,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-ZzM4BQ/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 159,
+          "phase": "agent_start",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false
+        },
+        {
+          "ms": 301,
+          "phase": "agent_start",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false
+        },
+        {
+          "ms": 497,
+          "phase": "context",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 550,
+          "phase": "context-end"
+        },
+        {
+          "ms": 559,
+          "phase": "before_provider_request",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 564,
+          "phase": "wire"
+        },
+        {
+          "ms": 599,
+          "phase": "agent_end",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 599,
+          "phase": "agent_end",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 600,
+          "phase": "agent_end",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 602,
+          "phase": "before_provider_request",
+          "session": "01a12cd3-fe29-71f7-9fce-daa0392e6848",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 604,
+          "phase": "wire"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 564,
+          "completedMs": 564,
+          "path": "/responses",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        },
+        {
+          "ms": 604,
+          "completedMs": 604,
+          "path": "/responses",
+          "roles": [
+            "user",
+            "user"
+          ],
+          "advisor": true,
+          "managedMarker": false,
+          "tagMarker": false,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    },
+    {
+      "name": "capture-plugin-responses-fixed",
+      "version": "omp/18.8.6",
+      "mode": "capture",
+      "baseline": false,
+      "fullPlugin": true,
+      "responses": true,
+      "isolatedEnvironment": {
+        "XDG_DATA_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data",
+        "XDG_CONFIG_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/config",
+        "XDG_STATE_HOME": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/state",
+        "XDG_RUNTIME_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/runtime",
+        "OPENCODE_DB": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/opencode/opencode.db",
+        "MAGIC_CONTEXT_STORAGE_DIR": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/cortexkit/magic-context"
+      },
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V",
+      "pid": 56940,
+      "requests": 1,
+      "databasePaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/data/cortexkit/magic-context/context.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-663/omp-e2e-tkjS1V/.omp/agent/skill-descriptions.db-wal"
+      ],
+      "timeline": [
+        {
+          "ms": 156,
+          "phase": "agent_start",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false
+        },
+        {
+          "ms": 306,
+          "phase": "agent_start",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false
+        },
+        {
+          "ms": 502,
+          "phase": "context",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "messages": 1
+        },
+        {
+          "ms": 708,
+          "phase": "context-end"
+        },
+        {
+          "ms": 724,
+          "phase": "before_provider_request",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "user",
+            "user"
+          ]
+        },
+        {
+          "ms": 742,
+          "phase": "wire"
+        },
+        {
+          "ms": 800,
+          "phase": "agent_end",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 800,
+          "phase": "agent_end",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 805,
+          "phase": "agent_end",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "messages": 2
+        },
+        {
+          "ms": 810,
+          "phase": "before_provider_request",
+          "session": "01a12cd4-2d2f-7480-b2b8-1d106900fbbd",
+          "child": false,
+          "requestRoles": [
+            "user",
+            "assistant",
+            "user"
+          ]
+        },
+        {
+          "ms": 815,
+          "phase": "entry",
+          "refusal": "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for OMP auto-learn capture; raw conversation refused)"
+        },
+        {
+          "ms": 821,
+          "phase": "abort"
+        }
+      ],
+      "wire": [
+        {
+          "ms": 742,
+          "completedMs": 745,
+          "path": "/responses",
+          "roles": [
+            "user",
+            "user",
+            "user"
+          ],
+          "advisor": false,
+          "managedMarker": false,
+          "tagMarker": true,
+          "originalMarker": true,
+          "sideMarker": false,
+          "steerMarker": false,
+          "summaryEnvelope": false,
+          "titleEnvelope": false,
+          "captureNudge": false
+        }
+      ]
+    }
+  ]
+}
