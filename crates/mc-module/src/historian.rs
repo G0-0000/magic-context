@@ -3198,6 +3198,18 @@ where
         .await
     {
         Ok(output) => output,
+        Err(err) if err.is_expired() => {
+            // Retention expiry means the old transcript is unavailable. Allow a new
+            // attempt instead of recording the read as a model failure.
+            let failure_backoff_at_ms = completion_failure_backoff_at_ms(
+                request.now_ms,
+                request.failure_backoff_at_ms,
+                (request.completion_now_ms)(),
+            );
+            abandon_current_state(request.store, request.session_id, failure_backoff_at_ms)?;
+            producer.close().await;
+            return Ok(HistorianReattachOutcome::RefireEligible { firing_seq });
+        }
         Err(err) => {
             let _ = producer.cancel(&producer_run_id).await;
             let detail_prefix = match err
@@ -6068,6 +6080,114 @@ mod tests {
             .unwrap(),
             FireOutcome::Fired(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn reattach_expired_transcript_refires_without_failure_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let fired = match fire(
+            &HistorianDurableState::default(),
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            1,
+            None,
+        )
+        .unwrap()
+        {
+            FireOutcome::Fired(state) => state,
+            FireOutcome::Busy(_) => unreachable!(),
+        };
+        let awaiting = producer_started(&fired, "producer-session".into(), "run-1".into()).unwrap();
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::default(),
+                &test_meta_with_historian(awaiting),
+            )
+            .unwrap();
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let expired = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+            "expired",
+            "session transcript has expired",
+        ));
+        let mut producer = ScriptedProducer::default()
+            .with_status(Ok(RunState::Terminal))
+            .with_output(Err(expired));
+
+        let outcome =
+            reattach_historian_producer(&mut producer, reattach_request(&store, &chunk, &prior))
+                .await
+                .unwrap();
+        assert_eq!(
+            outcome,
+            HistorianReattachOutcome::RefireEligible { firing_seq: 1 }
+        );
+        let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert_eq!(state.failure_backoff_at_ms, Some(999));
+        assert_eq!(state.last_failure, None);
+        assert_eq!(producer.closes, 1);
+        assert!(producer.cancels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reattach_expired_status_refires_without_failure_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let fired = match fire(
+            &HistorianDurableState::default(),
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            CompartmentSetGeneration::default(),
+            1,
+            None,
+        )
+        .unwrap()
+        {
+            FireOutcome::Fired(state) => state,
+            FireOutcome::Busy(_) => unreachable!(),
+        };
+        let awaiting = producer_started(&fired, "producer-session".into(), "run-1".into()).unwrap();
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::default(),
+                &test_meta_with_historian(awaiting),
+            )
+            .unwrap();
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let expired = HistorianProducerError::Subc(ProducerErrorBody::untagged(
+            "expired",
+            "session transcript has expired",
+        ));
+        let mut producer = ScriptedProducer::default().with_status(Err(expired));
+
+        let outcome =
+            reattach_historian_producer(&mut producer, reattach_request(&store, &chunk, &prior))
+                .await
+                .unwrap();
+        assert_eq!(
+            outcome,
+            HistorianReattachOutcome::RefireEligible { firing_seq: 1 }
+        );
+        let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert_eq!(state.failure_backoff_at_ms, Some(999));
+        assert_eq!(state.last_failure, None);
+        assert_eq!(producer.closes, 1);
+        assert!(producer.await_run_ids.is_empty());
     }
 
     #[tokio::test]
