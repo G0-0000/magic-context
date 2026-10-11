@@ -1,6 +1,13 @@
 #!/usr/bin/env bun
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -58,6 +65,8 @@ interface RunnerOptions {
 	 * longer sends, as a long-lived session accumulates them.
 	 */
 	historicalTags: number;
+	/** Seed hidden history after warm-up to keep cold tag allocation within the pass deadline. */
+	historicalTagsAfterMessages?: number;
 	toolResultRepeat?: number;
 }
 
@@ -68,6 +77,8 @@ export interface PerfPassReport {
 	outputMessages: number;
 	outputBytes: number;
 	outputHash: string;
+	/** Hash the literal served JSON too, not only a key-sorted comparison. */
+	wireHash: string;
 	tagRows: number;
 	tagRowsHash: string;
 	stages: ReturnType<ReturnType<typeof createTimingCollector>["samples"]>;
@@ -117,9 +128,16 @@ async function main(): Promise<void> {
 		}
 	}
 
-	const dataDir = mkdtempSync(join(tmpdir(), "mc-pi-perf-data-"));
+	const scratch = join(tmpdir(), "magic-context");
+	mkdirSync(scratch, { recursive: true });
+	const dataDir = mkdtempSync(join(scratch, "pi-append-perf-"));
 	process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataDir;
 	process.env.XDG_DATA_HOME = dataDir;
+	process.env.XDG_CONFIG_HOME = join(dataDir, "config");
+	process.env.XDG_STATE_HOME = join(dataDir, "state");
+	process.env.XDG_RUNTIME_DIR = join(dataDir, "runtime");
+	process.env.OPENCODE_DB = join(dataDir, "opencode.db");
+	process.env.MAGIC_CONTEXT_STORAGE_DIR = dataDir;
 	process.env.NODE_ENV = "test";
 
 	const [
@@ -158,6 +176,7 @@ async function main(): Promise<void> {
 	initializeDatabase(rawDb);
 	runMigrations(rawDb);
 	const externalDb = options.externalWrites ? new Database(dbPath) : null;
+	if (externalDb) initializeDatabase(externalDb);
 	externalDb?.exec("PRAGMA busy_timeout = 5000");
 	externalDb?.exec(
 		"CREATE TABLE IF NOT EXISTS perf_external_writes (pass INTEGER NOT NULL)",
@@ -176,7 +195,17 @@ async function main(): Promise<void> {
 				JSON.stringify([null, 1, "user", null, "0".repeat(64)]),
 			);
 	}
-	if (options.historicalTags > 0) {
+	let historicalTagsSeeded = false;
+	const seedHistoricalTags = () => {
+		if (historicalTagsSeeded || options.historicalTags <= 0) return;
+		historicalTagsSeeded = true;
+		const firstNumber = (
+			rawDb
+				.prepare(
+					"SELECT COALESCE(MAX(tag_number), 0) + 1 AS number FROM tags WHERE session_id = ?",
+				)
+				.get(fixture.sessionId) as { number: number }
+		).number;
 		const insert = rawDb.prepare(
 			`INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size,
 			   tag_number, harness, status, token_count)
@@ -187,11 +216,12 @@ async function main(): Promise<void> {
 			insert.run(
 				fixture.sessionId,
 				`historical-entry-${index}:p0`,
-				2 + index,
+				firstNumber + index,
 			);
 		}
 		rawDb.exec("COMMIT");
-	}
+	};
+	if (!options.historicalTagsAfterMessages) seedHistoricalTags();
 	const dbTimer = createDatabaseTimer(rawDb);
 	const timings = createTimingCollector();
 	const restoreObserver = setPiTransformTimingObserver((sample) =>
@@ -284,8 +314,7 @@ async function main(): Promise<void> {
 				messages: structuredClone(
 					options.pi087
 						? pass.messages.filter(
-								(message) =>
-									(message as { role?: unknown }).role !== "system",
+								(message) => (message as { role?: unknown }).role !== "system",
 							)
 						: pass.messages,
 				),
@@ -328,6 +357,9 @@ async function main(): Promise<void> {
 				outputMessages: output.length,
 				outputBytes: Buffer.byteLength(outputCanonical, "utf8"),
 				outputHash: canonicalHash(output),
+				wireHash: createHash("sha256")
+					.update(JSON.stringify(output))
+					.digest("hex"),
 				tagRows: tagRows.length,
 				tagRowsHash: canonicalHash(tagRows),
 				stages: timings.samples(),
@@ -338,6 +370,11 @@ async function main(): Promise<void> {
 				deferredDb,
 				dbQueries: dbTimer.queries(),
 			});
+			if (
+				options.historicalTagsAfterMessages &&
+				pass.requestedMessages >= options.historicalTagsAfterMessages
+			)
+				seedHistoricalTags();
 		}
 	} finally {
 		restoreObserver();
@@ -480,6 +517,9 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 			options.lingeringFallback = true;
 		} else if (arg === "--historical-tags" && value) {
 			options.historicalTags = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--historical-tags-after-messages" && value) {
+			options.historicalTagsAfterMessages = positiveInteger(value, arg);
 			index += 1;
 		} else if (arg === "--tool-result-repeat" && value) {
 			options.toolResultRepeat = positiveInteger(value, arg);

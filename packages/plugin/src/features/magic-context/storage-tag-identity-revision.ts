@@ -16,13 +16,22 @@ import type { Database } from "../../shared/sqlite";
  * session's tag count, which the cache checks separately.
  */
 export const TAG_IDENTITY_REVISION_PREFIX = "tag_identity_revision:";
+export const TAG_REVISION_PREFIX = "tag_revision:";
+
+/** Full-row revision for caches that also serve status, size and reduction fields. */
+export function tagRevisionKey(sessionId: string): string {
+    return `${TAG_REVISION_PREFIX}${sessionId}`;
+}
 
 export function tagIdentityRevisionKey(sessionId: string): string {
     return `${TAG_IDENTITY_REVISION_PREFIX}${sessionId}`;
 }
 
-const BUMP = (session: string) => `INSERT INTO schema_migrations_meta (key, value)
-        VALUES ('${TAG_IDENTITY_REVISION_PREFIX}' || ${session}, '1')
+const BUMP = (
+    session: string,
+    prefix = TAG_IDENTITY_REVISION_PREFIX,
+) => `INSERT INTO schema_migrations_meta (key, value)
+        VALUES ('${prefix}' || ${session}, '1')
         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`;
 
 /**
@@ -48,6 +57,21 @@ const TRIGGER_SQL = `CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_identity_revision_
 
 export function installTagIdentityRevisionTrigger(db: Database): void {
     db.exec(TRIGGER_SQL);
+    // Keep the owner-summary counter selective. A full tag snapshot needs a
+    // separate value in the same KV table, bumped atomically by every tag write.
+    db.exec(`CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_revision_ai AFTER INSERT ON main.tags BEGIN
+        ${BUMP("NEW.session_id", TAG_REVISION_PREFIX)};
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_revision_au AFTER UPDATE ON main.tags BEGIN
+        ${BUMP("OLD.session_id", TAG_REVISION_PREFIX)};
+        INSERT INTO schema_migrations_meta (key, value)
+            SELECT '${TAG_REVISION_PREFIX}' || NEW.session_id, '1'
+            WHERE NEW.session_id IS NOT OLD.session_id
+            ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+    END;
+    CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_revision_ad AFTER DELETE ON main.tags BEGIN
+        ${BUMP("OLD.session_id", TAG_REVISION_PREFIX)};
+    END;`);
 }
 
 /**
@@ -63,5 +87,8 @@ export function deleteTagIdentityRevisions(db: Database, sessionIds: readonly st
     const statement = db.prepare(
         "DELETE FROM schema_migrations_meta WHERE key = ? AND NOT EXISTS (SELECT 1 FROM tags WHERE session_id = ?)",
     );
-    for (const sessionId of sessionIds) statement.run(tagIdentityRevisionKey(sessionId), sessionId);
+    for (const sessionId of sessionIds) {
+        statement.run(tagIdentityRevisionKey(sessionId), sessionId);
+        statement.run(tagRevisionKey(sessionId), sessionId);
+    }
 }

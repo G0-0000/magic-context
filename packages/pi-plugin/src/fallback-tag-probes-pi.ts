@@ -18,7 +18,7 @@ function probe(
 	sessionId: string,
 	kind: "message" | "tool",
 ): boolean {
-	const revision = readPiTagSnapshotRevision(db);
+	const revision = readPiTagSnapshotRevision(db, sessionId);
 	const read = () =>
 		kind === "message"
 			? readMessageTags(db, sessionId)
