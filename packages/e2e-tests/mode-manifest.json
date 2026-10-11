@@ -981,7 +981,22 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: OpenCode 2 has no command.execute.before hook, so the TUI keymap layer is the only source of a /ctx-* command; asserts the real TUI's own record of the slash names the host accepted; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: the server command registry is the single /ctx-* registration; asserts each command is listed once and that the real TUI adds no second slash layer; the v2 lane runs from its own invocation (bun test tests/opencode2), not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/commands-s2-tui-feedback.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: drives every server-registered /ctx-* command in a real TUI and asserts the user sees its feedback (dialogs, toasts, usage messages, sidebar refresh); the v2 lane runs from its own invocation (bun test tests/opencode2), not through the v1 mode-selected spawn seam",
             "contract_refs": [
                 "OC2-S1"
             ],

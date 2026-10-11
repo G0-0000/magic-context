@@ -18,6 +18,7 @@ async function doctor(name: string, config: string) {
     // Only installation discovery needs this executable; no host or provider starts.
     writeFileSync(join(bin, "opencode"), "#!/bin/sh\necho 1.18.31\n", { mode: 0o755 });
     const child = Bun.spawn([process.execPath, cli, "doctor", "--harness", "opencode", "--force"], {
+        windowsHide: true,
         env: {
             PATH: `${bin}:${process.env.PATH}`,
             HOME: home,
