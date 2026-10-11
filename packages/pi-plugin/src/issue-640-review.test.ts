@@ -19,7 +19,7 @@ import {
 } from "./context-handler";
 import { createPiLkgCoordinator } from "./pi-lkg";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
-import { capturePiServedArray } from "./served-array-ledger";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import {
 	assistantMessage,
 	createFakePi,
@@ -291,6 +291,7 @@ test("review: a racing real-id row must not renumber the already-served fallback
 	const db = createTestDb(path);
 	const sibling = new Database(path);
 	const sessionId = "review-served-fallback-number";
+	const publication = observePiPublicationForTest(sessionId);
 	let restore: (() => void) | undefined;
 	try {
 		const handler = install(db);
@@ -299,12 +300,12 @@ test("review: a racing real-id row must not renumber the already-served fallback
 		ctx.sessionManager.getBranch = () => {
 			throw new Error("in-flight entry unavailable");
 		};
-		await expect(
-			handler({ messages: [structuredClone(original)] }, ctx),
-		).rejects.toMatchObject({ name: "PiStorageBusyError" });
-		const served = { messages: [userMessage("§1§ served fallback", 1)] };
-		// Legacy JSONL remains authoritative for identities served before atomic publication.
-		capturePiServedArray(sessionId, served.messages, { servedTagNumbers: [1] });
+		const served = await handler(
+			{ messages: [structuredClone(original)] },
+			ctx,
+		);
+		expect(textOf(served.messages[0])).toBe("§1§ served fallback");
+		publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		const exec = db.exec.bind(db);
 		const prepare = db.prepare.bind(db);
 		let prepared = false;
@@ -343,6 +344,7 @@ test("review: a racing real-id row must not renumber the already-served fallback
 		expect(textOf(adopted.messages[0])).toBe(textOf(served.messages[0]));
 	} finally {
 		restore?.();
+		publication.restore();
 		clearContextHandlerSession(sessionId);
 		resetLkgSlotsForTest();
 		sibling.close();

@@ -16,6 +16,7 @@ import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
 } from "./context-handler";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import {
 	assistantMessage,
 	createFakePi,
@@ -221,8 +222,9 @@ test("Q3 cloned native markers survive remapped entry ids", async () => {
 	}
 });
 
-test("Q2 malformed publication document refuses restart defer without overwriting storage", async () => {
+test("Q2 malformed document after mint retains pairs on restart defer", async () => {
 	const f = fixture(true, 10);
+	const publication = observePiPublicationForTest(f.session);
 	try {
 		await f.seed();
 		expect(calls(await f.pass(90))).toBe(0);
@@ -232,12 +234,11 @@ test("Q2 malformed publication document refuses restart defer without overwritin
 			)
 			.run("{", f.session);
 		f.restart();
-		await expect(f.pass(0)).rejects.toMatchObject({
-			name: "PiStorageBusyError",
-		});
-		await expect(f.pass(0)).rejects.toMatchObject({
-			name: "PiStorageBusyError",
-		});
+		publication.reset();
+		const deferred = await f.pass(0);
+		expect(calls(deferred)).toBe(10);
+		expect(JSON.stringify(await f.pass(0))).toBe(JSON.stringify(deferred));
+		publication.expect("skipped", "envelope_unreadable", 2);
 		expect(
 			f.db
 				.prepare(
@@ -246,6 +247,7 @@ test("Q2 malformed publication document refuses restart defer without overwritin
 				.get(f.session),
 		).toEqual({ trailing_blank_decisions: "{" });
 	} finally {
+		publication.restore();
 		f.close();
 	}
 });

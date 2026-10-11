@@ -292,7 +292,8 @@ export function saveLkgSlotToDb(
         rememberFingerprint(db, sessionId, fingerprint);
         return true;
     } catch (error) {
-        sessionLog(sessionId, "LKG snapshot persistence failed (in-memory slot retained):", error);
+        // Paired Pi publication reports its optional failure once per session/reason.
+        if (!publishMetadata) sessionLog(sessionId, "LKG snapshot persistence failed (in-memory slot retained):", error);
         return false;
     }
 }

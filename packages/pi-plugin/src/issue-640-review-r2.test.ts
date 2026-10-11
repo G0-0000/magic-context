@@ -20,6 +20,7 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import { createPiLkgCoordinator } from "./pi-lkg";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
 	createFakePi,
@@ -180,6 +181,7 @@ for (const api of [
 test("r2: distinct multi-block real messages must not collide with one served fallback", async () => {
 	const db = createTestDb();
 	const sessionId = "r2-identical-real";
+	const publication = observePiPublicationForTest(sessionId);
 	const fake = createFakePi();
 	registerPiContextHandler(fake.pi as never, { db });
 	const handler = fake.handlers.get("context") as unknown as Handler;
@@ -205,17 +207,18 @@ test("r2: distinct multi-block real messages must not collide with one served fa
 			fakeContext(sessionId, process.cwd(), ["first"], [raw[0]]),
 		);
 		expect(textOf(real.messages[0])).toBe("§1§ repeat§2§ alpha");
+		publication.reset();
 		const unavailable = fakeContext(sessionId);
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		await expect(
-			handler({ messages: [structuredClone(raw[1])] }, unavailable),
-		).rejects.toMatchObject({ name: "PiStorageBusyError" });
-		// Honor fallback numbers served by an older release even when that release had no LKG.
-		capturePiServedArray(sessionId, [userMessage("§3§ repeat§4§ beta", 1)], {
-			servedTagNumbers: [3, 4],
-		});
+		const fallback = await handler(
+			{ messages: [structuredClone(raw[1])] },
+			unavailable,
+		);
+		expect(textOf(fallback.messages[0])).toBe("§3§ repeat§4§ beta");
+		expect(getSlot(sessionId)?.jsonPrefix).toBe(JSON.stringify(real.messages));
+		publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		const result = await handler(
 			{ messages: structuredClone(raw) },
 			fakeContext(sessionId, process.cwd(), ["first", "second"], raw),
@@ -227,6 +230,7 @@ test("r2: distinct multi-block real messages must not collide with one served fa
 				"§3§ repeat§4§ beta",
 			]);
 	} finally {
+		publication.restore();
 		clearContextHandlerSession(sessionId);
 		resetLkgSlotsForTest();
 		db.close();
@@ -236,6 +240,7 @@ test("r2: distinct multi-block real messages must not collide with one served fa
 test("r2: an unserved racing real row is not served evidence merely because user text mentions its number", async () => {
 	const db = createTestDb();
 	const sessionId = "r2-literal-marker";
+	const publication = observePiPublicationForTest(sessionId);
 	const fake = createFakePi();
 	registerPiContextHandler(fake.pi as never, { db });
 	const handler = fake.handlers.get("context") as unknown as Handler;
@@ -248,16 +253,15 @@ test("r2: an unserved racing real row is not served evidence merely because user
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		await expect(
-			handler({ messages: [structuredClone(original)] }, unavailable),
-		).rejects.toMatchObject({ name: "PiStorageBusyError" });
-		const first = {
-			messages: [
-				userMessage("§1§ Explain the marker §9§ in this pasted example", 1),
-			],
-		};
-		// Seed the old JSONL evidence independently of the now-refused managed pass.
-		capturePiServedArray(sessionId, first.messages, { servedTagNumbers: [1] });
+		const first = await handler(
+			{ messages: [structuredClone(original)] },
+			unavailable,
+		);
+		expect(textOf(first.messages[0])).toBe(
+			"§1§ Explain the marker §9§ in this pasted example",
+		);
+		expect(getSlot(sessionId)).toBeUndefined();
+		publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		db.prepare(
 			"INSERT INTO tags(message_id,type,status,session_id,tag_number,byte_size) VALUES ('real:p0','message','active',?,9,0)",
 		).run(sessionId);
@@ -273,6 +277,7 @@ test("r2: an unserved racing real row is not served evidence merely because user
 		if (!(result instanceof Error))
 			expect(textOf(result.messages[0])).toBe(textOf(first.messages[0]));
 	} finally {
+		publication.restore();
 		clearContextHandlerSession(sessionId);
 		resetLkgSlotsForTest();
 		db.close();
@@ -460,6 +465,7 @@ test("r2: an event-aborted waiter superseded twice never aborts the latest turn"
 test("r2: reloading a session must not forget its already-served fallback number", async () => {
 	const db = createTestDb();
 	const sessionId = "r2-reload-served";
+	const publication = observePiPublicationForTest(sessionId);
 	const original = userMessage("served before restart", 1);
 	const install = () => {
 		const fake = createFakePi();
@@ -471,12 +477,13 @@ test("r2: reloading a session must not forget its already-served fallback number
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		await expect(
-			install()({ messages: [structuredClone(original)] }, unavailable),
-		).rejects.toMatchObject({ name: "PiStorageBusyError" });
-		const first = { messages: [userMessage("§1§ served before restart", 1)] };
-		// Existing users can have legacy served numbers without a replay slot.
-		capturePiServedArray(sessionId, first.messages, { servedTagNumbers: [1] });
+		const first = await install()(
+			{ messages: [structuredClone(original)] },
+			unavailable,
+		);
+		expect(textOf(first.messages[0])).toBe("§1§ served before restart");
+		expect(getSlot(sessionId)).toBeUndefined();
+		publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		db.prepare(
 			"INSERT INTO tags(message_id,type,status,session_id,tag_number,byte_size) VALUES ('real:p0','message','active',?,9,0)",
 		).run(sessionId);
@@ -493,6 +500,7 @@ test("r2: reloading a session must not forget its already-served fallback number
 		);
 		expect(textOf(result.messages[0])).toBe(textOf(first.messages[0]));
 	} finally {
+		publication.restore();
 		clearContextHandlerSession(sessionId);
 		resetLkgSlotsForTest();
 		db.close();

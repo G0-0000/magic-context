@@ -242,6 +242,17 @@ export interface PiLkgCoordinator {
 	}): PiLkgSerializedOutput | undefined;
 }
 
+/** A request that cannot be saved for replay can still be served with its admitted tag numbers recorded. */
+export class PiLkgUncapturable extends Error {
+	constructor(
+		readonly reason: string,
+		message: string,
+		cause?: unknown,
+	) {
+		super(message, { cause });
+	}
+}
+
 export function isTransientPiStorageError(error: unknown): boolean {
 	if (!error || typeof error !== "object") return false;
 	const candidate = error as { code?: unknown; message?: unknown };
@@ -528,9 +539,10 @@ function extendsMeasuredRequest(
 
 /**
  * Adapt Pi's JSONL entry ids and native AgentMessage shape to the shared LKG
- * slot/replay implementation. Managed publication commits synchronously so
- * identities cannot outlive a missing request. Detached inputs also protect
- * diagnostic callers that explicitly use deferred capture from later mutations.
+ * slot/replay implementation. Capturable managed results commit synchronously,
+ * sharing their request transaction with their new tag identities. The caller
+ * can still serve an uncapturable result and record its admitted numbers alone.
+ * Detached inputs also protect deferred diagnostic captures from later mutations.
  */
 export function createPiLkgCoordinator(
 	db: Database,
@@ -800,7 +812,10 @@ export function createPiLkgCoordinator(
 		const { snapshot } = args;
 		if (snapshot.preparationFailure || snapshot.inputs.length === 0) {
 			if (args.publishServedNumbers)
-				throw new Error("Pi LKG input preparation failed");
+				throw new PiLkgUncapturable(
+					snapshot.preparationFailure ?? "lkg_inputs_empty",
+					"Pi LKG input preparation failed",
+				);
 			return;
 		}
 		const state = stateFor(snapshot.sessionId);
@@ -838,7 +853,12 @@ export function createPiLkgCoordinator(
 				: null;
 		} catch (error) {
 			args.assertCurrentPass?.();
-			if (args.publishServedNumbers) throw error;
+			if (args.publishServedNumbers)
+				throw new PiLkgUncapturable(
+					"lkg_output_serialize_failed",
+					error instanceof Error ? error.message : String(error),
+					error,
+				);
 			dropSlot(snapshot.sessionId, "lkg_snapshot_serialize_failed");
 			const failedState = stateFor(snapshot.sessionId);
 			failedState.syncCaptureRequired = true;
@@ -1026,7 +1046,10 @@ export function createPiLkgCoordinator(
 				args.assertCurrentPass?.();
 				if (args.publishServedNumbers) {
 					if (lkgSlotRejection(plan.sessionId, slot))
-						throw new Error("LKG slot rejected the Pi snapshot");
+						throw new PiLkgUncapturable(
+							"lkg_slot_rejected",
+							"LKG slot rejected the Pi snapshot",
+						);
 					if (
 						!saveLkgSlotToDb(
 							db,

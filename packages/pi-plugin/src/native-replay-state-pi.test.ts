@@ -22,6 +22,7 @@ import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
 } from "./native-replay-state-pi";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import {
 	assistantMessage,
 	createFakePi,
@@ -316,9 +317,10 @@ describe("native upgrade application", () => {
 		});
 	}
 
-	it("refuses publication without overwriting an unsupported document version", async () => {
+	it("does not overwrite an unsupported document version or abort local cleanup", async () => {
 		const sessionId = "ses-native-future-document";
 		const f = fixture(sessionId);
+		const publication = observePiPublicationForTest(sessionId);
 		try {
 			await f.seedLegacy();
 			const stored = JSON.stringify({
@@ -331,10 +333,18 @@ describe("native upgrade application", () => {
 					"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
 				)
 				.run(stored, sessionId);
+			publication.reset();
+			const original = nativeBytes([oldAssistant()]);
 			for (const percent of [0, 90, 0]) {
 				f.restart();
-				await expect(f.pass(percent)).rejects.toMatchObject({
-					name: "PiStorageBusyError",
+				const messages = await f.pass(percent);
+				expect(nativeBytes(messages)).toBe(original);
+				expect(messages[1]).toMatchObject({
+					content: [
+						{ type: "thinking", thinking: "", thinkingSignature: undefined },
+						{},
+						{ arguments: { dropped: expect.any(String) } },
+					],
 				});
 			}
 			expect(
@@ -344,7 +354,9 @@ describe("native upgrade application", () => {
 					)
 					.get(sessionId),
 			).toEqual({ trailing_blank_decisions: stored });
+			publication.expect("skipped", "envelope_unreadable", 3);
 		} finally {
+			publication.restore();
 			f.close();
 		}
 	});

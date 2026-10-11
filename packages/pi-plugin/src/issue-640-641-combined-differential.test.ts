@@ -48,9 +48,11 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 			"pi-plugin/src/context-perf-hooks.ts",
 		);
 		const lkgTimes: number[] = [];
+		const transformTimes: number[] = [];
 		const restoreTiming = setPiTransformTimingObserver(
 			(sample: { stage: string; elapsedMs: number }) => {
 				if (sample.stage === "lkgCapture") lkgTimes.push(sample.elapsedMs);
+				if (sample.stage === "total") transformTimes.push(sample.elapsedMs);
 			},
 		);
 		const db = createTestDb(join(evidenceRoot(), "pi-context.db"));
@@ -113,6 +115,7 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 			}
 			expect(wires.every((wire) => wire === wires[0])).toBe(true);
 			expect(lkgTimes).toHaveLength(32);
+			expect(transformTimes).toHaveLength(32);
 			expect(wires[0]).toContain("§1§");
 			writeFileSync(join(evidenceRoot(), "pi.json"), wires[0]);
 			console.log(
@@ -128,6 +131,12 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 					lkgColdMs: lkgTimes[0],
 					lkgWarmMedianMs: median(lkgTimes.slice(2)),
 					lkgWarmMaxMs: Math.max(...lkgTimes.slice(2)),
+					publicationColdMs: times[0] - transformTimes[0],
+					publicationWarmMedianMs: median(
+						times
+							.slice(2)
+							.map((time, index) => time - transformTimes[index + 2]),
+					),
 					warmMedianMs: median(times.slice(2)),
 					warmMinMs: Math.min(...times.slice(2)),
 					warmMaxMs: Math.max(...times.slice(2)),

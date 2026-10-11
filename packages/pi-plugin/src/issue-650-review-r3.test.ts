@@ -29,6 +29,7 @@ import {
 	readPiIdentityRecurrences,
 } from "./pi-tag-identity-repair";
 import { piCachedToolSurvivor } from "./pi-tool-identity";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import { piContentFallbackIds } from "./read-session-pi";
 import {
 	capturePiServedArray,
@@ -528,6 +529,7 @@ for (const kind of [
 async function rewindUnsavedNotes(identical: boolean) {
 	const db = createTestDb();
 	const id = session(identical ? "twin-rewind" : "distinct-rewind");
+	const publication = observePiPublicationForTest(id);
 	try {
 		updateSessionMeta(db, id, { piStableIdScheme: 1 });
 		const first = userMessage("host-built note", 7);
@@ -540,28 +542,12 @@ async function rewindUnsavedNotes(identical: boolean) {
 		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
 		const ctx = fakeContext(id, process.cwd(), ["hello"], [hello]);
 		const handler = fake.handlers.get("context")!;
-		const initial = handler(
+		const before = (await handler(
 			{ messages: [first, second, hello] } as never,
 			ctx as never,
-		);
-		let before: { messages: PiMessage[] };
-		if (identical) {
-			await expect(initial).rejects.toMatchObject({
-				name: "PiStorageBusyError",
-			});
-			// Older releases could serve ambiguous unsaved twins without a last-good request.
-			// Their JSONL numbers must still keep the second occurrence's already-served tag.
-			before = {
-				messages: [
-					userMessage("§1§ host-built note", 7),
-					userMessage("§2§ host-built note", 7),
-					userMessage("§3§ hello", 10),
-				],
-			};
-			capturePiServedArray(id, before.messages, {
-				servedTagNumbers: [1, 2, 3],
-			});
-		} else before = (await initial) as { messages: PiMessage[] };
+		)) as { messages: PiMessage[] };
+		if (identical)
+			publication.expect("numbers_only", "lkg_duplicate_entry_id", 1);
 		const fallbackIds = piContentFallbackIds([first, second], () => undefined);
 		const dropped = db
 			.prepare(
@@ -577,6 +563,7 @@ async function rewindUnsavedNotes(identical: boolean) {
 		)) as { messages: PiMessage[] };
 		return { expected: before.messages[1], actual: after.messages[0] };
 	} finally {
+		publication.restore();
 		db.close();
 	}
 }
@@ -584,7 +571,7 @@ test("review 650 r3 partner: removing an unrelated unsaved note does not change 
 	const result = await rewindUnsavedNotes(false);
 	expect(result.actual).toEqual(result.expected);
 });
-test("review 650 r3 finding: removing the first legacy-served identical unsaved note must not transfer its dropped tag to the second", async () => {
+test("review 650 r3 finding: removing the first identical unsaved note must not transfer its dropped tag to the second", async () => {
 	const result = await rewindUnsavedNotes(true);
 	expect(result.actual).toEqual(result.expected);
 });

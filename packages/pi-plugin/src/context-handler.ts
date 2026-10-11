@@ -333,6 +333,7 @@ import {
 	isTransientPiStorageError,
 	type PiLkgPassSnapshot,
 	type PiLkgSerializedOutput,
+	PiLkgUncapturable,
 	piStorageErrorReason,
 	reconcilePiLkgEntryIds,
 	resolvePiLkgOutputEntryIds,
@@ -367,7 +368,12 @@ import {
 	PiDegradedPassError,
 	PiStorageBusyError,
 } from "./pi-raw-fallback";
-import { publishPiServedNumbers } from "./pi-served-identities";
+import {
+	notePiPublicationIssue,
+	PiServedEnvelopeUnavailable,
+	publishPiServedNumbers,
+	readPiCommittedServedNumbers,
+} from "./pi-served-identities";
 import {
 	acknowledgePiIdentityRebuilds,
 	claimPiIdentityRepair,
@@ -3957,6 +3963,21 @@ export function registerPiContextHandler(
 		let lkgPassSnapshot: PiLkgPassSnapshot | undefined;
 		let lkgCompactionOff = baseOptions.compactionOff === true;
 		let lkgEmergencyRecoveryArmed = false;
+		const captureServedEvidence = (
+			...args: Parameters<typeof capturePiServedArray>
+		) => {
+			try {
+				return capturePiServedArray(...args);
+			} catch {
+				budget.assertOutcome();
+				notePiPublicationIssue(
+					args[0],
+					"identity_mirror_failed",
+					"mirror_failed",
+				);
+				return undefined;
+			}
+		};
 		try {
 			const tFindSession = performance.now();
 			const sessionId = resolveSessionId(ctx);
@@ -5759,6 +5780,7 @@ export function registerPiContextHandler(
 				if (refusal) throw contextRefusalError(refusal);
 			}
 			let serializedOutput: PiLkgSerializedOutput | undefined;
+			let numbersCommitted = false;
 			budget.stage = "LKG/served publication";
 			// Normal transform work is finished. Serialization and publication use
 			// the reserved completion margin, never a new budget or a raw fallback.
@@ -5788,37 +5810,99 @@ export function registerPiContextHandler(
 					/* Missing optional attribution must not prevent capturing the good prefix. */
 				}
 				budget.assertOutcome();
-				serializedOutput = lkgCoordinator.captureAppliedPass({
-					publishServedNumbers: () =>
-						publishPiServedNumbers(options.db, sessionId, [
-							...getPiServedTagNumbers(sessionId),
-							...(result.servedTagNumbers ?? []),
-						]),
-					assertCurrentPass: budget.assertOutcome,
-					hostEnvelopeSignature,
-					snapshot: lkgPassSnapshot,
-					outputMessages,
-					outputEntryIds: resolvePiLkgOutputEntryIds(
+				try {
+					// Preserve unreadable or newer-version session replay JSON rather than
+					// overwrite state this build cannot interpret. The transformed request can still be served.
+					readPiCommittedServedNumbers(options.db, sessionId);
+					serializedOutput = lkgCoordinator.captureAppliedPass({
+						publishServedNumbers: () =>
+							publishPiServedNumbers(options.db, sessionId, [
+								...getPiServedTagNumbers(sessionId),
+								...(result.servedTagNumbers ?? []),
+							]),
+						assertCurrentPass: budget.assertOutcome,
+						hostEnvelopeSignature,
+						snapshot: lkgPassSnapshot,
 						outputMessages,
-						result.syntheticLeadingCount,
-						(message) =>
-							result.postCommitEntryIdByRef.get(message) ??
-							result.lkgEntryIdByRef.get(message),
-					),
-					// Refresh the replay request on every successful managed pass. If reductions
-					// changed its representation, invalidate the stale request before replacement.
-					cacheBusting: result.bustedThisPass,
-				});
+						outputEntryIds: resolvePiLkgOutputEntryIds(
+							outputMessages,
+							result.syntheticLeadingCount,
+							(message) =>
+								result.postCommitEntryIdByRef.get(message) ??
+								result.lkgEntryIdByRef.get(message),
+						),
+						// Refresh the replay request on every successful managed pass. If reductions
+						// changed its representation, invalidate the stale request before replacement.
+						cacheBusting: result.bustedThisPass,
+					});
+					numbersCommitted = true;
+				} catch (error) {
+					// Publication failure cannot admit an expired, cancelled or superseded context invocation.
+					budget.assertOutcome();
+					// Do not attach the next assistant's provider-usage measurement to a
+					// previous request when this newly served request was not captured.
+					clearPiLkgSessionState(sessionId);
+					if (error instanceof PiLkgUncapturable) {
+						try {
+							// Even without a replay snapshot, the tag numbers on the served bytes
+							// must remain immutable. Record them only while the outcome clock admits this invocation.
+							budget.assertOutcome();
+							options.db
+								.transaction(() => {
+									budget.assertOutcome();
+									publishPiServedNumbers(options.db, sessionId, [
+										...getPiServedTagNumbers(sessionId),
+										...(result.servedTagNumbers ?? []),
+									]);
+								})
+								.immediate();
+							budget.assertOutcome();
+							numbersCommitted = true;
+							notePiPublicationIssue(sessionId, error.reason, "numbers_only");
+						} catch (numberError) {
+							budget.assertOutcome();
+							notePiPublicationIssue(
+								sessionId,
+								numberError instanceof PiServedEnvelopeUnavailable
+									? "envelope_unreadable"
+									: "number_write_failed",
+								numberError instanceof PiServedEnvelopeUnavailable
+									? "skipped"
+									: "commit_failed",
+							);
+						}
+					} else {
+						const reason =
+							error instanceof PiServedEnvelopeUnavailable
+								? "envelope_unreadable"
+								: error instanceof Error &&
+										error.message === "Pi LKG/served publication failed"
+									? "pair_commit_failed"
+									: "capture_failed";
+						notePiPublicationIssue(
+							sessionId,
+							reason,
+							reason === "pair_commit_failed" ? "commit_failed" : "skipped",
+						);
+					}
+				}
 			}
 			budget.assertOutcome();
-			if (!budget.sideTurn)
-				capturePiServedArray(sessionId, outputMessages, {
+			if (
+				!budget.sideTurn &&
+				(numbersCommitted || lkgCompactionOff || rawMessageCount === 0)
+			)
+				captureServedEvidence(sessionId, outputMessages, {
 					db: !lkgCompactionOff ? options.db : undefined,
 					servedTagNumbers: result.servedTagNumbers,
 					serializedOutput,
 					assertCurrentPass: budget.assertOutcome,
 				});
-			if (!budget.sideTurn && result.identityRebuilt)
+			if (
+				!budget.sideTurn &&
+				result.identityRebuilt &&
+				(numbersCommitted || lkgCompactionOff)
+			)
 				acknowledgePiIdentityRebuilds(options.db, sessionId);
 			if (!budget.sideTurn)
 				captureOpencodeReasoningBudgetStatus(
@@ -5854,15 +5938,15 @@ export function registerPiContextHandler(
 			budget.assertOutcome();
 			budget.stage = "recovery";
 			if (err instanceof PiServedIdentityError) {
-				// A served-number JSONL mirror or identity-read failure must refuse dispatch. Invalidate usage attribution,
-				// but retain any already committed request and its authoritative identities.
+				// Identity safety errors outside optional publication retain their existing
+				// refusal policy. Post-commit mirror failures are handled at the successful-result boundary.
 				if (sessionIdForError) clearPiLkgSessionState(sessionIdForError);
 				throw new PiStorageBusyError({ cause: err });
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
 				if (!budget.sideTurn)
-					capturePiServedArray(sessionIdForError, err.messages, {
+					captureServedEvidence(sessionIdForError, err.messages, {
 						db: baseOptions.db,
 						assertCurrentPass: budget.assertOutcome,
 					});
@@ -5945,7 +6029,7 @@ export function registerPiContextHandler(
 						);
 						budget.assertOutcome();
 						if (!budget.sideTurn)
-							capturePiServedArray(sessionIdForError, replay.messages, {
+							captureServedEvidence(sessionIdForError, replay.messages, {
 								db: baseOptions.db,
 								assertCurrentPass: budget.assertOutcome,
 							});

@@ -1,8 +1,42 @@
 import {
+	ReplayDocumentError,
 	readReplayEnvelope,
 	updateReplayDocument,
 } from "@magic-context/core/features/magic-context/storage-replay-document";
+import { BoundedSessionMap } from "@magic-context/core/shared/bounded-session-map";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import { recordPiTransformTiming } from "./context-perf-hooks";
+
+export class PiServedEnvelopeUnavailable extends Error {}
+
+const loggedReasons = new BoundedSessionMap<Set<string>>(1000);
+
+/** Count each number-only/failed publication outcome; suppress repeated warning lines for the same session/reason. */
+export function notePiPublicationIssue(
+	sessionId: string,
+	reason: string,
+	status: "numbers_only" | "skipped" | "commit_failed" | "mirror_failed",
+): void {
+	try {
+		recordPiTransformTiming({
+			sessionId,
+			stage: "lkgPublication",
+			elapsedMs: 0,
+			publication: { status, reason, count: 1 },
+		});
+	} catch {
+		// Diagnostic observers must not turn an optional publication into a refusal.
+	}
+	const reasons = loggedReasons.get(sessionId) ?? new Set<string>();
+	if (reasons.has(reason)) return;
+	reasons.add(reason);
+	loggedReasons.set(sessionId, reasons);
+	sessionLog(
+		sessionId,
+		`Pi publication ${status} reason=${reason}; serving managed context`,
+	);
+}
 
 function parseNumbers(value: unknown): number[] {
 	if (value === undefined) return [];
@@ -10,7 +44,7 @@ function parseNumbers(value: unknown): number[] {
 		!Array.isArray(value) ||
 		!value.every((number) => Number.isSafeInteger(number) && number > 0)
 	) {
-		throw new Error(
+		throw new PiServedEnvelopeUnavailable(
 			"Invalid committed Pi served identities; refusing adoption",
 		);
 	}
@@ -22,7 +56,17 @@ export function readPiCommittedServedNumbers(
 	db: Database,
 	sessionId: string,
 ): readonly number[] {
-	return parseNumbers(readReplayEnvelope(db, sessionId).piServedTagNumbers);
+	try {
+		return parseNumbers(readReplayEnvelope(db, sessionId).piServedTagNumbers);
+	} catch (error) {
+		if (error instanceof ReplayDocumentError) {
+			throw new PiServedEnvelopeUnavailable(
+				"Pi served-number envelope is unreadable",
+				{ cause: error },
+			);
+		}
+		throw error;
+	}
 }
 
 /** Runs inside the last-good request transaction; failure rolls back the request and served numbers. */

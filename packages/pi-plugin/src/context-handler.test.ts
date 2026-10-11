@@ -100,6 +100,7 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
 	assistantMessage,
@@ -1954,15 +1955,10 @@ describe("registerPiContextHandler", () => {
 			// Record the initial model before populating session metadata; only a
 			// genuine model change may clear this metadata.
 			recordPiLiveModel(sessionId, "openai/gpt-5.6-sol");
-			await handler({ messages: [userMessage("warm", 1)] as never[] }, {
-				...baseContext,
-				...fakeContext(
-					sessionId,
-					process.cwd(),
-					["warm"],
-					[userMessage("warm", 1)],
-				),
-			} as never);
+			await handler(
+				{ messages: [userMessage("warm", 1)] as never[] },
+				baseContext as never,
+			);
 			updateSessionMeta(db, sessionId, {
 				lastContextPercentage: 61,
 				lastInputTokens: 61_000,
@@ -1973,12 +1969,6 @@ describe("registerPiContextHandler", () => {
 
 			await handler({ messages: [userMessage("native alias", 2)] as never[] }, {
 				...baseContext,
-				...fakeContext(
-					sessionId,
-					process.cwd(),
-					["native"],
-					[userMessage("native alias", 2)],
-				),
 				model: { provider: "openai-codex", id: "gpt-5.6-sol" },
 			} as never);
 			let meta = getOrCreateSessionMeta(db, sessionId);
@@ -1995,15 +1985,7 @@ describe("registerPiContextHandler", () => {
 			});
 			await handler(
 				{ messages: [userMessage("canonical alias", 3)] as never[] },
-				{
-					...baseContext,
-					...fakeContext(
-						sessionId,
-						process.cwd(),
-						["canonical"],
-						[userMessage("canonical alias", 3)],
-					),
-				} as never,
+				baseContext as never,
 			);
 			meta = getOrCreateSessionMeta(db, sessionId);
 			expect(meta.clearedReasoningThroughTag).toBe(8);
@@ -3094,8 +3076,9 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("refuses unresolved note-anchor history without persisting a new note", async () => {
+	it("replays note anchors by message id but skips new note persistence on ref failure", async () => {
 		const db = createTestDb();
+		const publication = observePiPublicationForTest("ses-note-ref-fail");
 		try {
 			const sessionId = "ses-note-ref-fail";
 			clearContextHandlerSession(sessionId);
@@ -3116,16 +3099,16 @@ describe("registerPiContextHandler", () => {
 				ctx: never,
 			) => Promise<{ messages: never[] }>;
 			const msg = { ...userMessage("new turn", 1), id: "entry-existing" };
-			await expect(
-				handler({ messages: [msg] as never[] }, {
-					...fakeContext(sessionId),
-					sessionManager: { getSessionId: () => sessionId },
-				} as never),
-			).rejects.toMatchObject({ name: "PiStorageBusyError" });
+			const result = await handler({ messages: [msg] as never[] }, {
+				...fakeContext(sessionId),
+				sessionManager: { getSessionId: () => sessionId },
+			} as never);
 
-			expect(getNoteNudgeAnchors(db, sessionId)[0]?.text).toContain("existing");
+			expect(textOf(result.messages[0] as never)).toContain("existing");
 			expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
+			publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		} finally {
+			publication.restore();
 			clearContextHandlerSession("ses-note-ref-fail");
 			closeQuietly(db);
 		}
@@ -4600,10 +4583,9 @@ describe("registerPiContextHandler", () => {
 				"boom messages",
 			);
 
-			const raw = [userMessage("ok", 2)];
 			await handler(
-				{ messages: raw as never[] },
-				fakeContext("ses-context", process.cwd(), ["ok"], raw) as never,
+				{ messages: [userMessage("ok", 2)] as never[] },
+				fakeContext("ses-context") as never,
 			);
 			expect(getOrCreateSessionMeta(db, "ses-context").lastTransformError).toBe(
 				null,
@@ -5080,7 +5062,8 @@ describe("registerPiContextHandler", () => {
 			) => Promise<{ messages: never[] }>;
 			const msg = userMessage("after restart", 1);
 			await handler({ messages: [msg] as never[] }, {
-				...fakeContext(sessionId, process.cwd(), ["after-restart"], [msg]),
+				...fakeContext(sessionId),
+				sessionManager: { getSessionId: () => sessionId },
 				// Same model as before (no model change) → first-pass path only.
 				getContextUsage: () => ({
 					tokens: 120_000,

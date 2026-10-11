@@ -8,7 +8,10 @@ import {
 	writeStorageFileSync,
 } from "@magic-context/core/shared/storage-permissions";
 import type { PiLkgSerializedOutput } from "./pi-lkg";
-import { readPiCommittedServedNumbers } from "./pi-served-identities";
+import {
+	PiServedEnvelopeUnavailable,
+	readPiCommittedServedNumbers,
+} from "./pi-served-identities";
 
 export const PI_SERVED_ARRAY_TAIL_MESSAGES = 40;
 export const PI_SERVED_ARRAY_BODY_CAPTURE_ENV =
@@ -87,11 +90,19 @@ export function getPiServedTagNumbers(
 	storageDir = getMagicContextStorageDir(),
 	db?: import("@magic-context/core/shared/sqlite").Database,
 ): ReadonlySet<number> {
-	if (db)
-		return new Set([
-			...getPiServedTagNumbers(sessionId, storageDir),
-			...readPiCommittedServedNumbers(db, sessionId),
-		]);
+	if (db) {
+		const legacy = getPiServedTagNumbers(sessionId, storageDir);
+		try {
+			return new Set([
+				...legacy,
+				...readPiCommittedServedNumbers(db, sessionId),
+			]);
+		} catch (error) {
+			// Unreadable optional SQLite evidence cannot erase valid legacy identities.
+			if (error instanceof PiServedEnvelopeUnavailable) return legacy;
+			throw error;
+		}
+	}
 	const filePath = getPiServedTagNumbersPath(sessionId, storageDir);
 	const cached = servedTagNumbersBySession.get(sessionId);
 	if (cached?.path === filePath) return cached.numbers;
