@@ -14400,6 +14400,17 @@ fn apply_surface_strips(
                 .flatten()
         });
     if whole_strip.is_some() {
+        // OpenCode 2 hands host system updates over as `system` rows and sends
+        // one to Anthropic as an in-conversation system message with its text
+        // blocks as they are, so the empty sentinel would be an empty text block
+        // the API rejects with HTTP 400. With no content the row is left out of
+        // the rendered output (see `present` in the render loop), matching TS
+        // `wholeMessageNeutralizationRemoves`. OpenCode 1 has no system rows.
+        if message.ck.role == "system" && request_accepts_empty_content(req) {
+            rebuilt.content.clear();
+            rebuilt.mark_modified();
+            return;
+        }
         rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text: sentinel })];
         rebuilt.mark_modified();
         return;
@@ -28410,6 +28421,106 @@ pub(crate) mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn anthropic_whole_message_strip_leaves_system_rows_without_content() {
+        // OpenCode 2 sends a `system` row to Anthropic as an in-conversation
+        // system message, empty text blocks included, and the API rejects an
+        // empty text block. The row must lose all content (the render loop then
+        // leaves it out) while user/assistant rows keep the empty sentinel the
+        // host drops, and other providers keep `[dropped]`.
+        let units = vec![
+            strip_unit("placeholder", "sys", ""),
+            strip_unit("system_injected", "reminder", ""),
+            strip_unit("placeholder", "asst", ""),
+        ];
+        let lookup = FrozenUnitLookup::Scan(&units);
+        let message = |mid: &str, ordinal: u64, role: &str, text: &str| {
+            let mut message = item(mid, ordinal, text);
+            message.ck.role = role.to_string();
+            message
+        };
+        let render = |message: &CkIngressMessage, provider: Option<&str>| {
+            let mut request = req("system-rows", "cfg0", vec![message.clone()]);
+            request.provider_id = provider.map(str::to_string);
+            let mut rebuilt = message.ck.clone();
+            apply_surface_strips(
+                &lookup,
+                &request,
+                message,
+                &[],
+                &mut rebuilt,
+                &BTreeMap::new(),
+                ReasoningMutationPolicy {
+                    watermark: 0,
+                    exempt: false,
+                },
+            );
+            rebuilt.content
+        };
+        let text = |text: &str| {
+            vec![CkWireBlock::bare(ck_wire::CkKind::Text {
+                text: text.to_string(),
+            })]
+        };
+
+        let dropped = message("sys", 2, "system", "[dropped \u{a7}4\u{a7}]");
+        let reminder = message(
+            "reminder",
+            2,
+            "system",
+            "<system-reminder>done</system-reminder>",
+        );
+        let assistant = message("asst", 2, "assistant", "[dropped \u{a7}5\u{a7}]");
+        assert!(render(&dropped, Some("anthropic")).is_empty());
+        assert!(render(&reminder, Some("anthropic")).is_empty());
+        assert_eq!(render(&assistant, Some("anthropic")), text(""));
+        assert_eq!(render(&dropped, Some("openai")), text("[dropped]"));
+        assert_eq!(render(&dropped, None), text("[dropped]"));
+
+        // Through the render loop: the anthropic system row is left out of the
+        // served messages entirely; with another provider it stays as `[dropped]`.
+        for (provider, kept) in [(Some("anthropic"), false), (Some("openai"), true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let messages = vec![
+                item("first", 1, "first user turn"),
+                message("sys", 2, "system", "[dropped \u{a7}4\u{a7}]"),
+                item("last", 3, "last user turn"),
+            ];
+            let projection = project_messages(&messages).unwrap();
+            let core = CoreState {
+                frozen_units: vec![
+                    synth_region("m0", "BASE".into()),
+                    synth_region("m1", M1_PLACEHOLDER.into()),
+                    strip_unit("placeholder", "sys", ""),
+                ],
+                ..Default::default()
+            };
+            let meta = ModuleMeta {
+                initialized: true,
+                block_identity_by_mid: projection.identity_by_mid,
+                ..Default::default()
+            };
+            s.commit("system-rows", None, &core, &meta).unwrap();
+            let mut request = req("system-rows", "cfg0", messages);
+            request.provider_id = provider.map(str::to_string);
+            let response =
+                transform(&s, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
+            let served = serde_json::to_string(&response.ck_messages).unwrap();
+            assert_eq!(
+                response
+                    .ck_messages
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message.role == "system"),
+                kept,
+                "{provider:?}: {served}"
+            );
+            assert!(!served.contains(r#""text":"""#), "{provider:?}: {served}");
+        }
     }
 
     #[test]

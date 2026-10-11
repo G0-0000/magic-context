@@ -793,3 +793,120 @@ it("OpenCode 2 question fallback vetoes automatic drops but preserves explicit r
     mapped.commit();
     expect(JSON.stringify(payload.messages)).toContain("[dropped §1§]");
 });
+
+describe("adaptPayload commit on canonical Anthropic", () => {
+    // Anthropic answers an empty text block with HTTP 400, and OpenCode 2 sends a
+    // `system` row to it as an in-conversation system message with its text
+    // blocks as they are. The whole-message lanes leave such a row with no parts;
+    // commit omits it, and a final guard takes out any empty text part left.
+    const HINT = { type: "ephemeral" };
+
+    function anthropicDraft(sessionID: string, messages: V2Message[]): SessionContext {
+        return {
+            ...draft(messages),
+            sessionID,
+            model: { providerID: "anthropic", id: "claude-opus-5-5" },
+        };
+    }
+
+    function rows(): V2Message[] {
+        return [
+            { id: "u1", role: "user", content: [{ type: "text", text: "§1§ start" }] },
+            { id: "s1", role: "system", content: [{ type: "text", text: "[dropped §2§]" }] },
+            { id: "a1", role: "assistant", content: [{ type: "text", text: "§3§ reply" }] },
+            { id: "u2", role: "user", content: [{ type: "text", text: "§4§ next" }] },
+        ];
+    }
+
+    function commitWith(
+        context: SessionContext,
+        edit: (byId: Map<unknown, MessageLike>) => void,
+    ): string[] {
+        const mapped = adaptPayload(context);
+        edit(new Map(mapped.messages.map((message) => [message.info.id, message])));
+        const logged: string[] = [];
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation((_session, message) => {
+            logged.push(message);
+        });
+        try {
+            mapped.commit();
+        } finally {
+            logSpy.mockRestore();
+        }
+        return logged.filter((line) => line.includes("v2 payload: left out"));
+    }
+
+    it("omits a system row left with no parts and records it once per session", () => {
+        const first = anthropicDraft("ses-662-omit", rows());
+        const logged = commitWith(first, (byId) => {
+            byId.get("s1")!.parts.length = 0;
+        });
+        expect(first.messages.map((message) => message.id)).toEqual(["u1", "a1", "u2"]);
+        expect(logged).toHaveLength(1);
+        expect(logged[0]).toContain("left out 1 emptied messages and 0 empty text parts");
+
+        // The next ordinary pass serves the same bytes and does not log again.
+        const second = anthropicDraft("ses-662-omit", rows());
+        expect(
+            commitWith(second, (byId) => {
+                byId.get("s1")!.parts.length = 0;
+            }),
+        ).toEqual([]);
+        expect(JSON.stringify(second.messages)).toBe(JSON.stringify(first.messages));
+    });
+
+    it("takes out empty text parts and puts a removed cache hint where OpenCode 2 would", () => {
+        const context = anthropicDraft("ses-662-guard", rows());
+        const logged = commitWith(context, (byId) => {
+            // An empty system row whose sentinel carries the host's cache hint.
+            byId.get("s1")!.parts.splice(0, 1, { type: "text", text: "", cache: HINT });
+            // An assistant row with empty parts around its text, the last one hinted.
+            byId.get("a1")!.parts.unshift({ type: "text", text: "" });
+            byId.get("a1")!.parts.push({ type: "text", text: "", cache: HINT });
+        });
+        expect(context.messages).toEqual([
+            // OpenCode 2's policy marks a message's last text part (else its last part).
+            { id: "u1", role: "user", content: [{ type: "text", text: "§1§ start", cache: HINT }] },
+            {
+                id: "a1",
+                role: "assistant",
+                content: [{ type: "text", text: "§3§ reply", cache: HINT }],
+            },
+            { id: "u2", role: "user", content: [{ type: "text", text: "§4§ next" }] },
+        ]);
+        expect(logged).toHaveLength(1);
+        expect(logged[0]).toContain("left out 1 emptied messages and 3 empty text parts");
+    });
+
+    it("never adds a second breakpoint to a message that already has one", () => {
+        const context = anthropicDraft("ses-662-existing", rows());
+        commitWith(context, (byId) => {
+            const assistant = byId.get("a1")!;
+            assistant.parts.unshift({ type: "text", text: "kept", cache: HINT });
+            assistant.parts.push({ type: "text", text: "", cache: { type: "other" } });
+        });
+        expect(context.messages.find((message) => message.id === "a1")?.content).toEqual([
+            { type: "text", text: "kept", cache: HINT },
+            { type: "text", text: "§3§ reply" },
+        ]);
+    });
+
+    it("leaves other providers' rows and empty parts exactly as the pipeline produced them", () => {
+        const context = {
+            ...anthropicDraft("ses-662-openai", rows()),
+            model: { providerID: "openai", id: "gpt" },
+        };
+        const logged = commitWith(context, (byId) => {
+            byId.get("s1")!.parts.splice(0, 1, { type: "text", text: "[dropped]" });
+            byId.get("a1")!.parts.push({ type: "text", text: "" });
+        });
+        expect(logged).toEqual([]);
+        expect(context.messages.find((message) => message.id === "s1")?.content).toEqual([
+            { type: "text", text: "[dropped]" },
+        ]);
+        expect(context.messages.find((message) => message.id === "a1")?.content).toEqual([
+            { type: "text", text: "§3§ reply" },
+            { type: "text", text: "" },
+        ]);
+    });
+});

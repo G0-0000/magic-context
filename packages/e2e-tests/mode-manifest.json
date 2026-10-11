@@ -810,6 +810,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/empty-text-sentinels.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: a system row Magic Context neutralizes on canonical Anthropic must leave the request instead of reaching the API as an empty text block (OpenCode 2 sends system rows to Claude models with native system updates as they are), checked against an Anthropic-strict mock on the real host; the v2 lane runs from its own invocation (bun test tests/opencode2), not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/commands-s2-flush.test.ts",
             "tier": "excluded",
             "invocation": {
