@@ -4113,7 +4113,8 @@ export function registerPiContextHandler(
 				contextPassGeneration.get(passSessionId) !== generation
 			)
 				throw new PiContextSupersededError(
-					"Pi context pass superseded before writer admission",
+					"Pi context pass superseded by a newer context generation",
+					"context generation",
 				);
 			signal?.throwIfAborted();
 		};

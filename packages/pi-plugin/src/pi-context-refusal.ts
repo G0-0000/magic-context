@@ -23,7 +23,14 @@ const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
 	"Magic Context could not safely prepare this turn; send your message again.";
 
-export class PiContextSupersededError extends Error {}
+export class PiContextSupersededError extends Error {
+	constructor(
+		message: string,
+		readonly origin = "context ownership",
+	) {
+		super(message);
+	}
+}
 
 interface Operation {
 	pass?: PiContextBudget;
@@ -183,7 +190,9 @@ export function registerPiGuardedContext(
 		budget.abandoned = true;
 		budget.recovery =
 			budget.recovery === "not attempted"
-				? "no managed result; refused"
+				? reason instanceof PiContextSupersededError
+					? "superseded context result; refused"
+					: "no managed result; refused"
 				: budget.recovery;
 		const identityConflict = findPiTagIdentityConflict(reason);
 		const message = identityConflict
@@ -318,7 +327,12 @@ export function registerPiGuardedContext(
 				active.dispatched = true;
 			} catch (error) {
 				active.refused = true;
-				budget.stage = "provider dispatch";
+				// Report what invalidated the prepared result and the last preparation
+				// stage it reached, rather than blaming a writer lock during dispatch.
+				budget.stage =
+					error instanceof PiContextSupersededError
+						? `provider dispatch (origin=${error.origin}; context stage=${budget.stage})`
+						: "provider dispatch";
 				refuse(ctx, budget, error, isCurrent);
 			}
 		});
@@ -366,7 +380,12 @@ export function registerPiGuardedContext(
 		budget.assertOwner = () => {
 			if (!isCurrent())
 				throw new PiContextSupersededError(
-					"Pi context pass superseded before writer admission",
+					"Pi context pass superseded: no longer valid for this operation",
+					active.ended
+						? "agent_end"
+						: operations.get(key) !== (budget.sideTurn ? owner : active)
+							? "operation replacement or cache eviction"
+							: "newer context pass",
 				);
 		};
 		try {

@@ -103,7 +103,7 @@ for (const cancellation of ["successor", "signal"] as const) {
 			expect(((await old) as Error).message).toBe(
 				cancellation === "signal"
 					? "cancelled search"
-					: "Pi context pass superseded before writer admission",
+					: "Pi context pass superseded: no longer valid for this operation",
 			);
 			await new Promise<void>((done) => setImmediate(done));
 			expect(getSlot(sessionId)?.jsonPrefix ?? "").not.toContain(
@@ -451,7 +451,7 @@ test("r2: an event-aborted waiter superseded twice never aborts the latest turn"
 		}
 		controller.abort(new Error("host abandoned old event"));
 		expect(((await old) as Error).message).toBe(
-			"Pi context pass superseded before writer admission",
+			"Pi context pass superseded: no longer valid for this operation",
 		);
 		expect(aborts).toBe(0);
 	} finally {

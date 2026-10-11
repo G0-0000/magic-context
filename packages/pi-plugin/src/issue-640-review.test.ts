@@ -106,7 +106,7 @@ for (const cancellation of ["successor", "signal"] as const) {
 				result: {
 					error:
 						cancellation === "successor"
-							? "Pi context pass superseded before writer admission"
+							? "Pi context pass superseded: no longer valid for this operation"
 							: "host cancelled after admission",
 				},
 				oldRows: [],
