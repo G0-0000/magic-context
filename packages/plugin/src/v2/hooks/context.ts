@@ -301,6 +301,7 @@ export function createHostSeams(
         TransformDeps,
         | "hostRawMessages"
         | "hostMessageReconciliationSource"
+        | "hostPrepareRawOrdinals"
         | "hostProtectedTailBoundary"
         | "hostModelFallback"
         | "getModelKey"
@@ -311,6 +312,10 @@ export function createHostSeams(
     return {
         hostRawMessages: readAllForConversion,
         hostMessageReconciliationSource: reconciliationSource,
+        // The OpenCode 2 reader already knows each message's position in the
+        // session. The default warm-up indexes OpenCode 1's SQLite database,
+        // which is a different store and cannot prepare this reader's messages.
+        hostPrepareRawOrdinals: async () => true,
         hostProtectedTailBoundary: (args) =>
             resolveOpenCodeProtectedTailBoundary({
                 ...args,
