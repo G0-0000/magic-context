@@ -41,6 +41,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { statSync } from "node:fs";
+
 // Type import only — runtime is loaded dynamically below. @types/better-sqlite3
 // has the richest definitions and is a structural superset of the API surface
 // we use, so calls typed against BetterSqlite3 work under bun:sqlite and
@@ -875,22 +876,31 @@ export function withSqliteBackgroundWriter<T>(operation: () => T): T {
 export function withSqliteTransformPass<T>(operation: () => T): T {
     const existing = transformPassScope.getStore();
     if (existing?.active) return operation();
-    const lease = { active: true, remainingWaitMs: FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS };
-    return transformPassScope.run(lease, () => {
-        try {
-            const result = operation();
-            if (result && typeof (result as { then?: unknown }).then === "function") {
-                return Promise.resolve(result).finally(() => {
-                    lease.active = false;
-                }) as T;
+    const reservation = reserveForegroundSqliteTurn();
+    const run = (release: () => void): T => {
+        const lease = { active: true, remainingWaitMs: FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS };
+        return transformPassScope.run(lease, () => {
+            try {
+                const result = operation();
+                if (result && typeof (result as { then?: unknown }).then === "function") {
+                    return Promise.resolve(result).finally(() => {
+                        lease.active = false;
+                        release();
+                    }) as T;
+                }
+                lease.active = false;
+                release();
+                return result;
+            } catch (error) {
+                lease.active = false;
+                release();
+                throw error;
             }
-            lease.active = false;
-            return result;
-        } catch (error) {
-            lease.active = false;
-            throw error;
-        }
-    });
+        });
+    };
+    // Foreground callers racing maintenance are awaited transforms. Idle
+    // synchronous callers keep the existing immediate return/throw behavior.
+    return typeof reservation === "function" ? run(reservation) : (reservation.then(run) as T);
 }
 
 /** Start detached maintenance work without borrowing a foreground pass's budget. */
@@ -1284,4 +1294,81 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
         }
         throw error;
     }
+}
+
+// Process-local admission only; SQLite remains the cross-process writer arbiter.
+const indexCoordinationKey = Symbol.for("magic-context.index-foreground-coordination.v1");
+const indexCoordinationHeap = globalThis as unknown as Record<
+    symbol,
+    SharedArrayBuffer | undefined
+>;
+const indexCoordinationBuffer =
+    indexCoordinationHeap[indexCoordinationKey] ??
+    new SharedArrayBuffer(3 * Int32Array.BYTES_PER_ELEMENT);
+indexCoordinationHeap[indexCoordinationKey] = indexCoordinationBuffer;
+const indexCoordinationState = new Int32Array(indexCoordinationBuffer);
+// Slots: foreground interest, current maintenance owner, next owner token.
+
+export function indexCoordinationInput(): {
+    indexCoordination: SharedArrayBuffer;
+    indexOwner: number;
+} {
+    return {
+        indexCoordination: indexCoordinationBuffer,
+        indexOwner: Atomics.add(indexCoordinationState, 2, 1) + 1,
+    };
+}
+
+const yieldIndexTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 1));
+
+/** Announce interest before waiting, so no maintenance chunk overtakes a foreground turn. */
+function reserveForegroundSqliteTurn(): (() => void) | Promise<() => void> {
+    Atomics.add(indexCoordinationState, 0, 1);
+    const release = () => {
+        Atomics.sub(indexCoordinationState, 0, 1);
+        Atomics.notify(indexCoordinationState, 0);
+    };
+    if (Atomics.load(indexCoordinationState, 1) === 0) return release;
+    return (async () => {
+        while (Atomics.load(indexCoordinationState, 1) !== 0) await yieldIndexTurn();
+        return release;
+    })();
+}
+
+export function releaseIndexOwner(input: {
+    indexCoordination?: SharedArrayBuffer;
+    indexOwner?: number;
+}): void {
+    if (!input.indexCoordination || !input.indexOwner) return;
+    const shared = new Int32Array(input.indexCoordination);
+    Atomics.compareExchange(shared, 1, input.indexOwner, 0);
+    Atomics.notify(shared, 1);
+}
+
+/** One synchronous transaction per permit; release the permit before yielding. */
+export async function withIndexChunk<T>(
+    input: { indexCoordination?: SharedArrayBuffer; indexOwner?: number },
+    operation: () => T,
+): Promise<T> {
+    if (!input.indexCoordination || !input.indexOwner) return operation();
+    const shared = new Int32Array(input.indexCoordination);
+    for (;;) {
+        if (
+            Atomics.load(shared, 0) === 0 &&
+            Atomics.compareExchange(shared, 1, 0, input.indexOwner) === 0
+        ) {
+            if (Atomics.load(shared, 0) === 0) break;
+            releaseIndexOwner(input);
+        }
+        await yieldIndexTurn();
+    }
+    try {
+        return await operation();
+    } finally {
+        releaseIndexOwner(input);
+    }
+}
+
+export async function yieldIndexChunk(): Promise<void> {
+    await yieldIndexTurn();
 }

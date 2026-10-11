@@ -80,6 +80,7 @@ import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
 import { hasAnthropicReasoning } from "./active-anthropic-turn";
 import {
+    applyFlushedStatuses,
     type ConvertedToolDropMode,
     foldBustsServedPrefix,
     prepareLegacyToolSkeletonConversions,
@@ -171,6 +172,7 @@ import {
     findMergedReasoningStripDecisions,
     findReasoningBearingAssistantIds,
     findTrailingBlankDecisionCandidates,
+    replayClearedReasoning,
     replayStrippedInlineThinking,
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
@@ -1897,6 +1899,23 @@ export async function runPostTransformPhase(
 ): Promise<PostTransformPhaseResult> {
     const tPostprocessSetup = performance.now();
     const compactionOff = args.compactionOff === true;
+    // Wait before this phase reads any decision/protection snapshot. The tagged
+    // message graph and prepared history are one coherent caller-owned input;
+    // do not replace only pieces of that render with a peer's newer epoch.
+    if (
+        !compactionOff &&
+        !tryGetReasoningTokenEstimatesByMessage(
+            args.db,
+            args.sessionId,
+            sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
+        )
+    ) {
+        await waitForTagOwners(
+            args.db,
+            args.sessionId,
+            sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
+        );
+    }
     // A caught error or failed persistence can leave an already-mutated array
     // only partly replayed. Never publish it, even if it fits the window. The
     // wrapper owns last-good replay or refusal; native compaction owns off mode.
@@ -2353,6 +2372,75 @@ export async function runPostTransformPhase(
     const removedReasoningIds = new Set<string>();
     let dropLeavesReasoning = false;
     let reasoningRemovalReadable = false;
+    const refreshReasoningRemovalUnion = (): void => {
+        if (compactionOff) return;
+        try {
+            if (reasoningRemovalEnabled) {
+                const committed = getReasoningRemovalState(args.db, args.sessionId);
+                for (const id of committed.messageIds) removedReasoningIds.add(id);
+                dropLeavesReasoning = committed.dropLeavesReasoning;
+            }
+            const committedWatermark = args.db
+                .prepare(
+                    "SELECT cleared_reasoning_through_tag AS watermark, last_observed_model_key AS modelKey FROM session_meta WHERE session_id=?",
+                )
+                .get(args.sessionId) as { watermark: number; modelKey: string | null } | null;
+            // A model transition intentionally resets the watermark. Never mix
+            // its older epoch into this pass's tagged/prepared input.
+            if (
+                committedWatermark &&
+                committedWatermark.modelKey === args.sessionMeta.lastObservedModelKey
+            ) {
+                args.sessionMeta.clearedReasoningThroughTag = Math.max(
+                    args.sessionMeta.clearedReasoningThroughTag,
+                    committedWatermark.watermark,
+                );
+                if (!prefixBoundModel) {
+                    if (canUseEmptySentinels)
+                        replayClearedReasoning(
+                            args.messages,
+                            args.reasoningByMessage,
+                            args.messageTagNumbers,
+                            args.sessionMeta.clearedReasoningThroughTag,
+                        );
+                    replayStrippedInlineThinking(
+                        args.messages,
+                        args.messageTagNumbers,
+                        args.sessionMeta.clearedReasoningThroughTag,
+                    );
+                }
+            }
+        } catch (error) {
+            failPass("reasoning-removal-read-failure", error);
+            throw new EmergencyFailClosedError("Saved reasoning removals could not be refreshed", {
+                cause: error,
+            });
+        }
+    };
+    const replayCommittedVisibleDrops = (): boolean => {
+        if (compactionOff) return false;
+        const visible = new Set(args.messages);
+        const targets = new Map(
+            [...args.targets].filter(([, target]) => {
+                if (target.mutationParts)
+                    return target.mutationParts.some(
+                        ({ message, part }) =>
+                            visible.has(message) &&
+                            message.info.syntheticHead !== true &&
+                            message.parts.includes(part) &&
+                            (!isRecord(part) || part.synthetic !== true),
+                    );
+                return (
+                    target.message !== undefined &&
+                    visible.has(target.message) &&
+                    target.message.info.syntheticHead !== true
+                );
+            }),
+        );
+        // History preparation may reuse a host text object for a synthetic
+        // prefix. A persisted drop of the former raw part must not erase it.
+        return applyFlushedStatuses(args.sessionId, args.db, targets);
+    };
     if (reasoningRemovalEnabled) {
         try {
             const state = getReasoningRemovalState(args.db, args.sessionId);
@@ -2698,23 +2786,11 @@ export async function runPostTransformPhase(
                     }
                 }
             }
-            let reasoningEstimates = tryGetReasoningTokenEstimatesByMessage(
+            const reasoningEstimates = tryGetReasoningTokenEstimatesByMessage(
                 args.db,
                 args.sessionId,
                 sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
             );
-            if (routineCleanupApplied && !reasoningEstimates) {
-                await waitForTagOwners(
-                    args.db,
-                    args.sessionId,
-                    sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
-                );
-                reasoningEstimates = tryGetReasoningTokenEstimatesByMessage(
-                    args.db,
-                    args.sessionId,
-                    sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
-                );
-            }
             const budgetCutoff =
                 routineCleanupApplied && reasoningEstimates
                     ? Math.min(
@@ -4078,6 +4154,10 @@ export async function runPostTransformPhase(
     // blocks exactly as a primary's does.
     // The first rebuilding pass after upgrade switches how reasoning a drop
     // touched is served; that changes bytes only where such a part is present.
+    // Todo and search work also suspend the pass. Read the committed union
+    // after the last suspension, even when this pass selected no new IDs.
+    refreshReasoningRemovalUnion();
+    replayCommittedVisibleDrops();
     const dropModeSwitchesThisPass =
         !canUseEmptySentinels &&
         !dropLeavesReasoning &&
@@ -4237,6 +4317,15 @@ export async function runPostTransformPhase(
     );
 
     args.restoreLatestTurnOriginals?.();
+    // Authorized restoration must not undo a peer's durable omissions.
+    if (args.restoreLatestTurnOriginals) {
+        refreshReasoningRemovalUnion();
+        if (replayCommittedVisibleDrops()) {
+            finalizeMessageRepresentation(args.messages, args.resolvedProviderID, finalizeOptions);
+        }
+        if (reasoningRemovalEnabled)
+            removeReasoningParts(args.messages, removedReasoningIds, args.resolvedProviderID);
+    }
     sessionLog(
         args.sessionId,
         `final representation: clearedParts=${finalRepresentation.clearedParts} mergedReasoningParts=${finalRepresentation.mergedReasoningParts} removedReasoningParts=${removedReasoningParts} settledDroppedReasoning=${settledDroppedReasoning}`,

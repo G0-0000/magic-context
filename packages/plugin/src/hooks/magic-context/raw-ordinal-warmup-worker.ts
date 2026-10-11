@@ -28,11 +28,11 @@ try {
         const { setHarness } = await import("../../shared/harness");
         setHarness(input.harness ?? "opencode");
         const [
-            { indexSingleMessage },
+            { indexMessageInShortChunks },
             { configureContextDatabasePragmas },
-            { withSqliteBackgroundWriter, registerSqliteDiagnosticSink },
+            { registerSqliteDiagnosticSink },
         ] = await Promise.all([
-            import("../../features/magic-context/message-index"),
+            import("../../features/magic-context/message-index-bounded"),
             import("../../shared/sqlite-context-pragmas"),
             import("../../shared/sqlite"),
         ]);
@@ -44,15 +44,14 @@ try {
         const cancellation = input.indexCancellation
             ? new Int32Array(input.indexCancellation)
             : undefined;
-        const inserted = withSqliteBackgroundWriter(() =>
-            indexSingleMessage(
-                writer,
-                input.sessionId,
-                message,
-                () => !cancellation || Atomics.load(cancellation, 0) === 0,
-            ),
+        const result = await indexMessageInShortChunks(
+            writer,
+            input.sessionId,
+            message,
+            input,
+            () => !cancellation || Atomics.load(cancellation, 0) === 0,
         );
-        reply = { kind: "indexed", inserted };
+        reply = { kind: "indexed", inserted: result.inserted, measurements: result.measurements };
     } else if (input.tagRatio !== undefined) {
         const { scanTagOwnerSummary, scanTagOwnerDelta } = await import(
             "../../features/magic-context/storage-tags"

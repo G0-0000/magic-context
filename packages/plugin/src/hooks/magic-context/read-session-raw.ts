@@ -1267,10 +1267,14 @@ export function scanRawSessionSummaryRows(
         }
         anchors.sort((left, right) => right.rowid - left.rowid);
         anchors.length = Math.min(anchors.length, SUMMARY_ANCHOR_LIMIT);
+        // Seeds are discovery hints, not exclusion certificates. An existing
+        // row can move into this session below every surviving anchor. Rank
+        // construction therefore evaluates the current predicate for every row
+        // on the worker snapshot, including IDs absent from the seed.
         const keys = db
-            .prepare(`SELECT id, time_created AS timeCreated, CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ${EXCLUDED_ROW_SQL} ELSE 0 END AS excluded FROM message WHERE session_id = ?
+            .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE session_id = ?
         ORDER BY time_created, id`)
-            .all(JSON.stringify(ids), sessionId) as Array<OrdinalKey & { excluded: number }>;
+            .all(sessionId) as Array<OrdinalKey & { excluded: number }>;
         const checkpoints: Array<OrdinalKey & { ordinal: number }> = [];
         let total = 0;
         for (let index = 0; index < keys.length; index++) {

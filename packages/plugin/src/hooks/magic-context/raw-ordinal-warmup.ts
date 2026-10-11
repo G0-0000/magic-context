@@ -16,6 +16,7 @@
  * same session until FAILURE_BACKOFF_MS has passed.
  */
 import { Worker } from "node:worker_threads";
+import type { IndexWorkerMeasurements } from "../../features/magic-context/message-index-bounded";
 import type {
     TagOwnerDelta,
     TagOwnerSummary,
@@ -24,7 +25,7 @@ import type {
 import { registerExitAbort } from "../../shared/exit-abort-registry";
 import type { HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
-import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
+import { type Database, getSqliteDatabasePath, releaseIndexOwner } from "../../shared/sqlite";
 import {
     countRawSessionMessageOrdinalsFromDb,
     getRawSessionSummaryEpoch,
@@ -46,6 +47,8 @@ export interface RawOrdinalWarmupInput {
     previous?: RawSessionSummaryScan;
     harness?: HarnessId;
     indexCancellation?: SharedArrayBuffer;
+    indexCoordination?: SharedArrayBuffer;
+    indexOwner?: number;
 }
 
 export type RawOrdinalWarmupReply =
@@ -53,7 +56,7 @@ export type RawOrdinalWarmupReply =
     | { kind: "scan"; scan: RawSessionSummaryScan }
     | { kind: "tag-summary"; summary: TagOwnerSummary }
     | { kind: "tag-delta"; delta: TagOwnerDelta }
-    | { kind: "indexed"; inserted: boolean }
+    | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { kind: "error"; error: string };
 
 /**
@@ -142,7 +145,7 @@ export function runSessionWarmupWorker(
                 | { scan: RawSessionSummaryScan }
                 | { summary: TagOwnerSummary }
                 | { delta: TagOwnerDelta }
-                | { inserted: boolean }
+                | { inserted: boolean; measurements?: IndexWorkerMeasurements }
                 | { failure: RawOrdinalWarmupFailureReason; detail: string },
         ) => {
             if (settled) return;
@@ -150,9 +153,15 @@ export function runSessionWarmupWorker(
             clearTimeout(deadline);
             if (worker) {
                 activeWorkers.delete(worker);
-                void worker.terminate();
+                const stopped = worker.terminate();
                 worker.unref();
+                void stopped.finally(() => {
+                    releaseIndexOwner(input);
+                    resolve(result);
+                });
+                return;
             }
+            releaseIndexOwner(input);
             resolve(result);
         };
         const arm = (failure: RawOrdinalWarmupFailureReason, ms: number) => {
@@ -178,7 +187,8 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "scan") finish({ scan: reply.scan });
             else if (reply.kind === "tag-summary") finish({ summary: reply.summary });
             else if (reply.kind === "tag-delta") finish({ delta: reply.delta });
-            else if (reply.kind === "indexed") finish({ inserted: reply.inserted });
+            else if (reply.kind === "indexed")
+                finish({ inserted: reply.inserted, measurements: reply.measurements });
             else finish({ failure: "worker-error", detail: reply.error });
         });
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
@@ -286,7 +296,7 @@ type WorkerResult =
     | { scan: RawSessionSummaryScan }
     | { summary: TagOwnerSummary }
     | { delta: TagOwnerDelta }
-    | { inserted: boolean }
+    | { inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { failure: RawOrdinalWarmupFailureReason; detail: string };
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */

@@ -79,6 +79,34 @@ const deleteMessageFtsStatements = new WeakMap<Database, PreparedStatement>();
 const deleteFtsMapStatements = new WeakMap<Database, PreparedStatement>();
 const deleteFtsMapRangeStatements = new WeakMap<Database, PreparedStatement>();
 const deleteMessageFtsMapStatements = new WeakMap<Database, PreparedStatement>();
+/** Large documents are source-accounted but omitted from FTS to bound tokenization under the writer. */
+export const MESSAGE_INDEX_MAX_FTS_BYTES = 64 * 1024;
+const skipStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
+function skipStatement(db: Database, sql: string): PreparedStatement {
+    const statements = skipStatements.get(db) ?? new Map<string, PreparedStatement>();
+    skipStatements.set(db, statements);
+    let statement = statements.get(sql);
+    if (!statement) {
+        statement = db.prepare(sql);
+        statements.set(sql, statement);
+    }
+    return statement;
+}
+export const messageIndexSkipKey = (sessionId: string, messageId: string) =>
+    `message_index_skip:${JSON.stringify([sessionId, messageId])}`;
+export function deleteMessageIndexSkips(db: Database, sessionId: string, messageId?: string): void {
+    if (messageId !== undefined) {
+        skipStatement(db, "DELETE FROM schema_migrations_meta WHERE key=?").run(
+            messageIndexSkipKey(sessionId, messageId),
+        );
+    } else {
+        const prefix = `message_index_skip:${JSON.stringify([sessionId]).slice(0, -1)},`;
+        skipStatement(db, "DELETE FROM schema_migrations_meta WHERE substr(key,1,length(?))=?").run(
+            prefix,
+            prefix,
+        );
+    }
+}
 
 function normalizeIndexText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
@@ -339,6 +367,8 @@ export interface MessageIndexSource {
     sourceVersion: string;
     contentHash: string;
     content: string;
+    /** Original byte mass when a worker deliberately omits an oversized FTS body. */
+    ftsSkippedBytes?: number;
 }
 
 export function toMessageIndexSource(message: RawMessage): MessageIndexSource {
@@ -375,9 +405,17 @@ export function isMessageIndexSourceCurrent(
     message: RawMessage,
 ): boolean {
     const source = getMessageSourceSnapshot(message);
+    return isIndexSourceCurrent(db, sessionId, source);
+}
+
+function isIndexSourceCurrent(
+    db: Database,
+    sessionId: string,
+    source: MessageIndexSource,
+): boolean {
     const row = getMessageSourceStatement(db).get(
         sessionId,
-        message.id,
+        source.id,
     ) as MessageHistorySourceRow | null;
     return (
         row?.message_ordinal === source.ordinal &&
@@ -385,15 +423,6 @@ export function isMessageIndexSourceCurrent(
         row.normalized_content_hash === source.contentHash &&
         row.role === source.role
     );
-}
-
-function setMessageSource(
-    db: Database,
-    sessionId: string,
-    message: RawMessage,
-    now: number,
-): string {
-    return writeMessageSource(db, sessionId, getMessageSourceSnapshot(message), now);
 }
 
 function writeMessageSource(
@@ -411,6 +440,26 @@ function writeMessageSource(
         source.role,
         getHarness(),
         now,
+    );
+    const bytes = Buffer.byteLength(source.content);
+    if (source.ftsSkippedBytes !== undefined || bytes > MESSAGE_INDEX_MAX_FTS_BYTES) {
+        skipStatement(
+            db,
+            "INSERT INTO schema_migrations_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ).run(
+            messageIndexSkipKey(sessionId, source.id),
+            JSON.stringify({
+                reason: "oversized",
+                bytes: source.ftsSkippedBytes ?? bytes,
+                contentHash: source.contentHash,
+                ordinal: source.ordinal,
+                complete: true,
+            }),
+        );
+        return "";
+    }
+    skipStatement(db, "DELETE FROM schema_migrations_meta WHERE key=?").run(
+        messageIndexSkipKey(sessionId, source.id),
     );
     return source.content;
 }
@@ -495,6 +544,7 @@ export function isMessageIndexReconciledThrough(
 }
 
 export function deleteIndexedMessage(db: Database, sessionId: string, messageId: string): number {
+    deleteMessageIndexSkips(db, sessionId, messageId);
     const row = getCountIndexedMessageStatement(db).get(sessionId, messageId) as CountRow | null;
     const count = typeof row?.count === "number" ? row.count : 0;
 
@@ -512,6 +562,7 @@ export function deleteIndexedMessage(db: Database, sessionId: string, messageId:
  * transaction; use `clearIndexedMessages` when it does not.
  */
 export function clearIndexedMessagesInTransaction(db: Database, sessionId: string): void {
+    deleteMessageIndexSkips(db, sessionId);
     getDeleteFtsStatement(db).run(sessionId);
     deleteUnmappedMessageFtsRows(db, [sessionId]);
     getDeleteFtsMapStatement(db).run(sessionId);
@@ -559,12 +610,13 @@ function indexSingleMessageInTransaction(
     message: RawMessage,
     now: number,
     dirtyFloorBeforeAttempt: number | null,
+    source: MessageIndexSource,
 ): boolean {
     const currentWatermark = getLastIndexedOrdinal(db, sessionId);
     const dirtyFloor = getDirtyIndexFloor(db, sessionId);
 
     if (message.ordinal <= currentWatermark) {
-        if (isMessageIndexSourceCurrent(db, sessionId, message)) {
+        if (isIndexSourceCurrent(db, sessionId, source)) {
             recordIndexedMessageTime(db, sessionId, message.ordinal, message.createdAt);
             return false;
         }
@@ -579,7 +631,7 @@ function indexSingleMessageInTransaction(
         // document without moving the contiguous watermark.
         getDeleteMessageFtsStatement(db).run(sessionId, message.id);
         getDeleteMessageFtsMapStatement(db).run(sessionId, sessionId, message.id);
-        const content = setMessageSource(db, sessionId, message, now);
+        const content = writeMessageSource(db, sessionId, source, now);
         if (content.length > 0 && (message.role === "user" || message.role === "assistant")) {
             insertMessageFtsRow(
                 db,
@@ -611,7 +663,7 @@ function indexSingleMessageInTransaction(
         return false;
     }
 
-    const content = setMessageSource(db, sessionId, message, now);
+    const content = writeMessageSource(db, sessionId, source, now);
     let inserted = false;
     if (
         content.length > 0 &&
@@ -645,13 +697,13 @@ export function indexSingleMessage(
     sessionId: string,
     message: RawMessage,
     shouldCommit: () => boolean = () => true,
+    preparedSource?: MessageIndexSource,
 ): boolean {
     if (!shouldCommit()) return false;
+    // Normalization and hashing never belong inside a SQLite write transaction.
+    const source = preparedSource ?? getMessageSourceSnapshot(message);
     const currentWatermark = getLastIndexedOrdinal(db, sessionId);
-    if (
-        message.ordinal <= currentWatermark &&
-        isMessageIndexSourceCurrent(db, sessionId, message)
-    ) {
+    if (message.ordinal <= currentWatermark && isIndexSourceCurrent(db, sessionId, source)) {
         recordIndexedMessageTime(db, sessionId, message.ordinal, message.createdAt);
         return false;
     }
@@ -676,6 +728,7 @@ export function indexSingleMessage(
             message,
             Date.now(),
             dirtyFloorBeforeAttempt,
+            source,
         );
         if (!shouldCommit()) return false;
         db.exec("COMMIT");
@@ -728,6 +781,7 @@ function indexItemsAfterOrdinal<T extends { ordinal: number }>(
 ): number {
     const now = Date.now();
     let inserted = 0;
+    const sources = new Map(items.map((item) => [item.ordinal, toSource(item)]));
 
     // The writer lock protects both duplicate checks and the progress row. Each
     // caller supplies only one bounded source page, so lock hold time is bounded
@@ -785,7 +839,8 @@ function indexItemsAfterOrdinal<T extends { ordinal: number }>(
             const item = itemsByOrdinal.get(ordinal);
             if (!item) continue;
 
-            const message = toSource(item);
+            const message = sources.get(ordinal);
+            if (!message) continue;
             const content = writeMessageSource(db, sessionId, message, now);
             if (
                 content.length === 0 ||

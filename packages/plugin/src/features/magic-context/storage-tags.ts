@@ -1139,11 +1139,19 @@ function readTagOwnerSummary(
             // Only this connection wrote, and only appends. `+session_id` keeps
             // SQLite on the rowid range, so this reads the rows appended since,
             // in any session.
-            rows = db
-                .prepare(
-                    `SELECT ${TAG_OWNER_COLUMNS} FROM tags WHERE id > ? AND +session_id = ? ORDER BY id LIMIT ${TAG_OWNER_PAGE_LIMIT + 1}`,
-                )
-                .all(cached.globalLastRowId, sessionId) as TagOwnerRow[];
+            const statement = db.prepare(
+                `SELECT ${TAG_OWNER_COLUMNS} FROM tags WHERE id > ? AND +session_id = ? ORDER BY id LIMIT ${TAG_OWNER_PAGE_LIMIT + 1}`,
+            );
+            rows = statement.all(cached.globalLastRowId, sessionId) as TagOwnerRow[];
+            // Memory stores cannot delegate to another connection. Drain every
+            // page before advancing the high watermark, or later reads lose rows.
+            if (!offThreadOnly) {
+                let page = rows;
+                while (page.length === TAG_OWNER_PAGE_LIMIT + 1) {
+                    page = statement.all(page[page.length - 1].id, sessionId) as TagOwnerRow[];
+                    rows.push(...page);
+                }
+            }
         } else {
             rows = appendedSinceForeignCommit(db, sessionId, cached);
         }

@@ -9,6 +9,7 @@ import { log, sessionLog } from "../../shared/logger";
 import {
     type Database,
     getSqliteDatabasePath,
+    indexCoordinationInput,
     withSqliteBackgroundWriter,
 } from "../../shared/sqlite";
 import {
@@ -21,10 +22,18 @@ import {
     isMessageIndexReconciledThrough,
     isMessageIndexSourceCurrent,
 } from "./message-index";
+import type { IndexWorkerMeasurements } from "./message-index-bounded";
 
 // Session teardown prevents queued indexing from starting; workers check cancellation before COMMIT.
 const indexCancellations = new Map<string, Set<Int32Array>>();
 const sessionEpochs = new Map<string, number>();
+const workerMeasurements = new WeakMap<Database, Map<string, IndexWorkerMeasurements>>();
+export function getIndexWorkerMeasurements(
+    db: Database,
+    sessionId: string,
+): IndexWorkerMeasurements | undefined {
+    return workerMeasurements.get(db)?.get(sessionId);
+}
 
 /**
  * Detect SQLite "database is locked" errors so the async indexer can
@@ -421,6 +430,7 @@ export async function indexSingleMessageOffThread(
             indexMessage: message,
             harness: getHarness(),
             indexCancellation: cancellation.buffer as SharedArrayBuffer,
+            ...indexCoordinationInput(),
         },
         {},
     ).finally(() => {
@@ -429,6 +439,15 @@ export async function indexSingleMessageOffThread(
     });
     if (!("inserted" in result))
         throw new Error("failure" in result ? result.detail : "unexpected indexing worker reply");
+    if (result.measurements) {
+        const sessions = workerMeasurements.get(db) ?? new Map();
+        sessions.set(sessionId, result.measurements);
+        workerMeasurements.set(db, sessions);
+        if (result.measurements.skipped)
+            log(
+                `[magic-context] incremental FTS skipped oversized source ${message.id} (${result.measurements.sourceBytes} bytes); identity and progress persisted`,
+            );
+    }
     return result.inserted;
 }
 

@@ -167,7 +167,7 @@ import {
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
-import { prewarmTagOwners, waitForTagOwners } from "./tag-owner-warmup";
+import { prewarmTagOwners } from "./tag-owner-warmup";
 import { collectTemporalCandidates, injectTemporalMarkers } from "./temporal-awareness";
 import { readServedTemporalDecisions } from "./temporal-served-projection";
 import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
@@ -2080,16 +2080,10 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
-        // A rebuild may wait briefly without blocking the event loop. If the
-        // digest is still cold, replay persisted reasoning removals this pass;
-        // never invent a cutoff from incomplete ownership information.
-        let tagOwnersReady: boolean;
-        if (isCacheBusting) {
-            tagOwnersReady = await waitForTagOwners(db, sessionId, ownerRatio);
-        } else {
-            void prewarmTagOwners(db, sessionId, ownerRatio);
-            tagOwnersReady = isTagOwnerSummaryReady(db, sessionId, ownerRatio);
-        }
+        // Preparation here is non-awaiting: trigger inputs above form a coherent
+        // pass view. Postprocess waits before taking its own decision snapshots.
+        void prewarmTagOwners(db, sessionId, ownerRatio);
+        const tagOwnersReady = isTagOwnerSummaryReady(db, sessionId, ownerRatio);
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
         if (
             fullFeatureMode &&
