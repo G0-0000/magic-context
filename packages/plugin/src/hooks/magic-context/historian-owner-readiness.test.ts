@@ -17,7 +17,7 @@ import * as trigger from "./compartment-trigger";
 import * as rawWarmup from "./raw-ordinal-warmup";
 import { resetRawSessionOrdinalWarmupsForTest } from "./raw-ordinal-warmup";
 import { getRawSessionMessageOrdinalCount, prepareRawSessionOrdinals } from "./read-session-chunk";
-import { closeReadOnlySessionDb } from "./read-session-db";
+import { closeReadOnlySessionDb, observeOpenCodeTurnEvent } from "./read-session-db";
 import * as warmup from "./tag-owner-warmup";
 import { createTransform } from "./transform";
 
@@ -129,7 +129,7 @@ test("historian trigger awaits cold owners before taking its usage snapshot", as
     });
 });
 
-test("historian trigger refreshes invalidated owners on a warm session", async () => {
+test("historian trigger keeps warm owners through unrelated peer commits", async () => {
     await fixture(async (db, path) => {
         const peer = new Database(path);
         const usage = new Map([[SESSION, pressure(50000)]]);
@@ -144,12 +144,11 @@ test("historian trigger refreshes invalidated owners on a warm session", async (
             expect(await warmup.prewarmTagOwners(db, SESSION, ratio)).toBe(true);
             expect(isTagOwnerSummaryReady(db, SESSION, ratio)).toBe(true);
 
-            // Index workers commit unrelated context rows through another connection.
-            // Such a commit still changes data_version and invalidates the owner digest.
+            // Index-worker activity commits do not change tag ownership.
             peer.prepare(
                 "UPDATE session_meta SET last_input_tokens = last_input_tokens + 1 WHERE session_id = ?",
             ).run(SESSION);
-            expect(isTagOwnerSummaryReady(db, SESSION, ratio)).toBe(false);
+            expect(isTagOwnerSummaryReady(db, SESSION, ratio)).toBe(true);
             await withSqliteTransformPass(() => transform({}, { messages: source() }));
             expect(check).toHaveBeenCalledTimes(2);
         } finally {
@@ -180,7 +179,7 @@ test("an owner readiness deadline warns and leaves the worker able to finish", a
     });
 });
 
-test("ordinal preparation retries a superseded scan within the same deadline", async () => {
+test("cold ordinal preparation truncates a tail removed while the worker ran", async () => {
     await fixture(async (_db, path) => {
         const raw = new Database(join(dirname(path), "absent-opencode.db"));
         raw.exec("PRAGMA journal_mode=WAL");
@@ -201,12 +200,12 @@ test("ordinal preparation retries a superseded scan within the same deadline", a
             async (...args) => {
                 const result = originalPrepare(...args);
                 if (++attempts === 1) {
-                    // Completed host summaries are excluded from the numbered
-                    // raw-message list. Commit after worker start so only a fresh
-                    // scan can produce a count that omits this row.
-                    raw.prepare("UPDATE message SET data = ? WHERE id = 'raw-1'").run(
-                        JSON.stringify({ role: "assistant", summary: true, finish: "stop" }),
-                    );
+                    // Repair a revert during cold preparation without scanning the prefix twice.
+                    raw.prepare("DELETE FROM message WHERE id = 'raw-2'").run();
+                    observeOpenCodeTurnEvent("message.removed", {
+                        sessionID: SESSION,
+                        messageID: "raw-2",
+                    });
                     firstOutcome = await result;
                     return firstOutcome;
                 }
@@ -215,8 +214,8 @@ test("ordinal preparation retries a superseded scan within the same deadline", a
         );
         try {
             expect(await prepareRawSessionOrdinals(SESSION)).toBe(true);
-            expect(firstOutcome).toBe("failed");
-            expect(attempts).toBe(2);
+            expect(firstOutcome).toBe("warm");
+            expect(attempts).toBe(1);
             expect(getRawSessionMessageOrdinalCount(SESSION)).toBe(2);
         } finally {
             prepare.mockRestore();
