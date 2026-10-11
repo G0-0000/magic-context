@@ -200,7 +200,9 @@ test("cold ordinal preparation truncates a tail removed while the worker ran", a
             async (...args) => {
                 const result = originalPrepare(...args);
                 if (++attempts === 1) {
-                    // Repair a revert during cold preparation without scanning the prefix twice.
+                    // Simulate an undo that deletes a message while the cold off-thread scan is
+                    // still running. The scan must repair its result by truncating at the
+                    // deleted message, not by starting the whole-session scan again.
                     raw.prepare("DELETE FROM message WHERE id = 'raw-2'").run();
                     observeOpenCodeTurnEvent("message.removed", {
                         sessionID: SESSION,

@@ -769,9 +769,12 @@ interface TagOwnerRow {
  * reasoning count to the session's calibrated token estimate. The cache is kept
  * per connection and extended with tags appended since the last read.
  *
- * Identity-write generations are process-wide hints, not session invalidations.
- * They cause a check of this session's revision and shape. Only an actual change
- * to existing ownership/reasoning data, deletion, or a previously uncached prose
+ * The identity-write generation is a single process-wide counter that moves
+ * whenever any session's tag ownership or reasoning data is rewritten in this
+ * process. It only says "something may have changed somewhere", so it never
+ * invalidates this session's cache by itself: it triggers the cheap revision
+ * and shape check described below. Only an actual change to this session's
+ * existing ownership/reasoning data, a deletion, or a previously uncached prose
  * ratio requires a worker rebuild. Status, drop-mode and size writes do not
  * affect this digest.
  *
