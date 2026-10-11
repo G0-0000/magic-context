@@ -26,6 +26,7 @@ import {
 	lkgContentDigestFromFields,
 	lkgContentFields,
 	lkgFieldsMatchDigest,
+	lkgSlotRejection,
 	registerLkgPersistence,
 	signatureForFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
@@ -230,6 +231,8 @@ export interface PiLkgCoordinator {
 		parentOf?: (id: string) => string | null | undefined,
 	): PiMeasuredPrefixFit | undefined;
 	captureAppliedPass(args: {
+		/** Publish served identities inside the synchronous last-good request transaction. */
+		publishServedNumbers?: () => void;
 		assertCurrentPass?: () => void;
 		snapshot: PiLkgPassSnapshot;
 		outputMessages: readonly unknown[];
@@ -237,6 +240,17 @@ export interface PiLkgCoordinator {
 		cacheBusting: boolean;
 		hostEnvelopeSignature?: string;
 	}): PiLkgSerializedOutput | undefined;
+}
+
+/** A request that cannot be saved for replay can still be served with its admitted tag numbers recorded. */
+export class PiLkgUncapturable extends Error {
+	constructor(
+		readonly reason: string,
+		message: string,
+		cause?: unknown,
+	) {
+		super(message, { cause });
+	}
 }
 
 export function isTransientPiStorageError(error: unknown): boolean {
@@ -525,10 +539,10 @@ function extendsMeasuredRequest(
 
 /**
  * Adapt Pi's JSONL entry ids and native AgentMessage shape to the shared LKG
- * slot/replay implementation. FNV/SHA digest work and durable writes run from
- * setImmediate; only detached field tokens and the exact served JSON bytes are
- * captured synchronously, so a later pass cannot hash objects the handler has
- * already mutated.
+ * slot/replay implementation. Capturable managed results commit synchronously,
+ * sharing their request transaction with their new tag identities. The caller
+ * can still serve an uncapturable result and record its admitted numbers alone.
+ * Detached inputs also protect deferred diagnostic captures from later mutations.
  */
 export function createPiLkgCoordinator(
 	db: Database,
@@ -796,7 +810,14 @@ export function createPiLkgCoordinator(
 	const captureAppliedPass: PiLkgCoordinator["captureAppliedPass"] = (args) => {
 		args.assertCurrentPass?.();
 		const { snapshot } = args;
-		if (snapshot.preparationFailure || snapshot.inputs.length === 0) return;
+		if (snapshot.preparationFailure || snapshot.inputs.length === 0) {
+			if (args.publishServedNumbers)
+				throw new PiLkgUncapturable(
+					snapshot.preparationFailure ?? "lkg_inputs_empty",
+					"Pi LKG input preparation failed",
+				);
+			return;
+		}
 		const state = stateFor(snapshot.sessionId);
 		let jsonPrefix: string;
 		try {
@@ -832,6 +853,12 @@ export function createPiLkgCoordinator(
 				: null;
 		} catch (error) {
 			args.assertCurrentPass?.();
+			if (args.publishServedNumbers)
+				throw new PiLkgUncapturable(
+					"lkg_output_serialize_failed",
+					error instanceof Error ? error.message : String(error),
+					error,
+				);
 			dropSlot(snapshot.sessionId, "lkg_snapshot_serialize_failed");
 			const failedState = stateFor(snapshot.sessionId);
 			failedState.syncCaptureRequired = true;
@@ -879,18 +906,21 @@ export function createPiLkgCoordinator(
 		};
 		// Capturing an unmeasured retry must not erase evidence for its unchanged
 		// served prefix. A rebuild, edited row, route or envelope does erase it.
-		if (
-			state.measuredRequest &&
-			(state.measuredRequest.modelKey !== plan.modelKey ||
-				state.measuredRequest.providerKey !== plan.providerKey ||
-				state.measuredRequest.envelopeSignature !==
-					args.hostEnvelopeSignature ||
-				!extendsMeasuredRequest(state.measuredRequest.jsonPrefix, jsonPrefix))
-		)
-			state.measuredRequest = undefined;
-		state.capturedRequest = args.hostEnvelopeSignature
-			? { ...plan, envelopeSignature: args.hostEnvelopeSignature }
-			: undefined;
+		const noteCapturedRequest = () => {
+			if (
+				state.measuredRequest &&
+				(state.measuredRequest.modelKey !== plan.modelKey ||
+					state.measuredRequest.providerKey !== plan.providerKey ||
+					state.measuredRequest.envelopeSignature !==
+						args.hostEnvelopeSignature ||
+					!extendsMeasuredRequest(state.measuredRequest.jsonPrefix, jsonPrefix))
+			)
+				state.measuredRequest = undefined;
+			state.capturedRequest = args.hostEnvelopeSignature
+				? { ...plan, envelopeSignature: args.hostEnvelopeSignature }
+				: undefined;
+		};
+		if (!args.publishServedNumbers) noteCapturedRequest();
 		const livePrior = getSlot(snapshot.sessionId);
 		const unchanged =
 			livePrior &&
@@ -902,7 +932,7 @@ export function createPiLkgCoordinator(
 				plan.inputs.length &&
 			JSON.stringify(livePrior.piOutputEntryIds) === JSON.stringify(ownership);
 		args.assertCurrentPass?.();
-		if (unchanged && !state.syncCaptureRequired) {
+		if (unchanged && !state.syncCaptureRequired && !args.publishServedNumbers) {
 			// Provider usage can arrive before the deferred commit. Refresh the
 			// replay slot's identity in memory now without rewriting unchanged
 			// durable bytes. The new capturedRequest awaits its own usage; the last
@@ -937,6 +967,7 @@ export function createPiLkgCoordinator(
 			try {
 				args.assertCurrentPass?.();
 			} catch (error) {
+				if (args.publishServedNumbers) throw error;
 				sessionLog(
 					plan.sessionId,
 					"DISCARDED CONTEXT RESULT: queued LKG capture",
@@ -988,6 +1019,7 @@ export function createPiLkgCoordinator(
 				);
 				reusedPrefix = incremental.reusedPrefix;
 				if (
+					!args.publishServedNumbers &&
 					!state.syncCaptureRequired &&
 					prior &&
 					reusedPrefix === plan.inputs.length &&
@@ -1012,14 +1044,42 @@ export function createPiLkgCoordinator(
 					captureSequence: plan.captureSequence,
 				};
 				args.assertCurrentPass?.();
+				if (args.publishServedNumbers) {
+					if (lkgSlotRejection(plan.sessionId, slot))
+						throw new PiLkgUncapturable(
+							"lkg_slot_rejected",
+							"LKG slot rejected the Pi snapshot",
+						);
+					if (
+						!saveLkgSlotToDb(
+							db,
+							plan.sessionId,
+							slot,
+							args.publishServedNumbers,
+						)
+					) {
+						throw new Error("Pi LKG/served publication failed");
+					}
+					// SQLite can return after the outcome deadline. The request and identities
+					// are durable, but the handler must refuse rather than dispatch a late result.
+					args.assertCurrentPass?.();
+				}
 				if (!captureSlot(plan.sessionId, slot)) {
 					throw new Error("LKG slot rejected the Pi snapshot");
 				}
 				state.acceptedInputs = plan.inputs;
 				state.acceptedSlot = slot;
-				const persisted = saveLkgSlotToDb(db, plan.sessionId, slot);
+				const persisted = args.publishServedNumbers
+					? true
+					: saveLkgSlotToDb(db, plan.sessionId, slot);
 				state.syncCaptureRequired = !persisted;
+				if (args.publishServedNumbers) noteCapturedRequest();
 			} catch (error) {
+				if (args.publishServedNumbers) {
+					state.syncCaptureRequired = true;
+					state.acceptedInputs = null;
+					throw error;
+				}
 				try {
 					args.assertCurrentPass?.();
 				} catch (discarded) {
@@ -1051,7 +1111,7 @@ export function createPiLkgCoordinator(
 				}
 			}
 		};
-		if (state.syncCaptureRequired) {
+		if (args.publishServedNumbers || state.syncCaptureRequired) {
 			commit();
 		} else {
 			try {

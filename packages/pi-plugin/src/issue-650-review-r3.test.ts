@@ -29,6 +29,7 @@ import {
 	readPiIdentityRecurrences,
 } from "./pi-tag-identity-repair";
 import { piCachedToolSurvivor } from "./pi-tool-identity";
+import { observePiPublicationForTest } from "./publication-observer.fixture";
 import { piContentFallbackIds } from "./read-session-pi";
 import {
 	capturePiServedArray,
@@ -528,6 +529,7 @@ for (const kind of [
 async function rewindUnsavedNotes(identical: boolean) {
 	const db = createTestDb();
 	const id = session(identical ? "twin-rewind" : "distinct-rewind");
+	const publication = observePiPublicationForTest(id);
 	try {
 		updateSessionMeta(db, id, { piStableIdScheme: 1 });
 		const first = userMessage("host-built note", 7);
@@ -544,6 +546,8 @@ async function rewindUnsavedNotes(identical: boolean) {
 			{ messages: [first, second, hello] } as never,
 			ctx as never,
 		)) as { messages: PiMessage[] };
+		if (identical)
+			publication.expect("numbers_only", "lkg_duplicate_entry_id", 1);
 		const fallbackIds = piContentFallbackIds([first, second], () => undefined);
 		const dropped = db
 			.prepare(
@@ -559,6 +563,7 @@ async function rewindUnsavedNotes(identical: boolean) {
 		)) as { messages: PiMessage[] };
 		return { expected: before.messages[1], actual: after.messages[0] };
 	} finally {
+		publication.restore();
 		db.close();
 	}
 }
