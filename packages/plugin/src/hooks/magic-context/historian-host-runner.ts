@@ -1,4 +1,5 @@
 import { ensureInstallInstanceId } from "../../features/magic-context/install-instance-id";
+import { failedInvocationStatus } from "../../features/magic-context/subagent-token-capture";
 import type { PluginContext } from "../../plugin/types";
 import { log as defaultLog } from "../../shared/logger";
 import { promptSyncWithValidatedOutputRetry } from "../../shared/model-suggestion-retry";
@@ -6,7 +7,7 @@ import { getSdkOutputLimit, getSdkWindowGeometry } from "../../shared/models-dev
 import { modelBodyField } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
 import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
-import type { HiddenCompletionExecutor } from "./compartment-runner-types";
+import type { HiddenCompletion, HiddenCompletionExecutor } from "./compartment-runner-types";
 import {
     resolveHistorianProducerLimits,
     resolveKnownHistorianContextLimit,
@@ -65,6 +66,20 @@ export type HistorianHostMethod =
     | "historian.claim"
     | "historian.heartbeat"
     | "historian.complete";
+
+/** Model-attempt usage sent to the Rust module, which assigns invocation ids and fallback parent ids. */
+interface HistorianHostInvocation {
+    provider_id: string | null;
+    model_id: string | null;
+    started_at: number;
+    ended_at: number;
+    status: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    error: string | null;
+}
 
 export interface HistorianHostPendingRun {
     runId: string;
@@ -501,6 +516,7 @@ export class HistorianHostRunner {
     }
 
     private async execute(claim: HistorianHostClaim, abort: AbortController): Promise<void> {
+        const invocations: HistorianHostInvocation[] = [];
         const budgetMs = Math.max(1, claim.awaitBudgetMs);
         const heartbeat = this.startHeartbeat(claim, abort);
         // The claim is never held past the budget the module handed out. Past it the
@@ -510,10 +526,11 @@ export class HistorianHostRunner {
             abort.abort(new Error(`historian host run ${claim.runId} exceeded its await budget`));
         }, budgetMs);
         try {
-            const completion = await this.runCompletion(claim, budgetMs, abort.signal);
+            const completion = await this.runCompletion(claim, budgetMs, abort.signal, invocations);
             if (heartbeat.claimOver) return;
             await this.report(claim, {
                 output: { text: completion.text, length_capped: completion.lengthCapped },
+                invocations,
             });
         } catch (error) {
             // The module already said this claim is over — replaced, or on a run it
@@ -536,6 +553,7 @@ export class HistorianHostRunner {
                     code: failureCode(error, abort.signal.aborted),
                     message: describeError(error),
                 },
+                invocations,
             });
         } finally {
             cancelDeadline();
@@ -643,6 +661,7 @@ export class HistorianHostRunner {
         claim: HistorianHostClaim,
         budgetMs: number,
         signal: AbortSignal,
+        invocations: HistorianHostInvocation[],
     ): Promise<{ text: string; lengthCapped: boolean }> {
         const binding = this.deps.openExecutor(claim.sessionId);
         if (!binding) {
@@ -691,6 +710,38 @@ export class HistorianHostRunner {
             const qualifier = this.deps.resolveVariant?.(model);
             return qualifier ? { model, qualifier } : model;
         };
+        let attemptModel = head;
+        let attemptRecorded = false;
+        const recordAttempt = (completion?: HiddenCompletion, error?: unknown): void => {
+            if (attemptRecorded) return;
+            attemptRecorded = true;
+            const split = attemptModel.indexOf("/");
+            const token = (value: number | undefined): number =>
+                typeof value === "number" && Number.isFinite(value)
+                    ? Math.max(0, Math.floor(value))
+                    : 0;
+            invocations.push({
+                provider_id:
+                    completion?.providerId ?? (split >= 0 ? attemptModel.slice(0, split) : null),
+                model_id:
+                    completion?.modelId ??
+                    (split >= 0 ? attemptModel.slice(split + 1) : attemptModel),
+                started_at: attemptStartedAt,
+                ended_at: Date.now(),
+                status: error
+                    ? signal.aborted
+                        ? "aborted"
+                        : failedInvocationStatus(error)
+                    : completion?.text?.trim()
+                      ? "completed"
+                      : "empty",
+                input_tokens: token(completion?.usage.input),
+                output_tokens: token(completion?.usage.output),
+                cache_read_tokens: token(completion?.usage.cacheRead),
+                cache_write_tokens: token(completion?.usage.cacheWrite),
+                error: error ? describeError(error) : null,
+            });
+        };
         try {
             if (!handle.id) throw new Error("hidden completion carrier returned no session id");
             const run = await promptSyncWithValidatedOutputRetry(
@@ -715,10 +766,20 @@ export class HistorianHostRunner {
                                 model?.providerID && model?.modelID
                                     ? `${model.providerID}/${model.modelID}`
                                     : head;
-                            const failure = this.admissionFailure(claim, key);
-                            if (failure) throw new Error(failure);
                             attemptStartedAt = Date.now();
-                            return executor.attempt(handle, request);
+                            attemptModel = key;
+                            attemptRecorded = false;
+                            try {
+                                const failure = this.admissionFailure(claim, key);
+                                if (failure) throw new Error(failure);
+                                return executor.attempt(handle, request).catch((error: unknown) => {
+                                    recordAttempt(undefined, error);
+                                    throw error;
+                                });
+                            } catch (error) {
+                                recordAttempt(undefined, error);
+                                throw error;
+                            }
                         },
                         { childSessionId: handle.childSessionId },
                     ),
@@ -732,7 +793,10 @@ export class HistorianHostRunner {
                             attemptStartedAt + attemptMs - Date.now(),
                             attemptMs,
                             signal,
-                        ),
+                        ).catch((error: unknown) => {
+                            recordAttempt(undefined, error);
+                            throw error;
+                        }),
                     validateOutput: (completion) => {
                         const text = completion.text;
                         // A model that answered with nothing has failed, so the next
@@ -740,13 +804,21 @@ export class HistorianHostRunner {
                         // document is deliberately NOT rejected here: the module refuses
                         // it with the same rule it applies to its own producer, and
                         // swallowing it would trade that precise refusal for a vague one.
-                        if (!text) throw new Error("historian host completion returned no output");
+                        if (!text?.trim()) {
+                            const error = new Error("historian host completion returned no output");
+                            recordAttempt(completion, error);
+                            throw error;
+                        }
+                        recordAttempt(completion);
                         return { text, lengthCapped: completion.lengthCapped === true };
                     },
                 },
             );
             promptSettled = true;
             return run.validated;
+        } catch (error) {
+            recordAttempt(undefined, error);
+            throw error;
         } finally {
             await executor.close(handle, {
                 promptSettled,
@@ -766,9 +838,10 @@ export class HistorianHostRunner {
      */
     private async report(
         claim: HistorianHostClaim,
-        body:
+        body: (
             | { output: { text: string; length_capped: boolean } }
-            | { error: { code: string; message: string } },
+            | { error: { code: string; message: string } }
+        ) & { invocations?: HistorianHostInvocation[] },
     ): Promise<void> {
         let response: unknown;
         try {

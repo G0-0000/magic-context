@@ -85,11 +85,13 @@ pub const DOMAIN_TABLES: &[&str] = &[
     "compartment_history_versions",
     "compartment_events",
     "compartments",
+    "historian_runs",
     "memories",
     "memory_embedding_watermarks",
     "notes",
     "primer_candidates",
     "session_facts",
+    "subagent_invocations",
     "user_memories",
     "user_memory_candidates",
 ];
@@ -322,6 +324,10 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
         "ffe1e5a4d218c3a16cacc0a4c716eb227fa1bba59f203f035226d73ee0f88751",
     ),
     (
+        "historian_runs",
+        "4fdc0eabcd26ec85f2ad536402f2dbcc3d097a29644ab9f95683a40e38fa5643",
+    ),
+    (
         "memories",
         "a5b13611e93768e4f53e78e4831a58d74d6c79e078a1a85c5cfbf269a0eb417c",
     ),
@@ -344,6 +350,10 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     (
         "user_memories",
         "db3e60857602228326096491485382054f65432421e673b669b5a91f7dc8c865",
+    ),
+    (
+        "subagent_invocations",
+        "e99ff3c619f1905c7cd4ef83b6ef82bed73c2fffb5c12ff35d01fb6756718c58",
     ),
     (
         "user_memory_candidates",
@@ -1009,6 +1019,22 @@ impl HostStore {
             writes(tx).map_err(HostStoreError::from)
         })
         .map(|_| ())
+    }
+
+    /// Check telemetry tables against the pinned schema without waiting up to five seconds
+    /// for SQLite's writer lock; that wait budget belongs to compartment publication.
+    pub fn try_domain_transaction(
+        &mut self,
+        tables: &[&str],
+        writes: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
+    ) -> Result<(), HostStoreError> {
+        self.conn.busy_timeout(std::time::Duration::ZERO)?;
+        let outcome = self.with_domain_transaction(tables, writes);
+        self.conn
+            .busy_timeout(std::time::Duration::from_millis(u64::from(
+                CONTEXT_BUSY_TIMEOUT_MS,
+            )))?;
+        outcome
     }
 
     /// The health block the status surface reports.
