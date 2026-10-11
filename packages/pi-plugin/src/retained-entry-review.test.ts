@@ -23,9 +23,8 @@ import {
 } from "./test-utils.test";
 
 // Header-only restoration must not choose one of multiple event messages with
-// the same header. This opt-in suite records known ambiguity failures and passing
-// lifecycle controls without making the ordinary test run fail.
-const review = test.skipIf(process.env.MC_RETAINED_ENTRY_REVIEW !== "1");
+// the same header; these cases guard that, alongside lifecycle controls.
+const review = test;
 const sessions: string[] = [];
 afterEach(() => {
     for (const id of sessions.splice(0)) clearContextHandlerSession(id);

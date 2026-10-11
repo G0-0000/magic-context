@@ -2176,8 +2176,12 @@ function resolvePiEventEntryIds(
  * Oh My Pi can retain older raw messages in its context event after native
  * compaction removes their entries from the branch APIs. Remember ids tagged
  * on the previous successful pass, matching only when the response id,
- * timestamp, role and tool call id name one entry and it has not been used by
- * another message. Otherwise saved text drops lose their emergency targets.
+ * timestamp, role and tool call id name exactly one entry AND exactly one
+ * message in this event, and the entry has not been used by another message.
+ * Uniqueness on the entry side alone is not enough: a header unique last pass
+ * can now describe two event messages, and giving the old id to either one
+ * would replay the old message's drop onto the wrong message. Otherwise saved
+ * text drops lose their emergency targets.
  */
 function restorePiRetainedEntryIds(
 	sessionId: string,
@@ -2199,20 +2203,31 @@ function restorePiRetainedEntryIds(
 		bucket.push(id);
 		owners.set(header, bucket);
 	}
+	// Count every message in the event, resolved or not, so a header shared
+	// with any other message in this pass is treated as ambiguous.
+	const eventKeys = messages.map((message) => {
+		const header = piContextHeaderFields(message);
+		return header
+			? JSON.stringify([
+					header.responseId,
+					header.timestamp,
+					header.role,
+					header.toolCallId,
+				])
+			: undefined;
+	});
+	const eventCounts = new Map<string, number>();
+	for (const key of eventKeys) {
+		if (key !== undefined)
+			eventCounts.set(key, (eventCounts.get(key) ?? 0) + 1);
+	}
 	const result = [...resolved];
 	const used = new Set(result.filter((id) => id !== undefined));
 	for (let index = 0; index < messages.length; index++) {
 		if (result[index] !== undefined) continue;
-		const header = piContextHeaderFields(messages[index]);
-		if (!header) continue;
-		const bucket = owners.get(
-			JSON.stringify([
-				header.responseId,
-				header.timestamp,
-				header.role,
-				header.toolCallId,
-			]),
-		);
+		const key = eventKeys[index];
+		if (key === undefined || eventCounts.get(key) !== 1) continue;
+		const bucket = owners.get(key);
 		const id = bucket?.length === 1 ? bucket[0] : undefined;
 		if (id === undefined || used.has(id)) continue;
 		result[index] = id;
