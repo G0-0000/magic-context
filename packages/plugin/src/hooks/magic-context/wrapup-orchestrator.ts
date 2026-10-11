@@ -294,10 +294,15 @@ export async function runManagedWrapup(
     const messagesToKeep = Math.max(1, Math.floor(options.messagesToKeep));
     setRecompStarting(ctx.liveSessionState, sessionId, "Estimating wrapup…", "wrapup");
     try {
-        // Wait off-thread for the session's canonical ordinals before the
-        // synchronous boundary reads (see prepareRawSessionOrdinals); an explicit
-        // wrapup proceeds even if that warm-up failed.
-        await prepareRawSessionOrdinals(sessionId);
+        if (!(await prepareRawSessionOrdinals(sessionId))) {
+            setRecompTerminal(
+                ctx.liveSessionState,
+                sessionId,
+                "failed",
+                "Session ordinals are warming; retry wrapup shortly.",
+            );
+            return "Wrapup deferred while session ordinals warm in the background. Retry shortly.";
+        }
         return await runStartedWrapup(ctx, sessionId, messagesToKeep);
     } catch (error) {
         // Every normal exit sets a terminal progress state. A throw (planning, the

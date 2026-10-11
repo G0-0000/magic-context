@@ -61,9 +61,9 @@ import {
     markDropLeavesReasoning,
 } from "../../features/magic-context/storage-reasoning-removal";
 import {
-    getReasoningTokenEstimatesByMessage,
     getTagNumberByMessageId,
     markTagsCompactedByMessageIds,
+    tryGetReasoningTokenEstimatesByMessage,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
 import type { Tagger } from "../../features/magic-context/tagger";
@@ -188,6 +188,7 @@ import {
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
 import { byteSize, prependTag } from "./tag-content-primitives";
+import { waitForTagOwners } from "./tag-owner-warmup";
 import {
     assertTailHygieneContentUnchangedIfEnabled,
     countRealUserMessages,
@@ -2697,31 +2698,48 @@ export async function runPostTransformPhase(
                     }
                 }
             }
-            const budgetCutoff = routineCleanupApplied
-                ? Math.min(
-                      safeReasoningCutoff,
-                      opencodeReasoningBudgetCutoff({
-                          messages: args.messages,
-                          messageTagNumbers: args.messageTagNumbers,
-                          budget: args.keepReasoningTokens ?? DEFAULT_KEEP_REASONING_TOKENS,
-                          alreadyRemoved: removedReasoningIds,
-                          alsoGone: bindingStrippedIds,
-                          countNeutralized: reasoningRemovalSelectable,
-                          proseRatio: sessionDecisionCalibration(args.db, args.sessionId)
-                              .proseRatio,
-                          frozenMergedIds: getMergedReasoningStrippedIds(args.db, args.sessionId),
-                          anthropic:
-                              canUseEmptySentinels ||
-                              prefixBoundModel ||
-                              hasAnthropicReasoning(args.messages),
-                          textEstimateByMessageId: getReasoningTokenEstimatesByMessage(
-                              args.db,
-                              args.sessionId,
-                              sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
-                          ),
-                      }),
-                  )
-                : 0;
+            let reasoningEstimates = tryGetReasoningTokenEstimatesByMessage(
+                args.db,
+                args.sessionId,
+                sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
+            );
+            if (routineCleanupApplied && !reasoningEstimates) {
+                await waitForTagOwners(
+                    args.db,
+                    args.sessionId,
+                    sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
+                );
+                reasoningEstimates = tryGetReasoningTokenEstimatesByMessage(
+                    args.db,
+                    args.sessionId,
+                    sessionDecisionCalibration(args.db, args.sessionId).proseRatio,
+                );
+            }
+            const budgetCutoff =
+                routineCleanupApplied && reasoningEstimates
+                    ? Math.min(
+                          safeReasoningCutoff,
+                          opencodeReasoningBudgetCutoff({
+                              messages: args.messages,
+                              messageTagNumbers: args.messageTagNumbers,
+                              budget: args.keepReasoningTokens ?? DEFAULT_KEEP_REASONING_TOKENS,
+                              alreadyRemoved: removedReasoningIds,
+                              alsoGone: bindingStrippedIds,
+                              countNeutralized: reasoningRemovalSelectable,
+                              proseRatio: sessionDecisionCalibration(args.db, args.sessionId)
+                                  .proseRatio,
+                              frozenMergedIds: getMergedReasoningStrippedIds(
+                                  args.db,
+                                  args.sessionId,
+                              ),
+                              anthropic:
+                                  canUseEmptySentinels ||
+                                  prefixBoundModel ||
+                                  hasAnthropicReasoning(args.messages),
+                              textEstimateByMessageId: reasoningEstimates,
+                          }),
+                      )
+                    : 0;
             const clearedReasoning =
                 routineCleanupApplied && canUseEmptySentinels && ageLaneAllowed
                     ? clearOldReasoning(

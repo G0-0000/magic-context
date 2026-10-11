@@ -105,7 +105,7 @@ for (const session of ["ses-r2-unaccepted", "ses-r2-silent"]) {
     });
 }
 
-test("late snapshot includes intervening writes when installed; different sessions warm independently", async () => {
+test("a changed store rejects delayed checkpoints; different sessions warm independently", async () => {
     await withStore(async (path, first, second) => {
         const sessions = ["ses-r2-one", "ses-r2-two"];
         for (const s of sessions) seed(first, s);
@@ -122,7 +122,9 @@ test("late snapshot includes intervening writes when installed; different sessio
                 .run(`${s}-summary`);
             writeFileSync(`${path}.${s}.release`, "go");
         }
-        expect(await Promise.all(pending)).toEqual(["warm", "warm"]);
+        expect(await Promise.all(pending)).toEqual(["failed", "failed"]);
+        for (const s of sessions)
+            expect(await prewarmRawSessionOrdinalsForDb(first, s)).toBe("warm");
         resetRawSessionOrdinalJsonRowsReadForTest();
         for (const s of sessions) {
             expect(isRawSessionSummaryWarm(first, s)).toBe(true);
@@ -201,7 +203,7 @@ test("an OpenCode 2-style registered provider prepares without a SQLite worker o
     }
 });
 
-test("a successful warm-up does not prevent an in-thread rescan after all remembered anchors are deleted", async () => {
+test("a successful warm-up never permits an in-thread rescan after all remembered anchors are deleted", async () => {
     await withStore(async (path, first, second) => {
         const session = "ses-r2-anchors-gone";
         seed(first, session);
@@ -215,7 +217,7 @@ test("a successful warm-up does not prevent an in-thread rescan after all rememb
             .run(session, '{"role":"user"}');
         resetRawSessionOrdinalJsonRowsReadForTest();
         expect(countRawSessionMessageOrdinalsFromDb(first, session)).toBe(1);
-        expect(getRawSessionSummaryFullScansForTest()).toBe(1);
+        expect(getRawSessionSummaryFullScansForTest()).toBe(0);
         expect([...getRawOrdinalWarmupFailures()]).toEqual([]);
     });
 });

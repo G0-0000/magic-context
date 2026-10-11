@@ -64,7 +64,7 @@ import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
-import { readRawSessionMessages } from "./read-session-chunk";
+import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
 import { estimateTokens } from "./read-session-formatting";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
@@ -806,6 +806,7 @@ describe("executeContextRecomp", () => {
 
         let result = "";
         try {
+            expect(await prepareRawSessionOrdinals("ses-recomp-timeout")).toBe(true);
             result = await withImmediateTimeouts(async () => {
                 return executeContextRecomp({
                     client,
@@ -1852,6 +1853,7 @@ describe("runCompartmentAgent", () => {
         });
 
         try {
+            expect(await prepareRawSessionOrdinals("ses-retry")).toBe(true);
             await withImmediateTimeouts(async () => {
                 await runCompartmentAgentWithLease({
                     client,

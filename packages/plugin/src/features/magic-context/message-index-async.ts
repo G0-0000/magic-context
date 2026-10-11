@@ -1,10 +1,16 @@
+import { runSessionWarmupWorker } from "../../hooks/magic-context/raw-ordinal-warmup";
 import type {
     RawMessage,
     RawMessageOrdinalAnchor,
 } from "../../hooks/magic-context/read-session-raw";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
+import { getHarness } from "../../shared/harness";
 import { log, sessionLog } from "../../shared/logger";
-import { type Database, withSqliteBackgroundWriter } from "../../shared/sqlite";
+import {
+    type Database,
+    getSqliteDatabasePath,
+    withSqliteBackgroundWriter,
+} from "../../shared/sqlite";
 import {
     clearIndexedMessages,
     getLastIndexedOrdinal,
@@ -15,6 +21,10 @@ import {
     isMessageIndexReconciledThrough,
     isMessageIndexSourceCurrent,
 } from "./message-index";
+
+// Session teardown prevents queued indexing from starting; workers check cancellation before COMMIT.
+const indexCancellations = new Map<string, Set<Int32Array>>();
+const sessionEpochs = new Map<string, number>();
 
 /**
  * Detect SQLite "database is locked" errors so the async indexer can
@@ -313,6 +323,7 @@ export function scheduleIncrementalIndex(
     messageSource: IncrementalMessageSource,
 ): void {
     const schedulingKey = `${sessionId}\u0000${messageId}`;
+    const epoch = sessionEpochs.get(sessionId) ?? 0;
     if (heapHolder.pendingIncrementalKeys.has(schedulingKey)) return;
 
     const activeTimer = heapHolder.incrementalTimers.get(schedulingKey);
@@ -324,7 +335,12 @@ export function scheduleIncrementalIndex(
     const timer = setTimeout(() => {
         heapHolder.incrementalTimers.delete(schedulingKey);
         heapHolder.pendingIncrementalKeys.add(schedulingKey);
-        const indexMessage = () => {
+        const indexMessage = async () => {
+            if (
+                (sessionEpochs.get(sessionId) ?? 0) !== epoch ||
+                !heapHolder.pendingIncrementalKeys.has(schedulingKey)
+            )
+                return;
             const message =
                 typeof messageSource === "function"
                     ? messageSource(sessionId, messageId)
@@ -344,7 +360,12 @@ export function scheduleIncrementalIndex(
             }
 
             const wasReconciled = heapHolder.reconciledSessions.delete(sessionId);
-            withSqliteBackgroundWriter(() => indexSingleMessage(db, sessionId, message));
+            await indexSingleMessageOffThread(db, sessionId, message);
+            if (
+                (sessionEpochs.get(sessionId) ?? 0) !== epoch ||
+                !heapHolder.pendingIncrementalKeys.has(schedulingKey)
+            )
+                return;
             const finalWatermark = getLastIndexedOrdinal(db, sessionId);
             if (wasReconciled && isMessageIndexReconciledThrough(db, sessionId, finalWatermark)) {
                 heapHolder.reconciledSessions.add(sessionId);
@@ -353,6 +374,7 @@ export function scheduleIncrementalIndex(
         };
         void sourceReady(messageSource, sessionId)
             .then((ready) => {
+                if ((sessionEpochs.get(sessionId) ?? 0) !== epoch) return;
                 if (ready) return runWithSessionLock(sessionId, indexMessage);
                 // Try again after PREPARE_RETRY_MS. A later reconciliation of the
                 // session also indexes this message.
@@ -362,6 +384,7 @@ export function scheduleIncrementalIndex(
                 ).unref?.();
             })
             .catch((error) => {
+                if ((sessionEpochs.get(sessionId) ?? 0) !== epoch) return;
                 heapHolder.reconciledSessions.delete(sessionId);
                 logIndexingError(sessionId, `incremental index for ${messageId}`, error);
                 if (isDatabaseLockedError(error))
@@ -371,11 +394,42 @@ export function scheduleIncrementalIndex(
                     ).unref();
             })
             .finally(() => {
-                heapHolder.pendingIncrementalKeys.delete(schedulingKey);
+                if ((sessionEpochs.get(sessionId) ?? 0) === epoch)
+                    heapHolder.pendingIncrementalKeys.delete(schedulingKey);
             });
     }, INCREMENTAL_DEBOUNCE_MS);
 
     heapHolder.incrementalTimers.set(schedulingKey, timer);
+}
+
+/** FTS segment merges and WAL checkpoints at COMMIT must not run on the event loop. */
+export async function indexSingleMessageOffThread(
+    db: Database,
+    sessionId: string,
+    message: RawMessage,
+): Promise<boolean> {
+    const path = getSqliteDatabasePath(db);
+    if (!path) return withSqliteBackgroundWriter(() => indexSingleMessage(db, sessionId, message));
+    const cancellation = new Int32Array(new SharedArrayBuffer(4));
+    const active = indexCancellations.get(sessionId) ?? new Set<Int32Array>();
+    active.add(cancellation);
+    indexCancellations.set(sessionId, active);
+    const result = await runSessionWarmupWorker(
+        {
+            path,
+            sessionId,
+            indexMessage: message,
+            harness: getHarness(),
+            indexCancellation: cancellation.buffer as SharedArrayBuffer,
+        },
+        {},
+    ).finally(() => {
+        active.delete(cancellation);
+        if (active.size === 0) indexCancellations.delete(sessionId);
+    });
+    if (!("inserted" in result))
+        throw new Error("failure" in result ? result.detail : "unexpected indexing worker reply");
+    return result.inserted;
 }
 
 export function scheduleClearAndReindex(
@@ -463,6 +517,9 @@ export function isSessionReconciled(sessionId: string): boolean {
 }
 
 export function clearSessionTracking(sessionId: string): void {
+    sessionEpochs.set(sessionId, (sessionEpochs.get(sessionId) ?? 0) + 1);
+    for (const cancellation of indexCancellations.get(sessionId) ?? [])
+        Atomics.store(cancellation, 0, 1);
     heapHolder.clearAndReindexScheduledSessions.delete(sessionId);
     heapHolder.reconciledSessions.delete(sessionId);
     heapHolder.reconciliationScheduledSessions.delete(sessionId);
@@ -488,6 +545,7 @@ export function clearSessionTracking(sessionId: string): void {
 }
 
 export function __resetMessageIndexAsyncForTests(): void {
+    for (const sessionId of indexCancellations.keys()) clearSessionTracking(sessionId);
     heapHolder.clearAndReindexScheduledSessions.clear();
     for (const timer of heapHolder.incrementalTimers.values()) {
         clearTimeout(timer);

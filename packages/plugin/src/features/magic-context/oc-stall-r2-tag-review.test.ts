@@ -3,6 +3,7 @@
 import { Database as ForeignDatabase } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { join } from "node:path";
+import { prewarmTagOwners } from "../../hooks/magic-context/tag-owner-warmup";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import { initializeDatabase } from "./storage-db";
@@ -16,7 +17,9 @@ interface Connection {
     transaction(fn: () => void): () => void;
 }
 
-function withStore(run: (reader: Database, foreign: ForeignDatabase, path: string) => void): void {
+async function withStore(
+    run: (reader: Database, foreign: ForeignDatabase, path: string) => Promise<void>,
+): Promise<void> {
     const { dir, cleanup } = createTestTempDir("mc-stall-r2-tags-");
     const path = join(dir, "fixture.db");
     const reader = new Database(path);
@@ -32,11 +35,12 @@ function withStore(run: (reader: Database, foreign: ForeignDatabase, path: strin
             "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number, reasoning_token_count) VALUES (?, 'tail', 'message', 10, 2, 100)",
         )
         .run(SESSION);
+    expect(await prewarmTagOwners(reader, SESSION, 1)).toBe(true);
     expect(getReasoningTokenEstimatesByMessage(reader, SESSION, 1).get("old")).toBe(40);
     expect(getMaxTagNumberByOwnerMessage(reader, SESSION).get("old")).toBe(1);
     const foreign = new ForeignDatabase(path);
     try {
-        run(reader, foreign, path);
+        await run(reader, foreign, path);
     } finally {
         foreign.close();
         reader.close();
@@ -52,8 +56,8 @@ function withStore(run: (reader: Database, foreign: ForeignDatabase, path: strin
  * Context process. `raw`: a plain connection without that trigger, like a
  * tool editing the file directly.
  */
-function backfillAndAppend(writerKind: "local" | "foreign" | "raw"): void {
-    withStore((reader, foreign) => {
+async function backfillAndAppend(writerKind: "local" | "foreign" | "raw"): Promise<void> {
+    await withStore(async (reader, foreign) => {
         if (writerKind === "foreign")
             installTagIdentityRevisionTrigger(foreign as unknown as Database);
         const writer: Connection = writerKind === "local" ? reader : foreign;
@@ -71,6 +75,7 @@ function backfillAndAppend(writerKind: "local" | "foreign" | "raw"): void {
                 )
                 .run(SESSION);
         })();
+        expect(await prewarmTagOwners(reader, SESSION, 1)).toBe(true);
         expect(getMaxTagNumberByOwnerMessage(reader, SESSION).get("appended")).toBe(3);
         const full = reader
             .prepare(
@@ -94,8 +99,8 @@ test("append plus reasoning backfill: the same-process identity generation refre
 test("limitation: a raw connection's append plus reasoning backfill is not seen by a warm summary", () =>
     backfillAndAppend("raw"));
 
-function replaceWithExplicitId(reopen: boolean): void {
-    withStore((reader, foreign, path) => {
+async function replaceWithExplicitId(reopen: boolean): Promise<void> {
+    await withStore(async (reader, foreign, path) => {
         const { id } = foreign
             .prepare("SELECT id FROM tags WHERE session_id = ? AND message_id = 'old'")
             .get(SESSION) as { id: number };
@@ -109,6 +114,7 @@ function replaceWithExplicitId(reopen: boolean): void {
         })();
         const connection = reopen ? new Database(path) : reader;
         try {
+            expect(await prewarmTagOwners(connection, SESSION, 1)).toBe(true);
             expect(getMaxTagNumberByOwnerMessage(connection, SESSION).get("old")).toBeUndefined();
             expect(getMaxTagNumberByOwnerMessage(connection, SESSION).get("replacement")).toBe(7);
             expect(

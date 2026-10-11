@@ -48,6 +48,7 @@ import {
     resetProtectedTailNoEligibleHead,
     resolveEpochFloorForPass,
 } from "../../features/magic-context/storage-meta-persisted";
+import { isTagOwnerSummaryReady } from "../../features/magic-context/storage-tags";
 import type { CoordinateGeneration } from "../../features/magic-context/store-generation-rebase";
 import {
     readCoordinateGeneration,
@@ -166,6 +167,7 @@ import {
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
+import { prewarmTagOwners, waitForTagOwners } from "./tag-owner-warmup";
 import { collectTemporalCandidates, injectTemporalMarkers } from "./temporal-awareness";
 import { readServedTemporalDecisions } from "./temporal-served-projection";
 import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
@@ -782,12 +784,10 @@ export function createTransform(deps: TransformDeps) {
 
         const db = deps.db;
 
-        // Many stages below count canonical ordinals synchronously. On the first
-        // pass of a session after a start, finding its compaction summaries means
-        // reading every message once; that runs on a worker while this pass
-        // waits, so the host's event loop stays free. If the worker fails (logged
-        // and counted there) the pass still runs and a count that needs the
-        // scan does it here once: a servable turn is never refused for it.
+        // Every newly touched session prepares its rank checkpoints off-thread.
+        // Preparation has a bounded asynchronous deadline. An unavailable rank
+        // never triggers a full count here: a required read degrades the pass to
+        // the last-good replay path instead of serving an approximate ordinal.
         try {
             const tPrepare = performance.now();
             const ready = await host.hostPrepareRawOrdinals(sessionId);
@@ -2079,11 +2079,23 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
+        const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
+        // A rebuild may wait briefly without blocking the event loop. If the
+        // digest is still cold, replay persisted reasoning removals this pass;
+        // never invent a cutoff from incomplete ownership information.
+        let tagOwnersReady: boolean;
+        if (isCacheBusting) {
+            tagOwnersReady = await waitForTagOwners(db, sessionId, ownerRatio);
+        } else {
+            void prewarmTagOwners(db, sessionId, ownerRatio);
+            tagOwnersReady = isTagOwnerSummaryReady(db, sessionId, ownerRatio);
+        }
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
         if (
             fullFeatureMode &&
             !compactionOff &&
             historianRunnable &&
+            tagOwnersReady &&
             !sessionMeta.compartmentInProgress
         ) {
             const tTrigger = performance.now();

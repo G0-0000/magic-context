@@ -633,6 +633,11 @@ export function getSqliteDatabasePath(db: Database): string | null {
                 : connection.filename;
         }
     }
+    // Native Bun/better-sqlite3 handles can reach readers without our constructor
+    // wrapper. Their filename is still available without a SQLite query.
+    const native = db as unknown as { filename?: unknown; name?: unknown };
+    const path = native.filename ?? native.name;
+    if (typeof path === "string" && path !== ":memory:" && path !== "") return path;
     return null;
 }
 
@@ -1056,16 +1061,20 @@ function acquireShort(db: Database, acquire: () => unknown, site: string): void 
  * `acquireShort`, then report how long the writer waited for the lock
  * (`acquire_ms`) and how long it then held it (`hold_ms`) when either crosses
  * the threshold. A long hold blocks every other process's writer, so it is
- * worth seeing even when the lock itself came quickly.
+ * worth seeing even when the lock itself came quickly. The native end statement's
+ * `end_ms` is reported separately, so a slow FTS merge or checkpoint at COMMIT
+ * is not mistaken for acquisition time.
  */
 function endWriterTransaction(db: Database, end: () => unknown, sql: string): unknown {
     let ended = false;
+    const endStarted = performance.now();
     try {
         const result = end();
         ended = true;
         return result;
     } finally {
         const open = openWriterTransactions.get(db);
+        const endMs = performance.now() - endStarted;
         // A COMMIT that failed with the transaction still open has not ended it.
         if (open && !isInTransaction(db)) {
             openWriterTransactions.delete(db);
@@ -1077,7 +1086,7 @@ function endWriterTransaction(db: Database, end: () => unknown, sql: string): un
                       ? "committed"
                       : "failed";
                 reportSqliteDiagnostic(
-                    `sqlite writer site=${open.site} lane=${open.lane} acquire_ms=${Math.round(open.acquireMs)} hold_ms=${Math.round(holdMs)} attempts=${open.attempts} outcome=${outcome}`,
+                    `sqlite writer site=${open.site} lane=${open.lane} acquire_ms=${Math.round(open.acquireMs)} hold_ms=${Math.round(holdMs)} end_ms=${Math.round(endMs)} attempts=${open.attempts} outcome=${outcome}`,
                 );
             }
         }

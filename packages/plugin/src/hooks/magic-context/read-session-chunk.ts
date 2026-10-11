@@ -595,19 +595,27 @@ readRawSessionMessages.getCount = getRawSessionMessageOrdinalCount;
 readRawSessionMessages.prepare = prepareRawSessionOrdinals;
 
 /**
- * Prepare a session's canonical ordinal counts without blocking the serving
- * thread: the one full scan for its compaction summaries runs on a worker (see
- * raw-ordinal-warmup.ts), after which counts read only the rows added since.
- * Resolves false when that off-thread scan failed; a later count then scans on
- * the calling thread, so background callers should reschedule instead of
- * reading. Sessions served by a registered raw-message provider, or without an
- * OpenCode store, need nothing.
+ * Prepare rank checkpoints on a worker for every newly touched file session.
+ * The caller waits at most 250 ms asynchronously; the worker continues after
+ * that deadline. False means defer or retry: a synchronous count never falls
+ * back to an unbounded scan. Registered providers and absent OpenCode stores
+ * need no SQLite preparation.
  */
 export async function prepareRawSessionOrdinals(sessionId: string): Promise<boolean> {
     if (sessionProviders.get(sessionId)?.provider) return true;
     if (!openCodeDbExists()) return true;
     const db = withReadOnlySessionDb((connection) => connection);
-    return (await prewarmRawSessionOrdinalsForDb(db, sessionId)) === "warm";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            prewarmRawSessionOrdinalsForDb(db, sessionId).then((outcome) => outcome === "warm"),
+            new Promise<false>((resolve) => {
+                timer = setTimeout(() => resolve(false), 250);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /**

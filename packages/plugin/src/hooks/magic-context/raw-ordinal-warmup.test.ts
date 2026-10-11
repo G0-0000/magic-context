@@ -112,7 +112,7 @@ describe("canonical ordinal warm-up", () => {
 
     it(
         "counts rows written while the scan ran, including a reused top rowid and a summary behind the tail",
-        withStore(300, (path, reader) => {
+        withStore(300, async (path, reader) => {
             const epoch = getRawSessionSummaryEpoch(SESSION);
             // The worker's part: a scan on its own connection.
             const scanner = new Database(path, { readonly: true });
@@ -133,7 +133,8 @@ describe("canonical ordinal warm-up", () => {
                 .prepare("UPDATE message SET data = ? WHERE id = 'open-summary'")
                 .run(JSON.stringify({ role: "assistant", summary: true, finish: "stop" }));
             writer.close();
-            expect(installRawSessionSummaryScan(reader, SESSION, scan, epoch)).toBe(true);
+            expect(installRawSessionSummaryScan(reader, SESSION, scan, epoch)).toBe(false);
+            expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
             resetRawSessionOrdinalJsonRowsReadForTest();
             expect(readRawSessionMessageByIdFromDb(reader, SESSION, "tail")?.ordinal).toBe(
                 oldOrdinal(reader, "tail"),
@@ -190,7 +191,7 @@ describe("canonical ordinal warm-up", () => {
     );
 
     it(
-        "scans a small session on the calling thread",
+        "scans even a small file session on the worker",
         withStore(100, async (_path, reader) => {
             expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
             expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(true);

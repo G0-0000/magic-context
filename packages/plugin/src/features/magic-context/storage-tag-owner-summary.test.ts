@@ -3,6 +3,7 @@
 import { Database as UnwrappedDatabase } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
+import { prewarmTagOwners } from "../../hooks/magic-context/tag-owner-warmup";
 import { Database, mayChangeTagIdentity } from "../../shared/sqlite";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
 import { createTestTempDir } from "../../shared/test-temp-dir";
@@ -23,6 +24,8 @@ import {
     getTagsBySession,
     insertTag,
     resetTagOwnerRowsReadForTest,
+    TAG_OWNER_APPENDED_WITH_SHAPE_SQL,
+    TagOwnerSummaryNotReady,
     updateTagDropMode,
     updateTagStatus,
 } from "./storage-tags";
@@ -73,7 +76,8 @@ function frozenReasoningEstimates(
     return totals;
 }
 
-function expectMatchesFullRead(db: Database, ratio = 0.75): void {
+async function expectMatchesFullRead(db: Database, ratio = 0.75): Promise<void> {
+    expect(await prewarmTagOwners(db, SESSION, ratio)).toBe(true);
     // Estimates first, as the projection reads them, then the owner map.
     expect(new Map(getReasoningTokenEstimatesByMessage(db, SESSION, ratio))).toEqual(
         frozenReasoningEstimates(db, SESSION, ratio),
@@ -109,8 +113,8 @@ function addTag(
     );
 }
 
-describe("tag owner summary", () => {
-    it("matches a full read through appends, owner changes, removals and other connections", () => {
+describe("tag owner summary", async () => {
+    it("matches a full read through appends, owner changes, removals and other connections", async () => {
         const { dir: directory, cleanup } = createTestTempDir("mc-tag-owner-");
         const path = join(directory, "context.db");
         const db = new Database(path);
@@ -124,15 +128,15 @@ describe("tag owner summary", () => {
             addTag(db, 3, "call-1", "tool", null, "m-1");
             addTag(db, 4, "call-2", "tool");
             addTag(db, 5, "m-2", "file");
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
 
             // Appends are folded into the cached summary. Tag 6 is written before
             // its token columns exist, the way a legacy row is.
             addTag(db, 6, "m-3", "message", null);
             addTag(db, 7, "call-3", "tool", null, "m-3");
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
             // A prose ratio the summary has not seen yet must still match a full read.
-            expectMatchesFullRead(db, 1.5);
+            await expectMatchesFullRead(db, 1.5);
 
             // A reasoning count written later changes an existing row.
             backfillTagTokenCounts(db, SESSION, 6, {
@@ -140,17 +144,17 @@ describe("tag owner summary", () => {
                 inputTokenCount: 0,
                 reasoningTokenCount: 300,
             });
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
 
             // A removal lowers an owner's maximum.
             deleteTagsByMessageId(db, SESSION, "m-3");
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
 
             // An owner re-assignment through this process's connection.
             db.prepare(
                 "UPDATE tags SET tool_owner_message_id = ? WHERE session_id = ? AND tag_number = ?",
             ).run("m-2", SESSION, 4);
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
 
             // A commit by another process, invisible to this process's write count.
             other = new UnwrappedDatabase(path);
@@ -158,14 +162,16 @@ describe("tag owner summary", () => {
             other
                 .prepare("DELETE FROM tags WHERE session_id = ? AND tag_number = ?")
                 .run(SESSION, 2);
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
 
             // Rows read inside a transaction that rolls back never reach the cache.
             db.exec("BEGIN IMMEDIATE");
             addTag(db, 8, "m-9", "message", 999);
-            expect(getMaxTagNumberByOwnerMessage(db, SESSION).get("m-9")).toBe(8);
+            expect(() => getMaxTagNumberByOwnerMessage(db, SESSION)).toThrow(
+                TagOwnerSummaryNotReady,
+            );
             db.exec("ROLLBACK");
-            expectMatchesFullRead(db);
+            await expectMatchesFullRead(db);
         } finally {
             other?.close();
             db.close();
@@ -173,8 +179,8 @@ describe("tag owner summary", () => {
         }
     });
 
-    it("reads only the appended tag rows, however many tags the session has", () => {
-        const rowsReadFor = (tagCount: number): number => {
+    it("reads only the appended tag rows, however many tags the session has", async () => {
+        const rowsReadFor = async (tagCount: number): Promise<number> => {
             const db = new Database(":memory:");
             try {
                 initializeDatabase(db);
@@ -199,18 +205,18 @@ describe("tag owner summary", () => {
                 getReasoningTokenEstimatesByMessage(db, SESSION, 1);
                 getMaxTagNumberByOwnerMessage(db, SESSION);
                 const read = getTagOwnerRowsReadForTest();
-                expectMatchesFullRead(db, 1);
+                await expectMatchesFullRead(db, 1);
                 return read;
             } finally {
                 db.close();
             }
         };
-        expect(rowsReadFor(2_000)).toBe(3);
-        expect(rowsReadFor(20_000)).toBe(3);
+        expect(await rowsReadFor(2_000)).toBe(3);
+        expect(await rowsReadFor(20_000)).toBe(3);
     });
 });
 
-describe("tag owner summary after other connections' commits", () => {
+describe("tag owner summary after other connections' commits", async () => {
     /**
      * A file store with tags 1..count and a warm summary. `other` stands in for
      * another process: a connection without Magic Context's wrapper, whose
@@ -222,11 +228,11 @@ describe("tag owner summary after other connections' commits", () => {
      * installs when it opens. `magicContextWriter: false` leaves it a raw
      * connection that is not Magic Context's.
      */
-    function withForeignWriter(
+    async function withForeignWriter(
         count: number,
-        run: (db: Database, other: UnwrappedDatabase) => void,
+        run: (db: Database, other: UnwrappedDatabase) => Promise<void>,
         magicContextWriter = true,
-    ): void {
+    ): Promise<void> {
         const { dir: directory, cleanup } = createTestTempDir("mc-tag-owner-foreign-");
         const path = join(directory, "context.db");
         const db = new Database(path);
@@ -244,11 +250,11 @@ describe("tag owner summary after other connections' commits", () => {
                         `m-${tag - 1}`,
                     );
             })();
-            expectMatchesFullRead(db, 1);
+            await expectMatchesFullRead(db, 1);
             other = new UnwrappedDatabase(path);
             other.exec("PRAGMA busy_timeout = 1000");
             if (magicContextWriter) installTagIdentityRevisionTrigger(other as unknown as Database);
-            run(db, other);
+            await run(db, other);
         } finally {
             other?.close();
             db.close();
@@ -256,50 +262,51 @@ describe("tag owner summary after other connections' commits", () => {
         }
     }
 
-    function readCost(db: Database): { rows: number; checks: number } {
+    async function readCost(db: Database): Promise<{ rows: number; checks: number }> {
         resetTagOwnerRowsReadForTest();
+        expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
         getReasoningTokenEstimatesByMessage(db, SESSION, 1);
         getMaxTagNumberByOwnerMessage(db, SESSION);
         return { rows: getTagOwnerRowsReadForTest(), checks: getTagOwnerShapeChecksForTest() };
     }
 
-    it("folds tags another connection appended without rereading the session", () => {
+    it("folds tags another connection appended without rereading the session", async () => {
         for (const count of [2_000, 20_000]) {
-            withForeignWriter(count, (db, other) => {
+            await withForeignWriter(count, async (db, other) => {
                 const insert = other.prepare(
                     "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number, reasoning_token_count) VALUES (?, ?, 'message', 10, ?, ?)",
                 );
                 for (let tag = count + 1; tag <= count + 3; tag += 1)
                     insert.run(SESSION, `m-${tag}`, tag, tag * 2);
                 // One shape check, then only the three new rows.
-                expect({ count, ...readCost(db) }).toEqual({ count, rows: 3, checks: 1 });
-                expectMatchesFullRead(db, 1);
+                expect({ count, ...(await readCost(db)) }).toEqual({ count, rows: 3, checks: 1 });
+                await expectMatchesFullRead(db, 1);
             });
         }
     });
 
-    it("keeps the summary through status and drop writes on either connection", () => {
-        withForeignWriter(2_000, (db, other) => {
+    it("keeps the summary through status and drop writes on either connection", async () => {
+        await withForeignWriter(2_000, async (db, other) => {
             updateTagStatus(db, SESSION, 5, "dropped");
             updateTagDropMode(db, SESSION, 5, "truncated");
-            expect(readCost(db)).toEqual({ rows: 0, checks: 0 });
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 0 });
             other
                 .prepare(
                     "UPDATE tags SET status = 'dropped', drop_mode = 'full' WHERE session_id = ? AND tag_number <= 100",
                 )
                 .run(SESSION);
-            expect(readCost(db)).toEqual({ rows: 0, checks: 1 });
-            expectMatchesFullRead(db, 1);
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            await expectMatchesFullRead(db, 1);
         });
     });
 
-    it("rebuilds after another connection deletes or replaces a tag", () => {
-        withForeignWriter(2_000, (db, other) => {
+    it("rebuilds after another connection deletes or replaces a tag", async () => {
+        await withForeignWriter(2_000, async (db, other) => {
             other
                 .prepare("DELETE FROM tags WHERE session_id = ? AND tag_number = 1999")
                 .run(SESSION);
-            expect(readCost(db)).toEqual({ rows: 1_999, checks: 1 });
-            expectMatchesFullRead(db, 1);
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            await expectMatchesFullRead(db, 1);
             // Delete and append in one commit: the count alone would not move.
             other.transaction(() => {
                 other
@@ -311,42 +318,42 @@ describe("tag owner summary after other connections' commits", () => {
                     )
                     .run(SESSION);
             })();
-            expect(readCost(db)).toEqual({ rows: 1_999, checks: 1 });
-            expectMatchesFullRead(db, 1);
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            await expectMatchesFullRead(db, 1);
             // A REPLACE removes the old row without a delete trigger.
             other
                 .prepare(
                     "INSERT OR REPLACE INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, 'm-replaced', 'message', 10, 7)",
                 )
                 .run(SESSION);
-            expect(readCost(db).rows).toBe(1_999);
-            expectMatchesFullRead(db, 1);
+            expect((await readCost(db)).rows).toBe(0);
+            await expectMatchesFullRead(db, 1);
         });
     });
 
-    it("rebuilds after another Magic Context connection re-keys or backfills a tag in place", () => {
-        withForeignWriter(2_000, (db, other) => {
+    it("rebuilds after another Magic Context connection re-keys or backfills a tag in place", async () => {
+        await withForeignWriter(2_000, async (db, other) => {
             other
                 .prepare(
                     "UPDATE tags SET message_id = 'm-rekeyed' WHERE session_id = ? AND tag_number = 1000",
                 )
                 .run(SESSION);
-            expect(readCost(db)).toEqual({ rows: 2_000, checks: 1 });
-            expectMatchesFullRead(db, 1);
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            await expectMatchesFullRead(db, 1);
             other
                 .prepare(
                     "UPDATE tags SET reasoning_token_count = 5000 WHERE session_id = ? AND tag_number = 10",
                 )
                 .run(SESSION);
-            expect(readCost(db)).toEqual({ rows: 2_000, checks: 1 });
-            expectMatchesFullRead(db, 1);
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            await expectMatchesFullRead(db, 1);
         });
     });
 
-    it("documents the residual: an in-place re-key by a connection that is not Magic Context's keeps the cached owners", () => {
-        withForeignWriter(
+    it("documents the residual: an in-place re-key by a connection that is not Magic Context's keeps the cached owners", async () => {
+        await withForeignWriter(
             2_000,
-            (db, other) => {
+            async (db, other) => {
                 other
                     .prepare(
                         "UPDATE tags SET message_id = 'm-rekeyed' WHERE session_id = ? AND tag_number = 1000",
@@ -356,19 +363,19 @@ describe("tag owner summary after other connections' commits", () => {
                 // count and highest id are unchanged, so the summary is kept. The
                 // same re-key on this process's own connection moves its
                 // identity-write generation and rebuilds.
-                expect(readCost(db)).toEqual({ rows: 0, checks: 1 });
+                expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
                 expect(getMaxTagNumberByOwnerMessage(db, SESSION).get("m-rekeyed")).toBeUndefined();
                 db.prepare(
                     "UPDATE tags SET message_id = 'm-rekeyed' WHERE session_id = ? AND tag_number = 1000",
                 ).run(SESSION);
-                expect(readCost(db).rows).toBe(2_000);
-                expectMatchesFullRead(db, 1);
+                expect((await readCost(db)).rows).toBe(0);
+                await expectMatchesFullRead(db, 1);
             },
             false,
         );
     });
 
-    it("installs the identity-revision trigger on every initialized connection", () => {
+    it("installs the identity-revision trigger on every initialized connection", async () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
@@ -384,8 +391,8 @@ describe("tag owner summary after other connections' commits", () => {
         }
     });
 
-    it("checks the session's shape from the index alone", () => {
-        withForeignWriter(10, (db, other) => {
+    it("checks the session's shape off-thread using the index alone", async () => {
+        await withForeignWriter(10, async (db, other) => {
             other.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ?").run(SESSION);
             const statements: string[] = [];
             const prepare = db.prepare.bind(db);
@@ -394,12 +401,12 @@ describe("tag owner summary after other connections' commits", () => {
                 return prepare(sql);
             }) as typeof db.prepare;
             try {
-                expect(readCost(db).checks).toBe(1);
+                expect((await readCost(db)).checks).toBe(1);
             } finally {
                 db.prepare = prepare;
             }
-            const shape = statements.find((sql) => sql.includes("COUNT(*)"));
-            expect(shape).toBeDefined();
+            expect(statements.some((sql) => sql.includes("COUNT(*)"))).toBe(false);
+            const shape = TAG_OWNER_APPENDED_WITH_SHAPE_SQL;
             const plan = (
                 db
                     .prepare(`EXPLAIN QUERY PLAN ${shape}`)
@@ -418,8 +425,8 @@ describe("tag owner summary after other connections' commits", () => {
     });
 });
 
-describe("tag identity write classification", () => {
-    it("lets appends and identity-free updates keep the summary", () => {
+describe("tag identity write classification", async () => {
+    it("lets appends and identity-free updates keep the summary", async () => {
         for (const sql of [
             "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, ?, ?, ?, ?)",
             "UPDATE tags SET status = ? WHERE session_id = ? AND tag_number = ?",
@@ -435,7 +442,7 @@ describe("tag identity write classification", () => {
         }
     });
 
-    it("treats anything that can change or remove an existing tag as an identity write", () => {
+    it("treats anything that can change or remove an existing tag as an identity write", async () => {
         for (const sql of [
             "DELETE FROM tags WHERE session_id = ? AND tag_number = ?",
             "UPDATE tags SET message_id = ? WHERE session_id = ? AND tag_number = ?",
@@ -460,7 +467,7 @@ describe("tag identity write classification", () => {
     });
 });
 
-describe("tag identity revision rows on session deletion", () => {
+describe("tag identity revision rows on session deletion", async () => {
     const revisionOf = (db: Database, sessionId: string) =>
         (
             db
@@ -468,7 +475,7 @@ describe("tag identity revision rows on session deletion", () => {
                 .get(tagIdentityRevisionKey(sessionId)) as { value: string } | null
         )?.value ?? null;
 
-    it("removes the session's revision row with its tags, and keeps it while another harness's tags remain", () => {
+    it("removes the session's revision row with its tags, and keeps it while another harness's tags remain", async () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
@@ -491,7 +498,7 @@ describe("tag identity revision rows on session deletion", () => {
         }
     });
 
-    it("rebuilds a warm summary of a session deleted by another connection", () => {
+    it("rebuilds a warm summary of a session deleted by another connection", async () => {
         const { dir: directory, cleanup } = createTestTempDir("mc-tag-owner-delete-");
         const path = join(directory, "context.db");
         const db = new Database(path);
@@ -504,7 +511,7 @@ describe("tag identity revision rows on session deletion", () => {
             db.prepare(
                 "UPDATE tags SET reasoning_token_count = 40 WHERE session_id = ? AND tag_number = 1",
             ).run(SESSION);
-            expectMatchesFullRead(db, 1);
+            await expectMatchesFullRead(db, 1);
             expect(revisionOf(db, SESSION)).not.toBeNull();
             // Session cleanup on a second connection deletes the tags first and
             // then the revision row.
@@ -514,9 +521,10 @@ describe("tag identity revision rows on session deletion", () => {
             // The missing revision differs from the cached one, and the count fell
             // to zero: either way the summary is rebuilt, not reused.
             resetTagOwnerRowsReadForTest();
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
             expect(new Map(getMaxTagNumberByOwnerMessage(db, SESSION))).toEqual(new Map());
             expect(getTagOwnerShapeChecksForTest()).toBeLessThanOrEqual(1);
-            expectMatchesFullRead(db, 1);
+            await expectMatchesFullRead(db, 1);
         } finally {
             other?.close();
             db.close();

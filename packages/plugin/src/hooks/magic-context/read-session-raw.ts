@@ -1,4 +1,6 @@
-import type { Database } from "../../shared/sqlite";
+import { isMainThread } from "node:worker_threads";
+import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
+import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 
 export interface RawMessageParts {
     id: string;
@@ -1139,36 +1141,146 @@ function survivingAnchor(db: Database, set: SummaryCandidates): RowAnchor | null
 }
 
 /**
- * A full summary scan of one session: the highest rows of `message` and the
- * session's flagged rows, read by one statement so both describe the same
- * state. Rows written after that state sit above `anchors[0]` (or replace one
- * of the remembered rows, which the next count notices), so a scan made on any
- * connection, at any earlier time, can be installed with
- * {@link installRawSessionSummaryScan} and brought up to date by the ordinary
- * incremental read.
+ * A worker snapshot of summary candidates, global rowid anchors and exact ranks.
+ * Candidates can seed another worker after appends or anchor reuse. Checkpoints
+ * can serve only while the original serving stamp is unchanged; a later commit
+ * requires the worker to rebuild them before a large prefix lookup can answer.
  */
 export interface RawSessionSummaryScan {
     anchors: Array<{ rowid: number; id: string }>;
     ids: string[];
     /** Rows of the session whose JSON the scan read. */
     sessionRows: number;
+    checkpoints?: Array<OrdinalKey & { ordinal: number }>;
+    total?: number;
 }
 
-/** Run a full summary scan. The warm-up worker calls this on its own connection. */
-export function scanRawSessionSummaryRows(db: Database, sessionId: string): RawSessionSummaryScan {
-    const rows = db.prepare(SUMMARY_FULL_SCAN_SQL).all(sessionId, sessionId) as ScanRow[];
-    const anchors: RowAnchor[] = [];
-    const ids: string[] = [];
-    let sessionRows = 0;
-    for (const row of rows) {
-        if (row.kind === 1 && typeof row.rid === "number" && typeof row.id === "string")
-            anchors.push({ rowid: row.rid, id: row.id });
-        else if (row.kind === 2 && typeof row.id === "string") ids.push(row.id);
-        else if (row.kind === 4 && typeof row.rid === "number") sessionRows = row.rid;
+const ordinalCheckpoints = new WeakMap<
+    Database,
+    Map<string, { stamp: StoreStamp; epoch: number; scan: RawSessionSummaryScan }>
+>();
+const ordinalSummarySeeds = new WeakMap<
+    Database,
+    Map<string, { epoch: number; scan: RawSessionSummaryScan }>
+>();
+const ORDINAL_LOOKUP_LIMIT = 512;
+
+export class RawOrdinalsNotReady extends Error {
+    constructor() {
+        super("canonical ordinals are warming off-thread; retry after preparation");
     }
-    anchors.sort((left, right) => right.rowid - left.rowid);
-    anchors.length = Math.min(anchors.length, SUMMARY_ANCHOR_LIMIT);
-    return { anchors, ids, sessionRows };
+}
+
+/** Capture the serving handle's stamp before starting a worker; stamps are connection-local. */
+export function rawOrdinalStoreStamp(db: Database): StoreStamp | null {
+    return readStoreStamp(db);
+}
+
+/** Candidate discovery can be reused even when a later commit invalidated ranks. */
+export function rawOrdinalSummarySeed(
+    db: Database,
+    sessionId: string,
+): RawSessionSummaryScan | undefined {
+    const seed = ordinalSummarySeeds.get(db)?.get(sessionId);
+    if (!seed || seed.epoch !== getRawSessionSummaryEpoch(sessionId)) return undefined;
+    return {
+        ...seed.scan,
+        ids: [...new Set([...seed.scan.ids, ...(writtenSummaryIds.get(sessionId) ?? [])])],
+    };
+}
+
+function boundedOrdinalPrefix(db: Database, sessionId: string, through: OrdinalKey | null): number {
+    const cached = ordinalCheckpoints.get(db)?.get(sessionId);
+    const usable =
+        cached &&
+        cached.epoch === getRawSessionSummaryEpoch(sessionId) &&
+        sameStoreStamp(cached.stamp, readStoreStamp(db));
+    if (usable && through === null) return cached.scan.total ?? 0;
+    let floor: (OrdinalKey & { ordinal: number }) | undefined;
+    if (usable && through) {
+        const points = cached.scan.checkpoints ?? [];
+        let low = 0;
+        let high = points.length;
+        while (low < high) {
+            const middle = Math.floor((low + high) / 2);
+            if (compareOrdinalKeys(points[middle], through) <= 0) low = middle + 1;
+            else high = middle;
+        }
+        floor = points[low - 1];
+        if (floor && compareOrdinalKeys(floor, through) === 0) return floor.ordinal;
+    }
+    const bindings: Array<string | number> = [sessionId];
+    if (floor) bindings.push(floor.timeCreated, floor.id);
+    if (through) bindings.push(through.timeCreated, through.id);
+    // LIMIT is applied to index keys before reading JSON. Even an unprepared
+    // synchronous caller can inspect only this bounded suffix, never a prefix scan.
+    const rows = db
+        .prepare(`SELECT ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE id IN (
+        SELECT id FROM message WHERE session_id = ?${floor ? " AND (time_created, id) > (?, ?)" : ""}${through ? " AND (time_created, id) <= (?, ?)" : ""}
+        ORDER BY time_created, id LIMIT ${ORDINAL_LOOKUP_LIMIT + 1})`)
+        .all(...bindings) as Array<{ excluded: number }>;
+    ordinalRowsVisited += rows.length;
+    ordinalJsonRowsRead += rows.length;
+    if (rows.length > ORDINAL_LOOKUP_LIMIT) {
+        void prewarmRawSessionOrdinalsForDb(db, sessionId);
+        throw new RawOrdinalsNotReady();
+    }
+    return (floor?.ordinal ?? 0) + rows.reduce((sum, row) => sum + (row.excluded === 1 ? 0 : 1), 0);
+}
+
+/** Discover summary candidates and build ranks on the worker's read snapshot. */
+export function scanRawSessionSummaryRows(
+    db: Database,
+    sessionId: string,
+    previous?: RawSessionSummaryScan,
+): RawSessionSummaryScan {
+    return withReadSnapshot(db, () => {
+        if (previous) {
+            const sessions = summaryCandidateSets.get(db) ?? new Map();
+            sessions.set(sessionId, {
+                epoch: getRawSessionSummaryEpoch(sessionId),
+                anchors: previous.anchors,
+                ids: new Set(previous.ids),
+            });
+            summaryCandidateSets.set(db, sessions);
+        }
+        const incremental =
+            previous && isRawSessionSummaryWarm(db, sessionId)
+                ? summaryCandidatesOf(db, sessionId)
+                : undefined;
+        const rows = incremental
+            ? []
+            : (db.prepare(SUMMARY_FULL_SCAN_SQL).all(sessionId, sessionId) as ScanRow[]);
+        const anchors: RowAnchor[] = [];
+        const ids: string[] = [];
+        let sessionRows = 0;
+        for (const row of rows) {
+            if (row.kind === 1 && typeof row.rid === "number" && typeof row.id === "string")
+                anchors.push({ rowid: row.rid, id: row.id });
+            else if (row.kind === 2 && typeof row.id === "string") ids.push(row.id);
+            else if (row.kind === 4 && typeof row.rid === "number") sessionRows = row.rid;
+        }
+        if (incremental) {
+            ids.push(...incremental.ids);
+            anchors.push(...(summaryCandidateSets.get(db)?.get(sessionId)?.anchors ?? []));
+            sessionRows = countStoredRawSessionRowsIndexed(db, sessionId);
+        }
+        anchors.sort((left, right) => right.rowid - left.rowid);
+        anchors.length = Math.min(anchors.length, SUMMARY_ANCHOR_LIMIT);
+        const keys = db
+            .prepare(`SELECT id, time_created AS timeCreated, CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ${EXCLUDED_ROW_SQL} ELSE 0 END AS excluded FROM message WHERE session_id = ?
+        ORDER BY time_created, id`)
+            .all(JSON.stringify(ids), sessionId) as Array<OrdinalKey & { excluded: number }>;
+        const checkpoints: Array<OrdinalKey & { ordinal: number }> = [];
+        let total = 0;
+        for (let index = 0; index < keys.length; index++) {
+            const key = keys[index];
+            if (key.excluded !== 1) total++;
+            if (index % 256 === 255 || index === keys.length - 1)
+                checkpoints.push({ id: key.id, timeCreated: key.timeCreated, ordinal: total });
+        }
+        return { anchors, ids, sessionRows, checkpoints, total };
+    });
 }
 
 /** The value to pass to {@link installRawSessionSummaryScan} for a scan started now. */
@@ -1177,18 +1289,27 @@ export function getRawSessionSummaryEpoch(sessionId: string): number {
 }
 
 /**
- * Use a scan made elsewhere as this connection's summary candidates. Ignored
- * when {@link forgetRawSessionSummaryRows} ran for the session after the scan
- * started (`epoch` is then stale), or when the connection already has a usable
- * set. Returns whether the session is now ready to count without a scan.
+ * Retain discovered candidates as a seed for later workers. File-store ranks
+ * are installed only with the original serving stamp and current session epoch;
+ * a stale scan must never certify a current rank. In-memory stores retain the
+ * candidate-only compatibility path. Returns whether ranks can now be served.
  */
 export function installRawSessionSummaryScan(
     db: Database,
     sessionId: string,
     scan: RawSessionSummaryScan,
     epoch: number,
+    stamp?: StoreStamp | null,
 ): boolean {
     if (epoch !== getRawSessionSummaryEpoch(sessionId)) return false;
+    const seeds = ordinalSummarySeeds.get(db) ?? new Map();
+    seeds.set(sessionId, { epoch, scan });
+    ordinalSummarySeeds.set(db, seeds);
+    if (scan.checkpoints && stamp && sameStoreStamp(stamp, readStoreStamp(db))) {
+        const counts = ordinalCheckpoints.get(db) ?? new Map();
+        counts.set(sessionId, { stamp, epoch, scan });
+        ordinalCheckpoints.set(db, counts);
+    } else if (stamp) return false;
     if (isRawSessionSummaryWarm(db, sessionId)) return true;
     let sessions = summaryCandidateSets.get(db);
     if (!sessions) {
@@ -1200,12 +1321,19 @@ export function installRawSessionSummaryScan(
 }
 
 /**
- * Whether the next count of this session on this connection can skip the full
- * scan: a candidate set exists for the current epoch and one of its remembered
- * rows still holds the same message. False when the store cannot be read by
- * rowid (the JSON-reading count is used there instead).
+ * File stores on the serving thread require rank checkpoints for the current
+ * stamp and epoch. Workers and in-memory stores instead require candidates with
+ * a surviving rowid anchor, so candidate discovery can be incremental.
  */
 export function isRawSessionSummaryWarm(db: Database, sessionId: string): boolean {
+    if (isMainThread && getSqliteDatabasePath(db)) {
+        const counts = ordinalCheckpoints.get(db)?.get(sessionId);
+        return Boolean(
+            counts &&
+                counts.epoch === getRawSessionSummaryEpoch(sessionId) &&
+                sameStoreStamp(counts.stamp, readStoreStamp(db)),
+        );
+    }
     const set = summaryCandidateSets.get(db)?.get(sessionId);
     if (!set || set.epoch !== getRawSessionSummaryEpoch(sessionId)) return false;
     try {
@@ -1289,10 +1417,9 @@ function canonicalCountStatementText(lower: boolean, upper: boolean): string {
 }
 
 /**
- * Ordinal-bearing messages of a session in `(after, through]` (either bound may
- * be open), counted from the index plus the summary candidates. Returns null
- * when this connection's store cannot be read this way, so the caller can use
- * the statement that reads every row's JSON.
+ * File-store serving counts use checkpoints and bounded reads, or defer. Workers
+ * and in-memory stores use the index plus summary candidates, with the legacy
+ * JSON-reading fallback when those facilities are unavailable.
  */
 function countCanonicalOrdinalsIndexed(
     db: Database,
@@ -1300,6 +1427,14 @@ function countCanonicalOrdinalsIndexed(
     after: OrdinalKey | null,
     through: OrdinalKey | null,
 ): number | null {
+    if (isMainThread && getSqliteDatabasePath(db)) {
+        return withReadSnapshot(
+            db,
+            () =>
+                boundedOrdinalPrefix(db, sessionId, through) -
+                (after ? boundedOrdinalPrefix(db, sessionId, after) : 0),
+        );
+    }
     if (indexedCountUnsupported.has(db)) return null;
     const range: Array<string | number> = [];
     if (after) range.push(after.timeCreated, after.id);

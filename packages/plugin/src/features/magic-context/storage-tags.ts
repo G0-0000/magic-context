@@ -1,7 +1,9 @@
+import { isMainThread } from "node:worker_threads";
 import { resolveToolTier } from "../../hooks/magic-context/emergency-drop";
 import { getHarness } from "../../shared/harness";
 import {
     type Database,
+    getSqliteDatabasePath,
     getTagIdentityWriteGeneration,
     type Statement as PreparedStatement,
 } from "../../shared/sqlite";
@@ -723,6 +725,20 @@ export function getReasoningTokenEstimatesByMessage(
     return summary.reasoningEstimatesByRatio.get(proseRatio) ?? new Map();
 }
 
+/** Missing ownership information must defer a new reasoning removal, not price it as zero. */
+export function tryGetReasoningTokenEstimatesByMessage(
+    db: Database,
+    sessionId: string,
+    ratio: number,
+): ReadonlyMap<string, number> | undefined {
+    try {
+        return getReasoningTokenEstimatesByMessage(db, sessionId, ratio);
+    } catch (error) {
+        if (error instanceof TagOwnerSummaryNotReady) return undefined;
+        throw error;
+    }
+}
+
 /**
  * Highest tag number per owning message, as the reasoning budget projection
  * groups tags: a tool tag belongs to its tool owner message (and is skipped
@@ -783,13 +799,15 @@ interface TagOwnerRow {
  * count and highest id still fit an append.
  *
  * Inside an open transaction it is neither used nor stored, since uncommitted
- * rows can still roll back.
+ * rows can still roll back. File-store callers defer cold reads; the worker
+ * performs builds and foreign-commit shape counts on a read snapshot.
  */
-interface TagOwnerSummary {
+export interface TagOwnerSummary {
     dataVersion: number;
     schemaVersion: number;
     generation: number;
     lastRowId: number;
+    globalLastRowId: number;
     /** Tag rows of the session folded into this summary. */
     rowCount: number;
     /** Ids of tool tags folded without an owner; another process may still adopt them. */
@@ -804,6 +822,143 @@ interface TagOwnerSummary {
 const tagOwnerSummaries = new WeakMap<Database, Map<string, TagOwnerSummary>>();
 /** The prose ratio comes from session calibration and changes rarely; keep the most recent few. */
 const MAX_CACHED_PROSE_RATIOS = 4;
+const TAG_OWNER_PAGE_LIMIT = 512;
+
+export class TagOwnerSummaryNotReady extends Error {
+    constructor() {
+        super("tag owner summary needs off-thread preparation");
+    }
+}
+
+/** A worker builds the same digest as a synchronous read, inside one snapshot. */
+export function scanTagOwnerSummary(
+    db: Database,
+    sessionId: string,
+    ratio: number,
+    ratios: number[] = [],
+): TagOwnerSummary {
+    db.exec("BEGIN");
+    try {
+        return readTagOwnerSummary(db, sessionId, ratio, ratios);
+    } finally {
+        db.exec("ROLLBACK");
+    }
+}
+
+export function cachedTagOwnerRatios(db: Database, sessionId: string): number[] {
+    return [...(tagOwnerSummaries.get(db)?.get(sessionId)?.reasoningEstimatesByRatio.keys() ?? [])];
+}
+
+export type TagOwnerWarmupState = Pick<
+    TagOwnerSummary,
+    | "dataVersion"
+    | "generation"
+    | "schemaVersion"
+    | "globalLastRowId"
+    | "lastRowId"
+    | "rowCount"
+    | "identityRevision"
+    | "unownedToolRows"
+>;
+export interface TagOwnerDelta {
+    rows: TagOwnerRow[];
+    adopted: TagOwnerRow[];
+    globalLastRowId: number;
+}
+
+export function tagOwnerWarmupState(
+    db: Database,
+    sessionId: string,
+): TagOwnerWarmupState | undefined {
+    const cached = tagOwnerSummaries.get(db)?.get(sessionId);
+    if (!cached || cached.unownedToolRows.size > TAG_OWNER_PAGE_LIMIT) return undefined;
+    return {
+        dataVersion: cached.dataVersion,
+        generation: cached.generation,
+        schemaVersion: cached.schemaVersion,
+        globalLastRowId: cached.globalLastRowId,
+        lastRowId: cached.lastRowId,
+        rowCount: cached.rowCount,
+        identityRevision: cached.identityRevision,
+        unownedToolRows: new Set(cached.unownedToolRows),
+    };
+}
+
+/** Foreign-commit shape counts run on the worker too, without transferring the cached maps. */
+export function scanTagOwnerDelta(
+    db: Database,
+    sessionId: string,
+    state: TagOwnerWarmupState,
+): TagOwnerDelta | null {
+    db.exec("BEGIN");
+    try {
+        const globalLastRowId = (
+            db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM tags").get() as { id: number }
+        ).id;
+        if (globalLastRowId - state.globalLastRowId > TAG_OWNER_PAGE_LIMIT) return null;
+        const rows = appendedSinceForeignCommit(db, sessionId, state);
+        if (!rows) return null;
+        return { rows, adopted: adoptedSinceForeignCommit(db, state), globalLastRowId };
+    } finally {
+        db.exec("ROLLBACK");
+    }
+}
+
+export function installTagOwnerDelta(
+    db: Database,
+    sessionId: string,
+    state: TagOwnerWarmupState,
+    delta: TagOwnerDelta,
+    versions: { dataVersion: number; schemaVersion: number; generation: number },
+): boolean {
+    const cached = tagOwnerSummaries.get(db)?.get(sessionId);
+    if (
+        !cached ||
+        cached.rowCount !== state.rowCount ||
+        cached.globalLastRowId !== state.globalLastRowId ||
+        cached.identityRevision !== state.identityRevision ||
+        delta.rows.length > TAG_OWNER_PAGE_LIMIT ||
+        delta.adopted.length > TAG_OWNER_PAGE_LIMIT
+    )
+        return false;
+    tagOwnerShapeChecks++;
+    tagOwnerRowsRead += delta.rows.length + delta.adopted.length;
+    for (const row of delta.rows) foldTagOwnerRow(cached, row);
+    for (const row of delta.adopted) foldTagOwnerRow(cached, row, false);
+    cached.globalLastRowId = delta.globalLastRowId;
+    cached.dataVersion = versions.dataVersion;
+    cached.schemaVersion = versions.schemaVersion;
+    cached.generation = versions.generation;
+    return true;
+}
+
+/** Use the original dataVersion, schemaVersion and generation validated by the caller. */
+export function installTagOwnerSummary(
+    db: Database,
+    sessionId: string,
+    summary: TagOwnerSummary,
+    versions: { dataVersion: number; schemaVersion: number; generation: number },
+    shapeChecked = false,
+): void {
+    if (shapeChecked) tagOwnerShapeChecks++;
+    summary.dataVersion = versions.dataVersion;
+    summary.schemaVersion = versions.schemaVersion;
+    summary.generation = versions.generation;
+    const sessions = tagOwnerSummaries.get(db) ?? new Map<string, TagOwnerSummary>();
+    sessions.set(sessionId, summary);
+    tagOwnerSummaries.set(db, sessions);
+}
+
+/** Readiness is checked through the ordinary invalidation and append path. */
+export function isTagOwnerSummaryReady(db: Database, sessionId: string, ratio: number): boolean {
+    try {
+        readTagOwnerSummary(db, sessionId, ratio);
+        return true;
+    } catch (error) {
+        if (error instanceof TagOwnerSummaryNotReady) return false;
+        throw error;
+    }
+}
 let tagOwnerRowsRead = 0;
 let tagOwnerShapeChecks = 0;
 
@@ -862,8 +1017,8 @@ const TAG_OWNER_COLUMNS =
 
 /**
  * Whether the connection has a transaction open. A handle whose state cannot be
- * read (a wrapping proxy, for instance) is treated as in a transaction, which
- * only means the summary is read in full and not kept.
+ * read (a wrapping proxy, for instance) is treated as in a transaction. A
+ * file-store read then defers rather than caching an uncommitted view.
  */
 function connectionInTransaction(db: Database): boolean {
     try {
@@ -879,7 +1034,7 @@ function connectionInTransaction(db: Database): boolean {
  * and highest id, from one statement so all three describe the same commit.
  * The count and highest id come from the `(session_id, ...)` index alone.
  */
-const TAG_OWNER_APPENDED_WITH_SHAPE_SQL = `SELECT ${TAG_OWNER_COLUMNS}, 0 AS shape, NULL AS tag_count, NULL AS max_id, NULL AS revision
+export const TAG_OWNER_APPENDED_WITH_SHAPE_SQL = `SELECT ${TAG_OWNER_COLUMNS}, 0 AS shape, NULL AS tag_count, NULL AS max_id, NULL AS revision
     FROM tags WHERE id > ? AND +session_id = ?
     UNION ALL
     SELECT NULL, NULL, NULL, NULL, NULL, NULL, 1, COUNT(*), MAX(id), (SELECT value FROM schema_migrations_meta WHERE key = ?)
@@ -899,12 +1054,17 @@ function readTagIdentityRevision(db: Database, sessionId: string): string | null
 function appendedSinceForeignCommit(
     db: Database,
     sessionId: string,
-    cached: TagOwnerSummary,
+    cached: TagOwnerWarmupState,
 ): TagOwnerRow[] | null {
     tagOwnerShapeChecks += 1;
     const rows = db
         .prepare(TAG_OWNER_APPENDED_WITH_SHAPE_SQL)
-        .all(cached.lastRowId, sessionId, tagIdentityRevisionKey(sessionId), sessionId) as Array<
+        .all(
+            cached.globalLastRowId,
+            sessionId,
+            tagIdentityRevisionKey(sessionId),
+            sessionId,
+        ) as Array<
         TagOwnerRow & {
             shape: number;
             tag_count: number | null;
@@ -928,12 +1088,12 @@ function appendedSinceForeignCommit(
 }
 
 /** Ownerless tool tags of the summary that another process has since given an owner. */
-function adoptedSinceForeignCommit(db: Database, cached: TagOwnerSummary): TagOwnerRow[] {
+function adoptedSinceForeignCommit(db: Database, cached: TagOwnerWarmupState): TagOwnerRow[] {
     if (cached.unownedToolRows.size === 0) return [];
     return db
         .prepare(
             `SELECT ${TAG_OWNER_COLUMNS} FROM tags
-             WHERE id IN (SELECT value FROM json_each(?)) AND tool_owner_message_id IS NOT NULL`,
+             WHERE id IN (SELECT value FROM json_each(?)) AND tool_owner_message_id IS NOT NULL LIMIT ${TAG_OWNER_PAGE_LIMIT + 1}`,
         )
         .all(JSON.stringify([...cached.unownedToolRows])) as TagOwnerRow[];
 }
@@ -942,6 +1102,7 @@ function readTagOwnerSummary(
     db: Database,
     sessionId: string,
     proseRatio?: number,
+    extraRatios: number[] = [],
 ): TagOwnerSummary {
     const inTransaction = connectionInTransaction(db);
     const versions = inTransaction
@@ -954,6 +1115,7 @@ function readTagOwnerSummary(
     const dataVersion = versions?.dataVersion ?? -1;
     const schemaVersion = versions?.schemaVersion ?? -1;
     const generation = getTagIdentityWriteGeneration();
+    const offThreadOnly = isMainThread && Boolean(getSqliteDatabasePath(db));
     const sessions = tagOwnerSummaries.get(db) ?? new Map<string, TagOwnerSummary>();
     const cached = inTransaction ? undefined : sessions.get(sessionId);
     if (
@@ -964,35 +1126,57 @@ function readTagOwnerSummary(
         (proseRatio === undefined || cached.reasoningEstimatesByRatio.has(proseRatio))
     ) {
         let rows: TagOwnerRow[] | null;
+        const globalLastRowId = (
+            db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM tags").get() as { id: number }
+        ).id;
+        if (
+            offThreadOnly &&
+            (cached.dataVersion !== dataVersion ||
+                globalLastRowId - cached.globalLastRowId > TAG_OWNER_PAGE_LIMIT)
+        )
+            throw new TagOwnerSummaryNotReady();
         if (cached.dataVersion === dataVersion) {
             // Only this connection wrote, and only appends. `+session_id` keeps
             // SQLite on the rowid range, so this reads the rows appended since,
             // in any session.
             rows = db
                 .prepare(
-                    `SELECT ${TAG_OWNER_COLUMNS} FROM tags WHERE id > ? AND +session_id = ? ORDER BY id`,
+                    `SELECT ${TAG_OWNER_COLUMNS} FROM tags WHERE id > ? AND +session_id = ? ORDER BY id LIMIT ${TAG_OWNER_PAGE_LIMIT + 1}`,
                 )
-                .all(cached.lastRowId, sessionId) as TagOwnerRow[];
+                .all(cached.globalLastRowId, sessionId) as TagOwnerRow[];
         } else {
             rows = appendedSinceForeignCommit(db, sessionId, cached);
         }
         if (rows) {
             const adopted =
                 cached.dataVersion === dataVersion ? [] : adoptedSinceForeignCommit(db, cached);
+            if (
+                isMainThread &&
+                getSqliteDatabasePath(db) &&
+                (rows.length > TAG_OWNER_PAGE_LIMIT || adopted.length > TAG_OWNER_PAGE_LIMIT)
+            )
+                throw new TagOwnerSummaryNotReady();
             tagOwnerRowsRead += rows.length + adopted.length;
             for (const row of rows) foldTagOwnerRow(cached, row);
             for (const row of adopted) foldTagOwnerRow(cached, row, false);
             cached.dataVersion = dataVersion;
+            cached.globalLastRowId = globalLastRowId;
             return cached;
         }
     }
-    const ratios = [...(cached?.reasoningEstimatesByRatio.keys() ?? [])];
+    if (isMainThread && getSqliteDatabasePath(db)) throw new TagOwnerSummaryNotReady();
+    const ratios = [
+        ...new Set([...(cached?.reasoningEstimatesByRatio.keys() ?? []), ...extraRatios]),
+    ];
     if (proseRatio !== undefined && !ratios.includes(proseRatio)) ratios.push(proseRatio);
     const summary: TagOwnerSummary = {
         dataVersion,
         schemaVersion,
         generation,
         lastRowId: 0,
+        globalLastRowId: (
+            db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM tags").get() as { id: number }
+        ).id,
         rowCount: 0,
         unownedToolRows: new Set(),
         // Read the revision before the rows. A rewrite committed between the two

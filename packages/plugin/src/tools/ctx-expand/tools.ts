@@ -68,10 +68,8 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 message: "number",
             });
             const sessionId = toolContext.sessionID;
-            // Wait off-thread for the session's canonical ordinals before the synchronous
-            // reads below (see prepareRawSessionOrdinals); an explicit command proceeds
-            // even if that warm-up failed.
-            await prepareRawSessionOrdinals(sessionId);
+            if (!(await prepareRawSessionOrdinals(sessionId)))
+                return "Session ordinals are warming in the background. Retry ctx_expand shortly; no approximate ordinal was served.";
             const mode = resolveCtxExpandMode(args, "positive");
             if (mode.kind === "error") {
                 return mode.message;

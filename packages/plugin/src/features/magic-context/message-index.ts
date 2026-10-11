@@ -640,7 +640,13 @@ function indexSingleMessageInTransaction(
     return inserted;
 }
 
-export function indexSingleMessage(db: Database, sessionId: string, message: RawMessage): boolean {
+export function indexSingleMessage(
+    db: Database,
+    sessionId: string,
+    message: RawMessage,
+    shouldCommit: () => boolean = () => true,
+): boolean {
+    if (!shouldCommit()) return false;
     const currentWatermark = getLastIndexedOrdinal(db, sessionId);
     if (
         message.ordinal <= currentWatermark &&
@@ -671,6 +677,7 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
             Date.now(),
             dirtyFloorBeforeAttempt,
         );
+        if (!shouldCommit()) return false;
         db.exec("COMMIT");
         committed = true;
         logSlowWriteTransaction("message_index_incremental", transactionStartedAt);

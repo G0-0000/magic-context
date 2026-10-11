@@ -111,7 +111,7 @@ function anchorRace(invalidate: boolean): void {
             if (
                 !interleaved &&
                 sql.includes("CASE WHEN") &&
-                sql.includes("FROM message WHERE rowid > ? AND +session_id")
+                sql.includes("ORDER BY time_created, id LIMIT")
             ) {
                 interleaved = true;
                 const before = writer
@@ -149,7 +149,7 @@ describe("stall r2 ordinal witnesses", () => {
         anchorRace(false));
     test("rowid reuse race: forgetting candidates restores the whole-prefix result", () =>
         anchorRace(true));
-    test.failing("a finished summary moved into an already warm session must be excluded", () =>
+    test("a finished summary moved into an already warm session must be excluded", () =>
         moveSummary(false));
     test("session move: forgetting destination candidates restores the whole-prefix result", () =>
         moveSummary(true));
@@ -168,7 +168,7 @@ describe("stall r2 ordinal witnesses", () => {
             const staleScan = scanRawSessionSummaryRows(reader, A);
             expect(staleScan.ids).toEqual([]);
             reader.exec("COMMIT");
-            expect(installRawSessionSummaryScan(reader, A, staleScan, epoch)).toBe(true);
+            expect(installRawSessionSummaryScan(reader, A, staleScan, epoch)).toBe(false);
             parity(reader, A, "target");
         });
     });
@@ -282,7 +282,7 @@ function differential(moveSessions: boolean, invalidateMoves: boolean): void {
                         put(writer, `s${seed}-${step}`, 1, session, true);
                         finish(writer, `s${seed}-${step}`);
                         expect(installRawSessionSummaryScan(reader, session, scan, epoch)).toBe(
-                            true,
+                            false,
                         );
                         break;
                     }
@@ -328,7 +328,7 @@ test(
     () => differential(false, false),
     DIFFERENTIAL_TIMEOUT_MS,
 );
-test.failing(
+test(
     "6,000-step differential: session moves must also match the old whole-prefix count",
     () => differential(true, false),
     DIFFERENTIAL_TIMEOUT_MS,
