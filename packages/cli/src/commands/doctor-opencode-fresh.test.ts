@@ -1,9 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
-const root = mkdtempSync(join(tmpdir(), "doctor-opencode-fresh-"));
+const root = createTestTempDirFromPath(join(tmpdir(), "doctor-opencode-fresh-"));
 const cli = resolve(import.meta.dir, "../index.ts");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 

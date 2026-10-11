@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	observeRustPassTurns,
 	rustPassTurnsForFullBranch,
@@ -43,7 +44,7 @@ function passAt(index: number) {
 }
 
 function logFixture() {
-	const root = mkdtempSync(join(tmpdir(), "rust-pass-observation-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "rust-pass-observation-"));
 	roots.push(root);
 	const path = join(root, "plugin.log");
 	writeFileSync(path, "[]");
