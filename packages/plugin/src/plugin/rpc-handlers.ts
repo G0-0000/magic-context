@@ -1730,11 +1730,9 @@ export function registerRpcHandlers(
         return { ok: true };
     });
 
-    // The three handlers below exist for a host whose only command seam is the
-    // TUI (OpenCode 2 registers /ctx-* through its keymap layer, and its lane
-    // never runs the OpenCode 1 `command.execute.before` hook). Each performs the
-    // same server-side work as the matching command branch and returns its text,
-    // so the caller can render it in a dialog or toast instead of a chat row.
+    // OpenCode 2 server command callbacks dispatch to these RPC handlers. The
+    // command API has no response-text channel, so callbacks send handler replies
+    // to a connected TUI as notifications instead of adding them to chat history.
     const compactionOffRefusal = (command: string): string =>
         `Magic Context compaction is disabled (${COMPACTION_ENABLED_PATH}: false) — /${command} manages compacted history and has no effect in this mode.`;
 
