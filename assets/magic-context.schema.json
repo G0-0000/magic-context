@@ -2058,11 +2058,17 @@
     },
     "smart_notes": {
       "default": {
+        "enabled": true,
         "retina_handoff": false
       },
       "description": "Smart-note ownership transition controls.",
       "type": "object",
       "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Enable smart-note authoring and condition evaluation. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface.",
+          "type": "boolean"
+        },
         "retina_handoff": {
           "default": false,
           "description": "When true, dreamer skips smart notes whose surface conditions compiled to retina provider configs at authoring time. Default false keeps both paths active until the retina consumer is deployed.",

@@ -358,6 +358,8 @@ export function buildSidebarSnapshot(
     moduleStatus?: RustSessionStatus,
     compactionEnabled = true,
 ): SidebarSnapshot {
+    const smartNotesEnabled =
+        (config?.smart_notes as { enabled?: boolean } | undefined)?.enabled !== false;
     try {
         const projectIdentity = resolveProjectIdentityForSession(directory);
         if (projectIdentity === undefined)
@@ -511,7 +513,13 @@ export function buildSidebarSnapshot(
             : null;
         if (projectIdentity) {
             try {
-                dreamerBacklog = getDreamTaskBacklogs(db, projectIdentity, CANONICAL_DREAM_TASKS);
+                dreamerBacklog = getDreamTaskBacklogs(
+                    db,
+                    projectIdentity,
+                    CANONICAL_DREAM_TASKS.filter(
+                        (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
+                    ),
+                );
             } catch {
                 // A pre-Dreamer-V2 database may not have all task tables yet.
             }
@@ -524,8 +532,12 @@ export function buildSidebarSnapshot(
                 lastDreamerRunAt = getMostRecentTaskRunAt(db, projectIdentity);
                 // A scheduled task can fail on every slot for weeks. Without this the
                 // only in-session trace is a backlog count that never falls.
-                dreamerFailures = getFailingDreamTasks(db, projectIdentity);
-                dreamerSkipped = getSkippedDreamTasks(db, projectIdentity);
+                dreamerFailures = getFailingDreamTasks(db, projectIdentity).filter(
+                    (state) => smartNotesEnabled || state.task !== "evaluate-smart-notes",
+                );
+                dreamerSkipped = getSkippedDreamTasks(db, projectIdentity).filter(
+                    (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
+                );
             } catch {
                 // task_schedule_state may not exist on a pre-V2 DB
             }

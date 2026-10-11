@@ -23,8 +23,10 @@ import {
     createCtxMemoryTools,
 } from "../tools/ctx-memory";
 import { createCtxNoteTools } from "../tools/ctx-note";
+import { withoutSmartNoteText } from "../tools/ctx-note/constants";
 import { createCtxReduceTools } from "../tools/ctx-reduce";
 import { createCtxSearchTools } from "../tools/ctx-search";
+import { CTX_NOTE_LIGHT_DESCRIPTION } from "../tools/light-descriptions";
 import { parameterDescriptionsFor } from "../tools/parameter-descriptions";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
 import { normalizeToolArgSchemas } from "./normalize-tool-arg-schemas";
@@ -157,6 +159,7 @@ export function createToolRegistry(args: {
         ...createCtxNoteTools({
             db,
             dreamerEnabled: isDreamerRunnable(pluginConfig),
+            smartNotesEnabled: pluginConfig.smart_notes?.enabled,
             resolveProjectPath,
             rustToolBackends,
         }),
@@ -204,7 +207,11 @@ export function createToolRegistry(args: {
     );
     const surfacedTools = Object.fromEntries(
         Object.entries(allTools).map(([toolId, definition]) => {
-            const parameterDescriptions = parameterDescriptionsFor(toolId, registration.preset);
+            const parameterDescriptions = parameterDescriptionsFor(
+                toolId,
+                registration.preset,
+                pluginConfig.smart_notes?.enabled,
+            );
             const argsWithPresetDescriptions = parameterDescriptions
                 ? Object.fromEntries(
                       Object.entries(definition.args).map(([name, schema]) => [
@@ -224,7 +231,14 @@ export function createToolRegistry(args: {
                 {
                     ...definition,
                     args: argsWithPresetDescriptions,
-                    description: registration.descriptionFor(toolId, definition.description ?? ""),
+                    description:
+                        toolId === "ctx_note" && pluginConfig.smart_notes?.enabled === false
+                            ? withoutSmartNoteText(
+                                  registration.preset === "light"
+                                      ? CTX_NOTE_LIGHT_DESCRIPTION
+                                      : (definition.description ?? ""),
+                              )
+                            : registration.descriptionFor(toolId, definition.description ?? ""),
                 },
             ];
         }),

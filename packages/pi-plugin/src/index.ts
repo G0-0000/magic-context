@@ -1597,6 +1597,8 @@ async function startPiMagicContextRuntime(
 			dedupe: true,
 		});
 		const switchedConfig = switchedLoad.config;
+		// A new cwd or session may reload config, but registered tool text belongs to this process's startup.
+		switchedConfig.smart_notes.enabled = config.smart_notes.enabled;
 		const switchedIdentity =
 			identityOverride ??
 			resolveProjectIdentityForSession(
@@ -1852,6 +1854,7 @@ async function startPiMagicContextRuntime(
 			embeddingConfig: current.config.embedding,
 			memoryEnabled: current.config.memory.enabled,
 			retinaHandoff: current.config.smart_notes.retina_handoff,
+			smartNotesEnabled: config.smart_notes.enabled,
 			mural: current.config.mural,
 			language: current.config.language,
 			gitCommitIndexing: current.config.memory.git_commit_indexing,
@@ -1899,6 +1902,7 @@ async function startPiMagicContextRuntime(
 		// running — otherwise the note sits `pending` forever with no
 		// path to surface. Match the user's dreamer config flag.
 		dreamerEnabled: isDreamerRunnable(config),
+		smartNotesEnabled: config.smart_notes.enabled,
 		resolveDreamerEnabled: (ctx) =>
 			resolveCurrentProjectDeps(ctx).dreamerEnabled,
 		todowriteEnabled,
@@ -2018,6 +2022,7 @@ async function startPiMagicContextRuntime(
 	const recompRunner = new PiSubagentRunner();
 	const wrapupRunner = new PiSubagentRunner();
 	registerCtxStatusCommand(pi, {
+		smartNotesEnabled: config.smart_notes.enabled,
 		db,
 		projectIdentity,
 		resolveProject: resolveCurrentProject,
@@ -2031,7 +2036,10 @@ async function startPiMagicContextRuntime(
 		executeThresholdTokens: bootProjectDeps.config.execute_threshold_tokens,
 		dreamer: {
 			runnable: bootProjectDeps.dreamerEnabled,
-			scheduleSummary: summarizeDreamSchedule(bootProjectDeps.config.dreamer),
+			scheduleSummary: summarizeDreamSchedule(
+				bootProjectDeps.config.dreamer,
+				config.smart_notes.enabled,
+			),
 		},
 		activeProfile: bootProjectDeps.config.profile,
 		cacheTtlConfig: bootProjectDeps.config.cache_ttl,
@@ -2045,6 +2053,7 @@ async function startPiMagicContextRuntime(
 			const fresh = live.poll().effective;
 			const failure = live.lastFailure();
 			return {
+				smartNotesEnabled: config.smart_notes.enabled,
 				configGeneration: live.current().generation,
 				configAdoptedAt: live.current().adoptedAt,
 				configReloadFailure: failure
@@ -2060,7 +2069,10 @@ async function startPiMagicContextRuntime(
 				executeThresholdTokens: current.config.execute_threshold_tokens,
 				dreamer: {
 					runnable: current.dreamerEnabled,
-					scheduleSummary: summarizeDreamSchedule(current.config.dreamer),
+					scheduleSummary: summarizeDreamSchedule(
+						current.config.dreamer,
+						config.smart_notes.enabled,
+					),
 				},
 				modelChainWarning: (() => {
 					const registry = activeModelRegistry;
@@ -2221,6 +2233,7 @@ async function startPiMagicContextRuntime(
 			};
 		},
 		dreamerEnabled: bootProjectDeps.dreamerEnabled,
+		smartNotesEnabled: config.smart_notes.enabled,
 		resolveDreamerEnabled: (ctx) =>
 			resolveCurrentProjectDeps(ctx).dreamerEnabled,
 		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
@@ -2481,6 +2494,7 @@ async function startPiMagicContextRuntime(
 				protectedTags: effectiveConfig.protected_tags,
 				ctxReduceCallable: !compactionOff,
 				dreamerEnabled: effectiveProjectDeps.dreamerEnabled,
+				smartNotesEnabled: config.smart_notes.enabled,
 				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
 					effectiveConfig.caveman_text_compression?.enabled === true,

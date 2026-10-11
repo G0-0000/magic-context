@@ -65,6 +65,7 @@ export interface PiDreamerOptions {
 	 */
 	memoryEnabled: boolean;
 	retinaHandoff?: boolean;
+	smartNotesEnabled?: boolean;
 	mural?: { enabled: boolean };
 	language?: string;
 	gitCommitIndexing: {
@@ -318,6 +319,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		memoryEnabled: opts.memoryEnabled,
 		embeddingConfig: opts.embeddingConfig,
 		retinaHandoff: opts.retinaHandoff,
+		smartNotesEnabled: opts.smartNotesEnabled,
 		mural: opts.mural,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
 		// Pi retrospectives read JSONL messages and context.db activity, not
@@ -384,6 +386,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 							dreamerConfig,
 							manualOpts.harness,
 							manualOpts.language,
+							manualOpts.smartNotesEnabled,
 						),
 						manualOpts.modelRegistry,
 						manualOpts.harness,
@@ -392,6 +395,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 						dreamerConfig,
 						manualOpts.harness,
 						manualOpts.language,
+						manualOpts.smartNotesEnabled,
 					),
 			executor: createDreamTaskExecutor({
 				client: manualClient as never,
@@ -406,6 +410,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				language: manualOpts.language,
 				retinaHandoff: manualOpts.retinaHandoff,
+				smartNotesEnabled: manualOpts.smartNotesEnabled,
 				mural,
 			}),
 			task,

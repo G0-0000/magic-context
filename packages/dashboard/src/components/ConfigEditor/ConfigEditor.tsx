@@ -73,6 +73,14 @@ interface FieldDef {
 }
 
 const FIELD_DEFS: FieldDef[] = [
+  {
+    key: "smart_notes.enabled",
+    label: "Smart Notes Enabled",
+    type: "boolean",
+    description:
+      "Enable condition-based notes (default on). User-level only; requires a host restart and one prompt rebuild per session. Pending notes stay unchecked; ready notes still surface.",
+    section: "Smart notes",
+  },
   // General
   {
     key: "enabled",
@@ -173,7 +181,12 @@ const FIELD_DEFS: FieldDef[] = [
 // These fields are valid only in trusted user configuration. They remain in the
 // schema coverage manifest because the user form renders them, but project forms
 // must not present controls for settings the runtime strips from repositories.
-const USER_ONLY_FORM_FIELDS = new Set(["language", "allow_home_project", "protected_tokens"]);
+const USER_ONLY_FORM_FIELDS = new Set([
+  "language",
+  "allow_home_project",
+  "protected_tokens",
+  "smart_notes.enabled",
+]);
 
 // ── Nested value access helpers ─────────────────────────────
 
@@ -215,6 +228,7 @@ const CONFIG_SECTIONS = [
   "Background models",
   "Dreamer schedule",
   "Prompt surface",
+  "Smart notes",
   "Advanced",
 ];
 

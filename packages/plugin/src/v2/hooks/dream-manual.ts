@@ -69,6 +69,7 @@ export interface ManualDreamOutcome {
 export async function runManualDreamNow(args: {
     db: ContextDatabase;
     dreamer: DreamerConfig;
+    smartNotesEnabled?: boolean;
     projectIdentity: string;
     directory: string;
     language?: string;
@@ -77,7 +78,12 @@ export async function runManualDreamNow(args: {
     sessionId: string;
     task?: DreamTaskName;
 }): Promise<ManualDreamOutcome> {
-    const tasks = buildDreamTaskRuntimeConfigs(args.dreamer, "opencode", args.language);
+    const tasks = buildDreamTaskRuntimeConfigs(
+        args.dreamer,
+        "opencode",
+        args.language,
+        args.smartNotesEnabled,
+    );
     const executor = createDreamTaskExecutor({
         hiddenCompletionExecutor: args.executor,
         parentSessionId: args.sessionId,
@@ -86,6 +92,7 @@ export async function runManualDreamNow(args: {
         retrospectiveRawProvider: (db) => new V2RetrospectiveRawProvider(db),
         language: args.language,
         mural: args.mural,
+        smartNotesEnabled: args.smartNotesEnabled,
     });
     const selection = selectRunnableDreamTasks({
         tasks,

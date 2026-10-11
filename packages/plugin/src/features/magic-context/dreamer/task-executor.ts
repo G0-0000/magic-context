@@ -175,6 +175,7 @@ export interface DreamTaskExecutorDeps {
     mural?: { enabled: boolean };
     memoryInjectionBudgetTokens?: number;
     retinaHandoff?: boolean;
+    smartNotesEnabled?: boolean;
     /** Process-local progress callback for user-facing status displays; it never reads from or writes to the prompt/result cache. */
     onProgress?: (progress: DreamTaskProgress | null, completedTask?: DreamTaskName) => void;
     /** Pi's process runner reports usage after each child exits rather than through session.messages. */
@@ -1066,6 +1067,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     model: config.model,
                     fallbackModels: config.fallbackModels,
                     retinaHandoff: deps.retinaHandoff,
+                    smartNotesEnabled: deps.smartNotesEnabled,
                 });
                 recordRun("completed", null, {
                     smartNotesSurfaced: result.surfaced,

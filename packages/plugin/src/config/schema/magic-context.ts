@@ -943,6 +943,8 @@ export interface MagicContextConfig {
     historian?: HistorianConfig;
     dreamer?: DreamerConfig;
     smart_notes: {
+        /** Enable smart-note authoring and checks for the user; read at process startup. */
+        enabled: boolean;
         /** Flip ownership of authoring-compiled conditions from dreamer to retina. */
         retina_handoff: boolean;
     };
@@ -1183,6 +1185,12 @@ export const MagicContextConfigSchema = z
         ),
         smart_notes: z
             .object({
+                enabled: z
+                    .boolean()
+                    .default(true)
+                    .describe(
+                        "Enable smart-note authoring and condition evaluation. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface.",
+                    ),
                 retina_handoff: z
                     .boolean()
                     .default(false)
@@ -1190,7 +1198,7 @@ export const MagicContextConfigSchema = z
                         "When true, dreamer skips smart notes whose surface conditions compiled to retina provider configs at authoring time. Default false keeps both paths active until the retina consumer is deployed.",
                     ),
             })
-            .default({ retina_handoff: false })
+            .default({ enabled: true, retina_handoff: false })
             .describe("Smart-note ownership transition controls."),
         cache_ttl: z
             .union([z.string(), z.object({ default: z.string() }).catchall(z.string())])

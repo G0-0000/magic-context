@@ -472,6 +472,7 @@ export function createMagicContextCommandHandler(deps: {
     db: Database;
     /** Boot-resolved mode; command paths must not re-read configuration. */
     compactionOff?: boolean;
+    smartNotesEnabled?: boolean;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
     historyBudgetPercentage?: number;
@@ -760,16 +761,28 @@ export function createMagicContextCommandHandler(deps: {
                                       backlog: readDreamTaskBacklogsSafely(
                                           deps.db,
                                           deps.dreamer.projectPath,
-                                          CANONICAL_DREAM_TASKS,
+                                          CANONICAL_DREAM_TASKS.filter(
+                                              (task) =>
+                                                  deps.smartNotesEnabled !== false ||
+                                                  task !== "evaluate-smart-notes",
+                                          ),
                                       ),
                                       progress: deps.getDreamerProgress?.() ?? null,
                                       skipped: readSkippedDreamTasksSafely(
                                           deps.db,
                                           deps.dreamer.projectPath,
+                                      ).filter(
+                                          (task) =>
+                                              deps.smartNotesEnabled !== false ||
+                                              task !== "evaluate-smart-notes",
                                       ),
                                       failures: readFailingDreamTasksSafely(
                                           deps.db,
                                           deps.dreamer.projectPath,
+                                      ).filter(
+                                          (state) =>
+                                              deps.smartNotesEnabled !== false ||
+                                              state.task !== "evaluate-smart-notes",
                                       ),
                                   }
                                 : undefined,

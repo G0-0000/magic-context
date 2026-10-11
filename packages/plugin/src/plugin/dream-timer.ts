@@ -91,6 +91,7 @@ const BOOT_PROJECT_JITTER_SLOT_MS = 1_000;
  * its dream schedule checked, and its config respected.
  */
 interface ProjectRegistration {
+    smartNotesEnabled?: boolean;
     directory: string;
     projectIdentity: string;
     /** The runtime selecting models for this registration. */
@@ -620,7 +621,12 @@ async function sweepProject(
     const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
     const configuredTasks =
         dreamingEnabled && dreamerConfig
-            ? buildDreamTaskRuntimeConfigs(dreamerConfig, reg.harness, reg.language)
+            ? buildDreamTaskRuntimeConfigs(
+                  dreamerConfig,
+                  reg.harness,
+                  reg.language,
+                  reg.smartNotesEnabled,
+              )
             : [];
     const runtimeConfigs = reg.validateTaskModels?.(configuredTasks) ?? configuredTasks;
     await sweepOrphanedInternalChildren(
@@ -678,6 +684,7 @@ async function sweepProject(
             mural: reg.mural,
             memoryInjectionBudgetTokens: reg.memoryInjectionBudgetTokens,
             retinaHandoff: reg.retinaHandoff,
+            smartNotesEnabled: reg.smartNotesEnabled,
             transformMode: reg.transformMode,
             moduleClient: reg.moduleClient,
             onProgress: (progress, completedTask) =>
@@ -756,6 +763,7 @@ export function _resetDreamTimerForTests(): void {
 }
 
 async function runCompiledSmartNoteSweep(reg: ProjectRegistration, db: Database): Promise<void> {
+    if (reg.smartNotesEnabled === false) return;
     if (projectNeedsSingleStoreMigration(db, reg.projectIdentity)) {
         logDreamerNotOwnerOnce(reg.projectIdentity);
         return;

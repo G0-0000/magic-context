@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { replaceAllCompartmentState } from "@magic-context/core/features/magic-context/compartment-storage";
+import { writeTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import {
 	getPendingPiCompactionMarkerState,
@@ -586,6 +587,33 @@ describe("Pi Magic Context commands", () => {
 				scheduleSummary: "verify 0 3 * * *",
 			},
 		});
+	});
+
+	it("/ctx-status hides disabled smart-note backlog and past failures", async () => {
+		for (const enabled of [true, false]) {
+			const db = createDb();
+			writeTaskScheduleState(db, {
+				projectPath: "/tmp/project",
+				task: "evaluate-smart-notes",
+				schedule: "0 3 * * *",
+				lastRunAt: null,
+				nextDueAt: 1,
+				lastStatus: "failed",
+				lastError: "old evaluation failure",
+				retryCount: 2,
+			});
+			const { pi, handlers, sent } = createMockPi();
+			registerCtxStatusCommand(pi as never, {
+				db,
+				projectIdentity: "/tmp/project",
+				smartNotesEnabled: enabled,
+				dreamer: { runnable: true },
+			});
+			await handlers.get("ctx-status")?.("", createCtx());
+			expect(JSON.stringify(sent[0]).includes("evaluate-smart-notes")).toBe(
+				enabled,
+			);
+		}
 	});
 
 	it("registers /ctx-recomp and requires confirmation before running", async () => {
