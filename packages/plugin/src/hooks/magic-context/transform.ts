@@ -167,7 +167,7 @@ import {
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
-import { prewarmTagOwners } from "./tag-owner-warmup";
+import { prewarmTagOwners, waitForTagOwners } from "./tag-owner-warmup";
 import { collectTemporalCandidates, injectTemporalMarkers } from "./temporal-awareness";
 import { readServedTemporalDecisions } from "./temporal-served-projection";
 import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
@@ -1211,6 +1211,21 @@ export function createTransform(deps: TransformDeps) {
             compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
 
+        // A foreign commit (including message indexing) invalidates even a warm
+        // owner digest. Preparing it without waiting can skip the only pass with
+        // enough pressure to start the historian. Wait before taking usage and
+        // decision snapshots, not after preparing the render from those snapshots.
+        if (fullFeatureMode && !compactionOff && historianRunnable) {
+            const tOwners = performance.now();
+            await waitForTagOwners(
+                db,
+                sessionId,
+                sessionDecisionCalibration(db, sessionId).proseRatio,
+            );
+            sessionMeta = getOrCreateSessionMeta(db, sessionId);
+            logTransformTiming(sessionId, "tagOwners.prepare", tOwners);
+        }
+
         const tModelDetect = performance.now();
         // Snapshot persisted usage BEFORE any reset this pass. Both the
         // model-change clear (just below) and the first-pass reset (further down)
@@ -2080,8 +2095,10 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
-        // Preparation here is non-awaiting: trigger inputs above form a coherent
-        // pass view. Postprocess waits before taking its own decision snapshots.
+        // Do not await after snapshotting usage, model limits and protected-tail
+        // state: the trigger must use that same decision state. The earlier owner
+        // preparation waited at most 250ms. Recheck its digest here; if a peer
+        // invalidated it, warm it again and defer the trigger until the next pass.
         void prewarmTagOwners(db, sessionId, ownerRatio);
         const tagOwnersReady = isTagOwnerSummaryReady(db, sessionId, ownerRatio);
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;

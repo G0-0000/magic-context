@@ -5,6 +5,7 @@ import {
     isTagOwnerSummaryReady,
     tagOwnerWarmupState,
 } from "../../features/magic-context/storage-tags";
+import { sessionLog } from "../../shared/logger";
 import {
     type Database,
     getSqliteDatabasePath,
@@ -49,7 +50,10 @@ export function prewarmTagOwners(db: Database, sessionId: string, ratio: number)
                 { path, sessionId, tagRatio: ratio, tagRatios: ratios, tagState },
                 {},
             );
-            if (!("summary" in result) && !("delta" in result)) return false;
+            if (!("summary" in result) && !("delta" in result)) {
+                sessionLog(sessionId, "WARN tag owner warm-up failed:", result);
+                return false;
+            }
             if (JSON.stringify(before) !== JSON.stringify(stamp(db))) continue;
             if ("delta" in result) {
                 if (
@@ -60,9 +64,16 @@ export function prewarmTagOwners(db: Database, sessionId: string, ratio: number)
             } else installTagOwnerSummary(db, sessionId, result.summary, before, Boolean(tagState));
             return true;
         }
+        sessionLog(
+            sessionId,
+            "WARN tag owner warm-up superseded by store changes after 3 attempts",
+        );
         return false;
     })()
-        .catch(() => false)
+        .catch((error) => {
+            sessionLog(sessionId, "WARN tag owner warm-up threw:", error);
+            return false;
+        })
         .finally(() => sessions.delete(key));
     sessions.set(key, job);
     return job;
@@ -77,12 +88,19 @@ export async function waitForTagOwners(
 ): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        return await Promise.race([
+        const ready = await Promise.race([
             prewarmTagOwners(db, sessionId, ratio),
             new Promise<false>((resolve) => {
                 timer = setTimeout(() => resolve(false), waitMs);
             }),
         ]);
+        if (!ready) {
+            sessionLog(
+                sessionId,
+                `WARN tag owner digest unavailable within ${waitMs}ms; decisions requiring exact owners must defer or retry`,
+            );
+        }
+        return ready;
     } finally {
         clearTimeout(timer);
     }
