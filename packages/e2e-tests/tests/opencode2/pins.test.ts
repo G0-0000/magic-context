@@ -58,6 +58,9 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 			// Re-minted when that checkout-claim check was removed again: the claim is
 			// now checked only at session registration, reconnect and move, outside
 			// Magic Context's per-turn path. Also a v1 change, not v2 leakage.
+			// Re-minted when the v1 entry began passing the startup-only
+			// `smart_notes.enabled` switch to the dreamer runtime (7965fc9bf0, "add
+			// startup-only smart notes capability switch"); also a v1 change.
 			bytes = bytes
 				.replace('import { setup } from "./v2/server";\n', "")
 				.replace("PluginModule & { setup: typeof setup }", "PluginModule")
