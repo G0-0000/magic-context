@@ -329,6 +329,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         if (notification.payload.action === "refresh-sidebar" && target) {
             if (mountedSidebar) mountedSidebar.refresh();
             else await refresh(target, true);
+            log(`[magic-context] sidebar refresh requested for session ${target}`);
             return true;
         }
         if (notification.payload.action === "show-result-dialog") {
