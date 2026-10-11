@@ -95,7 +95,7 @@ describe("whole-message neutralization of OpenCode 2 system rows", () => {
             // Each pass starts from the host's fresh projection, like the real hook.
             const fresh = session();
             replaySentinelByMessageIds(fresh, ids, "anthropic");
-            // The detecting lanes skip what replay already neutralized.
+            // Detection finds nothing new: replay already neutralized every row.
             expect(detect(fresh, "anthropic")).toEqual([]);
             served.push(JSON.stringify(fresh));
         }

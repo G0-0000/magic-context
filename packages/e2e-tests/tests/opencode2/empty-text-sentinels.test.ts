@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -27,17 +28,23 @@ import {
  * be non-empty`.
  *
  * A plugin listed ahead of Magic Context puts a `system` row into the draft,
- * the way another user plugin does. One session's row is only a drop marker;
- * the other's is a `<system-reminder>`, which heuristic cleanup turns into a
- * drop marker. Both rows are then neutralized by the whole-message lane on the
- * first rebuilding pass, and every later pass replays that persisted decision.
- * The second session also gets a `/ctx-flush` rebuilding pass, on which old
- * signed thinking is cleared (`keep_reasoning_tokens: 0`), exercising the
- * part-level reasoning sentinels. The mock answers like Anthropic does: any
- * empty text block, or a system message not following a user turn, gets a 400.
+ * the way another user plugin does. One session's row is only a drop marker
+ * (`[dropped]`); the other's is a `<system-reminder>`, which Magic Context's
+ * heuristic cleanup replaces with a drop marker. A message that holds nothing
+ * but drop markers is then "neutralized" (its content replaced as a whole) on
+ * the first pass that is allowed to change already-sent bytes (a rebuilding
+ * pass; the first pass of a session is one). Every later pass repeats that
+ * saved decision, so the request prefix stays the same. The second session
+ * also gets a `/ctx-flush` call, which makes its next pass a rebuilding pass;
+ * there old signed thinking is cleared (`keep_reasoning_tokens: 0`), which
+ * replaces thinking parts in assistant messages with empty text parts that the
+ * host must drop. The mock answers like Anthropic does: any empty text block,
+ * or a system message not following a user turn, gets a 400.
  */
 
-// Claude models with native system updates (Opus >= 4.8, every Claude 5).
+// OpenCode 2 sends a `system` row to these Claude models (Opus >= 4.8, every
+// Claude 5) as its own in-conversation system message; older models get it
+// wrapped into the user turn as text, which would hide the empty block.
 const MODEL = "claude-opus-5-5";
 const MARKER_ROW = "[dropped]";
 const REMINDER_ROW = "<system-reminder>Background task bg_42 finished.</system-reminder>";
@@ -138,11 +145,11 @@ test("OpenCode 2 Anthropic requests never carry an empty text block from Magic C
 				.filter((request) => JSON.stringify(request.body).includes(marker))
 				.map((request) => request.body);
 
-		// Dropped-placeholder lane: the first pass is already a rebuilding pass.
+		// The marker row is neutralized on the session's first pass.
 		for (let turn = 0; turn < 3; turn += 1) await prompt(markerSession.id, `marker turn ${turn}`);
 
-		// Then make one ordinary pass a rebuilding pass with the same call the
-		// /ctx-flush command makes.
+		// Make the next pass a rebuilding pass (one allowed to change sent bytes)
+		// with the same RPC call the /ctx-flush command makes.
 		for (let turn = 0; turn < TURNS_BEFORE_FLUSH; turn += 1)
 			await prompt(reminderSession.id, `reminder turn ${turn}`);
 		const storageDir = join(host.env.XDG_DATA_HOME as string, "cortexkit", "magic-context");
@@ -161,6 +168,15 @@ test("OpenCode 2 Anthropic requests never carry an empty text block from Magic C
 		for (let turn = 0; turn < 3; turn += 1)
 			await prompt(reminderSession.id, `after flush ${turn}`);
 
+		// Every database the host holds open lives under this test's throwaway root.
+		const open = spawnSync("lsof", ["-p", String(host.pid), "-Fn"], { encoding: "utf8" });
+		const databases = open.stdout
+			.split("\n")
+			.filter((line) => line.startsWith("n") && /\.db(-wal|-shm)?$/.test(line))
+			.map((line) => line.slice(1));
+		console.log(`host ${host.pid} open databases: ${JSON.stringify(databases)}`);
+		expect(databases.length).toBeGreaterThan(0);
+		for (const database of databases) expect(database.startsWith(fixture.root)).toBe(true);
 		expect(violations).toEqual([]);
 		const all = host.mock.requests().filter((request) => request.body.model === MODEL);
 		expect(all.length).toBeGreaterThan(TURNS_BEFORE_FLUSH);
@@ -170,17 +186,19 @@ test("OpenCode 2 Anthropic requests never carry an empty text block from Magic C
 		const reminderWires = wires("reminder turn");
 		expect(markerWires).toHaveLength(3);
 		expect(reminderWires).toHaveLength(TURNS_BEFORE_FLUSH + 3);
-		// The neutralized rows are gone from the request, not sent empty or wrapped.
+		// The injected system rows are absent from every request: not sent as an
+		// empty system message, nor wrapped into a user turn as <system-update> text.
 		for (const body of [...markerWires, ...reminderWires]) {
 			expect(JSON.stringify(body)).not.toContain("bg_42");
 			expect((body.messages as WireMessage[]).some((message) => message.role === "system")).toBe(false);
 		}
 		const beforeFlush = reminderWires.slice(0, TURNS_BEFORE_FLUSH);
 		const afterFlush = reminderWires.slice(TURNS_BEFORE_FLUSH);
-		// Ordinary passes after the rebuild keep every earlier byte: each request is
-		// the previous one plus the new turn. Only the host's tail cache breakpoint
-		// moves, and it sits on the last text block of the last message, which is
-		// where OpenCode 2's own policy puts it once the row is gone.
+		// Within each series every request repeats the previous one byte for byte
+		// and adds the new turn. Only the host's tail cache breakpoint moves: OpenCode
+		// 2's cache policy (packages/ai cache-policy.ts, `messages: { tail: 1 }`)
+		// marks the last text block of the last message, and with the system row
+		// gone that is a real block instead of the empty one.
 		for (const series of [markerWires, beforeFlush, afterFlush]) {
 			for (let index = 1; index < series.length; index += 1) {
 				const previous = series[index - 1]!.messages as WireMessage[];
@@ -193,7 +211,8 @@ test("OpenCode 2 Anthropic requests never carry an empty text block from Magic C
 				expect(blocks.findLast((block) => block.type === "text")?.cache_control).toBeDefined();
 			}
 		}
-		// The one-time shape change is recorded once per session in the plugin log.
+		// Leaving the emptied row out changes the request shape once; the plugin
+		// log records that once per session.
 		const recorded = async (sessionID: string) => {
 			const deadline = Date.now() + 15_000;
 			for (;;) {

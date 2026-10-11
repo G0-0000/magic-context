@@ -866,7 +866,8 @@ describe("adaptPayload commit on canonical Anthropic", () => {
             byId.get("a1")!.parts.push({ type: "text", text: "", cache: HINT });
         });
         expect(context.messages).toEqual([
-            // OpenCode 2's policy marks a message's last text part (else its last part).
+            // OpenCode 2's cache policy (packages/ai cache-policy.ts, markMessageAt)
+            // marks a message's last text part, else its last part.
             { id: "u1", role: "user", content: [{ type: "text", text: "§1§ start", cache: HINT }] },
             {
                 id: "a1",

@@ -364,7 +364,8 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         commit() {
             let head = 0;
             const rendered: V2Message[] = [];
-            // Canonical Anthropic is the one route whose sentinels are empty text.
+            // Provider `anthropic` is the only one Magic Context gives empty-text
+            // placeholders (see `modelAcceptsEmptyContent`), so only it is guarded.
             const emptyTextGuard = modelAcceptsEmptyContent(draft.model.providerID);
             let omitted = 0;
             let emptyTextParts = 0;
