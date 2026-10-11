@@ -221,7 +221,7 @@ test("Q3 cloned native markers survive remapped entry ids", async () => {
 	}
 });
 
-test("Q2 malformed document after mint retains pairs on restart defer", async () => {
+test("Q2 malformed publication document refuses restart defer without overwriting storage", async () => {
 	const f = fixture(true, 10);
 	try {
 		await f.seed();
@@ -232,9 +232,19 @@ test("Q2 malformed document after mint retains pairs on restart defer", async ()
 			)
 			.run("{", f.session);
 		f.restart();
-		const deferred = await f.pass(0);
-		expect(calls(deferred)).toBe(10);
-		expect(JSON.stringify(await f.pass(0))).toBe(JSON.stringify(deferred));
+		await expect(f.pass(0)).rejects.toMatchObject({
+			name: "PiStorageBusyError",
+		});
+		await expect(f.pass(0)).rejects.toMatchObject({
+			name: "PiStorageBusyError",
+		});
+		expect(
+			f.db
+				.prepare(
+					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
+				)
+				.get(f.session),
+		).toEqual({ trailing_blank_decisions: "{" });
 	} finally {
 		f.close();
 	}

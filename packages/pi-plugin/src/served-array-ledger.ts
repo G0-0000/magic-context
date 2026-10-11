@@ -8,6 +8,7 @@ import {
 	writeStorageFileSync,
 } from "@magic-context/core/shared/storage-permissions";
 import type { PiLkgSerializedOutput } from "./pi-lkg";
+import { readPiCommittedServedNumbers } from "./pi-served-identities";
 
 export const PI_SERVED_ARRAY_TAIL_MESSAGES = 40;
 export const PI_SERVED_ARRAY_BODY_CAPTURE_ENV =
@@ -47,6 +48,8 @@ interface PreviousPass {
 }
 
 interface CaptureOptions {
+	/** Managed identities are authoritative in SQLite; JSONL is a post-commit mirror. */
+	db?: import("@magic-context/core/shared/sqlite").Database;
 	/** Numbers assigned to identities represented by this managed result, not parsed from text. */
 	servedTagNumbers?: Iterable<number>;
 	assertCurrentPass?: () => void;
@@ -82,7 +85,13 @@ export function clearPiServedArraySession(sessionId: string): void {
 export function getPiServedTagNumbers(
 	sessionId: string,
 	storageDir = getMagicContextStorageDir(),
+	db?: import("@magic-context/core/shared/sqlite").Database,
 ): ReadonlySet<number> {
+	if (db)
+		return new Set([
+			...getPiServedTagNumbers(sessionId, storageDir),
+			...readPiCommittedServedNumbers(db, sessionId),
+		]);
 	const filePath = getPiServedTagNumbersPath(sessionId, storageDir);
 	const cached = servedTagNumbersBySession.get(sessionId);
 	if (cached?.path === filePath) return cached.numbers;
@@ -332,6 +341,18 @@ export function capturePiServedArray(
 		const previousNumbers = getPiServedTagNumbers(sessionId, storageDir);
 		identityPersistenceFailed = false;
 		const served = new Set(previousNumbers);
+		if (options.db) {
+			identityPersistenceFailed = true;
+			for (const number of readPiCommittedServedNumbers(options.db, sessionId))
+				served.add(number);
+			for (const number of options.servedTagNumbers ?? []) {
+				if (!served.has(number))
+					throw new PiServedIdentityError(
+						new Error("Pi identities have no committed LKG"),
+					);
+			}
+			identityPersistenceFailed = false;
+		}
 		for (const number of options.servedTagNumbers ?? []) {
 			if (Number.isSafeInteger(number) && number > 0) served.add(number);
 		}
@@ -362,8 +383,8 @@ export function capturePiServedArray(
 		);
 		const identityPath = getPiServedTagNumbersPath(sessionId, storageDir);
 		if (newNumbers.length) {
-			// Number identity is safety state, not optional telemetry. Persist it
-			// before returning; an unload or crash must not authorize renumbering.
+			// Managed numbers have already committed with their LKG. Keep a cumulative
+			// compatibility mirror, so older releases also honor these identities.
 			identityPersistenceFailed = true;
 			ensureStorageDirectorySync(path.dirname(identityPath));
 			options.assertCurrentPass?.();

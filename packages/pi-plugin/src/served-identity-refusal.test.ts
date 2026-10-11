@@ -8,6 +8,7 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import { PiStorageBusyError } from "./pi-raw-fallback";
+import { readPiCommittedServedNumbers } from "./pi-served-identities";
 import * as ledger from "./served-array-ledger";
 import {
 	createFakePi,
@@ -16,7 +17,7 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-test("identity persistence failure refuses and cancels the pending LKG capture", async () => {
+test("identity mirror failure refuses without discarding the committed LKG pair", async () => {
 	const db = createTestDb();
 	const sessionId = "served-identity-persistence-refusal";
 	const fake = createFakePi();
@@ -77,7 +78,10 @@ test("identity persistence failure refuses and cancels the pending LKG capture",
 		).rejects.toBeInstanceOf(PiStorageBusyError);
 		expect(capture).toHaveBeenCalledTimes(1);
 		await Bun.sleep(50);
-		expect(getSlot(sessionId)?.jsonPrefix).not.toContain("never served");
+		// The compatibility mirror failed after the authoritative SQLite pair committed.
+		// Refusing dispatch must not discard that request while retaining its identities.
+		expect(getSlot(sessionId)?.jsonPrefix).toContain("never served");
+		expect(readPiCommittedServedNumbers(db, sessionId)).toEqual([1, 2]);
 		expect([...ledger.getPiServedTagNumbers(sessionId)]).toEqual([1]);
 	} finally {
 		capture?.mockRestore();

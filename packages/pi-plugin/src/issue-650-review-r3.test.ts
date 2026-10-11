@@ -540,10 +540,28 @@ async function rewindUnsavedNotes(identical: boolean) {
 		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
 		const ctx = fakeContext(id, process.cwd(), ["hello"], [hello]);
 		const handler = fake.handlers.get("context")!;
-		const before = (await handler(
+		const initial = handler(
 			{ messages: [first, second, hello] } as never,
 			ctx as never,
-		)) as { messages: PiMessage[] };
+		);
+		let before: { messages: PiMessage[] };
+		if (identical) {
+			await expect(initial).rejects.toMatchObject({
+				name: "PiStorageBusyError",
+			});
+			// Older releases could serve ambiguous unsaved twins without a last-good request.
+			// Their JSONL numbers must still keep the second occurrence's already-served tag.
+			before = {
+				messages: [
+					userMessage("§1§ host-built note", 7),
+					userMessage("§2§ host-built note", 7),
+					userMessage("§3§ hello", 10),
+				],
+			};
+			capturePiServedArray(id, before.messages, {
+				servedTagNumbers: [1, 2, 3],
+			});
+		} else before = (await initial) as { messages: PiMessage[] };
 		const fallbackIds = piContentFallbackIds([first, second], () => undefined);
 		const dropped = db
 			.prepare(
@@ -566,7 +584,7 @@ test("review 650 r3 partner: removing an unrelated unsaved note does not change 
 	const result = await rewindUnsavedNotes(false);
 	expect(result.actual).toEqual(result.expected);
 });
-test("review 650 r3 finding: removing the first identical unsaved note must not transfer its dropped tag to the second", async () => {
+test("review 650 r3 finding: removing the first legacy-served identical unsaved note must not transfer its dropped tag to the second", async () => {
 	const result = await rewindUnsavedNotes(true);
 	expect(result.actual).toEqual(result.expected);
 });

@@ -1954,10 +1954,15 @@ describe("registerPiContextHandler", () => {
 			// Record the initial model before populating session metadata; only a
 			// genuine model change may clear this metadata.
 			recordPiLiveModel(sessionId, "openai/gpt-5.6-sol");
-			await handler(
-				{ messages: [userMessage("warm", 1)] as never[] },
-				baseContext as never,
-			);
+			await handler({ messages: [userMessage("warm", 1)] as never[] }, {
+				...baseContext,
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					["warm"],
+					[userMessage("warm", 1)],
+				),
+			} as never);
 			updateSessionMeta(db, sessionId, {
 				lastContextPercentage: 61,
 				lastInputTokens: 61_000,
@@ -1968,6 +1973,12 @@ describe("registerPiContextHandler", () => {
 
 			await handler({ messages: [userMessage("native alias", 2)] as never[] }, {
 				...baseContext,
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					["native"],
+					[userMessage("native alias", 2)],
+				),
 				model: { provider: "openai-codex", id: "gpt-5.6-sol" },
 			} as never);
 			let meta = getOrCreateSessionMeta(db, sessionId);
@@ -1984,7 +1995,15 @@ describe("registerPiContextHandler", () => {
 			});
 			await handler(
 				{ messages: [userMessage("canonical alias", 3)] as never[] },
-				baseContext as never,
+				{
+					...baseContext,
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						["canonical"],
+						[userMessage("canonical alias", 3)],
+					),
+				} as never,
 			);
 			meta = getOrCreateSessionMeta(db, sessionId);
 			expect(meta.clearedReasoningThroughTag).toBe(8);
@@ -3075,7 +3094,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("replays note anchors by message id but skips new note persistence on ref failure", async () => {
+	it("refuses unresolved note-anchor history without persisting a new note", async () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-note-ref-fail";
@@ -3097,12 +3116,14 @@ describe("registerPiContextHandler", () => {
 				ctx: never,
 			) => Promise<{ messages: never[] }>;
 			const msg = { ...userMessage("new turn", 1), id: "entry-existing" };
-			const result = await handler({ messages: [msg] as never[] }, {
-				...fakeContext(sessionId),
-				sessionManager: { getSessionId: () => sessionId },
-			} as never);
+			await expect(
+				handler({ messages: [msg] as never[] }, {
+					...fakeContext(sessionId),
+					sessionManager: { getSessionId: () => sessionId },
+				} as never),
+			).rejects.toMatchObject({ name: "PiStorageBusyError" });
 
-			expect(textOf(result.messages[0] as never)).toContain("existing");
+			expect(getNoteNudgeAnchors(db, sessionId)[0]?.text).toContain("existing");
 			expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
 		} finally {
 			clearContextHandlerSession("ses-note-ref-fail");
@@ -4579,9 +4600,10 @@ describe("registerPiContextHandler", () => {
 				"boom messages",
 			);
 
+			const raw = [userMessage("ok", 2)];
 			await handler(
-				{ messages: [userMessage("ok", 2)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: raw as never[] },
+				fakeContext("ses-context", process.cwd(), ["ok"], raw) as never,
 			);
 			expect(getOrCreateSessionMeta(db, "ses-context").lastTransformError).toBe(
 				null,
@@ -5058,8 +5080,7 @@ describe("registerPiContextHandler", () => {
 			) => Promise<{ messages: never[] }>;
 			const msg = userMessage("after restart", 1);
 			await handler({ messages: [msg] as never[] }, {
-				...fakeContext(sessionId),
-				sessionManager: { getSessionId: () => sessionId },
+				...fakeContext(sessionId, process.cwd(), ["after-restart"], [msg]),
 				// Same model as before (no model change) → first-pass path only.
 				getContextUsage: () => ({
 					tokens: 120_000,

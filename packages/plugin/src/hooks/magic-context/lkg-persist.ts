@@ -203,8 +203,9 @@ function slotFingerprint(slot: LkgSlot): string {
 }
 
 /**
- * Persist a slot for the session, replacing any prior row. Best-effort: callers
- * treat a failure as "this process still has the in-memory slot" and log.
+ * Persist a slot for the session, replacing any prior row. Returns false on
+ * failure; callers decide whether memory-only replay is sufficient. Pi requires
+ * a successful commit before installing the request and mirroring its identities.
  *
  * Only the prefix slices whose hash differs from the stored slice's hash are
  * written. Comparing against the stored hashes, not a hash this process
@@ -213,9 +214,14 @@ function slotFingerprint(slot: LkgSlot): string {
  * of slices past the new count, and the metadata row (with the count, length and
  * hash a load verifies) commit in one transaction.
  */
-export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot): boolean {
+export function saveLkgSlotToDb(
+    db: Database,
+    sessionId: string,
+    slot: LkgSlot,
+    publishMetadata?: () => void,
+): boolean {
     const fingerprint = slotFingerprint(slot);
-    if (persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
+    if (!publishMetadata && persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
         db.transaction(() => {
@@ -280,6 +286,8 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
                 slot.rowVersion ?? null,
                 slot.captureSequence ?? null,
             );
+            // Safety metadata must share the request's commit, not a later callback.
+            publishMetadata?.();
         }).immediate();
         rememberFingerprint(db, sessionId, fingerprint);
         return true;

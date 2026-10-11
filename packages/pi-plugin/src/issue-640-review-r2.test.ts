@@ -209,11 +209,13 @@ test("r2: distinct multi-block real messages must not collide with one served fa
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		const fallback = await handler(
-			{ messages: [structuredClone(raw[1])] },
-			unavailable,
-		);
-		expect(textOf(fallback.messages[0])).toBe("§3§ repeat§4§ beta");
+		await expect(
+			handler({ messages: [structuredClone(raw[1])] }, unavailable),
+		).rejects.toMatchObject({ name: "PiStorageBusyError" });
+		// Honor fallback numbers served by an older release even when that release had no LKG.
+		capturePiServedArray(sessionId, [userMessage("§3§ repeat§4§ beta", 1)], {
+			servedTagNumbers: [3, 4],
+		});
 		const result = await handler(
 			{ messages: structuredClone(raw) },
 			fakeContext(sessionId, process.cwd(), ["first", "second"], raw),
@@ -246,13 +248,16 @@ test("r2: an unserved racing real row is not served evidence merely because user
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		const first = await handler(
-			{ messages: [structuredClone(original)] },
-			unavailable,
-		);
-		expect(textOf(first.messages[0])).toBe(
-			"§1§ Explain the marker §9§ in this pasted example",
-		);
+		await expect(
+			handler({ messages: [structuredClone(original)] }, unavailable),
+		).rejects.toMatchObject({ name: "PiStorageBusyError" });
+		const first = {
+			messages: [
+				userMessage("§1§ Explain the marker §9§ in this pasted example", 1),
+			],
+		};
+		// Seed the old JSONL evidence independently of the now-refused managed pass.
+		capturePiServedArray(sessionId, first.messages, { servedTagNumbers: [1] });
 		db.prepare(
 			"INSERT INTO tags(message_id,type,status,session_id,tag_number,byte_size) VALUES ('real:p0','message','active',?,9,0)",
 		).run(sessionId);
@@ -466,11 +471,12 @@ test("r2: reloading a session must not forget its already-served fallback number
 		unavailable.sessionManager.getBranch = () => {
 			throw new Error("entry unavailable");
 		};
-		const first = await install()(
-			{ messages: [structuredClone(original)] },
-			unavailable,
-		);
-		expect(textOf(first.messages[0])).toBe("§1§ served before restart");
+		await expect(
+			install()({ messages: [structuredClone(original)] }, unavailable),
+		).rejects.toMatchObject({ name: "PiStorageBusyError" });
+		const first = { messages: [userMessage("§1§ served before restart", 1)] };
+		// Existing users can have legacy served numbers without a replay slot.
+		capturePiServedArray(sessionId, first.messages, { servedTagNumbers: [1] });
 		db.prepare(
 			"INSERT INTO tags(message_id,type,status,session_id,tag_number,byte_size) VALUES ('real:p0','message','active',?,9,0)",
 		).run(sessionId);

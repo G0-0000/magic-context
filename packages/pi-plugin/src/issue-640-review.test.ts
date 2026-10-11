@@ -19,6 +19,7 @@ import {
 } from "./context-handler";
 import { createPiLkgCoordinator } from "./pi-lkg";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
+import { capturePiServedArray } from "./served-array-ledger";
 import {
 	assistantMessage,
 	createFakePi,
@@ -298,11 +299,12 @@ test("review: a racing real-id row must not renumber the already-served fallback
 		ctx.sessionManager.getBranch = () => {
 			throw new Error("in-flight entry unavailable");
 		};
-		const served = await handler(
-			{ messages: [structuredClone(original)] },
-			ctx,
-		);
-		expect(textOf(served.messages[0])).toBe("§1§ served fallback");
+		await expect(
+			handler({ messages: [structuredClone(original)] }, ctx),
+		).rejects.toMatchObject({ name: "PiStorageBusyError" });
+		const served = { messages: [userMessage("§1§ served fallback", 1)] };
+		// Legacy JSONL remains authoritative for identities served before atomic publication.
+		capturePiServedArray(sessionId, served.messages, { servedTagNumbers: [1] });
 		const exec = db.exec.bind(db);
 		const prepare = db.prepare.bind(db);
 		let prepared = false;

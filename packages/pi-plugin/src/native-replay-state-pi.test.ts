@@ -300,20 +300,23 @@ describe("native upgrade application", () => {
 						],
 					});
 				}
-				expect(
-					f.db
-						.prepare(
-							"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
-						)
-						.get(sessionId),
-				).toEqual({ trailing_blank_decisions: stored });
+				const row = f.db
+					.prepare(
+						"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
+					)
+					.get(sessionId) as { trailing_blank_decisions: string };
+				const { piServedTagNumbers, ...nativeDocument } = JSON.parse(
+					row.trailing_blank_decisions,
+				);
+				expect(nativeDocument).toEqual(JSON.parse(stored));
+				expect(piServedTagNumbers).toEqual([1, 2, 3, 4]);
 			} finally {
 				f.close();
 			}
 		});
 	}
 
-	it("does not overwrite an unsupported document version or abort local cleanup", async () => {
+	it("refuses publication without overwriting an unsupported document version", async () => {
 		const sessionId = "ses-native-future-document";
 		const f = fixture(sessionId);
 		try {
@@ -328,17 +331,10 @@ describe("native upgrade application", () => {
 					"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
 				)
 				.run(stored, sessionId);
-			const original = nativeBytes([oldAssistant()]);
 			for (const percent of [0, 90, 0]) {
 				f.restart();
-				const messages = await f.pass(percent);
-				expect(nativeBytes(messages)).toBe(original);
-				expect(messages[1]).toMatchObject({
-					content: [
-						{ type: "thinking", thinking: "", thinkingSignature: undefined },
-						{},
-						{ arguments: { dropped: expect.any(String) } },
-					],
+				await expect(f.pass(percent)).rejects.toMatchObject({
+					name: "PiStorageBusyError",
 				});
 			}
 			expect(
