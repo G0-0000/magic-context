@@ -862,6 +862,7 @@ describe("adaptPayload commit on canonical Anthropic", () => {
             byId.get("s1")!.parts.splice(0, 1, { type: "text", text: "", cache: HINT });
             // An assistant row with empty parts around its text, the last one hinted.
             byId.get("a1")!.parts.unshift({ type: "text", text: "" });
+            byId.get("a1")!.parts.push({ type: "text", text: "§5§ more" });
             byId.get("a1")!.parts.push({ type: "text", text: "", cache: HINT });
         });
         expect(context.messages).toEqual([
@@ -870,7 +871,10 @@ describe("adaptPayload commit on canonical Anthropic", () => {
             {
                 id: "a1",
                 role: "assistant",
-                content: [{ type: "text", text: "§3§ reply", cache: HINT }],
+                content: [
+                    { type: "text", text: "§3§ reply" },
+                    { type: "text", text: "§5§ more", cache: HINT },
+                ],
             },
             { id: "u2", role: "user", content: [{ type: "text", text: "§4§ next" }] },
         ]);
