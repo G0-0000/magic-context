@@ -259,6 +259,7 @@ Behavior tuning most installs never need to touch.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `smart_notes.enabled` | boolean | `true` | Enable smart-note authoring and condition evaluation. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface. |
 | `smart_notes.retina_handoff` | boolean | `false` | When true, dreamer skips smart notes whose surface conditions compiled to retina provider configs at authoring time. Default false keeps both paths active until the retina consumer is deployed. |
 | `models.window_overlay_path` | string | — |  |
 | `toast_duration_ms` **Live** | number (0–60000) | `5000` | TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000) |

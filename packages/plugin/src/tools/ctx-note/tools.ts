@@ -32,7 +32,12 @@ import {
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { Database } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
-import { CTX_NOTE_DESCRIPTION } from "./constants";
+import {
+    CTX_NOTE_DESCRIPTION,
+    NOTES_FILTER_DESCRIPTION,
+    SMART_NOTES_DISABLED_REPLY,
+    withoutSmartNoteText,
+} from "./constants";
 import {
     EMPTY_READ_REPLY,
     formatWriteReply,
@@ -47,6 +52,7 @@ export { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 export interface CtxNoteToolDeps {
     db: Database;
     dreamerEnabled?: boolean;
+    smartNotesEnabled?: boolean;
     /**
      * Resolve the project identity for the session's directory at call time.
      * See CtxMemoryToolDeps.resolveProjectPath for why this is a function.
@@ -228,9 +234,19 @@ function parseNoteIds(action: string, value: unknown): number[] | string {
 }
 
 function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
+    const { surface_condition: _condition, ...plainArgs } = ctxNoteArgsShape;
     return tool({
-        description: CTX_NOTE_DESCRIPTION,
-        args: ctxNoteArgsShape,
+        description:
+            deps.smartNotesEnabled === false
+                ? withoutSmartNoteText(CTX_NOTE_DESCRIPTION)
+                : CTX_NOTE_DESCRIPTION,
+        args:
+            deps.smartNotesEnabled === false
+                ? {
+                      ...plainArgs,
+                      filter: ctxNoteArgsShape.filter.describe(NOTES_FILTER_DESCRIPTION),
+                  }
+                : ctxNoteArgsShape,
         async execute(rawArgs: CtxNoteArgs, toolContext) {
             const parsedArgs = ctxNoteArgsSchema.safeParse(rawArgs);
             let args = (parsedArgs.success ? parsedArgs.data : rawArgs) as CtxNoteArgs;
@@ -246,6 +262,9 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 offset: "number",
                 note_ids: { type: "array", items: "number", maxItems: 50 },
             });
+            if (deps.smartNotesEnabled === false && args.surface_condition !== undefined) {
+                return SMART_NOTES_DISABLED_REPLY;
+            }
             const sessionId = toolContext.sessionID;
             // Infer write only on NON-EMPTY content. GPT-family models fill every
             // optional param (content:"" for a read), so a bare `typeof === "string"`

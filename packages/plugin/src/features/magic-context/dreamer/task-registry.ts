@@ -29,6 +29,12 @@ export const CANONICAL_DREAM_TASKS = [
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
+export function availableDreamTasks(smartNotesEnabled = true): DreamTaskName[] {
+    return CANONICAL_DREAM_TASKS.filter(
+        (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
+    );
+}
+
 /** Prompt-token ceilings informed by docs/reports/dreamer-token-usage.md.
  * Completed Gemini run usage predicts 20-memory mapping/verification batches
  * at about 70% of their allowance

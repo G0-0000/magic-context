@@ -133,6 +133,7 @@ export function isMagicContextInternalAgent(systemPromptContent: string): boolea
 export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
     dreamerEnabled: boolean;
+    smartNotesEnabled?: boolean;
     /** When false (`memory.enabled: false`), the `<project-memory>` block is
      *  never injected, so ctx_memory guidance is dropped from the prompt and the
      *  ctx_memory tool is not registered. ctx_search guidance stays (it still
@@ -396,6 +397,7 @@ export function createSystemPromptHashHandler(deps: {
                 deps.memoryEnabled !== false,
                 promptSurface.preset,
                 promptSurface.primaryOverride,
+                deps.smartNotesEnabled,
             );
             // OpenAI-compatible serializers emit one wire message per array entry,
             // and strict chat templates reject a second system message. Keep the host

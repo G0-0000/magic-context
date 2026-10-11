@@ -588,6 +588,7 @@ const server: Plugin = async (ctx) => {
                 },
                 mural: pluginConfig.mural,
                 retinaHandoff: pluginConfig.smart_notes.retina_handoff,
+                smartNotesEnabled: pluginConfig.smart_notes.enabled,
                 gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
                     ? {
                           enabled: true,

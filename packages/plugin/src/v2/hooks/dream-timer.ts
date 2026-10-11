@@ -89,6 +89,7 @@ export function registerV2DreamScheduleTimer(args: {
         memoryEnabled: config.memory.enabled === true,
         memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
         retinaHandoff: config.smart_notes.retina_handoff,
+        smartNotesEnabled: config.smart_notes.enabled,
         embeddingConfig: config.embedding,
         gitCommitIndexing: gitCommitIndexing?.enabled
             ? {
