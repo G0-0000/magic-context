@@ -5782,6 +5782,10 @@ export function registerPiContextHandler(
 			let serializedOutput: PiLkgSerializedOutput | undefined;
 			let numbersCommitted = false;
 			budget.stage = "LKG/served publication";
+			// The outcome/ownership guard admits the request before reserving tag numbers.
+			// They do not prove the provider saw the bytes: Oh My Pi can later refuse a
+			// late, stale or ended turn. Keep its reservations and any saved last-good
+			// request; ambiguous number conflicts use the existing one-time identity repair.
 			// Normal transform work is finished. Serialization and publication use
 			// the reserved completion margin, never a new budget or a raw fallback.
 			budget.assertOutcome();

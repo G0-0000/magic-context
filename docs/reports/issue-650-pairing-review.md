@@ -1,5 +1,9 @@
 # Issue 650: publication-pairing correctness review
 
+## Resolution after independent review
+
+The findings below preserve the original review of `8680e41c5adf01c2fb9dd6b1b115644f0c033dc9`, including its original failing assertions. The task-giver subsequently refined the contract to **handler-admitted identity reservations**, not dispatched-only facts: late, stale or ended-turn OMP refusal retains admitted numbers and the saved request while permitting zero sends. The four boundary tests are renamed to assert that contract. The warmed legacy-reader cache is now validated against file metadata and the import test also checks SQLite directly. Immediate downgrade visibility after a failed mirror remains a documented compatibility limit; its test asserts the missing old-reader evidence, then proves visibility after the next successful new-version repair. The updated actual-0.47.0 review run passes all 18 tests. See `issue-650-publication-pairing-verification.md` for implementation, mutation proofs, known limits and final gates. Envelope scalability debt is assigned to a normalized number table on the migration branch, not fixed here.
+
 ## Scope and result
 
 Reviewed `82a3f0c11ad77ce5dfe09ff775b1277184bd9cab..8680e41c5adf01c2fb9dd6b1b115644f0c033dc9`, including `docs/reports/issue-650-lkg-served-pairing.md` (problem) and `docs/reports/issue-650-publication-pairing-verification.md` (implementation claims). The latter's results were treated as claims, not verification. Product code, existing tests, manifests, `ARCHITECTURE.md`, and `STRUCTURE.md` are unchanged by this review.
