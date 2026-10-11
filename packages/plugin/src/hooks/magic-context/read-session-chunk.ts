@@ -5,6 +5,7 @@ import {
 import { expandToolPart } from "../../shared/historian-tool-expansions";
 import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
+import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective } from "../../shared/system-directive";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
@@ -606,13 +607,30 @@ export async function prepareRawSessionOrdinals(sessionId: string): Promise<bool
     if (!openCodeDbExists()) return true;
     const db = withReadOnlySessionDb((connection) => connection);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = Date.now() + 250;
+    const prepare = async () => {
+        // Streaming writes can supersede a scan just before a tool reads history.
+        // Retry within the same deadline rather than returning a warming response
+        // after one short race; never install ranks from the superseded snapshot.
+        for (let attempt = 0; attempt < 3 && Date.now() < deadline; attempt++) {
+            if ((await prewarmRawSessionOrdinalsForDb(db, sessionId)) === "warm") return true;
+        }
+        return false;
+    };
     try {
-        return await Promise.race([
-            prewarmRawSessionOrdinalsForDb(db, sessionId).then((outcome) => outcome === "warm"),
+        const ready = await Promise.race([
+            prepare(),
             new Promise<false>((resolve) => {
                 timer = setTimeout(() => resolve(false), 250);
             }),
         ]);
+        if (!ready) {
+            sessionLog(
+                sessionId,
+                "WARN canonical ordinal preparation unavailable within 250ms; exact reads must defer or retry",
+            );
+        }
+        return ready;
     } finally {
         clearTimeout(timer);
     }
