@@ -22,7 +22,7 @@ import {
 	readPiCommittedServedNumbers,
 } from "./pi-served-identities";
 import { readPiIdentityRebuilds } from "./pi-tag-identity-repair";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import {
 	capturePiServedArray,
 	flushPiServedArrayLedger,

@@ -19,7 +19,7 @@ import {
 } from "./context-handler";
 import { createPiLkgCoordinator } from "./pi-lkg";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import {
 	assistantMessage,
 	createFakePi,

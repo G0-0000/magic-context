@@ -16,7 +16,7 @@ import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
 } from "./context-handler";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import {
 	assistantMessage,
 	createFakePi,

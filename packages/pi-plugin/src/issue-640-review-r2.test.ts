@@ -20,7 +20,7 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import { createPiLkgCoordinator } from "./pi-lkg";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
 	createFakePi,

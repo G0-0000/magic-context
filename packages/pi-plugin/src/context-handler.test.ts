@@ -100,7 +100,7 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
 	assistantMessage,

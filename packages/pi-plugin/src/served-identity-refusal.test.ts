@@ -9,7 +9,7 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import { readPiCommittedServedNumbers } from "./pi-served-identities";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import * as ledger from "./served-array-ledger";
 import {
 	createFakePi,

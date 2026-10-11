@@ -221,7 +221,8 @@ export function saveLkgSlotToDb(
     publishMetadata?: () => void,
 ): boolean {
     const fingerprint = slotFingerprint(slot);
-    if (!publishMetadata && persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
+    if (!publishMetadata && persistedFingerprints.get(db)?.get(sessionId) === fingerprint)
+        return true;
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
         db.transaction(() => {
@@ -293,7 +294,12 @@ export function saveLkgSlotToDb(
         return true;
     } catch (error) {
         // Paired Pi publication reports its optional failure once per session/reason.
-        if (!publishMetadata) sessionLog(sessionId, "LKG snapshot persistence failed (in-memory slot retained):", error);
+        if (!publishMetadata)
+            sessionLog(
+                sessionId,
+                "LKG snapshot persistence failed (in-memory slot retained):",
+                error,
+            );
         return false;
     }
 }

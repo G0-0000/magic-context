@@ -22,7 +22,7 @@ import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
 } from "./native-replay-state-pi";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import {
 	assistantMessage,
 	createFakePi,

@@ -19,7 +19,7 @@ import {
 	publishPiServedNumbers,
 	readPiCommittedServedNumbers,
 } from "./pi-served-identities";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import {
 	flushPiServedArrayLedger,
 	getPiServedTagNumbers,
@@ -386,6 +386,7 @@ const releasePackage = process.env.MC_REVIEW_RELEASE
 
 function peer(f: ReturnType<typeof setup>, code: string, cwd = process.cwd()) {
 	return Bun.spawn([process.execPath, "-e", code], {
+		windowsHide: true,
 		cwd,
 		env: {
 			...process.env,

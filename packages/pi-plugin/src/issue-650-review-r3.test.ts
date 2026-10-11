@@ -29,7 +29,7 @@ import {
 	readPiIdentityRecurrences,
 } from "./pi-tag-identity-repair";
 import { piCachedToolSurvivor } from "./pi-tool-identity";
-import { observePiPublicationForTest } from "./publication-observer.fixture";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { piContentFallbackIds } from "./read-session-pi";
 import {
 	capturePiServedArray,
