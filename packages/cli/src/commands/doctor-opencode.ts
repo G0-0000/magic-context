@@ -1159,6 +1159,25 @@ export async function runDoctor(
     }
 
     const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation.version);
+    const paths = detectConfigPaths();
+    let magicContextInstalled = false;
+    let magicContextStatusKnown = paths.opencodeConfigFormat === "none";
+    if (!magicContextStatusKnown) {
+        try {
+            const config = parse(readFileSync(paths.opencodeConfig, "utf-8")) as Record<
+                string,
+                unknown
+            >;
+            magicContextInstalled = isOpenCodePluginRegistered(
+                config,
+                dirname(paths.opencodeConfig),
+            );
+            magicContextStatusKnown = true;
+        } catch {
+            // An unreadable config cannot establish that the plugin is absent.
+            // Keep store failures visible until registration can be determined.
+        }
+    }
     // Plugin registration follows the active (PATH) install; store checks follow the
     // OpenCode 2 CLI when one is installed beside an OpenCode 1 that PATH resolves
     // first, because that is the host converting and serving the store.
@@ -1185,7 +1204,11 @@ export async function runDoctor(
     }
     const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(openCodeDbResolution);
     if (openCodeDbCheck.ok) pass(openCodeDbCheck.message);
-    else fail(openCodeDbCheck.message);
+    else if (magicContextStatusKnown && !magicContextInstalled) {
+        log.info(
+            "OpenCode session database not yet created (will be created on first OpenCode session)",
+        );
+    } else fail(openCodeDbCheck.message);
 
     if (openCodeDbCheck.ok) {
         let markerDb: Database | null = null;
@@ -1335,10 +1358,6 @@ export async function runDoctor(
     }
 
     // 2. Check config paths exist
-    const paths = detectConfigPaths();
-    let magicContextInstalled = false;
-    let magicContextStatusKnown = false;
-
     if (paths.opencodeConfigFormat === "none") {
         magicContextStatusKnown = true;
     } else {

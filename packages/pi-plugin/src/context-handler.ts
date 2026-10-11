@@ -699,17 +699,29 @@ class PiLkgAdmissionReplay extends Error {
 const liveModelBySession = new Map<string, string>();
 const latestAssistantModelTimestampBySession = new Map<string, number>();
 const taggedStableMessageIdsBySession = new Map<string, Set<string>>();
+const taggedEntryHeadersBySession = new Map<string, Map<string, string>>();
 const taggersBySession = new Map<string, Tagger>();
 
 function recordSuccessfulTaggedMessageIds(
 	sessionId: string,
 	entryIds: readonly (string | undefined)[],
+	branchEntries: readonly unknown[] | null,
 ): void {
 	const liveRealIds = new Set<string>();
 	for (const entryId of entryIds) {
 		if (entryId && !entryId.startsWith("pi-msg-")) liveRealIds.add(entryId);
 	}
 	taggedStableMessageIdsBySession.set(sessionId, liveRealIds);
+	const prior = taggedEntryHeadersBySession.get(sessionId);
+	const current = branchEntries
+		? getPiBranchEntryLookup(branchEntries).alignmentChecks
+		: undefined;
+	const headers = new Map<string, string>();
+	for (const id of liveRealIds) {
+		const header = current?.get(id)?.headerKey ?? prior?.get(id);
+		if (header !== undefined) headers.set(id, header);
+	}
+	taggedEntryHeadersBySession.set(sessionId, headers);
 }
 
 const piMessageTokenCacheBySession = new Map<
@@ -2140,14 +2152,73 @@ function resolvePiEventEntryIds(
 	const anchored = anchorPiEventEntryIds(lookup, aligned, messages);
 	if (anchored) {
 		piEntryAlignmentLaneCounts.anchored += 1;
-		return anchored;
+		return restorePiRetainedEntryIds(
+			sessionId,
+			branchEntries,
+			anchored,
+			messages,
+		);
 	}
 	piEntryAlignmentLaneCounts.fingerprint += 1;
-	return fillPiEntryIdsByUniqueHeader(
-		lookup,
-		collectMessageEntryIdsByRef(ctx, messages, sessionId, branchEntries),
+	return restorePiRetainedEntryIds(
+		sessionId,
+		branchEntries,
+		fillPiEntryIdsByUniqueHeader(
+			lookup,
+			collectMessageEntryIdsByRef(ctx, messages, sessionId, branchEntries),
+			messages,
+		),
 		messages,
 	);
+}
+
+/**
+ * Oh My Pi can retain older raw messages in its context event after native
+ * compaction removes their entries from the branch APIs. Remember ids tagged
+ * on the previous successful pass, matching only when the response id,
+ * timestamp, role and tool call id name one entry and it has not been used by
+ * another message. Otherwise saved text drops lose their emergency targets.
+ */
+function restorePiRetainedEntryIds(
+	sessionId: string,
+	branchEntries: readonly unknown[],
+	resolved: readonly (string | undefined)[] | null,
+	messages: readonly unknown[],
+): readonly (string | undefined)[] | null {
+	if (!resolved?.includes(undefined)) return resolved;
+	const previous = taggedEntryHeadersBySession.get(sessionId);
+	if (!previous?.size) return resolved;
+	const headers = new Map(previous);
+	for (const [id, check] of getPiBranchEntryLookup(branchEntries)
+		.alignmentChecks) {
+		headers.set(id, check.headerKey);
+	}
+	const owners = new Map<string, string[]>();
+	for (const [id, header] of headers) {
+		const bucket = owners.get(header) ?? [];
+		bucket.push(id);
+		owners.set(header, bucket);
+	}
+	const result = [...resolved];
+	const used = new Set(result.filter((id) => id !== undefined));
+	for (let index = 0; index < messages.length; index++) {
+		if (result[index] !== undefined) continue;
+		const header = piContextHeaderFields(messages[index]);
+		if (!header) continue;
+		const bucket = owners.get(
+			JSON.stringify([
+				header.responseId,
+				header.timestamp,
+				header.role,
+				header.toolCallId,
+			]),
+		);
+		const id = bucket?.length === 1 ? bucket[0] : undefined;
+		if (id === undefined || used.has(id)) continue;
+		result[index] = id;
+		used.add(id);
+	}
+	return result;
 }
 
 /**
@@ -4091,6 +4162,9 @@ export function registerPiContextHandler(
 				branchEntries,
 			);
 			const strictEntryIds = resolvedEntryIds ? [...resolvedEntryIds] : null;
+			// runPipeline trims positional ids along with a compacted prefix.
+			// Oh My Pi may present that raw prefix again, so remember the input ids.
+			const taggedInputEntryIds = strictEntryIds ? [...strictEntryIds] : null;
 			const lkgEntryIds = reconcilePiLkgEntryIds(
 				strictEntryIds,
 				alignedEntryIds,
@@ -5121,12 +5195,16 @@ export function registerPiContextHandler(
 			if (result.identityRebuilt) schedulerDecision = "execute";
 			const postPipelineStart = performance.now();
 			const tTransformDecision = performance.now();
-			// Replace the reuse window only after a successful pass. An id absent from
-			// the current branch must take one full derivation pass if it later returns,
-			// and bounding the set to the live branch prevents session-long growth.
+			// Replace the reuse window only after a successful pass. Bound it to the
+			// latest raw context input, which can include entries the branch APIs no
+			// longer expose, rather than accumulating every id seen in the session.
 			if (strictEntryIds) {
 				assertCurrentPass();
-				recordSuccessfulTaggedMessageIds(sessionId, strictEntryIds);
+				recordSuccessfulTaggedMessageIds(
+					sessionId,
+					taggedInputEntryIds ?? strictEntryIds,
+					branchEntries,
+				);
 			}
 			const piDecisionSnapshotNewestAssistant = result.bustedThisPass
 				? findNewestPiAssistantEntryId(branchEntries)
@@ -10174,6 +10252,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	liveModelBySession.delete(sessionId);
 	latestAssistantModelTimestampBySession.delete(sessionId);
 	taggedStableMessageIdsBySession.delete(sessionId);
+	taggedEntryHeadersBySession.delete(sessionId);
 	const tagger = taggersBySession.get(sessionId);
 	if (tagger) {
 		tagger.cleanup(sessionId);
