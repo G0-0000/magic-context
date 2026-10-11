@@ -4818,6 +4818,7 @@ impl McHandler {
                 protected_tokens_project: None,
                 keep_reasoning_tokens: None,
                 compaction_enabled: true,
+                smart_notes_enabled: true,
                 memory_enabled: true,
                 auto_search: crate::config::AutoSearchConfig::default(),
                 caveman: crate::config::CavemanConfig::default(),
@@ -5673,6 +5674,14 @@ impl McHandler {
             .effective_for_project(project_root);
         self.pause_memory_if_unresolved(project_root, &mut config);
         config
+    }
+
+    pub fn with_startup_smart_notes_enabled(self, enabled: bool) -> Self {
+        self.config
+            .lock()
+            .expect("config mutex")
+            .freeze_smart_notes_enabled(enabled);
+        self
     }
 
     /// Turn memory off in `config` while the route root's identity is unavailable, so the
@@ -9636,7 +9645,10 @@ impl McHandler {
             requested.guidance_override = binding.config.prompt_surface_guidance_override;
         }
         let selection = self.freeze_prompt_surface_selection(session_id, requested);
-        let tools = prompt_surface::session_tools(&selection);
+        let mut tools = prompt_surface::session_tools(&selection);
+        if !binding.config.smart_notes_enabled {
+            prompt_surface::disable_smart_notes_in_tools(&mut tools, selection.preset);
+        }
         respond(json!({
             "ok": true,
             "preset": selection.preset.as_str(),
@@ -9648,7 +9660,9 @@ impl McHandler {
             "preset_fallback": prompt_surface::tool_manifest_falls_back(selection.preset),
             "fallback_notice": prompt_surface::tool_manifest_falls_back(selection.preset)
                 .then_some(prompt_surface::LIGHT_FALLBACK_NOTICE),
-            "content_epoch": prompt_surface::manifest_content_epoch(&selection),
+            "content_epoch": if binding.config.smart_notes_enabled {
+                prompt_surface::manifest_content_epoch(&selection)
+            } else { sha256_hex(&serde_json::to_vec(&tools).unwrap_or_default()) },
             "tools": tools,
         }))
     }
@@ -9743,6 +9757,13 @@ impl McHandler {
             .guidance_override
             .as_deref()
             .unwrap_or(asset.bytes);
+        let filtered_text;
+        let base_text = if binding.config.smart_notes_enabled {
+            base_text
+        } else {
+            filtered_text = prompt_surface::without_smart_note_guidance(base_text);
+            &filtered_text
+        };
         let language_text = request
             .get("language")
             .and_then(Value::as_str)
@@ -13840,6 +13861,15 @@ impl McHandler {
             return invalid_params_error("ctx_note arguments must be an object");
         };
         let args = &args;
+        if args.get("surface_condition").is_some() {
+            if let Some(binding) = self.bindings.lock().expect("bindings mutex").get(&channel) {
+                if !binding.config.smart_notes_enabled {
+                    return tool_error_result(
+                        "Error: Smart notes are disabled; surface_condition is unavailable.",
+                    );
+                }
+            }
+        }
         if let Err(error) = validate_string_cap(args, "content", MAX_NOTE_CONTENT_BYTES)
             .and_then(|_| validate_string_cap(args, "surface_condition", MAX_SHORT_FIELD_BYTES))
             .and_then(|_| validate_string_cap(args, "compiled_provider", MAX_SHORT_FIELD_BYTES))
@@ -19015,6 +19045,18 @@ pub fn manifest_with_route_targets(
     module_id: &str,
     resolved_routes: &RouteTargetConfig,
 ) -> ModuleManifest {
+    manifest_with_route_targets_and_smart_notes(module_id, resolved_routes, true)
+}
+
+pub fn manifest_with_route_targets_and_smart_notes(
+    module_id: &str,
+    resolved_routes: &RouteTargetConfig,
+    smart_notes_enabled: bool,
+) -> ModuleManifest {
+    let mut tools = prompt_surface::module_tools(&PromptSurfaceSelection::default());
+    if !smart_notes_enabled {
+        prompt_surface::disable_smart_notes_in_tools(&mut tools, PromptSurfacePreset::Full);
+    }
     // Constructed via the subc-protocol builder (never a struct literal): ModuleManifest is
     // #[non_exhaustive], so builder methods are the only construction path that survives additive
     // field landings. Every field below is set to the exact value the pre-builder struct literal
@@ -19063,7 +19105,7 @@ pub fn manifest_with_route_targets(
         }
     })
     .provides(vec![ProviderRole::ToolProvider {
-        tools: prompt_surface::module_tools(&PromptSurfaceSelection::default()),
+        tools,
         identity_scope: vec![IdentityScope::Project, IdentityScope::Session],
         concurrency: Concurrency::ModuleManaged,
         emits_push: false,
@@ -22014,6 +22056,7 @@ mod tests {
             protected_tokens_project: None,
             keep_reasoning_tokens: None,
             compaction_enabled: true,
+            smart_notes_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
             caveman: crate::config::CavemanConfig::default(),
@@ -30225,79 +30268,98 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn note_facade_glance_lists_one_row_per_note_with_age_and_stale_markers() {
-        let producer = Arc::new(ProducerState::default());
-        let resolver =
-            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
-        let (handler, store, _dir, _project) =
-            handler_with_store_and_resolver(producer, default_test_config(), resolver);
-        handler.bind_route(7, binding("/repo", "token"));
+        for smart_notes_enabled in [true, false] {
+            let producer = Arc::new(ProducerState::default());
+            let resolver =
+                FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+            let (handler, store, _dir, _project) =
+                handler_with_store_and_resolver(producer, default_test_config(), resolver);
+            let mut route = binding("/repo", "token");
+            route.config.smart_notes_enabled = smart_notes_enabled;
+            handler.bind_route(7, route);
+            if !smart_notes_enabled {
+                let refused = tool_text(
+                    call_facade(
+                        &handler,
+                        "ctx_note",
+                        json!({"content": "cached", "surface_condition": "old"}),
+                    )
+                    .await,
+                );
+                assert_eq!(
+                    refused,
+                    "Error: Smart notes are disabled; surface_condition is unavailable."
+                );
+            }
 
-        let now = now_ms();
-        let day = 24 * 60 * 60 * 1000;
-        // A ready smart note, a parked smart note, and three plain notes: one
-        // fresh, one two days old, one untouched for 40 days.
-        let ready = store
-            .insert_project_note(NoteWriteInput {
-                project_path: "/repo",
-                route_project_root: None,
-                session_id: Some("session"),
-                content: "Ready smart item",
-                surface_condition: Some("condition"),
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                now_ms: now - 5 * day,
-            })
-            .unwrap();
-        store
-            .write_note_evaluation(NoteEvaluationInput {
-                project_path: "/repo",
-                note_id: ready.id,
-                source_revision: ready.status_version,
-                verdict: true,
-                compiled_check: None,
-                manifest_json: None,
-                check_hash: None,
-                next_due_at: None,
-                now_ms: now - 5 * day,
-            })
-            .unwrap();
-        store
-            .insert_project_note(NoteWriteInput {
-                project_path: "/repo",
-                route_project_root: None,
-                session_id: Some("session"),
-                content: "Parked smart item",
-                surface_condition: Some("condition"),
-                compiled_provider: None,
-                compiled_config: None,
-                compiled_at: None,
-                compile_status: None,
-                anchor_block_id: None,
-                anchor_ordinal: None,
-                now_ms: now - 2 * day,
-            })
-            .unwrap();
-        insert_session_note_at(&store, "Fresh plain item", now);
-        insert_session_note_at(&store, "Two-day-old plain item", now - 2 * day);
-        insert_session_note_at(&store, "Forty-day-old plain item", now - 40 * day);
+            let now = now_ms();
+            let day = 24 * 60 * 60 * 1000;
+            // A ready smart note, a parked smart note, and three plain notes: one
+            // fresh, one two days old, one untouched for 40 days.
+            let ready = store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content: "Ready smart item",
+                    surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: now - 5 * day,
+                })
+                .unwrap();
+            store
+                .write_note_evaluation(NoteEvaluationInput {
+                    project_path: "/repo",
+                    note_id: ready.id,
+                    source_revision: ready.status_version,
+                    verdict: true,
+                    compiled_check: None,
+                    manifest_json: None,
+                    check_hash: None,
+                    next_due_at: None,
+                    now_ms: now - 5 * day,
+                })
+                .unwrap();
+            store
+                .insert_project_note(NoteWriteInput {
+                    project_path: "/repo",
+                    route_project_root: None,
+                    session_id: Some("session"),
+                    content: "Parked smart item",
+                    surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
+                    anchor_block_id: None,
+                    anchor_ordinal: None,
+                    now_ms: now - 2 * day,
+                })
+                .unwrap();
+            insert_session_note_at(&store, "Fresh plain item", now);
+            insert_session_note_at(&store, "Two-day-old plain item", now - 2 * day);
+            insert_session_note_at(&store, "Forty-day-old plain item", now - 40 * day);
 
-        let glance = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
+            let glance =
+                tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
 
-        // Ready smart notes first, then pending, then plain notes newest first.
-        assert_eq!(
-            glance,
-            "## Notes\n\n\
+            // Ready smart notes first, then pending, then plain notes newest first.
+            assert_eq!(
+                glance,
+                "## Notes\n\n\
              #1 · 5d · Ready smart item · ready\n\
              #2 · 2d · Parked smart item · pending\n\
              #3 · 0m · Fresh plain item\n\
              #4 · 2d · Two-day-old plain item\n\
              #5 · 5w · Forty-day-old plain item · stale\n\n\
              To dismiss a stale note: ctx_note(action=\"dismiss\", note_ids=[N])"
-        );
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

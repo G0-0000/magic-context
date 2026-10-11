@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { log } from "@magic-context/core/shared/logger";
@@ -8,6 +8,10 @@ import {
 	writeStorageFileSync,
 } from "@magic-context/core/shared/storage-permissions";
 import type { PiLkgSerializedOutput } from "./pi-lkg";
+import {
+	PiServedEnvelopeUnavailable,
+	readPiCommittedServedNumbers,
+} from "./pi-served-identities";
 
 export const PI_SERVED_ARRAY_TAIL_MESSAGES = 40;
 export const PI_SERVED_ARRAY_BODY_CAPTURE_ENV =
@@ -46,7 +50,41 @@ interface PreviousPass {
 	serializedMessages: readonly string[];
 }
 
+interface IdentityFileStamp {
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+}
+
+function identityFileStamp(filePath: string): IdentityFileStamp | undefined {
+	try {
+		const { dev, ino, size, mtimeMs } = statSync(filePath);
+		return { dev, ino, size, mtimeMs };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		return undefined;
+	}
+}
+
+function sameIdentityFile(
+	a: IdentityFileStamp | undefined,
+	b: IdentityFileStamp | undefined,
+): boolean {
+	return (
+		a === b ||
+		(a !== undefined &&
+			b !== undefined &&
+			a.dev === b.dev &&
+			a.ino === b.ino &&
+			a.size === b.size &&
+			a.mtimeMs === b.mtimeMs)
+	);
+}
+
 interface CaptureOptions {
+	/** Managed identities are authoritative in SQLite; JSONL is a post-commit mirror. */
+	db?: import("@magic-context/core/shared/sqlite").Database;
 	/** Numbers assigned to identities represented by this managed result, not parsed from text. */
 	servedTagNumbers?: Iterable<number>;
 	assertCurrentPass?: () => void;
@@ -60,7 +98,7 @@ interface CaptureOptions {
 const previousBySession = new Map<string, PreviousPass>();
 const servedTagNumbersBySession = new Map<
 	string,
-	{ path: string; numbers: Set<number> }
+	{ path: string; numbers: Set<number>; stamp: IdentityFileStamp | undefined }
 >();
 const sequenceBySession = new Map<string, number>();
 const pendingLinesByPath = new Map<
@@ -82,10 +120,26 @@ export function clearPiServedArraySession(sessionId: string): void {
 export function getPiServedTagNumbers(
 	sessionId: string,
 	storageDir = getMagicContextStorageDir(),
+	db?: import("@magic-context/core/shared/sqlite").Database,
 ): ReadonlySet<number> {
+	if (db) {
+		const legacy = getPiServedTagNumbers(sessionId, storageDir);
+		try {
+			return new Set([
+				...legacy,
+				...readPiCommittedServedNumbers(db, sessionId),
+			]);
+		} catch (error) {
+			// Unreadable optional SQLite evidence cannot erase valid legacy identities.
+			if (error instanceof PiServedEnvelopeUnavailable) return legacy;
+			throw error;
+		}
+	}
 	const filePath = getPiServedTagNumbersPath(sessionId, storageDir);
+	const stamp = identityFileStamp(filePath);
 	const cached = servedTagNumbersBySession.get(sessionId);
-	if (cached?.path === filePath) return cached.numbers;
+	if (cached?.path === filePath && sameIdentityFile(cached.stamp, stamp))
+		return cached.numbers;
 	let text: string;
 	try {
 		text = readFileSync(filePath, "utf8");
@@ -115,7 +169,9 @@ export function getPiServedTagNumbers(
 		}
 		for (const number of row.tag_numbers) numbers.add(number);
 	}
-	servedTagNumbersBySession.set(sessionId, { path: filePath, numbers });
+	// Retain the pre-read stamp: a peer append during the read must invalidate the
+	// next lookup rather than certify that the newly appended bytes were parsed.
+	servedTagNumbersBySession.set(sessionId, { path: filePath, numbers, stamp });
 	return numbers;
 }
 
@@ -332,6 +388,18 @@ export function capturePiServedArray(
 		const previousNumbers = getPiServedTagNumbers(sessionId, storageDir);
 		identityPersistenceFailed = false;
 		const served = new Set(previousNumbers);
+		if (options.db) {
+			identityPersistenceFailed = true;
+			for (const number of readPiCommittedServedNumbers(options.db, sessionId))
+				served.add(number);
+			for (const number of options.servedTagNumbers ?? []) {
+				if (!served.has(number))
+					throw new PiServedIdentityError(
+						new Error("Pi identities have no committed LKG"),
+					);
+			}
+			identityPersistenceFailed = false;
+		}
 		for (const number of options.servedTagNumbers ?? []) {
 			if (Number.isSafeInteger(number) && number > 0) served.add(number);
 		}
@@ -362,8 +430,8 @@ export function capturePiServedArray(
 		);
 		const identityPath = getPiServedTagNumbersPath(sessionId, storageDir);
 		if (newNumbers.length) {
-			// Number identity is safety state, not optional telemetry. Persist it
-			// before returning; an unload or crash must not authorize renumbering.
+			// Managed numbers have already committed with their LKG. Keep a cumulative
+			// compatibility mirror, so older releases also honor these identities.
 			identityPersistenceFailed = true;
 			ensureStorageDirectorySync(path.dirname(identityPath));
 			options.assertCurrentPass?.();
@@ -378,10 +446,9 @@ export function capturePiServedArray(
 			identityPersistenceFailed = false;
 		}
 		options.assertCurrentPass?.();
-		servedTagNumbersBySession.set(sessionId, {
-			path: identityPath,
-			numbers: served,
-		});
+		// A peer can append other numbers between our read and this mirror write.
+		// Invalidate the parsed JSONL cache so the next reader reloads all of them.
+		if (newNumbers.length) servedTagNumbersBySession.delete(sessionId);
 		enqueue(
 			getPiServedArrayLedgerPath(sessionId, storageDir),
 			`${JSON.stringify(record)}\n`,

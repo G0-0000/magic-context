@@ -127,6 +127,8 @@ import {
     withSqliteTransformPass,
 } from "../../shared/sqlite";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
+import { CTX_NOTE_DESCRIPTION, withoutSmartNoteText } from "../../tools/ctx-note/constants";
+import { CTX_NOTE_LIGHT_DESCRIPTION } from "../../tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "../../tools/parameter-descriptions";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/host-media";
@@ -468,6 +470,7 @@ export function applyV2PromptSurfaceTools(
     draft: SessionContext,
     runtime: PromptSurfaceRuntime,
     config: PromptSurfaceConfig | undefined,
+    smartNotesEnabled = true,
 ): void {
     if (!draft.tools) return;
     const modelKey = `${draft.model.providerID}/${draft.model.id}`;
@@ -475,8 +478,20 @@ export function applyV2PromptSurfaceTools(
     for (const id of ACTIVE_TOOL_IDS) {
         const tool = draft.tools[id];
         if (!tool) continue;
-        tool.description = registration.descriptionFor(id, tool.description);
-        applyJsonSchemaParameterDescriptions(id, tool.input, registration.preset);
+        tool.description =
+            id === "ctx_note" && !smartNotesEnabled
+                ? withoutSmartNoteText(
+                      registration.preset === "light"
+                          ? CTX_NOTE_LIGHT_DESCRIPTION
+                          : CTX_NOTE_DESCRIPTION,
+                  )
+                : registration.descriptionFor(id, tool.description);
+        applyJsonSchemaParameterDescriptions(
+            id,
+            tool.input,
+            registration.preset,
+            smartNotesEnabled,
+        );
     }
 }
 
@@ -846,6 +861,7 @@ export async function registerContext(context: V2Context) {
         );
         const trigger = startDreamTrigger(context, {
             config: dreamerAtBoot,
+            smartNotesEnabled: config.smart_notes.enabled,
             sample: () => {
                 const current = dreamerRunConfig(config, liveConfigReader.poll().effective);
                 return { config: current.dreamer ?? dreamerAtBoot, mural: current.mural };
@@ -1476,7 +1492,12 @@ export async function registerContext(context: V2Context) {
         // grows host state without bound and a light-preset session's shortened
         // descriptions become the baseline every later request (any session,
         // any model) starts from. Registration happens once, in tools.ts.
-        applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
+        applyV2PromptSurfaceTools(
+            draft,
+            promptSurfaceRuntime,
+            config.prompt_surface,
+            config.smart_notes.enabled,
+        );
         const admissionDb = db ?? storage.current();
         const replayFits: NonNullable<
             Parameters<typeof tryMessagesTransformLkgReplay>[0]["replayFits"]
@@ -1614,6 +1635,7 @@ export async function registerContext(context: V2Context) {
             systemPrompt ??= createSystemPromptHashHandler({
                 db,
                 dreamerEnabled: config.dreamer !== undefined && !config.dreamer.disable,
+                smartNotesEnabled: config.smart_notes.enabled,
                 memoryEnabled:
                     config.memory.enabled &&
                     !!resolveProjectIdentityForSession(directory, config.allow_home_project),
@@ -2236,6 +2258,7 @@ export async function registerContext(context: V2Context) {
         void runManualDreamNow({
             db: runDb,
             dreamer: manualDreamer,
+            smartNotesEnabled: config.smart_notes.enabled,
             projectIdentity:
                 resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             directory,

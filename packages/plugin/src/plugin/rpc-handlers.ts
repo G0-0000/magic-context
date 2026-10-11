@@ -358,6 +358,8 @@ export function buildSidebarSnapshot(
     moduleStatus?: RustSessionStatus,
     compactionEnabled = true,
 ): SidebarSnapshot {
+    const smartNotesEnabled =
+        (config?.smart_notes as { enabled?: boolean } | undefined)?.enabled !== false;
     try {
         const projectIdentity = resolveProjectIdentityForSession(directory);
         if (projectIdentity === undefined)
@@ -511,7 +513,13 @@ export function buildSidebarSnapshot(
             : null;
         if (projectIdentity) {
             try {
-                dreamerBacklog = getDreamTaskBacklogs(db, projectIdentity, CANONICAL_DREAM_TASKS);
+                dreamerBacklog = getDreamTaskBacklogs(
+                    db,
+                    projectIdentity,
+                    CANONICAL_DREAM_TASKS.filter(
+                        (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
+                    ),
+                );
             } catch {
                 // A pre-Dreamer-V2 database may not have all task tables yet.
             }
@@ -524,8 +532,12 @@ export function buildSidebarSnapshot(
                 lastDreamerRunAt = getMostRecentTaskRunAt(db, projectIdentity);
                 // A scheduled task can fail on every slot for weeks. Without this the
                 // only in-session trace is a backlog count that never falls.
-                dreamerFailures = getFailingDreamTasks(db, projectIdentity);
-                dreamerSkipped = getSkippedDreamTasks(db, projectIdentity);
+                dreamerFailures = getFailingDreamTasks(db, projectIdentity).filter(
+                    (state) => smartNotesEnabled || state.task !== "evaluate-smart-notes",
+                );
+                dreamerSkipped = getSkippedDreamTasks(db, projectIdentity).filter(
+                    (task) => smartNotesEnabled || task !== "evaluate-smart-notes",
+                );
             } catch {
                 // task_schedule_state may not exist on a pre-V2 DB
             }
@@ -1718,11 +1730,9 @@ export function registerRpcHandlers(
         return { ok: true };
     });
 
-    // The three handlers below exist for a host whose only command seam is the
-    // TUI (OpenCode 2 registers /ctx-* through its keymap layer, and its lane
-    // never runs the OpenCode 1 `command.execute.before` hook). Each performs the
-    // same server-side work as the matching command branch and returns its text,
-    // so the caller can render it in a dialog or toast instead of a chat row.
+    // OpenCode 2 server command callbacks dispatch to these RPC handlers. The
+    // command API has no response-text channel, so callbacks send handler replies
+    // to a connected TUI as notifications instead of adding them to chat history.
     const compactionOffRefusal = (command: string): string =>
         `Magic Context compaction is disabled (${COMPACTION_ENABLED_PATH}: false) — /${command} manages compacted history and has no effect in this mode.`;
 

@@ -1,7 +1,7 @@
 import type { DreamerConfig } from "../../../config/schema/magic-context";
 import { type ModelHarness, resolveDreamerTaskModel } from "../../../shared/model-resolution";
 import {
-    CANONICAL_DREAM_TASKS,
+    availableDreamTasks,
     DREAM_TOOL_LOOP_TOKEN_BUDGETS,
     type DreamTaskName,
 } from "./task-registry";
@@ -17,8 +17,9 @@ export function buildDreamTaskRuntimeConfigs(
     dreamer: unknown,
     harness: ModelHarness,
     language?: string,
+    smartNotesEnabled = true,
 ): DreamTaskRuntimeConfig[] {
-    return CANONICAL_DREAM_TASKS.map((task) => {
+    return availableDreamTasks(smartNotesEnabled).map((task) => {
         const resolved = resolveDreamerTaskModel({
             config: { dreamer },
             harness,
@@ -85,16 +86,22 @@ export function dreamTaskScheduled(
 }
 
 /** Names of the tasks the user has scheduled (schedule != ""), in canonical order. */
-export function enabledDreamTasks(dreamer: DreamerConfig | undefined): DreamTaskName[] {
+export function enabledDreamTasks(
+    dreamer: DreamerConfig | undefined,
+    smartNotesEnabled = true,
+): DreamTaskName[] {
     if (!dreamer?.tasks) return [];
-    return CANONICAL_DREAM_TASKS.filter((t) => dreamer.tasks[t]?.schedule?.trim());
+    return availableDreamTasks(smartNotesEnabled).filter((t) => dreamer.tasks[t]?.schedule?.trim());
 }
 
 /** A compact `/ctx-status`-style schedule summary, e.g.
  *  "verify 0 3 * * *, curate 0 4 * * 0" — or "manual-only" when nothing is
  *  scheduled. */
-export function summarizeDreamSchedule(dreamer: DreamerConfig | undefined): string {
-    const enabled = enabledDreamTasks(dreamer);
+export function summarizeDreamSchedule(
+    dreamer: DreamerConfig | undefined,
+    smartNotesEnabled = true,
+): string {
+    const enabled = enabledDreamTasks(dreamer, smartNotesEnabled);
     if (enabled.length === 0) return "manual-only";
     return enabled.map((t) => `${t} ${dreamer?.tasks[t]?.schedule}`).join(", ");
 }

@@ -7966,6 +7966,9 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
             // built-in default. Identical for every project that only inherits.
             let tasks = crate::config::CANONICAL_DREAM_TASKS
                 .iter()
+                .filter(|&&task| {
+                    crate::jsonc::startup_smart_notes_enabled() || task != "evaluate-smart-notes"
+                })
                 .map(|&task| {
                     let effective = project_schedules
                         .get(task)

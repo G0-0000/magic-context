@@ -48,6 +48,7 @@ export function startDreamTrigger(
     context: Pick<V2Context, "location" | "event" | "session">,
     args: {
         config: DreamerConfig;
+        smartNotesEnabled?: boolean;
         sample?: () => { config: DreamerConfig; mural?: { enabled: boolean } };
         executor: HiddenCompletionExecutor;
         projectIdentity: () => string;
@@ -100,6 +101,7 @@ export function startDreamTrigger(
                             sampled?.config ?? args.config,
                             "opencode",
                             args.language,
+                            args.smartNotesEnabled,
                         ),
                         toolsSupported: args.executor.capabilities.tools === true,
                     });
@@ -116,6 +118,7 @@ export function startDreamTrigger(
                             retrospectiveRawProvider: (db) => new V2RetrospectiveRawProvider(db),
                             language: args.language,
                             mural: sampled?.mural ?? args.mural,
+                            smartNotesEnabled: args.smartNotesEnabled,
                         }),
                     });
                 } catch (error) {

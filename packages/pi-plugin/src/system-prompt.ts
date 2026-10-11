@@ -44,6 +44,7 @@ export interface BuildMagicContextBlockOptions {
 	protectedTags?: number;
 	ctxReduceCallable?: boolean;
 	dreamerEnabled?: boolean;
+	smartNotesEnabled?: boolean;
 	temporalAwarenessEnabled?: boolean;
 	cavemanTextCompressionEnabled?: boolean;
 	language?: string;
@@ -83,6 +84,7 @@ export function buildMagicContextBlock(
 		opts.memoryEnabled !== false,
 		opts.promptSurfacePreset,
 		opts.primaryGuidanceOverride,
+		opts.smartNotesEnabled,
 	);
 }
 

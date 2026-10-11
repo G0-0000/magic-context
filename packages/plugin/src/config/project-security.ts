@@ -455,6 +455,14 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    const smartNotes = projectRaw.smart_notes;
+    if (isPlainObject(smartNotes) && "enabled" in smartNotes) {
+        delete smartNotes.enabled;
+        warnings.push(
+            "Ignoring smart_notes.enabled from project config (only user-level config may change process-wide tool definitions; restart required).",
+        );
+    }
+
     // Repositories may select preset routing, but project settings cannot add
     // guidance or tool-description text to the provider-visible prompt; those
     // user-only fields are removed before project settings are merged.

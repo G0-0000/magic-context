@@ -100,6 +100,7 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
+import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
 	assistantMessage,
@@ -3077,6 +3078,7 @@ describe("registerPiContextHandler", () => {
 
 	it("replays note anchors by message id but skips new note persistence on ref failure", async () => {
 		const db = createTestDb();
+		const publication = observePiPublicationForTest("ses-note-ref-fail");
 		try {
 			const sessionId = "ses-note-ref-fail";
 			clearContextHandlerSession(sessionId);
@@ -3104,7 +3106,9 @@ describe("registerPiContextHandler", () => {
 
 			expect(textOf(result.messages[0] as never)).toContain("existing");
 			expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
+			publication.expect("numbers_only", "lkg_entry_ids_unavailable", 1);
 		} finally {
+			publication.restore();
 			clearContextHandlerSession("ses-note-ref-fail");
 			closeQuietly(db);
 		}

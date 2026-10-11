@@ -19,6 +19,7 @@ import { TASKS } from "./dreamer-task-data";
  * derived instead of hand-maintained.
  */
 export const RENDERED_PREFIXES: readonly string[] = [
+  "smart_notes.enabled",
   // General
   "enabled",
   "allow_home_project",

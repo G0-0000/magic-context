@@ -58,6 +58,7 @@ export async function registerTools(
         ...createCtxNoteTools({
             ...project,
             dreamerEnabled: isDreamerRunnable(config),
+            smartNotesEnabled: config.smart_notes.enabled,
             ...(rustToolBackends ? { rustToolBackends } : {}),
         }),
         ...createCtxSearchTools(project),

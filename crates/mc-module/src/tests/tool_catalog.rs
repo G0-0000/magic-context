@@ -37,6 +37,7 @@ fn example_catalog_config() -> CatalogConfig {
         other => panic!("not a surface: {other:?}"),
     };
     CatalogConfig {
+        smart_notes_enabled: true,
         compaction_enabled: config["compaction_enabled"].as_bool().unwrap(),
         memory_enabled: config["memory_enabled"].as_bool().unwrap(),
         dreamer_runnable: config["dreamer_runnable"].as_bool().unwrap(),
@@ -117,6 +118,38 @@ fn every_example_request_gets_exactly_the_pinned_answer_bytes() {
             String::from_utf8_lossy(&expected)
         );
     }
+}
+
+#[test]
+fn disabled_smart_notes_catalog_has_no_authoring_or_guidance_on_either_surface() {
+    let mut config = example_catalog_config();
+    config.smart_notes_enabled = false;
+    for surface in ["full", "light"] {
+        for compacting in [false, true] {
+            let answer =
+                tool_catalog::catalog_answer(&role_request("head", compacting, surface), &config)
+                    .unwrap();
+            let note = answer["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == "ctx_note")
+                .unwrap();
+            assert!(note["input_schema"]["properties"]
+                .get("surface_condition")
+                .is_none());
+            let text = format!("{} {}", note, answer["system_text"]["text"]);
+            assert!(!text.contains("surface_condition"), "{text}");
+            assert!(!text.contains("smart note"), "{text}");
+            assert!(!text.contains("outside checker"), "{text}");
+        }
+    }
+    config.guidance_override = Some("Custom guidance\n### Smart notes\n#### Verification\nUse an external condition to park work.\n### Ordinary notes\nKeep intentions in ctx_note.".to_string());
+    let answer =
+        tool_catalog::catalog_answer(&role_request("head", true, "full"), &config).unwrap();
+    let text = answer["system_text"]["text"].as_str().unwrap();
+    assert!(!text.contains("external condition"));
+    assert!(text.contains("Keep intentions in ctx_note"));
 }
 
 #[test]

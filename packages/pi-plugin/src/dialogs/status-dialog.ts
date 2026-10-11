@@ -111,6 +111,7 @@ const BORDER_COLUMNS = 2;
 const PADDING_COLUMNS = 2;
 
 export interface StatusDialogDeps {
+	smartNotesEnabled?: boolean;
 	db: ContextDatabase;
 	projectIdentity: string;
 	protectedTokens?: number;
@@ -1307,16 +1308,30 @@ function buildStatusDetail(
 					getDreamTaskBacklogs(
 						deps.db,
 						deps.projectIdentity,
-						CANONICAL_DREAM_TASKS,
+						CANONICAL_DREAM_TASKS.filter(
+							(task) =>
+								deps.smartNotesEnabled !== false ||
+								task !== "evaluate-smart-notes",
+						),
 					),
 				{},
 			),
 			failures: safeRead(
-				() => getFailingDreamTasks(deps.db, deps.projectIdentity),
+				() =>
+					getFailingDreamTasks(deps.db, deps.projectIdentity).filter(
+						(state) =>
+							deps.smartNotesEnabled !== false ||
+							state.task !== "evaluate-smart-notes",
+					),
 				[],
 			),
 			skipped: safeRead(
-				() => getSkippedDreamTasks(deps.db, deps.projectIdentity),
+				() =>
+					getSkippedDreamTasks(deps.db, deps.projectIdentity).filter(
+						(task) =>
+							deps.smartNotesEnabled !== false ||
+							task !== "evaluate-smart-notes",
+					),
 				[],
 			),
 			// Recorded by the process-wide maintenance timer, so it is read from

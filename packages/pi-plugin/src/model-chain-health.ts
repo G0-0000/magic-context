@@ -255,6 +255,7 @@ export function runnablePiModelChains(
 			config.dreamer,
 			harness,
 			config.language,
+			config.smart_notes?.enabled,
 		)) {
 			if (task.schedule.trim() === "") continue;
 			const chain = [task.model, ...(task.fallbackModels ?? [])].filter(
