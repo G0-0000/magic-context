@@ -1,5 +1,38 @@
 # Active thinking prefix hold (issue 665 and issue 664)
 
+## Review follow-up
+
+The independent review and its two tests were cherry-picked from `62fa1e27`.
+The follow-up narrows the directory veto back to m[0]/m[1] injection only. A
+failed lookup cannot stop queued reductions, heuristic cleanup or a useful
+explicit flush; the cached project memory/docs pair remains unchanged.
+
+The active-thinking veto applies only while there is a reusable prefix. First
+render without a cached pair and an idle-expired, already-cold cache admit safe
+reductions, routine cleanup and older-thinking stripping in the same pass.
+Per-target thinking protection still retains unsafe operations. Tests cover
+both hosts and a cold pass whose queued operations are all protected. Separate
+85% and 95% tests defend the existing pressure exceptions.
+
+A carried Pi identity repair is checked before adoption/tagging can expose its
+folded numbers. With a fitting LKG, the handler returns the last served prefix
+plus the new raw tail; it does not clear m[0]/m[1], acknowledge the repair or
+record a tag-identity calibration bust. The next permitted pass completes it.
+When no fitting replay can be proved, the parent selected one deliberate,
+attributed identity rebuild rather than refusing every step of the tool loop.
+That pass clears the cached pair, uses the folded numbers, admits eligible
+cleanup and acknowledges once. Both branches have real-handler tests.
+
+The cache-safe unheld Pi contention behavior is retained and pinned: a
+contended preflight with no other invalidation replays the old todo snapshot,
+preserves sticky anchors and keeps older thinking. A successful subsequent
+fold demonstrates that all three edits become available when permission returns.
+Hold-log state is pruned by the OpenCode 1 and OpenCode 2 deletion seams.
+
+The original host differential below remains the warm-cache issue-665 scenario;
+its after arm is rerun against the follow-up code. Rust is a separate task and
+is unchanged here.
+
 ## Real-host differential
 
 The committed OpenCode 2 test uses **OpenCode 2.0.26**, the real host's shell and
@@ -16,8 +49,9 @@ The next real user arrives at 61,000 tokens, below the execute threshold.
 | After: veto restored | 0 | 1 | 2 / 0 |
 
 `before.json` and `after.json` contain the measured hashes, pass decisions, host
-PIDs, and open database paths. The before arm changes only the new shared veto
-back to the old permission; it retains the corrected logging. The same regression
+PIDs, and open database paths. The before arm neutralizes only the active-thinking
+veto; on this warm-cache fixture that restores the old permission, while retaining
+corrected logging. The same regression
 test fails on the before arm and passes on the after arm. This measures provider
 request content, not simulated cache billing or estimated savings. Only moving
 `cache_control` breakpoints are excluded from byte comparisons; system content
@@ -93,24 +127,27 @@ and Biome 2.5.1. Package unit suites did not export OPENCODE_DB.
 
 - Plugin and Pi typecheck scripts: passed.
 - Plugin and Pi lint scripts: passed (warnings only; 1,378 and 303 files checked).
-- Pi full suite: 1,982 passed, 28 skipped, zero failed (2,010 tests).
-- Plugin full suite: 7,705 passed, 27 skipped, ten artifact-dependent failures
-  (7,742 tests). Nine bundled-worker failures referenced copied macOS build paths;
-  rebuilding both packages on Linux made all nine pass on the focused rerun.
+- Pi full suite: 1,988 passed, 28 skipped, zero failed (2,016 tests).
+- Plugin full suite after building both packages on Linux: 7,721 passed,
+  27 skipped, one unrelated fixture failure (7,749 tests). All bundled-worker
+  tests pass with Linux-built artifacts.
 - One unrelated fixture remains failing: `Node WASM Transformers fixture > builds
   with real fs and persists a model for offline reuse`, because its temporary
   bundle cannot resolve `onnxruntime-web/webgpu`. No embedding or fixture code was
   changed to conceal that failure.
-- All three changed plugin behavior-test files: 377 passed, zero failed, using the
-  repository's file-isolated `--parallel=4` runner setting.
+- Focused changed-file gate before the final cold-only Pi fixture: 421 passed,
+  zero failed across five files with the repository's file-isolated `--parallel=4`
+  setting. The added cold-only fixture passed separately, and the final full
+  suites include it and all follow-up regressions.
 - Linux builds: plugin bundled 708 modules for the main entry and 750 for v2;
   Pi bundled 1,013 modules. Nine compiled TUI files were unchanged.
-- The added host test has zero TypeScript diagnostics in the full e2e project
-  (exactly one owned test checked among 3,295 source files). That broader project
-  has 30 existing diagnostics in other files; its aggregate tsc gate is not clean.
+- The original host-test typecheck (the test file is unchanged in this follow-up)
+  found zero owned diagnostics in the full e2e project, with exactly one owned
+  test checked among 3,295 source files. That broader project had 30 diagnostics
+  in other files, so its aggregate tsc gate was not clean.
 - Real-host after arm: one test passed, 16 assertions. The before arm reddened only
   that same test with one loop prefix change instead of zero. The host gates ran
   locally because the installed 2.0.26 executable is a macOS binary.
-- Scoped live diagnostics covered all three changed implementation files: no
-  errors; one unused-import warning. Other health categories were unavailable
-  because the checkout call graph was not ready.
+- Scoped live diagnostics covered all four changed implementation files: no
+  errors; one existing unused-import warning and its corresponding hint. The
+  snapshot was fresh.

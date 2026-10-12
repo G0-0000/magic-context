@@ -765,3 +765,90 @@ test("unheld contended preflight replays todo and preserves sticky anchors and t
 		db.close();
 	}
 });
+
+test("Pi already-cold held pass strips older thinking without inventing another prefix edit", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-cold-strip-without-other-edit";
+	getOrCreateSessionMeta(db, sessionId);
+	updateSessionMeta(db, sessionId, {
+		piStableIdScheme: 1,
+		cacheTtl: "13h",
+		lastResponseTime: Date.now(),
+	});
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTokens: 4000,
+		heuristics: { keepReasoningTokens: 10000 },
+		injection: {
+			injectionBudgetTokens: 1000,
+			memoryEnabled: false,
+			injectDocs: false,
+		},
+		scheduler: { executeThresholdPercentage: 65 },
+	});
+	const handler = fake.handlers.get("context")!;
+	const thought = (n: number) =>
+		assistantMessage(`answer ${n}`, n, {
+			provider: "anthropic",
+			model: "claude-opus-5-5",
+			content: [
+				{
+					type: "thinking",
+					thinking: `thought ${n}`,
+					thinkingSignature: `sig-${n}`,
+				},
+				{ type: "text", text: `answer ${n}` },
+			],
+		});
+	const source = [
+		userMessage("old task", 1),
+		thought(2),
+		userMessage("active task", 3),
+		thought(4),
+	];
+	const ids = ["old-user", "old-answer", "active-user", "active-thought"];
+	const pass = async (warm = false) => {
+		const messages = structuredClone(warm ? source.slice(0, 1) : source);
+		const ctx = {
+			...fakeContext(
+				sessionId,
+				process.cwd(),
+				warm ? ids.slice(0, 1) : ids,
+				messages,
+			),
+			model: {
+				provider: "anthropic",
+				id: "claude-opus-5-5",
+				api: "anthropic-messages",
+				contextWindow: 100000,
+			},
+			getContextUsage: () => ({
+				tokens: 66000,
+				percent: 66,
+				contextWindow: 100000,
+			}),
+		};
+		return (
+			(await handler({ messages } as never, ctx as never)) as {
+				messages: unknown[];
+			}
+		).messages;
+	};
+	try {
+		await pass(true);
+		const before = JSON.stringify(await pass());
+		expect(before).toContain('"thinkingSignature":"sig-2"');
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+		});
+		const cold = JSON.stringify(await pass());
+		expect(cold).not.toContain('"thinkingSignature":"sig-2"');
+		expect(cold).toContain('"thinkingSignature":"sig-4"');
+		updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+		expect(JSON.stringify(await pass())).toBe(cold);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		db.close();
+	}
+});
