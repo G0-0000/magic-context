@@ -1,5 +1,6 @@
-//! Review checks for the large-session compose speed-ups that only make sense
-//! against the module after them: edge cases of the merged coverage ranges and of
+//! Tests that need the module after the large-session compose speed-ups (they call
+//! `CoveredOrdinals`, `surviving_strip_units_reference` and
+//! `compose_m0_with_compartments`, which the module before them lacks): edge cases of the merged coverage ranges and of
 //! the strip-unit survival parser beyond their randomized references, the
 //! one-compartment-read fold against a publication landing between two reads, and an
 //! ignored measurement of store lock waits under concurrent sessions.
@@ -207,11 +208,13 @@ fn a_publication_between_reads_cannot_split_the_fold_snapshot() {
         .unwrap()
         .map(|(_, end)| end);
     assert_eq!((guard_end, second_end), (Some(90), Some(99)));
-    // The two-read fold: guard rows against the second read's coverage end.
+    // Split snapshot, as when compose re-read the rows: the guard's rows end at 90 but
+    // coverage comes from the second read, ending at 99, so ordinal 91 looks uncovered.
     let stray =
         first_uncovered_live_block(&guard_rows, &live, second_end).map(|block| block.ordinal());
     assert_eq!(stray, Some(91), "the split snapshot reports a spurious gap");
-    // The one-read fold: guard and compose share the rows.
+    // One snapshot, as when compose reuses the guard's rows: checked against their own
+    // coverage end, no block is uncovered.
     assert_eq!(
         first_uncovered_live_block(&guard_rows, &live, guard_end).map(|b| b.ordinal()),
         None

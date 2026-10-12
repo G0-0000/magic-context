@@ -1,7 +1,11 @@
-//! Cross-commit m0/m1 differential for the large-session compose speed-ups.
+//! Cross-commit m0/m1 differential for the large-session compose speed-ups: the
+//! newest-first publication-floor walk, merged coverage ranges, the parsed strip-unit
+//! survival check, one compartment read per fold, sequence-indexed cached host
+//! coordinates, and the separate history render count cache in `mc-tokenizer`.
 //!
-//! This file compiles unchanged against the module before those speed-ups (with only
-//! the test helpers in `transform::tests` made `pub(crate)`) and after them. Each world
+//! This file compiles unchanged against the module before those speed-ups (commit
+//! 58b5f70d41: master's module with only the test helpers in `transform::tests` made
+//! `pub(crate)`) and after them. Each world
 //! is one store shared by three sessions that run their passes on their own threads at
 //! the same time. Between rounds the driver mutates the shared project memories, so
 //! every session sees the same memory set however the threads interleave. Within a
@@ -14,8 +18,8 @@
 //! Each pass yields one trace line: its actions, decision, reason, coverage and the
 //! SHA-256 of the frozen m0 and m1 payloads. A digest of every line must equal
 //! `testdata/compose-review-differential-golden.txt`. That file was written by the
-//! build before the speed-ups (`MC_REVIEW_GOLDEN_WRITE=1`); the build after them must
-//! reproduce it byte for byte.
+//! build of commit 58b5f70d41 (`MC_REVIEW_GOLDEN_WRITE=1`); the build after the
+//! speed-ups must reproduce it byte for byte.
 
 use super::tests::{item, memory_input, pctx, req, store};
 use super::*;
@@ -588,7 +592,8 @@ fn trace() -> Vec<String> {
     lines
 }
 
-/// One golden line per pass: its `w s r` label and the first 12 hex digits of the
+/// One golden line per pass: the trace line's first three tokens (its world, session
+/// and round label, such as `w0 s1 r7`) and the first 12 hex digits of the
 /// SHA-256 of the whole trace line (actions, decision, reason, coverage and the full
 /// m0 and m1 digests). The compact form keeps the committed file small; a mismatch
 /// prints the full trace line.
@@ -598,9 +603,10 @@ fn golden_line(line: &str) -> String {
     format!("{label} {}", &digest[..12])
 }
 
-/// The served m0/m1 bytes of 336 passes (12 materializing, 324 randomized) over four
-/// worlds of three concurrent sessions must equal the golden recorded from the module
-/// before the large-session speed-ups. Regenerate only for an intentional render
+/// The served m0/m1 bytes of 336 passes must equal the golden recorded from the module
+/// before the large-session speed-ups (commit 58b5f70d41). Four worlds of three
+/// concurrent sessions run rounds 0 through 27: round 0 is each session's
+/// materializing pass (12 passes) and rounds 1 to 27 are randomized (324 passes). Regenerate only for an intentional render
 /// change: `MC_REVIEW_GOLDEN_WRITE=1 cargo test -p mc-module --lib
 /// compose_review_differential -- --nocapture`, which also prints every full trace line.
 #[test]
