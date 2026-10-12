@@ -322,6 +322,9 @@ impl HistoryCounts {
 }
 
 #[cfg(test)]
+mod review_tests;
+
+#[cfg(test)]
 mod history_cache_tests {
     use super::*;
 

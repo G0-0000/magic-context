@@ -85,6 +85,12 @@ use crate::ck_wire::{
 #[path = "tests/compose_large_session.rs"]
 mod compose_large_session;
 #[cfg(test)]
+#[path = "tests/compose_review_differential.rs"]
+mod compose_review_differential;
+#[cfg(test)]
+#[path = "tests/compose_review_head.rs"]
+mod compose_review_head;
+#[cfg(test)]
 #[path = "tests/perf_audit_identity.rs"]
 mod perf_audit_identity;
 #[cfg(test)]
