@@ -198,10 +198,14 @@ test("issue 667 review: a pass refused while waiting for its SQLite reservation 
 		),
 	});
 	let reads = 0;
-	// The pass clock starts at 0; every later read sits 10 ms before the
-	// outcome deadline, so the wrapper's race fires while the reservation waits.
+	let later = 24_990;
+	// The pass clock starts at 0. Later reads sit 10 ms before the outcome
+	// deadline, so the wrapper's race fires while the reservation waits. Once
+	// the pass is refused, the clock reads 1 s: the late handler then sees
+	// time left on both cutoffs, so only the refusal itself (the abandoned flag
+	// and the handler's entry check) can stop it from writing.
 	const clock = spyOn(performance, "now").mockImplementation(() =>
-		reads++ === 0 ? 0 : 24_990,
+		reads++ === 0 ? 0 : later,
 	);
 	let releaseChunk!: () => void;
 	const held = new Promise<void>((resolve) => {
@@ -230,7 +234,10 @@ test("issue 667 review: a pass refused while waiting for its SQLite reservation 
 		const ctx = {
 			...fakeContext(sessionId, process.cwd(), ["u"], raw),
 			ui: { notify: () => {} },
-			abort: () => aborts++,
+			abort: () => {
+				aborts++;
+				later = 1_000;
+			},
 		};
 		const on = (name: string) => {
 			const fn = fake.handlers.get(name) as
