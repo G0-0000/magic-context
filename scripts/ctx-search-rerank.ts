@@ -126,7 +126,7 @@ export function spikeArgs(argv = process.argv.slice(2)) {
 	};
 }
 
-function fullCandidate(
+export function fullCandidate(
 	db: Database,
 	project: ProjectFixture,
 	result: UnifiedSearchResult,
@@ -219,7 +219,7 @@ function fullCandidate(
 }
 
 // Obtain separate full-text and vector-ranked lists for RRF instead of the production source-family score blend.
-async function collectLanes(
+export async function collectLanes(
 	db: Database,
 	project: ProjectFixture,
 	query: string,
@@ -388,7 +388,7 @@ async function collectLanes(
 	};
 }
 
-function validatedGolds(
+export function validatedGolds(
 	db: Database,
 	opencode: Database,
 	fixture: Fixture,
@@ -413,7 +413,10 @@ function validatedGolds(
 	return { gold, invalidGolds };
 }
 
-function rank(hits: readonly SafeHit[], gold: GoldTarget[]): number | null {
+export function rank(
+	hits: readonly SafeHit[],
+	gold: GoldTarget[],
+): number | null {
 	const index = hits.findIndex((hit) => resultMatchesGold(hit, gold));
 	return index < 0 ? null : index + 1;
 }
@@ -631,6 +634,7 @@ export async function runRerankSpike(): Promise<void> {
 				if (!snapshot)
 					throw new Error(`Missing embedding snapshot for ${query.project}`);
 				const shared: UnifiedSearchOptions = {
+					rerank: false,
 					limit: 10,
 					memoryEnabled: true,
 					embeddingEnabled: true,
