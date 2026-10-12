@@ -150,7 +150,9 @@ test("issue 667: a run's own end still invalidates its receipt", async () => {
 	dispatched.emit("agent_start");
 	await dispatched.emit("context", { messages: [prompt] });
 	dispatched.dispatch();
-	dispatched.emit("agent_end", { messages: [prompt, assistantMessage("done", 2)] });
+	dispatched.emit("agent_end", {
+		messages: [prompt, assistantMessage("done", 2)],
+	});
 	dispatched.dispatch();
 	expect(dispatched.refusals.at(-1)).toContain(
 		"the run that owned the latest context pass has ended",
@@ -189,7 +191,9 @@ test("issue 667: the outcome deadline covers a pass whose handler never settles"
 		h.emit("agent_start");
 		const outcome = await Promise.race([
 			Promise.resolve(h.emit("context", { messages: [userMessage("x", 1)] })),
-			new Promise((resolve) => setTimeout(() => resolve("still running"), 2000)),
+			new Promise((resolve) =>
+				setTimeout(() => resolve("still running"), 2000),
+			),
 		]);
 		expect(outcome).not.toBe("still running");
 		expect(h.aborts).toBe(1);
@@ -202,7 +206,6 @@ test("issue 667: the outcome deadline covers a pass whose handler never settles"
 		clock.mockRestore();
 	}
 });
-
 
 test("issue 667: a pass held behind index maintenance refuses by its deadline and cannot supersede the next pass", async () => {
 	const db = createTestDb();
@@ -264,7 +267,9 @@ test("issue 667: a pass held behind index maintenance refuses by its deadline an
 		on("agent_start")({});
 		const old = await Promise.race([
 			Promise.resolve(on("context")({ messages: raw })),
-			new Promise((resolve) => setTimeout(() => resolve("still waiting"), 2000)),
+			new Promise((resolve) =>
+				setTimeout(() => resolve("still waiting"), 2000),
+			),
 		]);
 		expect(old).not.toBe("still waiting");
 		expect(aborts).toBe(1);

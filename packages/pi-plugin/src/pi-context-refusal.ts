@@ -27,9 +27,10 @@ export class PiContextSupersededError extends Error {}
 
 interface Operation {
 	pass?: PiContextBudget;
-	// OMP's input messages for the latest pass, used only to attribute a late
-	// agent_end to the run it belongs to (see endBelongsToEarlierRun).
-	input?: readonly unknown[];
+	// The latest pass's context event. Its messages are read only when a late
+	// agent_end must be attributed (see endBelongsToEarlierRun), never on the
+	// context hook's own unguarded stack.
+	input?: { readonly messages?: unknown };
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
 	started: boolean;
@@ -50,7 +51,10 @@ function operationKey(ctx: ExtensionContext): string | object {
 
 function messageKey(message: unknown): string | undefined {
 	if (!message || typeof message !== "object") return undefined;
-	const { role, timestamp } = message as { role?: unknown; timestamp?: unknown };
+	const { role, timestamp } = message as {
+		role?: unknown;
+		timestamp?: unknown;
+	};
 	return typeof role === "string" && typeof timestamp === "number"
 		? `${role}:${timestamp}`
 		: undefined;
@@ -74,14 +78,20 @@ function endBelongsToEarlierRun(operation: Operation, event: unknown): boolean {
 	if (!operation.pass || operation.dispatched) return false;
 	const end = event as { willContinue?: unknown; messages?: unknown };
 	if (end?.willContinue === true) return true;
-	if (!operation.input || !Array.isArray(end?.messages)) return false;
+	let input: unknown;
+	try {
+		input = operation.input?.messages;
+	} catch {
+		return false;
+	}
+	if (!Array.isArray(input) || !Array.isArray(end?.messages)) return false;
 	const ended = new Set<string>();
 	for (const message of end.messages) {
 		const key = messageKey(message);
 		if (key) ended.add(key);
 	}
 	if (ended.size === 0) return false;
-	return operation.input.some((message) => {
+	return input.some((message) => {
 		const key = messageKey(message);
 		return key !== undefined && !ended.has(key);
 	});
@@ -130,7 +140,10 @@ export function registerPiGuardedContext(
 	// Lifecycle notifications seen per session. A run emits one agent_start and
 	// one agent_end, so ends catching up with starts means the start of the run
 	// that owns a misattributed pass has not been delivered yet.
-	const lifecycle = new Map<string | object, { starts: number; ends: number }>();
+	const lifecycle = new Map<
+		string | object,
+		{ starts: number; ends: number }
+	>();
 	const lifecycleCounts = (key: string | object) => {
 		let counts = lifecycle.get(key);
 		if (!counts) {
@@ -263,8 +276,7 @@ export function registerPiGuardedContext(
 				// it can no longer become one.
 				if (
 					!budget.completed &&
-					(budget.abandoned ||
-						budget.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
+					(budget.abandoned || budget.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
 				)
 					throw new PiContextDeadlineError(budget.diagnostic());
 				// A context result completed before the preparation deadline remains
@@ -316,7 +328,7 @@ export function registerPiGuardedContext(
 		}
 		const active = operation;
 		active.pass = budget;
-		active.input = event.messages;
+		active.input = event;
 		active.dispatched = false;
 		active.ready = false;
 		// A refusal aborts the run it was raised in. A later pass on the same
