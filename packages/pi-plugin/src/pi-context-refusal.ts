@@ -273,11 +273,7 @@ export function registerPiGuardedContext(
 		// No awaits, DB access or payload hashing are allowed in this backstop.
 		pi.on("before_provider_request", (event, ctx) => {
 			if (options.compactionOff?.(ctx)) return;
-			// Advisors inherit the payload hook, but review formatted copies of
-			// new messages in their own agent. They neither consume nor grant the
-			// receipt that authorizes the main conversation's managed messages.
 			const payload = (event as { payload?: unknown }).payload;
-			if (isOmpAdvisorRequest(payload)) return;
 			const key = operationKey(ctx);
 			// OMP erases the ephemeral request's attribution before this hook. Its
 			// abort API is session-wide, so after seeing OMP's attributed reminder
@@ -301,6 +297,10 @@ export function registerPiGuardedContext(
 				);
 				return;
 			}
+			// OMP also invokes this send hook for advisor agents. They review separate,
+			// formatted session updates rather than the main conversation, so they
+			// neither need nor establish a completed main-context pass.
+			if (isOmpAdvisorRequest(payload)) return;
 			let operation = operations.get(key);
 			if (!operation) {
 				operation = newOperation();
@@ -451,10 +451,12 @@ export function registerPiGuardedContext(
 					unsendableNonces.add(nonce);
 					event.messages.push({
 						role: "user",
-						content: [{
-							type: "text",
-							text: `Magic Context refused this request: it was not prepared for this turn. ${nonce}`,
-						}],
+						content: [
+							{
+								type: "text",
+								text: `Magic Context did not prepare this request for the current turn. ${nonce}`,
+							},
+						],
 						timestamp: Date.now(),
 					});
 				}

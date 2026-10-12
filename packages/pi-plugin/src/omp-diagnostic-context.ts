@@ -12,7 +12,9 @@ export function isOmpDumpContextStack(stack: string | undefined): boolean {
 				`^\\s*at (?:async )?(?:AgentSession\\.)?${method} \\(.*?/@oh-my-pi/pi-coding-agent/src/session/agent-session\\.ts:\\d+:\\d+\\)$`,
 			).test(frame),
 		);
-	return hostFrame("#formatLlmRequestJson") && hostFrame("dumpLlmRequestToTmpDir");
+	return (
+		hostFrame("#formatLlmRequestJson") && hostFrame("dumpLlmRequestToTmpDir")
+	);
 }
 
 export function isOmpDumpContext(): boolean {

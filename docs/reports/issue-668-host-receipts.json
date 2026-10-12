@@ -1,0 +1,969 @@
+{
+  "bun": "1.4.2",
+  "runs": [
+    {
+      "name": "fixed.SaLYTa",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/fixed.SaLYTa",
+        "variant": "fixed",
+        "api": "anthropic-messages",
+        "conflict": false,
+        "noDump": false,
+        "plugin": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/bg_001775389acba519/packages/pi-plugin/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 48587,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 48587,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 48587,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "OMP 18.10.3 dump frames are pinned",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "idle dump writes nothing",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "dump changes no live pass and causes no extension error",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "live request is prepared after dump",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 0,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "§3§ live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [],
+      "dumpFrames": [
+        [
+          "    at #formatLlmRequestJson (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13436:34)",
+          "    at dumpLlmRequestToTmpDir (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13431:40)"
+        ],
+        [
+          "    at #formatLlmRequestJson (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13436:34)",
+          "    at dumpLlmRequestToTmpDir (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13431:40)"
+        ]
+      ],
+      "markedDispatchAttempts": 0,
+      "marker": [],
+      "idleBefore": {
+        "bytes": 25110,
+        "sha256": "48870532ab961facf1309d5403db7f33d3c383da7354af0247ce592c9fb6b79c"
+      },
+      "idleAfter": {
+        "bytes": 25110,
+        "sha256": "48870532ab961facf1309d5403db7f33d3c383da7354af0247ce592c9fb6b79c"
+      },
+      "overlapBefore": {
+        "bytes": 25110,
+        "sha256": "48870532ab961facf1309d5403db7f33d3c383da7354af0247ce592c9fb6b79c"
+      },
+      "overlapAfter": {
+        "bytes": 25110,
+        "sha256": "48870532ab961facf1309d5403db7f33d3c383da7354af0247ce592c9fb6b79c"
+      },
+      "sessionAfterTurn": {
+        "bytes": 2923,
+        "sha256": "4e829376b11a47d1489a5fd0b56d071488fd2a0ffe57f6c4ad6d7b86fc993531"
+      }
+    },
+    {
+      "name": "fixed.osuVVE",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/fixed.osuVVE",
+        "variant": "fixed",
+        "api": "openai-responses",
+        "conflict": false,
+        "noDump": false,
+        "plugin": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/bg_001775389acba519/packages/pi-plugin/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 49820,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 49820,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 49820,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "OMP 18.10.3 dump frames are pinned",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "idle dump writes nothing",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "dump changes no live pass and causes no extension error",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "live request is prepared after dump",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 0,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "§3§ live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [],
+      "dumpFrames": [
+        [
+          "    at #formatLlmRequestJson (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13436:34)",
+          "    at dumpLlmRequestToTmpDir (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13431:40)"
+        ],
+        [
+          "    at #formatLlmRequestJson (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13436:34)",
+          "    at dumpLlmRequestToTmpDir (/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-668-bg_bb8953c19cb92ab9/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/agent-session.ts:13431:40)"
+        ]
+      ],
+      "markedDispatchAttempts": 0,
+      "marker": [],
+      "idleBefore": {
+        "bytes": 25523,
+        "sha256": "7e2fdf79eec876e9272b7a0fc8bf296fe1cba5ae070213c42a5ec05dde909abc"
+      },
+      "idleAfter": {
+        "bytes": 25523,
+        "sha256": "7e2fdf79eec876e9272b7a0fc8bf296fe1cba5ae070213c42a5ec05dde909abc"
+      },
+      "overlapBefore": {
+        "bytes": 25523,
+        "sha256": "7e2fdf79eec876e9272b7a0fc8bf296fe1cba5ae070213c42a5ec05dde909abc"
+      },
+      "overlapAfter": {
+        "bytes": 25523,
+        "sha256": "7e2fdf79eec876e9272b7a0fc8bf296fe1cba5ae070213c42a5ec05dde909abc"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3626,
+        "sha256": "148bf2c2f7a8dd5d8f988e4b502528d64f8adb0ca819b7f638d9a2b3d6649bb6"
+      }
+    },
+    {
+      "name": "fixed.xc9rA5",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/fixed.xc9rA5",
+        "variant": "fixed",
+        "api": "anthropic-messages",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/bg_001775389acba519/packages/pi-plugin/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 76341,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 76341,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "retry",
+          "pid": 76341,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "clean",
+          "pid": 76341,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 76341,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "superseded live array carries one marker",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "marked array never enters session JSONL",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "provider retry replays the exact marked payload",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "marked request and provider retry never reach HTTP",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "both marked dispatch attempts are refused",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "newer prepared request reaches HTTP",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "later clean pass reaches HTTP",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 0,
+        "retry": 0,
+        "clean": 1
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "clean",
+          "content": [
+            "§4§ live turn while diagnostic is emitted",
+            "§6§ later clean turn"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded: no longer valid for this operation"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 2,
+      "markedRetryPayloadEqual": true,
+      "marker": [
+        {
+          "sessionUnchanged": true,
+          "text": "Magic Context did not prepare this request for the current turn. ab39f9dd-8566-4297-90e0-229717e025e2"
+        }
+      ],
+      "idleBefore": {
+        "bytes": 25109,
+        "sha256": "184b56155397889be187a5cc7d77434ecda028f63bdac6b67035e4a2dcf67bd4"
+      },
+      "idleAfter": {
+        "bytes": 25109,
+        "sha256": "184b56155397889be187a5cc7d77434ecda028f63bdac6b67035e4a2dcf67bd4"
+      },
+      "overlapBefore": {
+        "bytes": 25109,
+        "sha256": "184b56155397889be187a5cc7d77434ecda028f63bdac6b67035e4a2dcf67bd4"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2027,
+        "sha256": "e010cd512ce5e180d3348407488d26ee355f55c6af8ac1bdbf966bee9051f448"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2027,
+        "sha256": "e010cd512ce5e180d3348407488d26ee355f55c6af8ac1bdbf966bee9051f448"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3115,
+        "sha256": "f6d2cc99b42c4ea3a147bf9712ecf1b80f13315ca99bdf4d535f9ddad16a0411"
+      }
+    },
+    {
+      "name": "fixed.fXavol",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/fixed.fXavol",
+        "variant": "fixed",
+        "api": "openai-responses",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/Users/ufukaltinok/.local/share/cortexkit/alfonso/worktrees/8f93aad09f2535d0/bg_001775389acba519/packages/pi-plugin/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 76626,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 76626,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "retry",
+          "pid": 76626,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "clean",
+          "pid": 76626,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 76626,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "superseded live array carries one marker",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "marked array never enters session JSONL",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "provider retry replays the exact marked payload",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "marked request and provider retry never reach HTTP",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "both marked dispatch attempts are refused",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "newer prepared request reaches HTTP",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "later clean pass reaches HTTP",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 0,
+        "retry": 0,
+        "clean": 1
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "clean",
+          "content": [
+            "§4§ live turn while diagnostic is emitted",
+            "§6§ later clean turn"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded: no longer valid for this operation"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 2,
+      "markedRetryPayloadEqual": true,
+      "marker": [
+        {
+          "sessionUnchanged": true,
+          "text": "Magic Context did not prepare this request for the current turn. 316008c7-ce18-44bd-b2b2-3f13fc55f341"
+        }
+      ],
+      "idleBefore": {
+        "bytes": 25522,
+        "sha256": "4ce12da4a9b8344b9e8f61e6737ac21dc309dd279ecf840038d9a59b324341e6"
+      },
+      "idleAfter": {
+        "bytes": 25522,
+        "sha256": "4ce12da4a9b8344b9e8f61e6737ac21dc309dd279ecf840038d9a59b324341e6"
+      },
+      "overlapBefore": {
+        "bytes": 25522,
+        "sha256": "4ce12da4a9b8344b9e8f61e6737ac21dc309dd279ecf840038d9a59b324341e6"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2380,
+        "sha256": "bfa897c8799641febb9c4c3a74b4a6ae9f4b608ec089f8fd6906914bfe6cab28"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2380,
+        "sha256": "bfa897c8799641febb9c4c3a74b4a6ae9f4b608ec089f8fd6906914bfe6cab28"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3466,
+        "sha256": "77ea8d3a8c1a987478924db477e1d2b91a8d9cef3e786577a376d1fc2680cebd"
+      }
+    },
+    {
+      "name": "master.vA79fY",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/master.vA79fY",
+        "variant": "master",
+        "api": "anthropic-messages",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T//magic-context/bg_001775389acba519/master-plugin/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 5554,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 5554,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 5554,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "unfixed host sends raw loser without dump",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "unfixed host also sends prepared replacement",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded: no longer valid for this operation"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 0,
+      "marker": [
+        {
+          "sessionUnchanged": true
+        }
+      ],
+      "idleBefore": {
+        "bytes": 25111,
+        "sha256": "c75fce1c3a4a9bb154f06cbb1ba58a8abf747b84c4cc9167353d1dcf105827cf"
+      },
+      "idleAfter": {
+        "bytes": 25111,
+        "sha256": "c75fce1c3a4a9bb154f06cbb1ba58a8abf747b84c4cc9167353d1dcf105827cf"
+      },
+      "overlapBefore": {
+        "bytes": 25111,
+        "sha256": "31d54b9cd5455639df3288ad6f898b285d19d92911f52ef89e55874c322b6b1a"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2029,
+        "sha256": "b97b7f20e85a433c9887ed9bed9b6d885b5fb4edb6a72f8a9f75e5b255ab3c27"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2029,
+        "sha256": "b97b7f20e85a433c9887ed9bed9b6d885b5fb4edb6a72f8a9f75e5b255ab3c27"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3080,
+        "sha256": "3d9a6f2a8bff7999cadd46aeddb0fafa8ee960749dca40fbf35e9a052eb409e0"
+      }
+    },
+    {
+      "name": "master.GYw83z",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/master.GYw83z",
+        "variant": "master",
+        "api": "openai-responses",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T//magic-context/bg_001775389acba519/master-plugin/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 7277,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 7277,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 7277,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "unfixed host sends raw loser without dump",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "unfixed host also sends prepared replacement",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded: no longer valid for this operation"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 0,
+      "marker": [
+        {
+          "sessionUnchanged": true
+        }
+      ],
+      "idleBefore": {
+        "bytes": 25524,
+        "sha256": "a8566890250c8b3c3b21a87495a22e8cd1b018c3511dee5c22dbd6ba0af1337e"
+      },
+      "idleAfter": {
+        "bytes": 25524,
+        "sha256": "a8566890250c8b3c3b21a87495a22e8cd1b018c3511dee5c22dbd6ba0af1337e"
+      },
+      "overlapBefore": {
+        "bytes": 25524,
+        "sha256": "a32f72b7744d739ba58516326b0bd8511cc39f2b591345263514aa7d5adf4714"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2382,
+        "sha256": "1d2df7e4aaff2bc1066f62aa715d35e7bc59b24b75705bf512643268f9817bc3"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2382,
+        "sha256": "1d2df7e4aaff2bc1066f62aa715d35e7bc59b24b75705bf512643268f9817bc3"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3785,
+        "sha256": "35212d77aef73ee5812d0ab3509d38fb0885533b61c028449c57e2973a379088"
+      }
+    },
+    {
+      "name": "released.s6yxST",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/released.s6yxST",
+        "variant": "released",
+        "api": "anthropic-messages",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T//magic-context/bg_001775389acba519/released/node_modules/@cortexkit/pi-magic-context/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 8677,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 8677,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 8677,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "unfixed host sends raw loser without dump",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "unfixed host also sends prepared replacement",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded before writer admission"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 0,
+      "marker": [
+        {
+          "sessionUnchanged": true
+        }
+      ],
+      "idleBefore": {
+        "bytes": 24909,
+        "sha256": "0056d297404c0428856ed048a4eedbea5d4d889be958ba18e70b506b547e6a2f"
+      },
+      "idleAfter": {
+        "bytes": 24909,
+        "sha256": "0056d297404c0428856ed048a4eedbea5d4d889be958ba18e70b506b547e6a2f"
+      },
+      "overlapBefore": {
+        "bytes": 24909,
+        "sha256": "0056d297404c0428856ed048a4eedbea5d4d889be958ba18e70b506b547e6a2f"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2031,
+        "sha256": "60553423e50927607e3a6754cb665d69a6134421e2f14be8bc35756d7b6b0a6c"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2031,
+        "sha256": "60553423e50927607e3a6754cb665d69a6134421e2f14be8bc35756d7b6b0a6c"
+      },
+      "sessionAfterTurn": {
+        "bytes": 2924,
+        "sha256": "c4ccf2b49ef2c8ff63acb19e585f38d18a8a96867e81683942a420ff4f17e690"
+      }
+    },
+    {
+      "name": "released.uDwj3f",
+      "host": {
+        "phase": "host",
+        "version": "18.10.3",
+        "bun": "1.4.2",
+        "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_001775389acba519/released.uDwj3f",
+        "variant": "released",
+        "api": "openai-responses",
+        "conflict": true,
+        "noDump": true,
+        "plugin": "/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T//magic-context/bg_001775389acba519/released/node_modules/@cortexkit/pi-magic-context/dist/index.js"
+      },
+      "isolation": [
+        {
+          "label": "start",
+          "pid": 9348,
+          "openStoreDescriptors": 25,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "resumed",
+          "pid": 9348,
+          "openStoreDescriptors": 27,
+          "allInsideRunRoot": true
+        },
+        {
+          "label": "end",
+          "pid": 9348,
+          "openStoreDescriptors": 31,
+          "allInsideRunRoot": true
+        }
+      ],
+      "checks": [
+        {
+          "phase": "check",
+          "name": "unfixed host sends raw loser without dump",
+          "passed": true
+        },
+        {
+          "phase": "check",
+          "name": "unfixed host also sends prepared replacement",
+          "passed": true
+        }
+      ],
+      "httpCalls": {
+        "warm": 1,
+        "idle-dump": 0,
+        "overlap": 0,
+        "newer": 1,
+        "loser": 1,
+        "retry": 0,
+        "clean": 0
+      },
+      "requestText": [
+        {
+          "scenario": "warm",
+          "content": [],
+          "containsMarker": false
+        },
+        {
+          "scenario": "newer",
+          "content": [
+            "§2§ replacement live history"
+          ],
+          "containsMarker": false
+        },
+        {
+          "scenario": "loser",
+          "content": [
+            "live turn while diagnostic is emitted"
+          ],
+          "containsMarker": false
+        }
+      ],
+      "contextErrors": [
+        "Error: Pi context pass superseded before writer admission"
+      ],
+      "dumpFrames": [],
+      "markedDispatchAttempts": 0,
+      "marker": [
+        {
+          "sessionUnchanged": true
+        }
+      ],
+      "idleBefore": {
+        "bytes": 25321,
+        "sha256": "2ae99e9d83c318e9d3d2bf96777040da524eedbcbc13077d4080317b16e066d1"
+      },
+      "idleAfter": {
+        "bytes": 25321,
+        "sha256": "2ae99e9d83c318e9d3d2bf96777040da524eedbcbc13077d4080317b16e066d1"
+      },
+      "overlapBefore": {
+        "bytes": 25321,
+        "sha256": "2ae99e9d83c318e9d3d2bf96777040da524eedbcbc13077d4080317b16e066d1"
+      },
+      "sessionBeforeMarker": {
+        "bytes": 2383,
+        "sha256": "a6a6a833bfca19064f424da512867fdea3eb153b843b8450eafbb11c9e19a7de"
+      },
+      "sessionAfterMarker": {
+        "bytes": 2383,
+        "sha256": "a6a6a833bfca19064f424da512867fdea3eb153b843b8450eafbb11c9e19a7de"
+      },
+      "sessionAfterTurn": {
+        "bytes": 3629,
+        "sha256": "52f7b0f5c0772585797799e89f4cba32c738f305db14102b1bc2cab54b4bd4d1"
+      }
+    }
+  ]
+}
