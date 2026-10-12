@@ -163,5 +163,18 @@
         "class": "unaccounted_rewrite",
         "decision": { "decision": "unknown", "canonicalDecision": "unknown" },
         "input": { "divergenceIndex": 2, "previousMessageCount": 10 }
+    },
+    {
+        "class": "provider_short_read_after_reclaim",
+        "decision": { "decision": "defer", "canonicalDecision": "defer" },
+        "input": {
+            "providerShortReadWithIdenticalPrefix": true,
+            "previousBustClass": "accounted_execute_published_history"
+        }
+    },
+    {
+        "class": "double_bust_after_reclaim",
+        "decision": { "decision": "defer", "droppedCount": 2 },
+        "input": { "previousBustClass": "accounted_hard_marker_drain" }
     }
 ]
