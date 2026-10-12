@@ -242,8 +242,9 @@ fn signed_hold_head(response: &TransformResponse) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Pressure relief inside the open turn. The late drop lands and the serve shrinks; the
-/// early one, before the kept signed thinking, stays withheld. The m0/m1 head replays byte
+/// Context-pressure relief inside the open turn, with both drops from
+/// `signed_hold_queue_both` queued. The late drop (after the kept signed thinking) is applied
+/// and the serve shrinks; the early drop, before it, stays withheld. The m0/m1 head replays byte
 /// for byte while that signed thinking is still served, so a pending project-memory marker
 /// (a HARD fold trigger) waits for the next user turn, which then takes it.
 fn check_signed_hold_relief(session: &str, used: u64, recovery_armed: bool) {
@@ -433,8 +434,9 @@ fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
 
 /// An expired provider cache does not let the head change: the cached m0/m1 pair can still
 /// be replayed, and re-rendering it would invalidate the turn's kept signed thinking. The
-/// pass is a full cache write anyway, so the late drop rides it; the head replays unchanged,
-/// and the early drop (before the kept signed thinking) waits.
+/// pass is a full cache write anyway, so the late drop queued by `signed_hold_queue_both` is
+/// applied in it; the head replays unchanged, and the early drop (before the kept signed
+/// thinking) stays pending.
 #[test]
 fn signed_prefix_hold_idle_expiry_replays_the_head_and_carries_queued_drops() {
     let dir = tempfile::tempdir().unwrap();
@@ -660,7 +662,7 @@ fn signed_prefix_hold_render_identity_change_waits_for_the_turn() {
 }
 
 /// A reconcile pending with its boundary absent from the live array (a revert removed it)
-/// asks for a reconcile HARD (classify rule 5). Inside the open turn that would re-render
+/// makes `classify` ask for a reconcile HARD. Inside the open turn that would re-render
 /// m0/m1 under the kept signed thinking, so the pass defers and keeps the reconcile flag; the
 /// first pass after the turn takes the HARD and carries the queued work.
 #[test]
@@ -686,13 +688,15 @@ fn signed_prefix_hold_reconcile_hard_waits_for_the_turn() {
 
     signed_hold_next_user(&mut request);
     let released = transform(&s, &request, &ctx).unwrap();
-    // The stand-in boundary also reads as a boundary divergence, whose recut names this HARD.
+    // The stand-in boundary is also detected as a boundary divergence, whose recut forces a
+    // HARD too and names it, so only the action is asserted.
     assert_eq!(released.action, "HARD", "{:?}", released.materialize_reason);
     assert!(signed_hold_pending(&s, session).is_empty());
 }
 
-/// Turning the tag surface on would tag a held subagent's old blocks, before its kept signed
-/// thinking, so the transition waits until the hold lifts and is then spent as one rewrite.
+/// Turning the tag surface on (the request's `tool_present`) adds tags to a subagent's
+/// existing blocks, including those before its kept signed thinking. A held subagent therefore
+/// defers the transition until the hold lifts, then applies it in one SOFT pass.
 #[test]
 fn signed_prefix_hold_subagent_tag_surface_transition_waits() {
     let dir = tempfile::tempdir().unwrap();

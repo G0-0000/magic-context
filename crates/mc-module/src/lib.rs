@@ -27248,10 +27248,11 @@ mod tests {
         ];
         for pass in 0..5 {
             if pass >= 3 {
-                // The fixture is one open Anthropic turn with signed thinking on a
-                // prefix-bound model, so the render-identity change below waits for the turn
-                // to end (the m0/m1 head is frozen while that thinking is kept). A missing m1
-                // cannot be replayed, so it prices these passes as HARDs instead.
+                // From pass 3 on, remove the frozen m1 unit from both stores. The fixture is
+                // one open Anthropic turn with signed thinking on a prefix-bound model, so the
+                // render-identity change below would wait for the turn to end (the m0/m1 head
+                // is frozen while that thinking is kept). Without m1 the head cannot be
+                // replayed, so the transform rebuilds it (a HARD pass) on these passes.
                 for store in [&store, &reference_store] {
                     let mut loaded = store.load("ses").unwrap();
                     loaded.core.frozen_units.retain(|unit| unit.key != "m1");
@@ -27486,8 +27487,9 @@ mod tests {
             .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
         let mut priced_request = make_request(&native);
         priced_request["render_config"] = json!("independent-priced-config-change");
-        // A render-identity change inside the open signed turn waits for the turn to end, so a
-        // missing m1 (which cannot be replayed) prices this pass instead.
+        // Remove the frozen m1 unit. A render-identity change inside the open signed turn
+        // would wait for the turn to end, but without m1 the head cannot be replayed, so the
+        // transform rebuilds it (the HARD asserted below).
         let mut loaded = store.load("ses").unwrap();
         loaded.core.frozen_units.retain(|unit| unit.key != "m1");
         store
@@ -27594,8 +27596,9 @@ mod tests {
         }
         let mut priced_request = make_request(&native, "claude-fable-5-1");
         priced_request["render_config"] = json!("independent-priced-config-change");
-        // A render-identity change inside the open signed turn waits for the turn to end, so a
-        // missing m1 (which cannot be replayed) prices this pass instead.
+        // Remove the frozen m1 unit. A render-identity change inside the open signed turn
+        // would wait for the turn to end, but without m1 the head cannot be replayed, so the
+        // transform rebuilds it (the HARD asserted below).
         let mut loaded = store.load("ses").unwrap();
         loaded.core.frozen_units.retain(|unit| unit.key != "m1");
         store

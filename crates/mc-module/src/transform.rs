@@ -5193,10 +5193,10 @@ fn apply_once(
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
-    // The rebuilds an unprotected session also counts as independent (see
-    // `independent_rebuild`): no cached m0/m1 pair, a missing m1, or lineage force_hard (a new
-    // host conversation epoch, or discarded cache sections). Subagents never render m0/m1 and
-    // ignore a lineage descent.
+    // Head rebuilds that happen whatever the hold decides, the same cases `independent_rebuild`
+    // counts for an unprotected session: no cached m0/m1 pair, a missing m1, or lineage
+    // force_hard (a new host conversation epoch, or discarded cache sections). Subagents never
+    // render m0/m1 and ignore a lineage descent.
     let head_rebuild_forced = !req.is_subagent
         && (!loaded.meta.initialized
             || cached_m1_missing(&loaded.core)
@@ -5207,8 +5207,10 @@ fn apply_once(
         || (!req.is_subagent
             && (loaded.meta.bootstrap_seed_fold_pending || is_legacy_baseline(&loaded.core)));
     let signed_head_frozen = protected_signed_prefix && !head_replay_impossible;
-    // An expired provider cache or discarded cache sections make this pass a full cache write
-    // anyway, so queued work may ride it; for a primary the head still replays unchanged.
+    // The drain hold lifts when this pass relieves pressure (force band, Emergency95) or is a
+    // full provider-cache write anyway (an expired cache, discarded cache sections, a head
+    // that cannot be replayed): queued work is then applied in this same pass. For a primary
+    // with a replayable head, the head itself still replays unchanged.
     let signed_drains_released = force_band_active
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || scheduler_outcome.idle_ttl_fired
@@ -5415,7 +5417,8 @@ fn apply_once(
                 || hard_fold_prices_mutations
                 || cached_m1_missing_due
                 // A lineage descent or discarded cache sections force a HARD even when the
-                // scheduler defers; queued work is selected so it lands in that bust.
+                // scheduler defers. Queued work is selected now so it is applied in that same
+                // cache rewrite instead of costing a second one later.
                 || lineage_state.force_hard,
         );
     // Keep selection deferred when the producer gate blocks it.
@@ -5667,12 +5670,15 @@ fn apply_once(
         render_config_changed,
         hard_fold_requested,
         boundary_present,
-        // A frozen signed head never takes a reconcile HARD (rule 5); the pass defers and
-        // keeps the flag (`step_defer` with the boundary absent) until the turn ends.
+        // A frozen signed head never takes the reconcile HARD that `classify` gives a pending
+        // reconcile whose boundary is absent. The pass defers instead (`step_defer` with the
+        // boundary absent), and reconcile_pending stays set until the turn ends.
         reconcile_pending: loaded.core.reconcile_pending
             && !(signed_head_frozen && !boundary_present),
-        // A frozen signed head replays m1 too: its delta and an explicit refresh wait. The
-        // synthetic todo pair sits after the latest assistant, outside the head.
+        // While the signed head is frozen, m1 replays unchanged too, so neither a changed m1
+        // digest nor a pending explicit refresh counts as an m1 change until the turn ends.
+        // Pending todo injection still counts: the synthetic todo pair is placed after the
+        // latest assistant message, outside the frozen head.
         m1_revision_changed: (!signed_head_frozen
             && (current_m1_digest != applied_m1_revision || loaded.meta.soft_refresh_pending))
             || todo_injection_pending,
@@ -5700,8 +5706,8 @@ fn apply_once(
         // Spend that one intentional rewrite now, so old blocks do not acquire tags
         // piecemeal during later defers. Ordinary late mints still wait for an
         // independent Soft pass selected by the scheduler.
-        // A held subagent's transition waits with everything else until the hold lifts:
-        // tagging old blocks would edit blocks before its kept signed thinking.
+        // A subagent under the signed-prefix hold defers this transition until the hold lifts:
+        // tagging old blocks would edit content before its kept signed thinking.
         plan = if (surface_transition && !signed_prefix_hold) || subagent_execute_permitted {
             PassPlan::Soft
         } else {
@@ -6089,7 +6095,8 @@ fn apply_once(
             .is_none_or(|date| *date == loaded.meta.guidance_date)
         && !releases_native_reasoning_keep
         && !applies_held_system_strip;
-    // A frozen signed head did not refresh m1, so an explicit flush stays pending for it.
+    // Clear a pending explicit flush only when this pass refreshed m1. A frozen signed head
+    // replays m1 unchanged, so the flush stays pending for the first pass after the turn.
     if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved && !signed_head_frozen {
         meta.soft_refresh_pending = false;
     }
