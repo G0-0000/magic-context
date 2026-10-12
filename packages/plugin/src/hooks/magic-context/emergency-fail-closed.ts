@@ -25,6 +25,10 @@ export const PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE = "protected_tool_results_ov
 export const SIGNED_TURN_OVER_LIMIT =
     "This turn's context is larger than the model's context window even after all of its thinking and reclaimable tool output were removed, so it was not sent. Send a new message or start a new session to continue.";
 export const SIGNED_TURN_OVER_LIMIT_CODE = "signed_turn_over_limit";
+/** Shown when the host cannot durably record a module signed-thinking reset before
+ * serving it: serving without that record could later replay the removed thinking. */
+export const SIGNED_THINKING_RESET_FENCE_FAILED =
+    "Magic Context could not record a thinking reset for this session, so this turn was not sent. Send your message again.";
 
 export function contextRefusalError(message: string): EmergencyFailClosedError {
     return new EmergencyFailClosedError(message, {
@@ -86,6 +90,33 @@ export function outgoingContextRefusal(
     )
         return undefined;
     return PROTECTED_TOOL_RESULTS_OVER_LIMIT;
+}
+
+/**
+ * Whole-request admission after a module signed-thinking reset. That pass already stripped
+ * every signed thinking block and reclaimed what the module could, so a request whose
+ * refusal-grade final-wire estimate is still over the limit cannot fit and is refused
+ * rather than sent. The estimate counts the served messages (text, reasoning, tool calls
+ * and results, images it can size), the system prompt and this route's measured tool
+ * definitions. It cannot see the provider's own message framing and tokenizer differences
+ * beyond its calibration, and it is not refusal-grade (so nothing is refused here) when
+ * this route's tool definitions or calibration are unmeasured or a part cannot be counted.
+ */
+export function signedTurnContextRefusal(
+    estimate: ContextRefusalEstimate | undefined,
+    limit: number | undefined,
+): string | undefined {
+    if (
+        estimate?.refusalGrade !== true ||
+        typeof estimate.refusalTokens !== "number" ||
+        !Number.isFinite(estimate.refusalTokens) ||
+        !limit ||
+        !Number.isFinite(limit) ||
+        limit <= 0 ||
+        estimate.refusalTokens <= limit
+    )
+        return undefined;
+    return SIGNED_TURN_OVER_LIMIT;
 }
 
 export class EmergencyFailClosedError extends Error {

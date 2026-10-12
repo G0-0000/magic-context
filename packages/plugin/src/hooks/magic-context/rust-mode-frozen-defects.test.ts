@@ -38,7 +38,7 @@ import forceFixture from "./__fixtures__/rust-signed-thinking-reset/force.json";
 import idleFixture from "./__fixtures__/rust-signed-thinking-reset/idle.json";
 import rewriteFixture from "./__fixtures__/rust-signed-thinking-reset/rewrite.json";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
-import { EmergencyFailClosedError } from "./emergency-fail-closed";
+import { EmergencyFailClosedError, SIGNED_TURN_OVER_LIMIT } from "./emergency-fail-closed";
 import { resolveTrustedContextLimit } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { armLatestThinkingRecovery } from "./latest-thinking-recovery";
@@ -216,11 +216,13 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         ...(options.compactionOff ? { compactionOff: true } : {}),
     };
     let estimatorOverride: typeof estimateFinalWireInputTokens | undefined;
+    let resetFenceHook: ((sessionId: string) => void) | undefined;
     const makeAdapter = () =>
         createRustModeTransform(deps, {
             moduleClient,
             modulePageMaxBytes: 512 * 1024,
             scheduleLkgCapture: (capture) => capture(),
+            afterSignedThinkingResetFenceForTests: (id) => resetFenceHook?.(id),
             rawFallbackEstimatorForTests: (args) =>
                 (estimatorOverride ?? estimateFinalWireInputTokens)(args),
         });
@@ -337,6 +339,10 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         /** Extra fields (such as `signed_thinking_reset`) added to every later module response. */
         setResponseExtras: (value: Record<string, unknown>) => {
             responseExtras = value;
+        },
+        /** Crash seam: runs after a reset's strip fence, before the old LKG slot is dropped. */
+        setResetFenceHook: (value: ((sessionId: string) => void) | undefined) => {
+            resetFenceHook = value;
         },
         /** Arm emergency recovery without provider proof, so no LKG replay is admitted. */
         armEmergency: () =>
@@ -1190,4 +1196,79 @@ describe("Rust host thinking strips with real engine output", () => {
             expect(reasoningIds(after)).toEqual([]);
         });
     }
+});
+
+describe("a signed-thinking reset survives a crash and never ships over the window", () => {
+    // The module commits the reset before it answers, but the host's LKG snapshot and
+    // reactive recovery are separate state. The host records a strip fence for every
+    // thinking-bearing assistant of the input before it touches either. LKG admission applies
+    // that fence: a snapshot taken before the reset still carries the fenced thinking, so it
+    // no longer matches what a replay would serve and is not admitted. A crash after the
+    // fence therefore never resurrects the removed thinking; the turn is refused until the
+    // module answers, which then serves its persisted reset.
+    it("a crash after the reset fence, before the old snapshot is dropped, never replays the removed thinking", async () => {
+        const fixture = signedThinkingFixtures.rewrite;
+        const s = frozenSession("signed-reset-crash");
+        const remap = (messages: MessageLike[]) =>
+            structuredClone(messages).map((message) => {
+                message.info.sessionID = s.sessionId;
+                return message;
+            });
+        const input = remap(fixture.input);
+        s.setModuleOutput(() => remap(fixture.before.native_messages));
+        const before = (await s.run(input, "SOFT+")) as MessageLike[];
+        expect(reasoningIds(before).length).toBeGreaterThan(0);
+
+        // The reset pass: real engine output, already stripped by the module.
+        s.setUsage(66, 132_000);
+        s.setModuleOutput(() => remap(fixture.pressured.native_messages));
+        s.setResponseExtras({ signed_thinking_reset: true });
+        s.setResetFenceHook(() => {
+            throw new Error("simulated crash after the reset fence");
+        });
+        // The interrupted pass falls back to the pre-reset snapshot, which the fence refuses.
+        await expect(s.run(input, "HARD")).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        s.setResetFenceHook(undefined);
+        s.setResponseExtras({});
+
+        // A new process whose module cannot answer finds only that snapshot: still refused,
+        // never served with the thinking the module removed.
+        s.restart();
+        await expect(s.run(input, "throw")).rejects.toBeInstanceOf(EmergencyFailClosedError);
+
+        // Once the module answers again it replays its persisted reset.
+        s.setModuleOutput(() => remap(fixture.pressured.native_messages));
+        const healthy = (await s.run(input, "SOFT+")) as MessageLike[];
+        expect(reasoningIds(healthy)).toEqual([]);
+        expect(healthy.map((message) => message.info.id)).toEqual(
+            remap(fixture.pressured.native_messages).map((message) => message.info.id),
+        );
+    });
+
+    it("a reset whose whole request is still over the window is refused, not sent", async () => {
+        const fixture = signedThinkingFixtures.rewrite;
+        const s = frozenSession("signed-reset-over-window");
+        const remap = (messages: MessageLike[]) =>
+            structuredClone(messages).map((message) => {
+                message.info.sessionID = s.sessionId;
+                return message;
+            });
+        const input = remap(fixture.input);
+        s.setModuleOutput(() => remap(fixture.before.native_messages));
+        await s.run(input, "SOFT+");
+        // The module's reset output still carries a prompt far over the 200k limit (about
+        // 1 MB of real words; the final-wire estimate's byte bound proves it over).
+        const huge = "lorem ipsum dolor sit amet ".repeat(40_000);
+        s.setModuleOutput(() =>
+            remap(fixture.pressured.native_messages).map((message) =>
+                message.info.id === "u3"
+                    ? { ...message, parts: [{ type: "text", text: huge }] }
+                    : message,
+            ),
+        );
+        s.setResponseExtras({ signed_thinking_reset: true });
+        const refused = s.run(input, "HARD");
+        await expect(refused).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        await expect(refused).rejects.toThrow(SIGNED_TURN_OVER_LIMIT);
+    });
 });

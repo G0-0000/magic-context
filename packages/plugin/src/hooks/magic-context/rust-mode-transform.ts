@@ -18,6 +18,7 @@ import { resolveSessionCacheTtl } from "../../features/magic-context/session-cac
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
+    addMergedReasoningStrippedIds,
     casChannel2NudgeState,
     clearEmergencyRecovery,
     clearPersistedTodoSyntheticAnchor,
@@ -35,6 +36,7 @@ import {
     resolveEpochFloorForPass,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
+    thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import { hasPendingDropOps } from "../../features/magic-context/storage-ops";
 import {
@@ -77,6 +79,7 @@ import {
     EmergencyFailClosedError,
     ENGINE_BUSY_USER_MESSAGE,
     ENGINE_RECONNECTING_USER_MESSAGE,
+    SIGNED_THINKING_RESET_FENCE_FAILED,
 } from "./emergency-fail-closed";
 import {
     resolveContextWindowGeometry,
@@ -179,7 +182,10 @@ import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries"
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { STORE_AHEAD_OF_BINARY_CODE, storeAheadOfBinaryFailure } from "./store-ahead-refusal";
-import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
+import {
+    findReasoningBearingAssistantIds,
+    snapshotTrailingBlankSourceDecisions,
+} from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
 import type { TransformDeps } from "./transform";
 import { resolveHistoryBudgetTokens } from "./transform";
@@ -507,6 +513,11 @@ export interface RustModeTransformOptions {
     installNativeMessagesForTests?: (output: { messages: unknown[] }, messages: unknown[]) => void;
     /** Override only to exercise raw-fallback estimator failures in tests. */
     rawFallbackEstimatorForTests?: typeof estimateFinalWireInputTokens;
+    /**
+     * Test-only crash seam: runs on a pass serving a module signed-thinking reset, after
+     * the reset's strip fence is durable and before the previous LKG slot is invalidated.
+     */
+    afterSignedThinkingResetFenceForTests?: (sessionId: string) => void;
     /** Override only to observe mural candidate resolution in tests. */
     muralResolverForTests?: typeof resolveMuralWire;
     /** Override only to observe session-identity caching in tests. */
@@ -4138,6 +4149,35 @@ export function createRustModeTransform(
                     "rust transform wire invariant failed: SOFT+ cannot permit a prefix bust",
                 );
             }
+            // The module has durably removed every signed thinking block it serves. The
+            // previous LKG snapshot and the reactive recovery still hold that thinking, and
+            // neither is part of the module's commit. Before anything else on this pass can
+            // clear recovery, invalidate the snapshot or fall back to it, record the strip
+            // fence: every reasoning-bearing assistant of this input joins the persisted
+            // binding-mismatch set, which every LKG replay and every later host pass applies.
+            // Without it a crash here could replay thinking the module no longer serves.
+            const signedThinkingReset =
+                moduleDecisionBusts && response.signed_thinking_reset === true;
+            if (signedThinkingReset) {
+                const fenced = findReasoningBearingAssistantIds(messages as MessageLike[]);
+                let recorded = false;
+                try {
+                    recorded = addMergedReasoningStrippedIds(
+                        deps.db,
+                        sessionId,
+                        fenced.map(thinkingBindingRecoveryFrozenId),
+                    );
+                } catch (error) {
+                    sessionLog(sessionId, "signed thinking reset fence: persistence threw:", error);
+                }
+                if (!recorded) {
+                    throw new EmergencyFailClosedError(SIGNED_THINKING_RESET_FENCE_FAILED);
+                }
+                sessionLog(
+                    sessionId,
+                    `signed thinking reset fence: ${fenced.length} assistant(s) [${fenced.join(",")}]`,
+                );
+            }
             // Only the producer grants prefix-rebuild authority. A local safety escape
             // may replace the frozen representation, but cannot grant any other edits.
             const cacheBustingPass = moduleDecisionBusts;
@@ -4457,17 +4497,7 @@ export function createRustModeTransform(
                     });
                     thinkingBindingRecovery = postprocess.thinkingBindingRecovery;
                     markerAt = postprocess.markerAt;
-                    // A served signed-thinking reset removed every signed block of the
-                    // turn a provider rejection armed for restoration; its originals are
-                    // bound to bytes that changed, so the recovery has nothing left to
-                    // restore on later passes of this turn.
-                    if (
-                        thinkingRecovery.restore &&
-                        moduleDecisionBusts &&
-                        response.signed_thinking_reset === true
-                    ) {
-                        endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
-                    }
+
                     // A possibly committed host write with unfinished mirror/CAS
                     // work is not an admitted cut, even if fresh native output fits.
                     // Keep the durable fence until a supported recovery repairs it.
@@ -4512,15 +4542,24 @@ export function createRustModeTransform(
                         },
                         resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
                     );
-                    const refusal = outgoingContextRefusal(
-                        servedFinalWireEstimate,
-                        resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
-                        protectedToolTokenCount(
-                            getActiveTagsBySession(deps.db, sessionId),
-                            deps.protectedTools,
-                            resolveDecisionCalibration(model?.providerID, model?.modelID),
-                        ),
-                    );
+                    const refusal =
+                        outgoingContextRefusal(
+                            servedFinalWireEstimate,
+                            resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
+                            protectedToolTokenCount(
+                                getActiveTagsBySession(deps.db, sessionId),
+                                deps.protectedTools,
+                                resolveDecisionCalibration(model?.providerID, model?.modelID),
+                            ),
+                        ) ??
+                        // After a signed-thinking reset nothing more can be removed, so a
+                        // whole request still over the window is refused, not sent.
+                        (signedThinkingReset
+                            ? signedTurnContextRefusal(
+                                  servedFinalWireEstimate,
+                                  resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
+                              )
+                            : undefined);
                     if (refusal) {
                         // A priced module replacement invalidates its prior durable
                         // snapshot even when final admission refuses before installation.
@@ -4564,6 +4603,7 @@ export function createRustModeTransform(
                 // A cache-busting replacement invalidates the previous snapshot only after the
                 // replacement is installed. If installation fails, the prior LKG remains available
                 // and its replay still applies durable binding-mismatch strips.
+                if (signedThinkingReset) options.afterSignedThinkingResetFenceForTests?.(sessionId);
                 if (synchronousReplacement && !markerDefinitelyNoCut) {
                     dropSlot(sessionId, "lkg_cache_bust_pending_capture");
                     state.lkgAcceptedCapture = undefined;
@@ -4583,6 +4623,15 @@ export function createRustModeTransform(
                 );
                 let captureMode = "async";
                 if (capturePlan) state.lkgLastServedCaptureSequence = capturePlan.captureSequence;
+                // A served signed-thinking reset removed every signed block of the turn a
+                // provider rejection armed for restoration; its originals are bound to bytes
+                // that changed. End that recovery only once the stripped replacement is
+                // captured, so no surviving state can restore the turn's old thinking.
+                const endRecoveryAfterResetCapture = (): void => {
+                    if (signedThinkingReset && thinkingRecovery.restore) {
+                        endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
+                    }
+                };
                 const captureFailed = (mode: "async" | "sync", error: unknown): void => {
                     if (
                         states.get(sessionId) !== state ||
@@ -4608,6 +4657,7 @@ export function createRustModeTransform(
                     captureMode = synchronousReplacement ? "sync_priced" : "sync_recovery";
                     try {
                         commitRustCapture(state, capturePlan, synchronousReplacement);
+                        endRecoveryAfterResetCapture();
                     } catch (error) {
                         captureFailed("sync", error);
                         if (synchronousReplacement) throw error;
@@ -4618,6 +4668,7 @@ export function createRustModeTransform(
                             const asyncStartedAt = performance.now();
                             try {
                                 const result = commitRustCapture(state, capturePlan);
+                                endRecoveryAfterResetCapture();
                                 logTransformTiming(
                                     sessionId,
                                     "rust.lkg_snapshot_async",
@@ -5173,4 +5224,5 @@ import {
     contextRefusalError,
     outgoingContextRefusal,
     protectedToolRefusal,
+    signedTurnContextRefusal,
 } from "./emergency-fail-closed";

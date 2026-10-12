@@ -5230,10 +5230,8 @@ fn apply_once(
     // such block does not. Each removal is a `strip:reasoning_age:<mid>` frozen unit, which
     // every later pass already replays. With no signed thinking left to protect,
     // `active_thinking_prefix_edit_ids` protects nothing, so all queued work is applied on
-    // this same pass. Primary only: the reductions-only subagent branch carries no strip
-    // units.
-    let signed_thinking_reset_units: Vec<FrozenUnit> = if reset_signed_thinking && !req.is_subagent
-    {
+    // this same pass. A subagent takes the same units through its reductions-only branch.
+    let signed_thinking_reset_units: Vec<FrozenUnit> = if reset_signed_thinking {
         let already_removed = loaded
             .core
             .frozen_units
@@ -5254,7 +5252,7 @@ fn apply_once(
     } else {
         Vec::new()
     };
-    let signed_thinking_reset = reset_signed_thinking && !req.is_subagent;
+    let signed_thinking_reset = reset_signed_thinking;
     // The selection, caveman and strip planning below protect blocks before kept signed
     // thinking; they read the frozen units with the reset's removals already in place, so
     // they see that no signed thinking is kept.
@@ -6210,17 +6208,21 @@ fn apply_once(
     let mut committed_mural_hash = persisted_mural_hash;
 
     if req.is_subagent {
-        if subagent_execute_permitted {
+        if subagent_execute_permitted || signed_thinking_reset {
+            let mut rendered_units = new_reduction_units(
+                &core,
+                &selected_reductions,
+                &live,
+                None,
+                suppress_bootstrap_reduction_tag_overlay,
+            );
+            // A subagent's only strip units: a signed-thinking reset's removals, which its
+            // output replays on every later pass like a primary's.
+            rendered_units.extend(signed_thinking_reset_units.iter().cloned());
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
                 boundary_present: boundary_token,
-                rendered_units: new_reduction_units(
-                    &core,
-                    &selected_reductions,
-                    &live,
-                    None,
-                    suppress_bootstrap_reduction_tag_overlay,
-                ),
+                rendered_units,
                 new_boundary_id: None,
                 queued: Vec::new(),
                 run_started: false,
@@ -6915,17 +6917,6 @@ fn apply_once(
                 }
             }
         }
-    }
-    // A head that could not be replayed was rebuilt inside an open signed turn. When the
-    // rebuilt m0/m1 bytes differ from the head last committed (or there was none), every
-    // signed thinking block after them is bound to bytes that no longer exist: retry as a
-    // signed-thinking reset, which strips them all and lands the queued work in this pass.
-    if protected_signed_prefix
-        && !req.is_subagent
-        && !signed_thinking_reset
-        && served_head_units(&core) != served_head_units(&loaded.core)
-    {
-        return Err(TransformError::SignedThinkingReset);
     }
     if loaded.meta.initialized
         && matches!(plan, PassPlan::Hard | PassPlan::MigrateHard)
@@ -7722,22 +7713,52 @@ fn apply_once(
             return Err(TransformError::ProtectedToolResultsOverLimit);
         }
     }
+    // A head that could not be replayed was rebuilt inside an open signed turn. Every signed
+    // thinking block after it is bound to the head bytes last served, so compare the rebuilt
+    // head with the durable fingerprint of that serve (stored apart from the frozen cache,
+    // which may be the part that was lost). If they differ, or the last serve is unknown,
+    // retry as a signed-thinking reset, which strips them all and lands the queued work in
+    // this pass. An unknown last serve is a conservative repair, logged as such.
+    if protected_signed_prefix && !req.is_subagent && !signed_head_frozen && !signed_thinking_reset
+    {
+        let reason = if loaded.meta.served_output_fingerprint.is_empty() {
+            Some("unknown_prefix")
+        } else if served_head_fingerprint(&loaded.meta.served_output_fingerprint)
+            != served_head_fingerprint(&served_output_fingerprints(
+                &ck_messages,
+                &frame_block_stems,
+            ))
+        {
+            Some("head_changed")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            tracing::info!(
+                "mc-module: [{}] signed thinking reset reason={reason}",
+                req.session_id
+            );
+            return Err(TransformError::SignedThinkingReset);
+        }
+    }
     // Fit or refuse inside an open signed turn near the context limit (the force band or the
     // 95% emergency). Thinking-prefix protection keeps
     // every block before the turn's kept signed thinking unchanged, so in a long signed tool
     // loop the reclaimable output can all sit behind it and the request stays over the
     // window. Stripping all signed thinking is valid under strict binding and lifts that
     // protection, so such a pass is retried as a signed-thinking reset; if even the reset
-    // pass cannot fit, it is refused rather than sent. The served text is a lower bound on
-    // the request, and only trusted final-wire evidence near the wall arms the check.
+    // pass cannot fit, it is refused rather than sent. The served estimate is a lower bound
+    // on the request, and only trusted final-wire evidence of non-fit near the wall arms the
+    // check. Subagents take the same reset through their reductions-only branch.
     if protected_signed_prefix
-        && !req.is_subagent
         && (force_band_active || scheduler_outcome.pass == scheduler::PassDecision::Emergency95)
-        && req
-            .usage
-            .as_ref()
-            .is_some_and(|usage| usage.final_wire_trusted)
         && hard_context_limit_tokens > 0.0
+        // The host proved this request's input over the window. A trusted count that fits
+        // needs no reset: the transform only removes from what the host measured.
+        && req.usage.as_ref().is_some_and(|usage| {
+            usage.final_wire_trusted
+                && usage.final_wire_input_tokens as f64 > hard_context_limit_tokens
+        })
         && served_text_token_lower_bound(&ck_messages, estimate_tokens) as f64
             > hard_context_limit_tokens
     {
@@ -15352,21 +15373,29 @@ fn output_trailing_blank_decision(
     }
 }
 
-/// The frozen units that render the synthetic m0/m1 head, by key and payload.
-fn served_head_units(core: &CoreState) -> Vec<(&str, &str)> {
-    let mut units = core
-        .frozen_units
+/// The served synthetic m0/m1 head blocks of an output fingerprint, in served order.
+fn served_head_fingerprint(fingerprints: &[ServedBlockFingerprint]) -> Vec<(&str, &str)> {
+    fingerprints
         .iter()
-        .filter(|unit| matches!(unit.key.as_str(), "m0" | "m1" | M0_MURAL_KEY))
-        .map(|unit| (unit.key.as_str(), unit.frozen_payload.as_str()))
-        .collect::<Vec<_>>();
-    units.sort_unstable();
-    units
+        .filter(|fingerprint| {
+            fingerprint
+                .block_id
+                .strip_prefix(M0_ID)
+                .or_else(|| fingerprint.block_id.strip_prefix(M1_ID))
+                .is_some_and(|rest| rest.starts_with('#'))
+        })
+        .map(|fingerprint| {
+            (
+                fingerprint.block_id.as_str(),
+                fingerprint.content_hash.as_str(),
+            )
+        })
+        .collect()
 }
 
-/// Estimated tokens of the text the served messages carry: text, reasoning text and text
-/// tool output. Envelopes, tool calls, media, the system prompt and tool schemas are left
-/// out, so this is a lower bound on the provider request.
+/// Estimated tokens of what the served messages carry: text, reasoning text, text tool
+/// output and serialized tool-call arguments. Envelopes, media, the system prompt and tool
+/// schemas are left out, so this is a lower bound on the provider request.
 fn served_text_token_lower_bound(
     messages: &[ServedMessage],
     estimate_tokens: impl Fn(&str) -> usize,
@@ -15382,6 +15411,7 @@ fn served_text_token_lower_bound(
                 ck_wire::CkOutputKind::Text { text } => estimate_tokens(text),
                 _ => 0,
             },
+            ck_wire::CkKind::ToolCall { input, .. } => estimate_tokens(&input.to_string()),
             _ => 0,
         })
         .sum()
@@ -30728,6 +30758,7 @@ pub(crate) mod tests {
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
     include!("tests/signed_prefix_hold_review_r2.rs");
+    include!("tests/signed_prefix_hold_review_r3.rs");
 
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {

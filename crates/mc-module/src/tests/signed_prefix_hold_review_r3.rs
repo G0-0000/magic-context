@@ -1,9 +1,9 @@
 // A signed reasoning block is bound to the request bytes preceding it. Removing
 // every reasoning block permits a prefix rewrite without retaining invalid signatures.
-// These report-only tests check that such removals persist, that unchanged heads
-// do not cause needless removals, and that signed requests fit or are refused.
-// Include after the earlier review files in transform.rs's test module to share
-// their temporary-session helpers. No provider, daemon, or live session is contacted.
+// These tests check that such removals persist, that unchanged heads do not cause
+// needless removals, and that signed requests fit or are refused. Included after the
+// earlier review files in transform.rs's test module to share their temporary-session
+// helpers. No provider, daemon, or live session is contacted.
 
 fn review_r3_reasoning_count(response: &TransformResponse) -> usize {
     response
@@ -23,7 +23,6 @@ fn review_r3_delete_m1(sim: &ReviewSession) {
 }
 
 #[test]
-#[ignore = "report-only reset persistence witness"]
 fn review_r3_reset_replays_original_ingress_after_restart_and_next_turn() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "r3-persist");
     sim.messages[1]
@@ -100,7 +99,6 @@ fn review_r3_reset_replays_original_ingress_after_restart_and_next_turn() {
 }
 
 #[test]
-#[ignore = "report-only precommit interruption witness"]
 fn review_r3_interruption_before_reset_commit_retries_without_mixed_state() {
     let (mut sim, _) = review_open_turn_with_publication("r3-crash");
     review_r3_delete_m1(&sim);
@@ -123,7 +121,6 @@ fn review_r3_interruption_before_reset_commit_retries_without_mixed_state() {
 }
 
 #[test]
-#[ignore = "report-only H1 exactness contract witness; expected red if cache loss alone resets"]
 fn review_r3_identical_served_head_after_missing_m1_must_not_reset() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "r3-identical");
     sim.run(false).unwrap();
@@ -162,7 +159,6 @@ fn review_r3_over_window_prompt(subagent: bool, label: &str) -> ReviewSession {
 }
 
 #[test]
-#[ignore = "report-only M1 trust and normal-pressure witness"]
 fn review_r3_untrusted_or_below_force_evidence_cannot_reset() {
     for (used, trusted) in [(95_000, false), (66_000, true)] {
         let mut sim = review_r3_over_window_prompt(false, &format!("r3-trust-{used}"));
@@ -185,7 +181,6 @@ fn review_r3_untrusted_or_below_force_evidence_cannot_reset() {
 }
 
 #[test]
-#[ignore = "report-only inconsistent wire evidence probe; the Rust host does not send trusted fitting counts"]
 fn review_r3_fit_final_wire_evidence_must_not_be_overruled_by_text_estimate() {
     let mut sim = review_r3_over_window_prompt(false, "r3-fit-evidence");
     sim.used = 86_000;
@@ -205,7 +200,6 @@ fn review_r3_fit_final_wire_evidence_must_not_be_overruled_by_text_estimate() {
 }
 
 #[test]
-#[ignore = "report-only subagent fit-or-refuse contract witness; expected red for primary-only reset"]
 fn review_r3_subagent_signed_tool_loop_at_wall_must_fit_or_refuse() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, true, "r3-subagent-wall");
     sim.ctx.protected_tools.clear();
@@ -260,7 +254,6 @@ fn review_r3_subagent_signed_tool_loop_at_wall_must_fit_or_refuse() {
 }
 
 #[test]
-#[ignore = "report-only round-1 and extended held drivers with new seeds"]
 fn review_r3_new_seed_round_one_and_extended_drivers() {
     for steps in [70, 240] {
         let mut total = ReviewHeldStats::default();
@@ -300,7 +293,6 @@ fn review_r3_new_seed_round_one_and_extended_drivers() {
 }
 
 #[test]
-#[ignore = "report-only whole-request fit witness; expected red if tool-call inputs escape the wall check"]
 fn review_r3_signed_tool_call_input_over_window_must_fit_or_refuse() {
     let mut violations = Vec::new();
     for force_reset in [false, true] {

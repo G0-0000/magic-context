@@ -366,9 +366,12 @@ fn assert_signed_hold_reset(
 }
 
 /// `prepare` edits the stored state of a bootstrapped session so its m0/m1 head cannot be
-/// replayed (for example, by deleting the frozen m1 unit), forcing a HARD rebuild.
+/// replayed (for example, by deleting the frozen m1 unit), forcing a HARD rebuild. The reset
+/// follows the served head bytes: it happens exactly when the rebuilt head differs from the
+/// head last served. `expect_reset` pins which of the two a case must take.
 fn check_signed_hold_rides_unavoidable_rewrite(
     session: &str,
+    expect_reset: Option<bool>,
     prepare: impl FnOnce(&McStore, &mut ProducerContext<'static>),
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -382,7 +385,29 @@ fn check_signed_hold_rides_unavoidable_rewrite(
     signed_hold_queue_both(&s, session);
     let request = signed_hold_request(session, 20_000);
     let rewritten = transform(&s, &request, &ctx).unwrap();
-    assert_signed_hold_reset(&s, session, &request, &ctx, &rewritten);
+    let head_changed = signed_hold_head(&rewritten) != signed_hold_head(&baseline);
+    assert_eq!(
+        rewritten.signed_thinking_reset, head_changed,
+        "{session}: the reset follows the served head bytes"
+    );
+    if let Some(expected) = expect_reset {
+        assert_eq!(rewritten.signed_thinking_reset, expected, "{session}");
+    }
+    if rewritten.signed_thinking_reset {
+        assert_signed_hold_reset(&s, session, &request, &ctx, &rewritten);
+    } else {
+        // An identical rebuild leaves the kept signed thinking valid: it stays, and only
+        // the drop after it lands.
+        assert_eq!(rewritten.action, "HARD", "{session}");
+        assert_eq!(
+            signed_hold_pending(&s, session),
+            BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()]),
+            "{session}"
+        );
+        assert!(String::from_utf8(signed_hold_bytes(&rewritten))
+            .unwrap()
+            .contains("sig-plan"));
+    }
 }
 
 #[test]
@@ -398,15 +423,42 @@ fn signed_prefix_hold_first_render_carries_queued_drops() {
     assert_signed_hold_reset(&s, session, &request, &ctx, &first);
 }
 
+fn signed_hold_delete_m1(s: &McStore, session: &str) {
+    let mut loaded = s.load(session).unwrap();
+    loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+    s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+        .unwrap();
+}
+
+/// Losing the cached m1 alone is no head change: the rebuild serves the same head bytes as
+/// the last serve, so the kept signed thinking stays.
 #[test]
 fn signed_prefix_hold_missing_m1_carries_queued_drops() {
-    check_signed_hold_rides_unavoidable_rewrite("signed-hold-missing-m1", |s, _| {
-        let session = "signed-hold-missing-m1";
-        let mut loaded = s.load(session).unwrap();
-        loaded.core.frozen_units.retain(|unit| unit.key != "m1");
-        s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
-            .unwrap();
+    check_signed_hold_rides_unavoidable_rewrite("signed-hold-missing-m1", Some(false), |s, _| {
+        signed_hold_delete_m1(s, "signed-hold-missing-m1");
     });
+}
+
+/// With a historian publication waiting, the rebuilt head folds it in, so its bytes differ
+/// from the last serve and the turn's signed thinking is reset.
+#[test]
+fn signed_prefix_hold_missing_m1_with_a_publication_resets() {
+    check_signed_hold_rides_unavoidable_rewrite(
+        "signed-hold-missing-m1-published",
+        Some(true),
+        |s, _| {
+            let session = "signed-hold-missing-m1-published";
+            s.replace_compartments(
+                session,
+                &[
+                    comp(1, 1, 1, "old-prompt", "SUMMARY"),
+                    comp(2, 2, 2, "old-answer", "PUBLISHED"),
+                ],
+            )
+            .unwrap();
+            signed_hold_delete_m1(s, session);
+        },
+    );
 }
 
 /// A lineage descent onto a new host conversation epoch serves a different message array
@@ -518,7 +570,7 @@ fn signed_prefix_hold_bootstrap_seed_fold_carries_queued_drops() {
 
 #[test]
 fn signed_prefix_hold_legacy_baseline_migration_carries_queued_drops() {
-    check_signed_hold_rides_unavoidable_rewrite("signed-hold-legacy", |s, _| {
+    check_signed_hold_rides_unavoidable_rewrite("signed-hold-legacy", None, |s, _| {
         let session = "signed-hold-legacy";
         let mut loaded = s.load(session).unwrap();
         loaded.core.frozen_units = vec![synth_region("baseline", "OLD".into())];
@@ -887,4 +939,110 @@ fn signed_turn_over_limit_refusal_matches_the_cross_language_contract() {
         TransformError::SignedTurnOverLimit.to_string(),
         golden["message"].as_str().unwrap()
     );
+}
+
+/// Tool-call arguments count toward the wall. Here one bound call's arguments alone are over
+/// the window, and a waiting publication with a lost m1 forces a head rebuild, so the pass
+/// is first a signed-thinking reset. That reset pass must still fit or be refused: with its
+/// thinking gone, the oversized call may be reclaimed; if not, it is refused.
+#[test]
+fn signed_prefix_hold_tool_call_input_reset_pass_fits_or_refuses() {
+    let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "tool-input-reset");
+    sim.ctx.protected_tools.clear();
+    sim.run(false).unwrap();
+    sim.tool_step();
+    let payload = (0..17_000)
+        .map(|n| format!("entry{n:05} value{n:05}\n"))
+        .collect::<String>();
+    let call = sim
+        .messages
+        .iter_mut()
+        .find(|message| message.mid == "a4")
+        .unwrap()
+        .ck
+        .content
+        .iter_mut()
+        .find(|block| matches!(block.kind, ck_wire::CkKind::ToolCall { .. }))
+        .unwrap();
+    if let ck_wire::CkKind::ToolCall { input, .. } = &mut call.kind {
+        *input = json!({ "content": payload });
+    }
+    sim.run(false).unwrap();
+    sim.tool_step();
+    sim.run(false).unwrap();
+    let mut rng = ReviewRng(7);
+    assert!(sim.publish(&mut rng), "the earlier turn can be summarized");
+    signed_hold_delete_m1(sim.s(), &sim.session);
+    sim.used = 95_000;
+    let mut request = sim.request(false);
+    let usage = request.usage.as_mut().unwrap();
+    usage.final_wire_trusted = true;
+    usage.final_wire_input_tokens = 140_000;
+    match transform(sim.s(), &request, &sim.ctx) {
+        Err(TransformError::SignedTurnOverLimit) => {}
+        Ok(response) => {
+            assert!(response.signed_thinking_reset, "{}", response.action);
+            let inputs: usize = response
+                .messages()
+                .iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|block| match &block.kind {
+                    ck_wire::CkKind::ToolCall { input, .. } => {
+                        Some(mc_tokenizer::estimate_tokens(&input.to_string()))
+                    }
+                    _ => None,
+                })
+                .sum();
+            assert!(inputs <= 100_000, "served {inputs} tool-call input tokens");
+        }
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// A subagent's signed tool loop at the wall, every large result before kept signed
+/// thinking: the subagent takes the same signed-thinking reset as a primary, through its
+/// reductions-only branch. The reset strips the loop's thinking, the queued drops land, the
+/// serve fits, and the next pass replays it.
+#[test]
+fn signed_prefix_hold_subagent_signed_loop_at_the_wall_resets_and_fits() {
+    let mut sim = ReviewSession::new(REVIEW_BOUND, true, true, "subagent-wall-fit");
+    sim.ctx.protected_tools.clear();
+    sim.run(false).unwrap();
+    let payload = (0..700)
+        .map(|n| format!("entry{n:04} value{n:04}\n"))
+        .collect::<String>();
+    for _ in 0..22 {
+        sim.tool_step();
+        if let ck_wire::CkKind::ToolResult { output, .. } =
+            &mut sim.messages.last_mut().unwrap().ck.content[0].kind
+        {
+            output.kind = ck_wire::CkOutputKind::Text {
+                text: payload.clone(),
+            };
+        }
+        sim.run(false).unwrap();
+    }
+    sim.tool_step();
+    let baseline = sim.run(false).unwrap();
+    let bound = review_r2_result_token_lower_bound(&baseline);
+    assert!(bound > 100_000);
+    sim.s()
+        .append_pending_agent_drops(&sim.session, &sim.tool_results[..22], 1)
+        .unwrap();
+    sim.used = 95_000;
+    let mut request = sim.request(false);
+    let usage = request.usage.as_mut().unwrap();
+    usage.final_wire_trusted = true;
+    usage.final_wire_input_tokens = bound as u64;
+    let reset = transform(sim.s(), &request, &sim.ctx).unwrap();
+    assert!(reset.signed_thinking_reset, "{}", reset.action);
+    assert_eq!(review_r3_reasoning_count(&reset), 0);
+    assert!(review_r2_result_token_lower_bound(&reset) <= 100_000);
+    assert!(review_pending(sim.s(), &sim.session).is_empty());
+    // Below the wall the next pass holds, replaying the persisted reset.
+    sim.used = 20_000;
+    let replay = sim.run(false).unwrap();
+    assert_eq!(replay.action, "SOFT+");
+    assert!(!replay.signed_thinking_reset);
+    assert_eq!(review_bytes(&replay), review_bytes(&reset));
 }

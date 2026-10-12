@@ -16,6 +16,7 @@ import {
     protectedToolRefusal,
     SIGNED_TURN_OVER_LIMIT,
     SIGNED_TURN_OVER_LIMIT_CODE,
+    signedTurnContextRefusal,
 } from "./emergency-fail-closed";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import type { MessageLike } from "./tag-messages";
@@ -126,6 +127,15 @@ it("signed-turn over-window refusal matches the cross-language public contract",
     const refusal = protectedToolRefusal({ cause: { code: signedTurnGolden.code } });
     expect(refusal?.message).toBe(signedTurnGolden.message);
     expect(refusal?.code).toBe(signedTurnGolden.code);
+});
+
+it("after a signed-thinking reset only refusal-grade evidence of non-fit refuses", () => {
+    const over = { tokens: 120_000, trusted: false, refusalGrade: true, refusalTokens: 120_000 };
+    expect(signedTurnContextRefusal(over, 100_000)).toBe(SIGNED_TURN_OVER_LIMIT);
+    // A fitting request, an estimate that cannot prove non-fit, or an unknown limit is sent.
+    expect(signedTurnContextRefusal({ ...over, refusalTokens: 90_000 }, 100_000)).toBeUndefined();
+    expect(signedTurnContextRefusal({ ...over, refusalGrade: false }, 100_000)).toBeUndefined();
+    expect(signedTurnContextRefusal(over, undefined)).toBeUndefined();
 });
 
 it("successful no-op reclaim refuses a trusted over-limit outgoing request before provider rejection", () => {
