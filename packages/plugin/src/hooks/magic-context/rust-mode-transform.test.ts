@@ -5538,7 +5538,7 @@ describe("Rust mode authority adapter", () => {
                                     text:
                                         pass === 1
                                             ? "small capture"
-                                            : "x".repeat(12 * 1024 * 1024 + 1_000),
+                                            : "x".repeat(36 * 1024 * 1024 + 1_000),
                                 },
                             ],
                         },
@@ -6140,7 +6140,7 @@ describe("Rust mode authority adapter", () => {
                                     type: "text",
                                     text:
                                         pass === 1
-                                            ? "x".repeat(12 * 1024 * 1024 + 1_000)
+                                            ? "x".repeat(36 * 1024 * 1024 + 1_000)
                                             : "recovered synchronously",
                                 },
                             ],

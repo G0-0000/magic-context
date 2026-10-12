@@ -34,8 +34,16 @@ export interface LkgEntryNote {
     anchorIndex: number;
 }
 
-const LKG_TOTAL_BYTES = 64 * 1024 * 1024;
-const LKG_SINGLE_SLOT_BYTES = 24 * 1024 * 1024;
+// One slot must hold any request a provider will accept. Anthropic's limit is
+// 32 MB of request JSON, and screenshot-heavy sessions reach it long before the
+// token window. Slot size is counted as two heap bytes per JSON character, so a
+// 32 MB request needs 64 MiB plus its digests. A smaller cap rejects the
+// synchronous capture a rebuilding pass requires, so every such pass is refused
+// and the session cannot leave its frozen replay.
+const LKG_SINGLE_SLOT_BYTES = 72 * 1024 * 1024;
+// Room for two sessions at that size; older slots are evicted first and reload
+// from durable storage when needed.
+const LKG_TOTAL_BYTES = 160 * 1024 * 1024;
 const LKG_METADATA_BYTES = 256;
 
 class MagicContextLkgHeapHolder {
