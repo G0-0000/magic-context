@@ -1314,9 +1314,18 @@ impl subc_client_rs::ModuleHandler for CensusRunner {
             .get(&ctx.route_handle().channel)
             .cloned()
             .unwrap();
-        self.observed
-            .send((principal, serde_json::from_slice(&body).unwrap()))
-            .unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The historian asks the runner which session policies it supports
+        // before it sends. Answer with no optional policies so the following
+        // session.send is the request this census observes.
+        if request["method"] == "role.describe" {
+            return subc_client_rs::HandlerOutcome::Response(
+                serde_json::to_vec(&json!({ "result": {} })).unwrap(),
+            );
+        }
+        // The test stops reading after the first send; later requests from a
+        // retrying historian have no reader and are simply not recorded.
+        let _ = self.observed.send((principal, request));
         // The received request and its daemon-supplied principal prove the
         // route was accepted; no completion or external provider is needed.
         subc_client_rs::HandlerOutcome::Response(
