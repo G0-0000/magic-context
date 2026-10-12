@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import { CANONICAL_DREAM_TASKS } from "../../features/magic-context/dreamer/task-registry";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -14,7 +15,7 @@ import type { StatusDetail } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
-import { rustHistorianChainFields } from "./rust-mode-transform";
+import { rustWrapupHistorianFields } from "./rust-mode-transform";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
@@ -1057,7 +1058,7 @@ describe("createMagicContextCommandHandler", () => {
             );
         });
 
-        it("sends the historian chain from the current config with each Rust wrapup", async () => {
+        it("sends the historian settings from the current config with each Rust wrapup", async () => {
             const moduleCall = mock(
                 async (_args: { method: string; body: Record<string, unknown> }) => ({
                     disposition: "completed",
@@ -1067,7 +1068,10 @@ describe("createMagicContextCommandHandler", () => {
             );
             // The config is read on every wrapup, as the hook does, so an edit made
             // after the session's last completed transform still reaches the module.
-            let config: Record<string, unknown> = {
+            let config: {
+                historian: Record<string, unknown>;
+                historian_timeout_ms?: number;
+            } = {
                 historian: { opencode: { model: "anthropic/claude-haiku-4-5" } },
             };
             const handler = createMagicContextCommandHandler({
@@ -1075,11 +1079,14 @@ describe("createMagicContextCommandHandler", () => {
                 transformMode: "rust",
                 rustModeModuleClient: { call: moduleCall },
                 sendNotification: mock(async () => {}),
-                resolveRustHistorianChain: () => {
+                // Resolved the way hook.ts samples the historian config.
+                resolveRustWrapupHistorianFields: () => {
                     const models = resolveHistorianModel(config, "opencode");
-                    return rustHistorianChainFields({
+                    return rustWrapupHistorianFields({
                         historianModel: models.primary,
                         fallbackModels: models.fallbacks,
+                        timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                        maxOutputTokens: config.historian.maxTokens as number | undefined,
                     });
                 },
             });
@@ -1101,7 +1108,9 @@ describe("createMagicContextCommandHandler", () => {
                         variant: "medium",
                         fallback_models: ["google/gemini-3-flash"],
                     },
+                    maxTokens: 12_000,
                 },
+                historian_timeout_ms: 90_000,
             };
             await wrapup();
 
@@ -1109,6 +1118,9 @@ describe("createMagicContextCommandHandler", () => {
             expect(bodies).toHaveLength(2);
             expect(bodies[0]?.historian_model_chain).toEqual(["anthropic/claude-haiku-4-5"]);
             expect(bodies[0]?.historian_model_variants).toEqual({});
+            expect(bodies[0]?.historian_timeout_ms).toBe(DEFAULT_HISTORIAN_TIMEOUT_MS);
+            // An unset output cap is left out so the module keeps its own default.
+            expect(bodies[0]).not.toHaveProperty("historian_max_output_tokens");
             expect(bodies[1]?.historian_model_chain).toEqual([
                 "anthropic/claude-sonnet-5-5",
                 "google/gemini-3-flash",
@@ -1120,7 +1132,9 @@ describe("createMagicContextCommandHandler", () => {
                 "anthropic/claude-sonnet-5-5",
                 "google/gemini-3-flash",
             ]);
-            // The chain rides beside the wrapup's own fields, which it never replaces.
+            expect(bodies[1]?.historian_timeout_ms).toBe(90_000);
+            expect(bodies[1]?.historian_max_output_tokens).toBe(12_000);
+            // The historian fields ride beside the wrapup's own, which they never replace.
             expect(bodies[1]?.method).toBe("session.wrapup");
             expect(bodies[1]?.session_id).toBe("ses-rust-chain");
         });

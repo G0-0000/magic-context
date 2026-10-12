@@ -110,6 +110,7 @@ import {
     createRustModeTransform as createRustModeTransformImpl,
     RUST_EMERGENCY_WALL_PCT,
     RUST_FAILURE_PARK_THRESHOLD,
+    RUST_IN_PROGRESS_PARK_EXEMPTION_MS,
     RUST_PARK_PROBE_PRESSURE_BYPASS_PCT,
     RUST_PARK_RETRY_INTERVAL,
     type RustModeModuleClient,
@@ -8052,6 +8053,86 @@ describe("Rust stalled transform probe", () => {
         expect(await recovered.outcome).toBe("served");
         expect(module.applyingUntil).toBeNull();
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    /** A transform with a module stuck applying an earlier page, plus its park notices. */
+    async function stuckApplyingSession(label: string) {
+        const sessionId = `rust-in-progress-${label}-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        const module = slowApplyingModule(clock, sessionId);
+        const parkNotices: string[] = [];
+        const transform = createRustModeTransform(makeDeps(db, module.client), {
+            moduleClient: module.client,
+            clockForTests: clock,
+            notifyParked: (_sessionId, message) => parkNotices.push(message),
+        });
+        const pass = async () => {
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            const outcome = transform
+                .run(sessionId, messages, output, makeMeta(db, sessionId))
+                .then(
+                    () => "served",
+                    (error) => error,
+                );
+            return settleOnClock(clock, outcome);
+        };
+        // A healthy first pass leaves a last good request to replay.
+        expect(await pass()).toBe("served");
+        return { sessionId, clock, module, parkNotices, transform, pass };
+    }
+
+    it("in-progress refusals inside the exemption bound never park, and a pass the module accepts restarts the bound", async () => {
+        const { sessionId, clock, module, parkNotices, transform, pass } =
+            await stuckApplyingSession("inside");
+        const state = () => transform.getState(sessionId);
+        module.applyingUntil = clock.now() + 60 * 60_000;
+
+        expect(await pass()).toBe("served");
+        const runStartedAt = state().transformInProgressSinceMs;
+        expect(runStartedAt).not.toBeNull();
+        // Just inside the bound: every refusal is still exempt.
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS - 30_000);
+        for (let i = 0; i < RUST_FAILURE_PARK_THRESHOLD + 1; i++)
+            expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBe(runStartedAt);
+        expect(state().consecutiveFailures).toBe(0);
+        expect(state().parked).toBe(false);
+        expect(parkNotices).toEqual([]);
+
+        // The module finishes and accepts a transform: the run ends.
+        module.applyingUntil = null;
+        expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBeNull();
+
+        // A later run is timed from its own first refusal, not the earlier run's.
+        module.applyingUntil = clock.now() + 60 * 60_000;
+        expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBeGreaterThan(runStartedAt ?? 0);
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS - 30_000);
+        expect(await pass()).toBe("served");
+        expect(state().consecutiveFailures).toBe(0);
+        expect(parkNotices).toEqual([]);
+    });
+
+    it("in-progress refusals past the exemption bound count toward parking again", async () => {
+        const { sessionId, clock, module, parkNotices, transform, pass } =
+            await stuckApplyingSession("beyond");
+        const state = () => transform.getState(sessionId);
+        module.applyingUntil = clock.now() + 60 * 60_000;
+
+        expect(await pass()).toBe("served");
+        expect(state().consecutiveFailures).toBe(0);
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS + 1_000);
+        for (let i = 1; i <= RUST_FAILURE_PARK_THRESHOLD; i++) {
+            expect(await pass()).toBe("served");
+            expect(state().consecutiveFailures).toBe(i);
+        }
+        expect(state().parked).toBe(true);
+        expect(parkNotices).toEqual([ENGINE_RECONNECTING_USER_MESSAGE]);
     });
 
     it("an abandoned or still-applying final page never falls back to raw history, even with compaction off", async () => {

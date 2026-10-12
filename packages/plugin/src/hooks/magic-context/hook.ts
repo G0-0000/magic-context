@@ -102,7 +102,7 @@ import { createModuleToolBackends } from "./module-tool-backends";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp } from "./recomp-orchestrator";
-import { type RustModeModuleClient, rustHistorianChainFields } from "./rust-mode-transform";
+import { type RustModeModuleClient, rustWrapupHistorianFields } from "./rust-mode-transform";
 import { createRustRefusalRecovery } from "./rust-refusal-recovery";
 import { createTextCompleteHandler } from "./text-complete";
 import { createTransform } from "./transform";
@@ -986,11 +986,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         historyBudgetPercentage: deps.config.history_budget_percentage,
         transformMode: deps.config.transform_mode,
         rustModeModuleClient,
-        resolveRustHistorianChain: () => {
+        resolveRustWrapupHistorianFields: () => {
             const run = sampleHistorian();
-            return rustHistorianChainFields({
+            return rustWrapupHistorianFields({
                 historianModel: run.model,
                 fallbackModels: run.fallbackModels,
+                timeoutMs: run.timeoutMs,
+                maxOutputTokens: run.maxOutputTokens,
             });
         },
         projectRoot: deps.directory,

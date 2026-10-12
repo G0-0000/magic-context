@@ -518,8 +518,8 @@ export function createMagicContextCommandHandler(deps: {
     sampleToastDurationMs?: () => number | undefined;
     transformMode?: ResolvedTransformMode;
     rustModeModuleClient?: RustModeModuleClient;
-    /** Rust mode: the historian chain resolved from the current config, sent with /ctx-wrapup. */
-    resolveRustHistorianChain?: () => Record<string, unknown>;
+    /** Rust mode: the historian settings resolved from the current config, sent with /ctx-wrapup. */
+    resolveRustWrapupHistorianFields?: () => Record<string, unknown>;
     projectRoot?: string;
     dreamer?: {
         config: DreamerConfig;
@@ -841,7 +841,7 @@ export function createMagicContextCommandHandler(deps: {
                                 session_id: sessionId,
                                 keep,
                                 command_id: rustCommandId("wrapup"),
-                                ...deps.resolveRustHistorianChain?.(),
+                                ...deps.resolveRustWrapupHistorianFields?.(),
                             },
                             MAX_WRAPUP_REQUEST_BUDGET_MS,
                         );

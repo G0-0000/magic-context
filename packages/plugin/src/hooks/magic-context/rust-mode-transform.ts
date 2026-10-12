@@ -235,6 +235,15 @@ export const TRANSFORM_FINAL_PAGE_ABANDONED_CODE = "transform_final_page_abandon
  * one is a transform an earlier pass of this plugin stopped waiting for.
  */
 const TRANSFORM_PAGE_IN_PROGRESS_CODE = "authority_transform_page_in_progress";
+/**
+ * How long a session's unbroken run of `authority_transform_page_in_progress`
+ * refusals is exempt from parking. The plugin abandons a final page after its first
+ * attempt (45 s on heavy passes) plus a 45 s identical-page wait, about 90 s, and a
+ * slow module finishing that page was seen taking several minutes more. A pending
+ * page that outlasts this bound is treated as a stuck module again, so the session
+ * reaches the park cadence and its recovery.
+ */
+export const RUST_IN_PROGRESS_PARK_EXEMPTION_MS = 5 * 60_000;
 export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
@@ -417,6 +426,9 @@ interface RustSessionState extends ModuleStateSyncState {
      * full wire array (delta eligibility bypassed) until a pass applies. Wire-layer
      * only — never triggers a state re-seed. */
     forceFullWire: boolean;
+    /** When the current unbroken run of `authority_transform_page_in_progress`
+     * refusals began, on the adapter clock; null when the last pass was not one. */
+    transformInProgressSinceMs: number | null;
     ordinalMemoAnchor: RawMessageOrdinalAnchor | null;
     ordinalMemoStoredCount: number | null;
     ordinalMemoCanonicalCount: number;
@@ -1108,6 +1120,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             passesSincePark: 0,
             warningSent: false,
             forceFullWire: false,
+            transformInProgressSinceMs: null,
             ordinalMemoAnchor: null,
             ordinalMemoStoredCount: null,
             ordinalMemoCanonicalCount: 0,
@@ -1450,18 +1463,27 @@ export function applyNativeMessagesVerbatim(
 }
 
 /**
- * The historian chain fields a Rust-mode `session.wrapup` carries. The module would
- * otherwise reuse the chain from the session's last completed transform, which stays
- * stale while that session's passes are failing.
+ * The historian fields a Rust-mode `session.wrapup` carries, resolved from the current
+ * config: the model chain with its limits and variants, the per-attempt timeout and the
+ * output cap. The module would otherwise reuse the values from the session's last
+ * completed transform, which stay stale while that session's passes are failing. An
+ * unset output cap is omitted, as it is on a transform, so the module keeps its default.
  */
-export function rustHistorianChainFields(
-    models: Pick<TransformDeps, "historianModel" | "fallbackModels">,
+export function rustWrapupHistorianFields(
+    historian: Pick<TransformDeps, "historianModel" | "fallbackModels"> & {
+        timeoutMs: number;
+        maxOutputTokens?: number;
+    },
 ): Record<string, unknown> {
-    const chain = resolvedHistorianModelChain(models);
+    const chain = resolvedHistorianModelChain(historian);
     return {
         historian_model_chain: chain,
         historian_model_limits: resolvedHistorianModelLimits(chain),
-        historian_model_variants: resolvedHistorianModelVariants(models),
+        historian_model_variants: resolvedHistorianModelVariants(historian),
+        historian_timeout_ms: historian.timeoutMs,
+        ...(historian.maxOutputTokens !== undefined
+            ? { historian_max_output_tokens: historian.maxOutputTokens }
+            : {}),
     };
 }
 
@@ -2047,18 +2069,36 @@ export function createRustModeTransform(
         return original;
     };
 
+    /** Whether the session's current run of "in progress" refusals is inside its bound. */
+    const inProgressRunWithinBound = (state: RustSessionState): boolean =>
+        state.transformInProgressSinceMs !== null &&
+        clock.now() - state.transformInProgressSinceMs <= RUST_IN_PROGRESS_PARK_EXEMPTION_MS;
+
+    /**
+     * Whether `error` is an "in progress" refusal inside the run's exemption bound.
+     * Records the run's start on its first refusal and ends the run on any other error.
+     */
+    const exemptInProgressRefusal = (state: RustSessionState, error: unknown): boolean => {
+        if (moduleFailureCode(error) !== TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+            state.transformInProgressSinceMs = null;
+            return false;
+        }
+        state.transformInProgressSinceMs ??= clock.now();
+        return inProgressRunWithinBound(state);
+    };
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
         if (isModuleBusyWithAbandonedTransform(error)) {
             // The module may still commit the abandoned transform, which moves the
             // state a tail delta would build on, so the next pass sends complete arrays.
             state.forceFullWire = true;
         }
-        if (moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+        if (exemptInProgressRefusal(state, error)) {
             // The module answered: it is still applying a transform of this session that
-            // an earlier pass stopped waiting for. That is not a module failure, so it
-            // leaves consecutiveFailures (the parking counter) alone and shows no
-            // reconnecting notice. failureCount is only the lifetime tally of failed
-            // passes, which this pass still is.
+            // an earlier pass stopped waiting for. Within the bound that is not a module
+            // failure, so it leaves consecutiveFailures (the parking counter) alone and
+            // shows no reconnecting notice. failureCount is only the lifetime tally of
+            // failed passes, which this pass still is.
             state.failureCount += 1;
             sessionLog(
                 sessionId,
@@ -3840,6 +3880,9 @@ export function createRustModeTransform(
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
+                // The module accepted a transform of this session, which ends any run of
+                // "still applying" refusals.
+                state.transformInProgressSinceMs = null;
                 return { response };
             };
             let transformSeriesRestarted = false;
@@ -4912,10 +4955,14 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "mc_rust_emergency_refusal before_lkg");
                 markFailure(sessionId, state, error);
                 finishPass(false, false);
-                if (moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+                if (
+                    moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE &&
+                    inProgressRunWithinBound(state)
+                ) {
                     // The module answered that it is busy, so there is no reconnect to
                     // wait for: the refusal names the real state and arms no reconnect
-                    // recovery.
+                    // recovery. Past the exemption bound the pending page counts as a
+                    // stuck module, and the refusal below arms reconnect recovery.
                     throw new EmergencyFailClosedError(ENGINE_BUSY_USER_MESSAGE, {
                         cause: error,
                     });
