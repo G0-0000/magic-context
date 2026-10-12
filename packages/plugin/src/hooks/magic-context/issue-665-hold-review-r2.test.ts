@@ -635,11 +635,9 @@ for (const host of ["opencode1", "opencode2"] as const) {
 }
 
 // Strict binding: a reasoning block kept on two consecutive passes must have
-// identical provider-visible bytes before it. The held drivers find passes that
-// break this (first render, idle expiry and the force band strip older thinking
-// in front of the kept active turn); see docs/reports/issue-665-hold-review-r2.md.
-// Pinned as an expected failure so the suite stays green while it is open.
-it.failing("held drivers: no kept signed thinking is served behind changed bytes", () => {
+// identical provider-visible bytes before it. Cache expiry alone is not a
+// binding rewrite, and a true rewrite must omit all affected thinking.
+it("held drivers: no kept signed thinking is served behind changed bytes", () => {
     expect(heldViolations.size).toBeGreaterThan(0);
     const broken = [...heldViolations].flatMap(([run, violations]) =>
         summarize(violations.filter((v) => v.kind === "strict-binding")).map(
@@ -670,7 +668,11 @@ for (const host of ["opencode1", "opencode2"] as const) {
             const db = openDatabase();
             try {
                 getOrCreateSessionMeta(db, sessionId);
-                updateSessionMeta(db, sessionId, { cacheTtl: "13h", lastResponseTime: Date.now() });
+                updateSessionMeta(db, sessionId, {
+                    cacheTtl: "13h",
+                    lastResponseTime: Date.now(),
+                    systemPromptHash: "r2-system-before",
+                });
                 const model = { providerID: "anthropic", modelID: PREFIX_BOUND };
                 const usage = new Map([
                     [
@@ -798,6 +800,9 @@ for (const host of ["opencode1", "opencode2"] as const) {
                 heldStep();
                 const previous = await serve();
                 const pairBefore = pair();
+                expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash).toBe(
+                    "r2-system-before",
+                );
                 expect(heads(previous).length).toBeGreaterThan(0);
                 heldStep();
                 if (cause === "idle expiry")

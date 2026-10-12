@@ -231,12 +231,14 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		// redesign (replaced by Channel 1 tool-result append + Channel 2
 		// sendUserMessage). Note nudges still run after the pipeline completes.
 		const pipelineIdx = code.search(
-			/const\s+result\s*=\s*await\s+(?:\b(?:guardAwait|budget\.waitMandatory)\(\s*)?runPipeline\(/,
+			/(?:const|let)\s+result\s*=\s*await\s+(?:\b(?:guardAwait|budget\.waitMandatory)\(\s*)?runPipeline\(/,
 		);
 		const noteIdx = code.indexOf("applyNoteNudges(");
 		expect(pipelineIdx).toBeGreaterThan(0);
 		expect(noteIdx).toBeGreaterThan(pipelineIdx);
-		expect(code).toContain("isCacheBusting: result.prefixBustPermitted");
+		expect(code).toMatch(
+			/isCacheBusting:\s*result\.prefixBustPermitted\s*&&\s*!result\.strictThinkingKept/,
+		);
 	});
 });
 
@@ -248,7 +250,7 @@ describe("source contract: peek-then-drain in runPipeline (pending materializati
 		// happens AFTER applyPendingOperations succeeds.
 		// Match across formatter line wraps with a tolerant regex.
 		expect(code).toMatch(
-			/const\s+hasPendingMaterializeSignal\s*=\s*hasPendingMaterialization\(/,
+			/(?:const|let)\s+hasPendingMaterializeSignal\s*=\s*!protectedSignedPrefix\s*&&\s*hasPendingMaterialization\(/,
 		);
 		// And confirm the variable is NOT directly assigned from the
 		// draining helper (regression guard for the pre-fix pattern).

@@ -287,9 +287,9 @@ export interface PiProactiveThinkingStrip {
  * unchanged, and a busting pass is the pass that changes those bytes: older
  * accounts then drop the blocks silently, `drop_block` drops them, and newer
  * accounts reject the request with a 400. The pass therefore removes all of
- * them itself only outside the active assistant turn. All steps in a tool-use
- * loop are part of that turn; none of its thinking blocks may be removed.
- * Callers must defer prefix edits that would require stripping those blocks.
+ * them itself. Held turns keep every signed block and defer edits before them.
+ * A caller that proves a prefix rewrite sets stripActiveTurn: that pass omits
+ * every block, including the active turn, instead of keeping invalid signatures.
  *
  * `messages` is the final array this pass serves, after binding-mismatch strips
  * were replayed on it at the end of the pass. The entries are persisted into
@@ -312,11 +312,17 @@ export function applyPiProactiveThinkingStrip(args: {
 	provider?: string;
 	model?: string;
 	cacheBustingPass: boolean;
+	/** Use for changed knowledge bytes or a declared rebuild, not idle expiry alone. */
+	stripActiveTurn?: boolean;
+	/** Record omissions now; remove parts after transcript commit so replay uses the same part indices. */
+	persistOnly?: boolean;
 	report?: (message: string) => void;
 }): PiProactiveThinkingStrip | null {
 	if (!args.cacheBustingPass) return null;
 	if (!isPrefixBoundThinkingModel(args.provider, args.model)) return null;
-	const protectedMessages = latestAssistantTurnMessages(args.messages);
+	const protectedMessages = args.stripActiveTurn
+		? new Set()
+		: latestAssistantTurnMessages(args.messages);
 	const entryIds: string[] = [];
 	const indices: number[] = [];
 	for (let index = 0; index < args.messages.length; index += 1) {
@@ -347,7 +353,8 @@ export function applyPiProactiveThinkingStrip(args: {
 		);
 		return null;
 	}
-	for (const index of indices) stripThinkingParts(args.messages[index]);
+	if (!args.persistOnly)
+		for (const index of indices) stripThinkingParts(args.messages[index]);
 	reportBindingRecovery(
 		args.sessionId,
 		args.report,

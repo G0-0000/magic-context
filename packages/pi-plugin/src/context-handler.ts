@@ -228,6 +228,7 @@ import {
 	modelAcceptsEmptyContent,
 	variantChangeBustsProviderCache,
 } from "@magic-context/core/hooks/magic-context/sentinel";
+import { servedPrefixMatches } from "@magic-context/core/hooks/magic-context/strict-thinking-prefix";
 import {
 	buildEditSupersessionReclaim,
 	buildSupersessionReclaimOps,
@@ -376,6 +377,7 @@ import {
 } from "./pi-served-identities";
 import {
 	acknowledgePiIdentityRebuilds,
+	claimPiIdentityRebuildFailure,
 	claimPiIdentityRepair,
 	PI_TAG_IDENTITY_REPAIR_REASON,
 	type PiIdentityRebuild,
@@ -423,6 +425,7 @@ import { replayPiReminderStrips } from "./reminder-strip-pi";
 import {
 	capturePiServedArray,
 	clearPiServedArraySession,
+	getPiLastServedArray,
 	getPiServedTagNumbers,
 	PiServedIdentityError,
 } from "./served-array-ledger";
@@ -5147,141 +5150,153 @@ export function registerPiContextHandler(
 			if (beforePipelineForTests)
 				await budget.waitMandatory(beforePipelineForTests());
 			assertCurrentPass();
-			const result = await budget.waitMandatory(
-				runPipeline({
-					assertCurrentPass,
-					db: options.db,
-					tagger,
-					sessionId,
-					projectIdentity,
-					projectDirectory,
-					sessionMeta,
-					messages: event.messages,
-					lkgEntryIds: event.messages.map((message) =>
-						lkgInputIdByRef.get(message),
-					),
-					smartDrops: options.smartDrops === true,
-					protectedTools: options.protectedTools,
-					protectedTags: options.protectedTags ?? 20,
-					protectedTokens: options.protectedTokens,
-					protectedTokenTierOverrides: options.protectedTokenTierOverrides,
-					usableSoft:
-						windowGeometry?.usableSoft ?? usageContextLimit ?? 200_000,
-					heuristics: options.heuristics,
-					emergencyCeilingTokens,
-					injection: options.injection
-						? {
-								...options.injection,
-								memoryEnabled: options.injection.memoryEnabled,
-								// v2 decay rendering needs the HISTORY budget (~60K), not the
-								// memory injection budget (~4K). Compute it from live usage +
-								// historian config, mirroring OpenCode's decayPressure budget.
-								historyBudgetPolicyIdentity: historyBudgetPolicyIdentity(
+			const inputForThinkingFit = isPrefixBoundThinkingModel(
+				ctx.model?.provider,
+				ctx.model?.id,
+			)
+				? structuredClone(event.messages)
+				: null;
+			const pipelineArgs: RunPipelineArgs = {
+				assertCurrentPass,
+				db: options.db,
+				tagger,
+				sessionId,
+				projectIdentity,
+				projectDirectory,
+				sessionMeta,
+				messages: event.messages,
+				lkgEntryIds: event.messages.map((message) =>
+					lkgInputIdByRef.get(message),
+				),
+				smartDrops: options.smartDrops === true,
+				protectedTools: options.protectedTools,
+				protectedTags: options.protectedTags ?? 20,
+				protectedTokens: options.protectedTokens,
+				protectedTokenTierOverrides: options.protectedTokenTierOverrides,
+				usableSoft: windowGeometry?.usableSoft ?? usageContextLimit ?? 200_000,
+				heuristics: options.heuristics,
+				emergencyCeilingTokens,
+				injection: options.injection
+					? {
+							...options.injection,
+							memoryEnabled: options.injection.memoryEnabled,
+							// v2 decay rendering needs the HISTORY budget (~60K), not the
+							// memory injection budget (~4K). Compute it from live usage +
+							// historian config, mirroring OpenCode's decayPressure budget.
+							historyBudgetPolicyIdentity: historyBudgetPolicyIdentity(
+								options.historian?.historyBudgetPercentage,
+								options.historian?.executeThresholdPercentage,
+								liveModelBySession.get(sessionId),
+								options.historian?.executeThresholdTokens,
+							),
+							historyBudgetTokens: resolveHistoryBudgetTokensForPi({
+								historyBudgetPercentage:
 									options.historian?.historyBudgetPercentage,
+								usagePercentage,
+								usageInputTokens,
+								usageContextLimit,
+								executeThresholdPercentage:
 									options.historian?.executeThresholdPercentage,
-									liveModelBySession.get(sessionId),
+								executeThresholdTokens:
 									options.historian?.executeThresholdTokens,
-								),
-								historyBudgetTokens: resolveHistoryBudgetTokensForPi({
-									historyBudgetPercentage:
-										options.historian?.historyBudgetPercentage,
-									usagePercentage,
-									usageInputTokens,
-									usageContextLimit,
-									executeThresholdPercentage:
-										options.historian?.executeThresholdPercentage,
-									executeThresholdTokens:
-										options.historian?.executeThresholdTokens,
-									modelKey: liveModelBySession.get(sessionId),
-								}),
-							}
-						: undefined,
-					entryIds,
-					entryIdByRef,
-					reusableMessageIds,
-					stableIdSchemeCutover,
-					schedulerDecision,
-					schedulerDeferReason,
-					// 95% emergency forces drop-all-tools regardless of the
-					// derived force gate, so the LLM call sees the smallest possible
-					// prompt before we hand control back to Pi.
-					forceMaterialization: forceMaterialization || isEmergency,
-					forceMaterializationPercentage,
-					contextUsage: {
-						percentage: usagePercentage,
-						inputTokens: usageInputTokens,
-					},
-					isCacheBusting,
-					reasoningClearing: {
-						keepReasoningTokens: resolveKeepReasoningTokens(
-							options.heuristics?.keepReasoningTokens,
-							resolvePiContextModelKey(ctx),
-						),
-						nativeReasoningMayClear: canClearNativeReasoning(ctx.model),
-						prefixBound: isPrefixBoundThinkingModel(
-							typeof ctx.model?.provider === "string"
-								? ctx.model.provider
-								: undefined,
-							typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
-						),
-						preserveReasoningToolArcs:
-							ctx.model?.api !== "openai-codex-responses" &&
-							ctx.model?.api !== "openai-responses",
-					},
-					resolvedProviderID: ctx.model?.provider,
-					resolvedModelID: ctx.model?.id,
-					canUseEmptySentinels,
-					temporalAwareness: options.injection?.temporalAwareness === true,
-					appendCompaction: guardedPiAppendCompaction(ctx, assertCurrentPass),
-					readBranchEntries: resolvePiReadBranchEntries(ctx),
-					isSubagent: sessionMeta.isSubagent,
-					compactionOff: options.compactionOff === true,
-					injectionPassSnapshot: piM0M1PassSnapshot,
-					tryReplayHeldIdentityRebuild: () => {
-						const replay = lkgCoordinator.replay(
-							snapshot,
-							(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
-						);
-						if (!replay.ok) {
-							sessionLog(
-								sessionId,
-								`Pi held identity rebuild: prior prefix unavailable (${replay.reason}); applying the declared rebuild`,
-							);
-							return;
+								modelKey: liveModelBySession.get(sessionId),
+							}),
 						}
-						try {
-							assertPiRawFallbackFits(
-								replay.messages,
-								rawFallbackLimit,
-								(line) => logPiLkgRecovery(sessionId, line),
-								undefined,
-								readPiLkgFitEnvelope(
-									ctx,
-									pi,
-									lkgModelKey,
-									sessionDecisionCalibration(options.db, sessionId),
-									toolWireSchema,
-								),
-								replay.measuredPrefix,
-							);
-						} catch (error) {
-							sessionLog(
-								sessionId,
-								`Pi held identity rebuild: prior prefix cannot fit (${String(error)}); applying the declared rebuild`,
-							);
-							return;
-						}
-						logPiLkgRecovery(
+					: undefined,
+				entryIds,
+				entryIdByRef,
+				reusableMessageIds,
+				stableIdSchemeCutover,
+				schedulerDecision,
+				schedulerDeferReason,
+				// 95% emergency forces drop-all-tools regardless of the
+				// derived force gate, so the LLM call sees the smallest possible
+				// prompt before we hand control back to Pi.
+				forceMaterialization: forceMaterialization || isEmergency,
+				forceMaterializationPercentage,
+				contextUsage: {
+					percentage: usagePercentage,
+					inputTokens: usageInputTokens,
+				},
+				isCacheBusting,
+				reasoningClearing: {
+					keepReasoningTokens: resolveKeepReasoningTokens(
+						options.heuristics?.keepReasoningTokens,
+						resolvePiContextModelKey(ctx),
+					),
+					nativeReasoningMayClear: canClearNativeReasoning(ctx.model),
+					prefixBound: isPrefixBoundThinkingModel(
+						typeof ctx.model?.provider === "string"
+							? ctx.model.provider
+							: undefined,
+						typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
+					),
+					preserveReasoningToolArcs:
+						ctx.model?.api !== "openai-codex-responses" &&
+						ctx.model?.api !== "openai-responses",
+				},
+				resolvedProviderID: ctx.model?.provider,
+				resolvedModelID: ctx.model?.id,
+				canUseEmptySentinels,
+				temporalAwareness: options.injection?.temporalAwareness === true,
+				appendCompaction: guardedPiAppendCompaction(ctx, assertCurrentPass),
+				readBranchEntries: resolvePiReadBranchEntries(ctx),
+				isSubagent: sessionMeta.isSubagent,
+				compactionOff: options.compactionOff === true,
+				injectionPassSnapshot: piM0M1PassSnapshot,
+				readLastServedMessages: () => {
+					const serialized = getPiLastServedArray(sessionId);
+					try {
+						return serialized ? JSON.parse(serialized) : null;
+					} catch {
+						return null;
+					}
+				},
+				tryReplayHeldIdentityRebuild: () => {
+					const replay = lkgCoordinator.replay(
+						snapshot,
+						(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+					);
+					if (!replay.ok) {
+						sessionLog(
 							sessionId,
-							"Pi held identity rebuild: replaying the served prefix and retaining the pending repair",
+							`Pi held identity rebuild: prior prefix unavailable (${replay.reason}); applying the declared rebuild`,
 						);
-						throw new PiLkgAdmissionReplay(
+						return;
+					}
+					try {
+						assertPiRawFallbackFits(
 							replay.messages,
-							"held tag-identity rebuild: replaying the served prefix",
+							rawFallbackLimit,
+							(line) => logPiLkgRecovery(sessionId, line),
+							undefined,
+							readPiLkgFitEnvelope(
+								ctx,
+								pi,
+								lkgModelKey,
+								sessionDecisionCalibration(options.db, sessionId),
+								toolWireSchema,
+							),
+							replay.measuredPrefix,
 						);
-					},
-				}),
-			);
+					} catch (error) {
+						sessionLog(
+							sessionId,
+							`Pi held identity rebuild: prior prefix cannot fit (${String(error)}); applying the declared rebuild`,
+						);
+						return;
+					}
+					logPiLkgRecovery(
+						sessionId,
+						"Pi held identity rebuild: replaying the served prefix and retaining the pending repair",
+					);
+					throw new PiLkgAdmissionReplay(
+						replay.messages,
+						"held tag-identity rebuild: replaying the served prefix",
+					);
+				},
+			};
+			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			if (result.identityRebuilt) schedulerDecision = "execute";
 			const postPipelineStart = performance.now();
@@ -5448,7 +5463,9 @@ export function registerPiContextHandler(
 						entryIdByRef: result.postCommitEntryIdByRef,
 						// Sticky-anchor GC shares the pipeline's permission, including
 						// its signed-prefix hold, rather than a refresh request alone.
-						isCacheBusting: result.prefixBustPermitted,
+						isCacheBusting:
+							result.prefixBustPermitted && !result.strictThinkingKept,
+						// Kept signatures also cover older reminder anchors.
 						// These leading synthetic messages have no persisted entry IDs, so
 						// exclude them from the sticky-anchor GC denominator.
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -5541,7 +5558,8 @@ export function registerPiContextHandler(
 					!sessionMetaForTodo.isSubagent &&
 					sessionMetaForTodo.lastTodoState !== ""
 				) {
-					const isCacheBustingForTodo = result.prefixBustPermitted;
+					const isCacheBustingForTodo =
+						result.prefixBustPermitted && !result.strictThinkingKept;
 					outputMessages = injectSyntheticTodowriteForPi({
 						db: options.db,
 						sessionId,
@@ -5597,7 +5615,7 @@ export function registerPiContextHandler(
 					bindingEntryIdByRef.get(message),
 			).map((entryId) => entryId ?? undefined);
 			const thinkingBindingRecoveryApplied =
-				bindingStripOrder === "end"
+				bindingStripOrder === "end" && !result.signedPrefixRewritten
 					? applyPiThinkingBindingRecovery({
 							db: options.db,
 							sessionId,
@@ -5626,17 +5644,19 @@ export function registerPiContextHandler(
 						// The pipeline's permission also governs host-side mutations;
 						// a requested history refresh cannot bypass a signed-prefix hold.
 						//
-						// Anthropic's preserved-thinking contract permits removing only
-						// the oldest thinking blocks without invalidating newer ones.
-						// Keep those newer blocks on a trim-only pass; other prefix edits,
-						// or edits the pass cannot classify, still require a full strip.
+						// Strict binding keeps all thinking on a held pass. A proven
+						// prefix rewrite removes every signed block, including the
+						// active turn, rather than retaining newer invalid signatures.
 						cacheBustingPass:
-							result.prefixBustPermitted &&
-							(isCacheBusting ||
-								result.prefixRebuildAlreadyPriced ||
-								(result.executedWorkThisPass &&
-									(result.prefixEditBesidesReasoningTrim ||
-										hostEditBeforeNewestThinking))),
+							result.signedPrefixRewritten ||
+							(result.prefixBustPermitted &&
+								!result.strictThinkingKept &&
+								(isCacheBusting ||
+									result.prefixRebuildAlreadyPriced ||
+									(result.executedWorkThisPass &&
+										(result.prefixEditBesidesReasoningTrim ||
+											hostEditBeforeNewestThinking)))),
+						stripActiveTurn: result.signedPrefixRewritten,
 						report: (line) => sessionLog(sessionId, line),
 					});
 				} catch (err) {
@@ -5890,7 +5910,7 @@ export function registerPiContextHandler(
 					sessionDecisionCalibration(options.db, sessionId),
 					toolWireSchema,
 				);
-				const estimate = estimatePiOutgoingInputTokens(
+				let estimate = estimatePiOutgoingInputTokens(
 					outputMessages,
 					envelope,
 					lkgPassSnapshot
@@ -5902,6 +5922,59 @@ export function registerPiContextHandler(
 						: undefined,
 					rawFallbackLimit,
 				);
+				if (
+					inputForThinkingFit &&
+					result.strictThinkingKept &&
+					rawFallbackLimit &&
+					estimate.refusalGrade &&
+					(estimate.refusalTokens ?? estimate.tokens) > rawFallbackLimit
+				) {
+					result = await budget.waitMandatory(
+						runPipeline({
+							...pipelineArgs,
+							messages: inputForThinkingFit,
+							forceSignedRebuildForFit: true,
+							forceMaterialization: true,
+							contextUsage: {
+								...pipelineArgs.contextUsage,
+								percentage: Math.max(95, pipelineArgs.contextUsage.percentage),
+							},
+						}),
+					);
+					outputMessages = result.messages as PiAgentMessage[];
+					const retryIds = resolvePiLkgOutputEntryIds(
+						outputMessages,
+						result.syntheticLeadingCount,
+						(message) =>
+							result.lkgEntryIdByRef.get(message) ??
+							result.postCommitEntryIdByRef.get(message),
+					);
+					applyPiProactiveThinkingStrip({
+						db: options.db,
+						sessionId,
+						messages: outputMessages,
+						entryIds: retryIds.map((id) => id ?? undefined),
+						provider: ctx.model?.provider,
+						model: ctx.model?.id,
+						cacheBustingPass: true,
+						stripActiveTurn: true,
+					});
+					estimate = estimatePiOutgoingInputTokens(
+						outputMessages,
+						envelope,
+						undefined,
+						rawFallbackLimit,
+					);
+				}
+				if (
+					result.signedPrefixRewritten &&
+					rawFallbackLimit &&
+					estimate.refusalGrade &&
+					(estimate.refusalTokens ?? estimate.tokens) > rawFallbackLimit
+				)
+					throw contextRefusalError(
+						"The request remains over the model window after stripping signed thinking and reclaiming context",
+					);
 				const refusal = outgoingContextRefusal(
 					estimate,
 					rawFallbackLimit,
@@ -7220,6 +7293,8 @@ function maybeFireHistorian(args: {
 }
 interface RunPipelineArgs {
 	tryReplayHeldIdentityRebuild?: () => void;
+	readLastServedMessages?: () => readonly unknown[] | null;
+	forceSignedRebuildForFit?: boolean;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	assertCurrentPass?: () => void;
@@ -7373,6 +7448,8 @@ interface RunPipelineResult {
 	prefixBustPermitted: boolean;
 	/** False while a signed-prefix hold defers new host-side work. */
 	prefixMutationAllowed: boolean;
+	strictThinkingKept: boolean;
+	signedPrefixRewritten: boolean;
 	/** A missing or cold cache already costs a rebuild; further eligible edits add no extra bust. */
 	prefixRebuildAlreadyPriced: boolean;
 	identityRebuilt?: boolean;
@@ -7530,6 +7607,8 @@ async function runCompactionOffPipeline(
 		messages: args.messages as unknown[],
 		prefixBustPermitted: false,
 		prefixMutationAllowed: false,
+		strictThinkingKept: false,
+		signedPrefixRewritten: false,
 		prefixRebuildAlreadyPriced: false,
 		heuristicsExecuted: false,
 		executedWorkThisPass: false,
@@ -7583,13 +7662,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let restoreOriginals:
 		| ReturnType<typeof captureOriginalTurn<unknown>>
 		| undefined;
-	const activeThinkingTurn = hasActiveAnthropicThinkingTurn(
+	let activeThinkingTurn = hasActiveAnthropicThinkingTurn(
 		args.messages,
 		args.resolvedProviderID,
 		args.resolvedModelID,
 	);
-	const protectedSignedPrefix =
+	let protectedSignedPrefix =
 		activeThinkingTurn && args.reasoningClearing?.prefixBound === true;
+	let rewritingSignedPrefix = false;
+	let workingForRewrite: unknown[] | undefined;
+	const stripForPrefixRewrite = () => {
+		const messages = workingForRewrite ?? args.messages;
+		const result = applyPiProactiveThinkingStrip({
+			db: args.db,
+			sessionId: args.sessionId,
+			messages: messages as unknown[],
+			entryIds: messages.map((message, index) =>
+				resolvePiStableId(
+					message,
+					index,
+					args.entryIds,
+					args.entryIdByRef ?? undefined,
+				),
+			),
+			provider: args.resolvedProviderID,
+			model: args.resolvedModelID,
+			cacheBustingPass: true,
+			stripActiveTurn: true,
+			persistOnly: true,
+		});
+		if (activeThinkingTurn && !result)
+			throw new Error(
+				"Cannot persist signed thinking omission before prefix rewrite",
+			);
+		rewritingSignedPrefix = true;
+		activeThinkingTurn = false;
+		protectedSignedPrefix = false;
+	};
+	if (args.forceSignedRebuildForFit && protectedSignedPrefix)
+		stripForPrefixRewrite();
 	// Messages without a real entry id get a position-independent fallback id
 	// computed once from this pass's input, before any stage edits content.
 	// Every stage below resolves by the index it was given into this same array
@@ -7731,6 +7842,209 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredHistoryWasPendingAtPassStart =
 		deferredHistoryRefreshSessions.has(args.sessionId);
 
+	// Prepare prefix work on a shadow array. An execute with unchanged m[1] is
+	// not a ride; changed published bytes or an executed fold price the reductions.
+	const piHardSignals = args.injection
+		? (() => {
+				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
+				// derive from freshly-read session_meta; modelKey from the volatile live
+				// map.
+				const hardMeta = args.sessionMeta;
+				let piTtlMs = 5 * 60 * 1000;
+				try {
+					piTtlMs = parseCacheTtl(hardMeta.cacheTtl);
+				} catch {
+					// invalid cache_ttl → 5m default (parity with execute-status)
+				}
+				return {
+					systemHash:
+						typeof hardMeta.systemPromptHash === "string"
+							? hardMeta.systemPromptHash
+							: "",
+					modelKey: liveModelBySession.get(args.sessionId) ?? "",
+					cacheExpired: isPiHardCacheExpired(
+						hardMeta.lastResponseTime,
+						piTtlMs,
+						Date.now(),
+					),
+					lastResponseTime: hardMeta.lastResponseTime,
+				};
+			})()
+		: undefined;
+	const emergencyDropEligible =
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= forceMaterializationPercentage;
+	// Build the fold state once and reuse it for both the preflight and the wire
+	// injection. Omitting a render-affecting field from only one of those calls can
+	// manufacture a HARD signal that the real injection immediately disproves.
+	const piM0State: PiM0M1State | undefined =
+		args.injection && piHardSignals
+			? {
+					sessionId: args.sessionId,
+					projectIdentity: args.projectIdentity,
+					projectDirectory: args.projectDirectory,
+					memoryEnabled: args.injection.memoryEnabled,
+					injectDocs: args.injection.injectDocs,
+					injectionBudgetTokens: args.injection.injectionBudgetTokens,
+					historyBudgetTokens: args.injection.historyBudgetTokens,
+					historyBudgetPolicyIdentity:
+						args.injection.historyBudgetPolicyIdentity,
+					hardSignals: piHardSignals,
+					muralEnabled: args.injection.muralEnabled === true,
+					freezePrefixForPass: true,
+					allowFreshContentionFallback:
+						args.forceMaterialization === true || emergencyDropEligible,
+				}
+			: undefined;
+	const foldDueDecision = piM0State
+		? mustMaterializePi(
+				piM0State,
+				args.db,
+				injectionPassSnapshot?.compartments,
+				injectionPassSnapshot,
+			)
+		: { value: false, reason: null };
+	const firstRenderBust =
+		piM0State !== undefined &&
+		!(
+			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
+			injectionPassSnapshot.cachedRow.cached_m1_bytes
+		);
+	let foldExecutedThisPass = false;
+	// The one bust permission an executed fold grants: true only when the fold
+	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
+	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
+	// drains, heuristics, synthetic todo and sentinel first-application.
+	let foldBustsServedPrefixThisPass = false;
+	let publishedM1RefreshedThisPass = false;
+	let prefixPreflightContended = false;
+	const softRefreshOpportunity = args.schedulerDecision === "execute";
+	const cachedPrefixBeforePreflight =
+		piM0State &&
+		(foldDueDecision.value || softRefreshOpportunity) &&
+		!emergencyDropEligible
+			? prepareCachedM0M1PiReplay(
+					piM0State,
+					args.db,
+					injectionPassSnapshot?.cachedRow,
+				)
+			: undefined;
+	let preFoldInjectionResult: PiInjectionResult | null = null;
+	const persistedM0BeforeFold =
+		injectionPassSnapshot?.sessionMeta ?? args.sessionMeta;
+	const m0CoverageBeforeFold =
+		persistedM0BeforeFold.cachedM0Bytes === null
+			? -1
+			: persistedM0BeforeFold.cachedM0MaxCompartmentSeq;
+	if (protectedSignedPrefix && !firstRenderBust && piM0State) {
+		piM0State.preparedPrefix = prepareCachedM0M1PiReplay(
+			piM0State,
+			args.db,
+			injectionPassSnapshot?.cachedRow,
+		);
+	}
+	if (
+		(!protectedSignedPrefix || firstRenderBust) &&
+		(foldDueDecision.value || softRefreshOpportunity) &&
+		piM0State
+	) {
+		try {
+			// Persist the fold before opening mutation gates. The shadow array keeps
+			// this pre-execution off the outgoing wire; the normal injection below
+			// replays the persisted pair into the real message array.
+			preFoldInjectionResult = injectM0M1PiForRun(
+				piM0State,
+				args.db,
+				[],
+				undefined,
+				softRefreshOpportunity,
+				injectionPassSnapshot,
+			);
+			if (protectedSignedPrefix && firstRenderBust) {
+				const candidate = getOrCreateSessionMeta(args.db, args.sessionId);
+				if (
+					!servedPrefixMatches({
+						messages: args.readLastServedMessages?.(),
+						m0Text: candidate.cachedM0Bytes?.toString(),
+						m1Text: candidate.cachedM1Bytes?.toString(),
+						muralDataUrl: candidate.cachedM0MuralDataUrl,
+					})
+				)
+					stripForPrefixRewrite();
+			}
+			prefixPreflightContended =
+				preFoldInjectionResult.contentionExhausted === true;
+			publishedM1RefreshedThisPass =
+				!prefixPreflightContended &&
+				persistedM0BeforeFold.cachedM1Bytes?.toString("utf8") !==
+					getOrCreateSessionMeta(
+						args.db,
+						args.sessionId,
+					).cachedM1Bytes?.toString("utf8");
+			foldExecutedThisPass = foldExecutesThisPass(
+				foldDueDecision.value || softRefreshOpportunity,
+				preFoldInjectionResult.m0Materialized === true,
+			);
+			if (foldExecutedThisPass) {
+				const afterFold = getOrCreateSessionMeta(args.db, args.sessionId);
+				foldBustsServedPrefixThisPass =
+					!protectedSignedPrefix &&
+					foldBustsServedPrefix(
+						foldDueDecision.reason,
+						{
+							m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
+							m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
+							muralDataUrl: persistedM0BeforeFold.cachedM0MuralDataUrl ?? null,
+						},
+						{
+							m0Bytes: afterFold.cachedM0Bytes ?? null,
+							m1Bytes: afterFold.cachedM1Bytes ?? null,
+							muralDataUrl: afterFold.cachedM0MuralDataUrl ?? null,
+						},
+					);
+			}
+			if (preFoldInjectionResult.m0Materialized) {
+				injectionPassSnapshot = createPiM0M1PassSnapshot({
+					db: args.db,
+					sessionId: args.sessionId,
+					compactionOff: false,
+					compartments: injectionPassSnapshot?.compartments,
+				});
+			}
+			const m0CoverageAfterFold =
+				injectionPassSnapshot?.sessionMeta.cachedM0MaxCompartmentSeq ??
+				m0CoverageBeforeFold;
+			try {
+				rearmChannel2AfterCoverageAdvancingHardFold({
+					db: args.db,
+					sessionId: args.sessionId,
+					foldExecuted: foldExecutedThisPass,
+					compactionOff: false,
+					previousCoverage: m0CoverageBeforeFold,
+					currentCoverage: m0CoverageAfterFold,
+				});
+			} catch (error) {
+				sessionLog(
+					args.sessionId,
+					`pi channel2 fold-cycle reset failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		} catch (error) {
+			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
+			prefixPreflightContended = true;
+			sessionLog(
+				args.sessionId,
+				`pi m[0] HARD fold pre-execution failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		const mismatch = foldDueDecision.mismatch
+			? ` mismatch=${JSON.stringify(foldDueDecision.mismatch)}`
+			: "";
+		sessionLog(
+			args.sessionId,
+			`pi m[0] HARD fold decision: reason=${preFoldInjectionResult?.m0Reason ?? foldDueDecision.reason ?? "soft_refresh"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+		);
+	}
 	// Observe candidates before any history cut. Replay only durable decisions
 	// until the independently priced rebuild permission below is known.
 	const temporalCandidates = args.temporalAwareness
@@ -7829,6 +8143,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// source[idx] = working[idx], leaving the cleared-reasoning watermark ahead
 	// of the actual wire bytes → defer-pass replay divergence → cache bust.
 	const workingMessages = transcript.getWorkingMessages();
+	workingForRewrite = workingMessages;
 	// Stable-id resolver for the reasoning/placeholder paths. MUST match the id the
 	// transcript assigned each message (so reasoning's messageIdToMaxTag lookup
 	// hits). Reasoning runs on `workingMessages` where tagging may have cloned
@@ -7859,198 +8174,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization === true ||
 		args.contextUsage.percentage >= forceMaterializationPercentage;
-	const deferredMaterializeEligible =
+	let deferredMaterializeEligible =
 		canConsumeDeferredLate &&
-		deferredMaterializationSessions.has(args.sessionId);
-	// Prepare prefix work on a shadow array. An execute with unchanged m[1] is
-	// not a ride; changed published bytes or an executed fold price the reductions.
-	const piHardSignals = args.injection
-		? (() => {
-				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
-				// derive from freshly-read session_meta; modelKey from the volatile live
-				// map.
-				const hardMeta = args.sessionMeta;
-				let piTtlMs = 5 * 60 * 1000;
-				try {
-					piTtlMs = parseCacheTtl(hardMeta.cacheTtl);
-				} catch {
-					// invalid cache_ttl → 5m default (parity with execute-status)
-				}
-				return {
-					systemHash:
-						typeof hardMeta.systemPromptHash === "string"
-							? hardMeta.systemPromptHash
-							: "",
-					modelKey: liveModelBySession.get(args.sessionId) ?? "",
-					cacheExpired: isPiHardCacheExpired(
-						hardMeta.lastResponseTime,
-						piTtlMs,
-						Date.now(),
-					),
-					lastResponseTime: hardMeta.lastResponseTime,
-				};
-			})()
-		: undefined;
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
-	// Build the fold state once and reuse it for both the preflight and the wire
-	// injection. Omitting a render-affecting field from only one of those calls can
-	// manufacture a HARD signal that the real injection immediately disproves.
-	const piM0State: PiM0M1State | undefined =
-		args.injection && piHardSignals
-			? {
-					sessionId: args.sessionId,
-					projectIdentity: args.projectIdentity,
-					projectDirectory: args.projectDirectory,
-					memoryEnabled: args.injection.memoryEnabled,
-					injectDocs: args.injection.injectDocs,
-					injectionBudgetTokens: args.injection.injectionBudgetTokens,
-					historyBudgetTokens: args.injection.historyBudgetTokens,
-					historyBudgetPolicyIdentity:
-						args.injection.historyBudgetPolicyIdentity,
-					hardSignals: piHardSignals,
-					muralEnabled: args.injection.muralEnabled === true,
-					freezePrefixForPass: true,
-					allowFreshContentionFallback:
-						args.forceMaterialization === true || emergencyDropEligible,
-				}
-			: undefined;
-	const foldDueDecision = piM0State
-		? mustMaterializePi(
-				piM0State,
-				args.db,
-				injectionPassSnapshot?.compartments,
-				injectionPassSnapshot,
-			)
-		: { value: false, reason: null };
-	const firstRenderBust =
-		piM0State !== undefined &&
-		!(
-			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
-			injectionPassSnapshot.cachedRow.cached_m1_bytes
-		);
-	let foldExecutedThisPass = false;
-	// The one bust permission an executed fold grants: true only when the fold
-	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
-	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
-	// drains, heuristics, synthetic todo and sentinel first-application.
-	let foldBustsServedPrefixThisPass = false;
-	let publishedM1RefreshedThisPass = false;
-	let prefixPreflightContended = false;
-	const softRefreshOpportunity = args.schedulerDecision === "execute";
-	const cachedPrefixBeforePreflight =
-		piM0State &&
-		(foldDueDecision.value || softRefreshOpportunity) &&
-		!emergencyDropEligible
-			? prepareCachedM0M1PiReplay(
-					piM0State,
-					args.db,
-					injectionPassSnapshot?.cachedRow,
-				)
-			: undefined;
-	let preFoldInjectionResult: PiInjectionResult | null = null;
-	const persistedM0BeforeFold =
-		injectionPassSnapshot?.sessionMeta ?? args.sessionMeta;
-	const m0CoverageBeforeFold =
-		persistedM0BeforeFold.cachedM0Bytes === null
-			? -1
-			: persistedM0BeforeFold.cachedM0MaxCompartmentSeq;
-	if (protectedSignedPrefix && piM0State) {
-		piM0State.preparedPrefix = prepareCachedM0M1PiReplay(
-			piM0State,
-			args.db,
-			injectionPassSnapshot?.cachedRow,
-		);
-	}
-	if (
-		!protectedSignedPrefix &&
-		(foldDueDecision.value || softRefreshOpportunity) &&
-		piM0State
-	) {
-		try {
-			// Persist the fold before opening mutation gates. The shadow array keeps
-			// this pre-execution off the outgoing wire; the normal injection below
-			// replays the persisted pair into the real message array.
-			preFoldInjectionResult = injectM0M1PiForRun(
-				piM0State,
-				args.db,
-				[],
-				undefined,
-				softRefreshOpportunity,
-				injectionPassSnapshot,
-			);
-			prefixPreflightContended =
-				preFoldInjectionResult.contentionExhausted === true;
-			publishedM1RefreshedThisPass =
-				!prefixPreflightContended &&
-				persistedM0BeforeFold.cachedM1Bytes?.toString("utf8") !==
-					getOrCreateSessionMeta(
-						args.db,
-						args.sessionId,
-					).cachedM1Bytes?.toString("utf8");
-			foldExecutedThisPass = foldExecutesThisPass(
-				foldDueDecision.value || softRefreshOpportunity,
-				preFoldInjectionResult.m0Materialized === true,
-			);
-			if (foldExecutedThisPass) {
-				const afterFold = getOrCreateSessionMeta(args.db, args.sessionId);
-				foldBustsServedPrefixThisPass = foldBustsServedPrefix(
-					foldDueDecision.reason,
-					{
-						m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
-						m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
-						muralDataUrl: persistedM0BeforeFold.cachedM0MuralDataUrl ?? null,
-					},
-					{
-						m0Bytes: afterFold.cachedM0Bytes ?? null,
-						m1Bytes: afterFold.cachedM1Bytes ?? null,
-						muralDataUrl: afterFold.cachedM0MuralDataUrl ?? null,
-					},
-				);
-			}
-			if (preFoldInjectionResult.m0Materialized) {
-				injectionPassSnapshot = createPiM0M1PassSnapshot({
-					db: args.db,
-					sessionId: args.sessionId,
-					compactionOff: false,
-					compartments: injectionPassSnapshot?.compartments,
-				});
-			}
-			const m0CoverageAfterFold =
-				injectionPassSnapshot?.sessionMeta.cachedM0MaxCompartmentSeq ??
-				m0CoverageBeforeFold;
-			try {
-				rearmChannel2AfterCoverageAdvancingHardFold({
-					db: args.db,
-					sessionId: args.sessionId,
-					foldExecuted: foldExecutedThisPass,
-					compactionOff: false,
-					previousCoverage: m0CoverageBeforeFold,
-					currentCoverage: m0CoverageAfterFold,
-				});
-			} catch (error) {
-				sessionLog(
-					args.sessionId,
-					`pi channel2 fold-cycle reset failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		} catch (error) {
-			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
-			prefixPreflightContended = true;
-			sessionLog(
-				args.sessionId,
-				`pi m[0] HARD fold pre-execution failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		const mismatch = foldDueDecision.mismatch
-			? ` mismatch=${JSON.stringify(foldDueDecision.mismatch)}`
-			: "";
-		sessionLog(
-			args.sessionId,
-			`pi m[0] HARD fold decision: reason=${preFoldInjectionResult?.m0Reason ?? foldDueDecision.reason ?? "soft_refresh"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
-		);
-	}
+		deferredMaterializationSessions.has(args.sessionId) &&
+		!protectedSignedPrefix;
 	// Primary sessions run routine age-sensitive cleanup only once during an
 	// unbroken stretch of execute/emergency pressure. Later passes still evaluate
 	// emergency drops, but another batch requires pressure to clear and rise again.
@@ -8065,7 +8192,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!args.sessionMeta.isSubagent &&
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
-	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
+	let hasPendingMaterializeSignal =
+		!protectedSignedPrefix && hasPendingMaterialization(args.sessionId);
 	// Subagents have no history fold to ride. Their execute pass admits every
 	// eligible cleanup lane together, without rewriting bytes when none acts.
 	const rideSignals = {
@@ -8127,12 +8255,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 	let unavoidableCarriedIdentityRebuild = false;
 	if (
-		!prefixMutationAllowed &&
+		protectedSignedPrefix &&
 		readPiIdentityRebuilds(args.db, args.sessionId).length > 0
 	) {
 		// Try the last served prefix before tagging can expose new numbers that
 		// another writer committed to the database but never sent to the provider.
 		args.tryReplayHeldIdentityRebuild?.();
+		stripForPrefixRewrite();
 		unavoidableCarriedIdentityRebuild = true;
 		prefixMutationAllowed = true;
 		args.tagger.cleanup(args.sessionId);
@@ -8206,7 +8335,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				: undefined,
 		},
 	);
-	const identityRebuild =
+	let identityRebuild =
 		unavoidableCarriedIdentityRebuild || identityAdoption.rebuilds.length > 0;
 	if (identityRebuild) {
 		if (!prefixMutationAllowed) {
@@ -8214,6 +8343,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// served numbers again, keeping its pending record when replay succeeds.
 			if (!unavoidableCarriedIdentityRebuild) {
 				args.tryReplayHeldIdentityRebuild?.();
+				stripForPrefixRewrite();
 				args.tagger.cleanup(args.sessionId);
 				args.tagger.initFromDb(args.sessionId, args.db);
 			}
@@ -8223,21 +8353,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			prefixMutationAllowed = true;
 		}
 		args.schedulerDecision = "execute";
+		hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
+		deferredMaterializeEligible =
+			canConsumeDeferredLate &&
+			deferredMaterializationSessions.has(args.sessionId);
 		isCacheBustingPass = prefixMutationAllowed;
 		publishedWorkDrainAllowed = isCacheBustingPass;
 		shouldRunHeuristics = args.heuristics !== undefined;
 		if (piM0State && prefixMutationAllowed) {
-			clearM0M1PiCache(args.db, args.sessionId, PI_TAG_IDENTITY_REPAIR_REASON);
-			piM0State.preparedPrefix = undefined;
-			piM0State.freezePrefixForPass = false;
-			injectionPassSnapshot = createPiM0M1PassSnapshot({
-				db: args.db,
-				sessionId: args.sessionId,
-				compactionOff: false,
-			});
+			try {
+				clearM0M1PiCache(
+					args.db,
+					args.sessionId,
+					PI_TAG_IDENTITY_REPAIR_REASON,
+				);
+				piM0State.preparedPrefix = undefined;
+				piM0State.freezePrefixForPass = false;
+				injectionPassSnapshot = createPiM0M1PassSnapshot({
+					db: args.db,
+					sessionId: args.sessionId,
+					compactionOff: false,
+				});
+			} catch (error) {
+				if (claimPiIdentityRebuildFailure(args.db, args.sessionId) === "first")
+					throw error;
+				identityRebuild = false;
+				piM0State.preparedPrefix ??= prepareCachedM0M1PiReplay(
+					piM0State,
+					args.db,
+					injectionPassSnapshot?.cachedRow,
+				);
+				piM0State.freezePrefixForPass = true;
+				sessionLog(
+					args.sessionId,
+					"Pi identity rebuild failed again; serving with the repair still pending",
+				);
+			}
 		}
 	}
-	if (args.temporalAwareness && isCacheBustingPass) {
+	if (args.temporalAwareness && isCacheBustingPass && !protectedSignedPrefix) {
 		temporalDecisions = freezeTemporalDecisions(
 			args.db,
 			args.sessionId,
@@ -8337,12 +8491,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		: new Set<string>();
 	const protectedThinkingProxies = new Set<unknown>();
 	if (activeThinkingTurn) {
+		// mutationView is the filtered transcript message array: dropped/empty
+		// messages are absent. Its indices and IDs, not workingMessages indices,
+		// locate the thinking whose preceding bytes must remain unchanged.
+		const rawById = new Map(
+			workingMessages.map((message, index) => [
+				stableIdResolver(message, index),
+				message,
+			]),
+		);
 		for (
-			let i = latestAssistantTurnStart(workingMessages);
+			let i = latestAssistantTurnStart(mutationView);
 			i < mutationView.length;
 			i++
 		) {
-			const id = stableIdResolver(workingMessages[i], i);
+			const id = mutationView[i].info.id;
 			if (
 				!thinkingRecovery.restore &&
 				id &&
@@ -8352,12 +8515,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			for (let p = 0; p < mutationView[i].parts.length; p++) {
 				const part = mutationView[i].parts[p];
 				if (part.kind !== "thinking") continue;
-				const local = (
-					workingMessages[i] as { content?: { redacted?: boolean }[] }
-				).content?.[p];
+				const raw = rawById.get(id) as
+					| { content?: { redacted?: boolean }[] }
+					| undefined;
+				const redacted = raw?.content?.some((part) => part.redacted === true);
 				if (
 					!thinkingRecovery.restore &&
-					!local?.redacted &&
+					!redacted &&
 					id &&
 					(reasoningTagsForProtection.get(id) ?? Infinity) <=
 						(args.sessionMeta.clearedReasoningThroughTag ?? 0)
@@ -8367,7 +8531,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	const newTargets = new Map(
+	let newTargets = new Map(
 		protectNewTagMutations(
 			mutationView.map((message) => ({
 				info: message.info,
@@ -8378,7 +8542,28 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.reasoningClearing?.prefixBound === true,
 		),
 	);
+	if (protectedSignedPrefix && args.contextUsage.percentage >= 95) {
+		const candidates = getActiveTagsBySession(args.db, args.sessionId).filter(
+			(tag) => tag.type === "tool" && targets.get(tag.tagNumber)?.canDrop?.(),
+		);
+		if (
+			candidates.length > 0 &&
+			candidates.every(
+				(tag) =>
+					newTargets.get(tag.tagNumber)?.thinkingRewriteProtected === true,
+			)
+		) {
+			stripForPrefixRewrite();
+			newTargets = targets;
+			prefixMutationAllowed = true;
+			isCacheBustingPass = true;
+			publishedWorkDrainAllowed = true;
+			shouldRunHeuristics = args.heuristics !== undefined;
+			hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
+		}
+	}
 	for (const number of identityAdoption.protectedTagNumbers) {
+		if (rewritingSignedPrefix) break;
 		const target = newTargets.get(number);
 		if (!target) continue;
 		// A drop recovered from the deleted tag remains queued. This request must
@@ -8400,7 +8585,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			setContent: () => false,
 		});
 	}
-	if (thinkingRecovery.restore) {
+	if (thinkingRecovery.restore && !rewritingSignedPrefix) {
 		transcript.commit();
 		restoreOriginals = captureOriginalTurn(
 			args.messages as unknown[],
@@ -9020,7 +9205,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// same-pass mutation). shouldRunHeuristics is the broader, correct set.
 	let reasoningPersistenceFailed = false;
 	let reasoningBudgetCutoffThisPass = 0;
-	if (args.reasoningClearing && shouldRunHeuristics && routineCleanupApplied) {
+	const nativeBudgetClearingAllowed = Boolean(
+		args.reasoningClearing && args.reasoningClearing.prefixBound !== true,
+	);
+	if (
+		args.reasoningClearing &&
+		nativeBudgetClearingAllowed &&
+		shouldRunHeuristics &&
+		routineCleanupApplied &&
+		!protectedSignedPrefix
+	) {
 		const rollbackReasoning = captureReasoningMutationRollback(workingMessages);
 		try {
 			const tClearReasoning = performance.now();
@@ -9227,7 +9421,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
-				detect: isCacheBustingPass,
+				detect: isCacheBustingPass && !protectedSignedPrefix,
 				watermark: getMaxDroppedTagNumber(args.db, args.sessionId),
 				messageIdToMaxTag,
 				stableId: stableIdResolver,
@@ -9255,7 +9449,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		db: args.db,
 		sessionId: args.sessionId,
 		activeTags,
-		targets,
+		targets: newTargets,
 		legacyReminderTagNumbers: textIdentityPlan.legacyReminderTagNumbers,
 		cacheBusting: isCacheBustingPass,
 	});
@@ -9871,6 +10065,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		messages: outputMessages,
 		prefixBustPermitted: isCacheBustingPass,
 		prefixMutationAllowed,
+		strictThinkingKept: protectedSignedPrefix,
+		signedPrefixRewritten: rewritingSignedPrefix,
 		prefixRebuildAlreadyPriced:
 			firstRenderBust || piHardSignals?.cacheExpired === true,
 		identityRebuilt: identityRebuild,

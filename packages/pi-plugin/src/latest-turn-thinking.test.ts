@@ -491,125 +491,144 @@ for (const lane of [
 }
 
 for (const cause of ["first render", "idle expiry"] as const) {
-	test(`Pi held ${cause} admits safe riders on the already-priced pass`, async () => {
-		const db = createTestDb();
-		const sessionId = `pi-held-priced-${cause}`;
-		getOrCreateSessionMeta(db, sessionId);
-		updateSessionMeta(db, sessionId, {
-			piStableIdScheme: 1,
-			lastResponseTime: Date.now(),
-			cacheTtl: "13h",
-		});
-		const fake = createFakePi();
-		const options: Parameters<typeof registerPiContextHandler>[1] = {
-			db,
-			tagger: createTagger(),
-			protectedTokens: 4000,
-			injection:
-				cause === "idle expiry"
-					? {
-							injectionBudgetTokens: 1000,
-							memoryEnabled: false,
-							injectDocs: false,
-						}
-					: undefined,
-			heuristics: { keepReasoningTokens: 10000 },
-			scheduler: { executeThresholdPercentage: 65 },
-		};
-		registerPiContextHandler(fake.pi as never, options);
-		const handler = fake.handlers.get("context")!;
-		const thought = (n: number) =>
-			assistantMessage(`answer ${n}`, n, {
-				provider: "anthropic",
-				model: "claude-opus-5-5",
-				content: [
-					{
-						type: "thinking",
-						thinking: `thought ${n}`,
-						thinkingSignature: `sig-${n}`,
-					},
-					{ type: "text", text: `answer ${n}` },
-				],
+	test(
+		cause === "first render"
+			? "Pi rewriting first render strips all thinking and admits queued work"
+			: "Pi idle expiry admits suffix work while keeping every signed block",
+		async () => {
+			const db = createTestDb();
+			const sessionId = `pi-held-priced-${cause}`;
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				piStableIdScheme: 1,
+				lastResponseTime: Date.now(),
+				cacheTtl: "13h",
 			});
-		const source = [
-			userMessage("old task", 1),
-			thought(2),
-			userMessage("active task", 3),
-			thought(4),
-			assistantMessage("SAFE-LATE-CONTENT", 5, {
-				provider: "anthropic",
-				model: "claude-opus-5-5",
-			}),
-		];
-		const ids = [
-			"old-user",
-			"old-answer",
-			"active-user",
-			"active-thought",
-			"late-answer",
-		];
-		const pass = async (warm = false) => {
-			const messages = structuredClone(warm ? source.slice(0, 1) : source);
-			const ctx = {
-				...fakeContext(
-					sessionId,
-					process.cwd(),
-					warm ? ids.slice(0, 1) : ids,
-					messages,
-				),
-				model: {
+			const fake = createFakePi();
+			const options: Parameters<typeof registerPiContextHandler>[1] = {
+				db,
+				tagger: createTagger(),
+				protectedTokens: 4000,
+				injection:
+					cause === "idle expiry"
+						? {
+								injectionBudgetTokens: 1000,
+								memoryEnabled: false,
+								injectDocs: false,
+							}
+						: undefined,
+				heuristics: { keepReasoningTokens: 10000 },
+				scheduler: { executeThresholdPercentage: 65 },
+			};
+			registerPiContextHandler(fake.pi as never, options);
+			const handler = fake.handlers.get("context")!;
+			const thought = (n: number) =>
+				assistantMessage(`answer ${n}`, n, {
 					provider: "anthropic",
-					id: "claude-opus-5-5",
-					api: "anthropic-messages",
-					contextWindow: 100000,
-				},
-				getContextUsage: () => ({
-					tokens: 66000,
-					percent: 66,
-					contextWindow: 100000,
-				}),
-			};
-			return (
-				(await handler({ messages } as never, ctx as never)) as {
-					messages: unknown[];
-				}
-			).messages;
-		};
-		try {
-			if (cause === "idle expiry") await pass(true);
-			await pass();
-			const late = getTagsBySession(db, sessionId)
-				.filter((tag) => tag.type === "message")
-				.sort((a, b) => b.tagNumber - a.tagNumber)[0]!;
-			options.injection = {
-				injectionBudgetTokens: 1000,
-				memoryEnabled: false,
-				injectDocs: false,
-			};
-			if (cause === "idle expiry")
-				updateSessionMeta(db, sessionId, {
-					lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+					model: "claude-opus-5-5",
+					content: [
+						{
+							type: "thinking",
+							thinking: `thought ${n}`,
+							thinkingSignature: `sig-${n}`,
+						},
+						{ type: "text", text: `answer ${n}` },
+					],
 				});
-			queuePendingOp(db, sessionId, late.tagNumber, "drop");
-			const priced = await pass();
-			expect(getPendingOps(db, sessionId)).toHaveLength(0);
-			expect(
-				getTagsBySession(db, sessionId).find(
-					(tag) => tag.tagNumber === late.tagNumber,
-				)?.status,
-			).toBe("dropped");
-			expect(JSON.stringify(priced)).not.toContain("SAFE-LATE-CONTENT");
-			expect(JSON.stringify(priced)).toContain('"thinkingSignature":"sig-4"');
-			expect([...getMergedReasoningStrippedIds(db, sessionId)]).toContain(
-				"binding_mismatch:old-answer",
-			);
-			updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
-			expect(JSON.stringify(await pass())).toBe(JSON.stringify(priced));
-		} finally {
-			clearContextHandlerSession(sessionId);
-			db.close();
-		}
-	});
+			const source = [
+				userMessage("old task", 1),
+				thought(2),
+				userMessage("active task", 3),
+				thought(4),
+				assistantMessage("SAFE-LATE-CONTENT", 5, {
+					provider: "anthropic",
+					model: "claude-opus-5-5",
+				}),
+			];
+			const ids = [
+				"old-user",
+				"old-answer",
+				"active-user",
+				"active-thought",
+				"late-answer",
+			];
+			const pass = async (warm = false) => {
+				const messages = structuredClone(warm ? source.slice(0, 1) : source);
+				const ctx = {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						warm ? ids.slice(0, 1) : ids,
+						messages,
+					),
+					model: {
+						provider: "anthropic",
+						id: "claude-opus-5-5",
+						api: "anthropic-messages",
+						contextWindow: 100000,
+					},
+					getContextUsage: () => ({
+						tokens: 66000,
+						percent: 66,
+						contextWindow: 100000,
+					}),
+				};
+				return (
+					(await handler({ messages } as never, ctx as never)) as {
+						messages: unknown[];
+					}
+				).messages;
+			};
+			try {
+				if (cause === "idle expiry") await pass(true);
+				await pass();
+				const late = getTagsBySession(db, sessionId)
+					.filter((tag) => tag.type === "message")
+					.sort((a, b) => b.tagNumber - a.tagNumber)[0]!;
+				options.injection = {
+					injectionBudgetTokens: 1000,
+					memoryEnabled: false,
+					injectDocs: false,
+				};
+				if (cause === "idle expiry")
+					updateSessionMeta(db, sessionId, {
+						lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+					});
+				queuePendingOp(db, sessionId, late.tagNumber, "drop");
+				const priced = await pass();
+				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === late.tagNumber,
+					)?.status,
+				).toBe("dropped");
+				expect(JSON.stringify(priced)).not.toContain("SAFE-LATE-CONTENT");
+				if (cause === "first render") {
+					expect(JSON.stringify(priced)).not.toContain("thinkingSignature");
+					expect([...getMergedReasoningStrippedIds(db, sessionId)]).toContain(
+						"binding_mismatch:old-answer",
+					);
+				} else {
+					expect(JSON.stringify(priced)).toContain(
+						'"thinkingSignature":"sig-2"',
+					);
+					expect(JSON.stringify(priced)).toContain(
+						'"thinkingSignature":"sig-4"',
+					);
+					expect(
+						[...getMergedReasoningStrippedIds(db, sessionId)].filter((id) =>
+							id.startsWith("binding_mismatch:"),
+						),
+					).toEqual([]);
+				}
+				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+				expect(JSON.stringify(await pass())).toBe(JSON.stringify(priced));
+			} finally {
+				clearContextHandlerSession(sessionId);
+				db.close();
+			}
+		},
+	);
 }
 
 test("unheld contended preflight replays todo and preserves sticky anchors and thinking", async () => {
@@ -766,7 +785,7 @@ test("unheld contended preflight replays todo and preserves sticky anchors and t
 	}
 });
 
-test("Pi already-cold held pass strips older thinking without inventing another prefix edit", async () => {
+test("Pi already-cold held pass keeps every signed block when no binding bytes change", async () => {
 	const db = createTestDb();
 	const sessionId = "pi-cold-strip-without-other-edit";
 	getOrCreateSessionMeta(db, sessionId);
@@ -843,10 +862,328 @@ test("Pi already-cold held pass strips older thinking without inventing another 
 			lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
 		});
 		const cold = JSON.stringify(await pass());
-		expect(cold).not.toContain('"thinkingSignature":"sig-2"');
+		expect(cold).toContain('"thinkingSignature":"sig-2"');
 		expect(cold).toContain('"thinkingSignature":"sig-4"');
 		updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 		expect(JSON.stringify(await pass())).toBe(cold);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		db.close();
+	}
+});
+
+for (const trigger of ["wall", "final fit"] as const)
+	for (const outcome of ["fits", "still too large"] as const) {
+		test(`Pi ${trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
+			const db = createTestDb();
+			const sessionId = `pi-signed-fit-${trigger}-${outcome}`;
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				piStableIdScheme: 1,
+				lastResponseTime: Date.now(),
+				cacheTtl: "13h",
+			});
+			const fake = createFakePi();
+			Object.assign(fake.pi, {
+				getAllTools: () => [
+					{
+						name: "read",
+						description: "Read a file",
+						parameters: {
+							type: "object",
+							properties: { path: { type: "string" } },
+						},
+					},
+				],
+				getActiveTools: () => ["read"],
+			});
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTokens: 4000,
+				protectedTools: { read: 0 },
+				injection: {
+					injectionBudgetTokens: 1000,
+					memoryEnabled: false,
+					injectDocs: false,
+				},
+				heuristics: { keepReasoningTokens: 10000 },
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context")!;
+			const source = [
+				userMessage("start", 1),
+				assistantMessage("", 2, {
+					provider: "anthropic",
+					model: "claude-opus-5-5",
+					api: "anthropic-messages",
+					content: [
+						{
+							type: "toolCall",
+							id: "old-call",
+							name: "read",
+							arguments: { path: "old.ts" },
+						},
+					],
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "old-call",
+					toolName: "read",
+					content: [{ type: "text", text: "small result" }],
+					isError: false,
+					timestamp: 3,
+				},
+			];
+			const ids = ["u0", "old-tool", "old-result"];
+			let percent = 20;
+			const serve = async () => {
+				const messages = structuredClone(source);
+				const ctx = {
+					...fakeContext(sessionId, process.cwd(), ids, messages as never),
+					getSystemPrompt: () => "Read files for the task.",
+					model: {
+						provider: "anthropic",
+						id: "claude-opus-5-5",
+						api: "anthropic-messages",
+						contextWindow: 100000,
+					},
+					getContextUsage: () => ({
+						tokens: percent * 1000,
+						percent,
+						contextWindow: 100000,
+					}),
+				};
+				return (
+					(await handler({ messages } as never, ctx as never)) as {
+						messages: unknown[];
+					}
+				).messages;
+			};
+			try {
+				await serve();
+				const tag = getTagsBySession(db, sessionId).find(
+					(tag) => tag.type === "tool",
+				)!;
+				(source[2].content as { text: string }[])[0].text =
+					"RECLAIMABLE ".repeat(60000);
+				source.push(
+					userMessage(
+						outcome === "fits" ? "continue" : "MANDATORY_USER ".repeat(90000),
+						4,
+					),
+					assistantMessage("current work", 5, {
+						provider: "anthropic",
+						model: "claude-opus-5-5",
+						api: "anthropic-messages",
+						content: [
+							{
+								type: "thinking",
+								thinking: "kept signed thinking",
+								thinkingSignature: "fit-signature",
+							},
+							{ type: "text", text: "current work" },
+						],
+					}),
+				);
+				ids.push("active-user", "active");
+				queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+				percent = trigger === "wall" ? 96 : 75;
+				if (outcome === "fits") {
+					const output = JSON.stringify(await serve());
+					expect(output).not.toContain("fit-signature");
+					expect(output).not.toContain("RECLAIMABLE");
+				} else
+					await expect(serve()).rejects.toMatchObject({
+						name: "EmergencyFailClosedError",
+					});
+				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(row) => row.tagNumber === tag.tagNumber,
+					)?.status,
+				).toBe("dropped");
+			} finally {
+				clearContextHandlerSession(sessionId);
+				db.close();
+			}
+		}, 30_000);
+	}
+
+test("Pi projected transcript gaps cannot drop an earlier target in front of kept thinking", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-projected-thinking-boundary";
+	getOrCreateSessionMeta(db, sessionId);
+	updateSessionMeta(db, sessionId, {
+		piStableIdScheme: 1,
+		cacheTtl: "13h",
+		lastResponseTime: Date.now(),
+	});
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTokens: 4000,
+		injection: {
+			injectionBudgetTokens: 1000,
+			memoryEnabled: false,
+			injectDocs: false,
+		},
+		heuristics: { keepReasoningTokens: 10000 },
+		scheduler: { executeThresholdPercentage: 65 },
+	});
+	const handler = fake.handlers.get("context")!;
+	const extra = {
+		provider: "anthropic",
+		model: "claude-opus-5-5",
+		api: "anthropic-messages",
+	};
+	const source = [
+		userMessage("old work", 1),
+		assistantMessage("PROTECTED_OLD_BODY", 2, extra),
+		...Array.from({ length: 12 }, (_, i) =>
+			assistantMessage("", 3 + i, { ...extra, content: [] }),
+		),
+		userMessage("active work", 20),
+	];
+	const ids = [
+		"old-user",
+		"old-body",
+		...Array.from({ length: 12 }, (_, i) => `empty-${i}`),
+		"active-user",
+	];
+	const serve = async () => {
+		const messages = structuredClone(source);
+		const ctx = {
+			...fakeContext(sessionId, process.cwd(), ids, messages),
+			model: { ...extra, id: extra.model, contextWindow: 100000 },
+			getContextUsage: () => ({
+				tokens: 66000,
+				percent: 66,
+				contextWindow: 100000,
+			}),
+		};
+		return (
+			(await handler({ messages } as never, ctx as never)) as {
+				messages: unknown[];
+			}
+		).messages;
+	};
+	try {
+		await serve();
+		source.push(
+			assistantMessage("current", 21, {
+				...extra,
+				content: [
+					{
+						type: "thinking",
+						thinking: "kept",
+						thinkingSignature: "projected-kept",
+					},
+					{ type: "text", text: "current" },
+				],
+			}),
+		);
+		ids.push("active-thinking");
+		const before = JSON.stringify(await serve());
+		const old = getTagsBySession(db, sessionId).find((tag) =>
+			tag.messageId.startsWith("old-body"),
+		)!;
+		queuePendingOp(db, sessionId, old.tagNumber, "drop");
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+		});
+		const after = JSON.stringify(await serve());
+		expect(after).toBe(before);
+		expect(after).toContain("PROTECTED_OLD_BODY");
+		expect(after).toContain("projected-kept");
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		db.close();
+	}
+});
+
+test("Pi unheld idle expiry carries queued work and all-thinking stripping in one cache-safe pass", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-unheld-idle-riders";
+	getOrCreateSessionMeta(db, sessionId);
+	updateSessionMeta(db, sessionId, {
+		piStableIdScheme: 1,
+		cacheTtl: "13h",
+		lastResponseTime: Date.now(),
+	});
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTokens: 4000,
+		injection: {
+			injectionBudgetTokens: 1000,
+			memoryEnabled: false,
+			injectDocs: false,
+		},
+		heuristics: { keepReasoningTokens: 10000 },
+		scheduler: { executeThresholdPercentage: 65 },
+	});
+	const handler = fake.handlers.get("context")!;
+	const source = [
+		userMessage("old work", 1),
+		assistantMessage("RECLAIM_OLD", 2, {
+			provider: "anthropic",
+			model: "claude-opus-5-5",
+			content: [
+				{
+					type: "thinking",
+					thinking: "old",
+					thinkingSignature: "old-complete",
+				},
+				{ type: "text", text: "RECLAIM_OLD" },
+			],
+		}),
+		userMessage("new work", 3),
+	];
+	const ids = ["old-user", "old-body", "new-user"];
+	const serve = async (warm = false) => {
+		const messages = structuredClone(warm ? source.slice(0, 1) : source);
+		const ctx = {
+			...fakeContext(
+				sessionId,
+				process.cwd(),
+				warm ? ids.slice(0, 1) : ids,
+				messages,
+			),
+			model: {
+				provider: "anthropic",
+				id: "claude-opus-5-5",
+				api: "anthropic-messages",
+				contextWindow: 100000,
+			},
+			getContextUsage: () => ({
+				tokens: 20000,
+				percent: 20,
+				contextWindow: 100000,
+			}),
+		};
+		return (
+			(await handler({ messages } as never, ctx as never)) as {
+				messages: unknown[];
+			}
+		).messages;
+	};
+	try {
+		await serve(true);
+		await serve();
+		const old = getTagsBySession(db, sessionId).find((tag) =>
+			tag.messageId.startsWith("old-body"),
+		)!;
+		queuePendingOp(db, sessionId, old.tagNumber, "drop");
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+		});
+		const cold = JSON.stringify(await serve());
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(cold).not.toContain("RECLAIM_OLD");
+		expect(cold).not.toContain("old-complete");
+		updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+		expect(JSON.stringify(await serve())).toBe(cold);
 	} finally {
 		clearContextHandlerSession(sessionId);
 		db.close();

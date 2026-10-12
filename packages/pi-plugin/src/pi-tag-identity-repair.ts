@@ -72,6 +72,7 @@ function freezeIdentityDecision(
 	kind:
 		| "tag-identity-repair-once"
 		| "tag-identity-repair-pending"
+		| "tag-identity-rebuild-failed"
 		| "tag-identity-recurring",
 	value: string,
 ): boolean {
@@ -160,6 +161,28 @@ export function queuePiIdentityRebuild(
 		"tag-identity-repair-pending",
 		JSON.stringify(repair),
 	);
+}
+
+/** Only the first recorded cache-clear failure may refuse a send; later failures serve with the identity repair pending. */
+export function claimPiIdentityRebuildFailure(
+	db: Database,
+	sessionId: string,
+): "first" | "again" | "unpersisted" {
+	const decisions = readPiIdentityDecisions(db, sessionId);
+	if (!decisions) return "unpersisted";
+	const key = encodePiContentDecision(
+		"tag-identity-rebuild-failed",
+		"m0-m1-clear",
+	);
+	if (decisions.has(key)) return "again";
+	return freezeIdentityDecision(
+		db,
+		sessionId,
+		"tag-identity-rebuild-failed",
+		"m0-m1-clear",
+	)
+		? "first"
+		: "unpersisted";
 }
 
 export function readPiIdentityRebuilds(

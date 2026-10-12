@@ -742,9 +742,8 @@ for (const seed of SEEDS) {
 
 // Strict binding: a signed block kept on two consecutive passes must have
 // identical provider-visible bytes before it, and m[0]/m[1] must not be
-// re-rendered while signed thinking is kept. The held drivers break both (see
-// docs/reports/issue-665-hold-review-r2.md); pinned as expected failures so the
-// suite stays green while they are open.
+// re-rendered while signed thinking is kept. These checks must pass on every
+// generated sequence, including first render, expiry and carried repairs.
 function aggregate(kind: Violation["kind"]): string[] {
 	expect(heldViolations.size).toBeGreaterThan(0);
 	return [...heldViolations].flatMap(([seed, violations]) =>
@@ -753,10 +752,10 @@ function aggregate(kind: Violation["kind"]): string[] {
 		),
 	);
 }
-test.failing("Pi held drivers: no kept signed thinking is served behind changed bytes", () => {
+test("Pi held drivers: no kept signed thinking is served behind changed bytes", () => {
 	expect(aggregate("strict-binding")).toEqual([]);
 });
-test.failing("Pi held drivers: m[0]/m[1] is never re-rendered while signed thinking is kept", () => {
+test("Pi held drivers: m[0]/m[1] is never re-rendered while signed thinking is kept", () => {
 	expect(aggregate("m0m1-rerendered")).toEqual([]);
 });
 
@@ -1001,14 +1000,9 @@ for (const withCarriedRepair of [false, true]) {
 				fixture.db.close();
 			}
 		};
-		// A tag-identity repair left pending by the held pass is applied as soon as
-		// the hold lifts (idle expiry, 85%, 95%): it clears and re-renders m[0]/m[1]
-		// in front of thinking that is still served, which strict prefix binding
-		// rejects. Pinned as expected failures so the suite stays green while the
-		// defect is open; R2_SHOW_FAILING=1 runs them as plain tests.
-		if (withCarriedRepair && !process.env.R2_SHOW_FAILING)
-			test.failing(name, body, 60_000);
-		else test(name, body, 60_000);
+		// Pressure and expiry do not change the binding of kept thinking. A carried
+		// repair therefore keeps replaying until the signatures can all be omitted.
+		test(name, body, 60_000);
 	}
 }
 
@@ -1017,56 +1011,62 @@ for (const withCarriedRepair of [false, true]) {
 // last-known-good prefix takes the declared rebuild, whose m[0]/m[1] clear is
 // made to fail. Count refused passes across two held tool steps and two later
 // user turns.
-// Pinned as an expected failure: with the m[0]/m[1] clear failing, every pass
-// that tries the declared rebuild refuses, in the held turn and in each later
-// user turn (62fa1e27 refused none here).
-(process.env.R2_SHOW_FAILING ? test : test.failing)(
-	"Pi carried identity repair: a failing declared rebuild refuses at most one turn",
-	async () => {
-		const logs = spyOn(logger, "sessionLog").mockImplementation(() => {});
-		const fixture = await piRulingFixture(true);
-		const refusedTurns = new Set<number>();
-		let turn = 0;
-		const serveCounting = async () => {
-			try {
-				await fixture.serve();
-			} catch (error) {
-				refusedTurns.add(turn);
-				if (process.env.R2_DEBUG)
-					console.log("refused:", String(error).slice(0, 200));
-			}
-		};
+// A persistent clear failure may refuse once, then must serve with the repair
+// still pending rather than interrupt every pass and every later user turn.
+test("Pi carried identity repair: a failing declared rebuild refuses at most one turn", async () => {
+	const logs = spyOn(logger, "sessionLog").mockImplementation(() => {});
+	const fixture = await piRulingFixture(true);
+	const refusedTurns = new Set<number>();
+	let turn = 0;
+	let servedPasses = 0;
+	const serveCounting = async () => {
 		try {
-			fixture.db.exec(
-				"CREATE TRIGGER r2_fail_m0_clear BEFORE UPDATE OF cached_m0_bytes ON session_meta WHEN NEW.cached_m0_bytes IS NULL BEGIN SELECT RAISE(FAIL, 'injected m0 clear failure'); END",
-			);
-			dropSlot(fixture.sessionId, "r2-no-lkg");
-			fixture.heldStep();
-			await serveCounting();
-			fixture.heldStep();
-			await serveCounting();
-			for (const n of [1, 2]) {
-				turn = n;
-				fixture.source.push(userMessage(`turn ${n}`, 200 + n));
-				fixture.ids.push(`turn-${n}`);
-				await serveCounting();
-				fixture.heldStep();
-				await serveCounting();
-			}
+			await fixture.serve();
+			servedPasses++;
+		} catch (error) {
+			refusedTurns.add(turn);
 			if (process.env.R2_DEBUG)
-				console.log(
-					"refused turns",
-					[...refusedTurns],
-					"pending",
-					readPiIdentityRebuilds(fixture.db, fixture.sessionId).length,
-				);
-			expect(refusedTurns.size).toBeLessThanOrEqual(1);
-		} finally {
-			logs.mockRestore();
-			clearContextHandlerSession(fixture.sessionId);
-			clearPiServedArraySession(fixture.sessionId);
-			fixture.db.close();
+				console.log("refused:", String(error).slice(0, 200));
 		}
-	},
-	60_000,
-);
+	};
+	try {
+		fixture.db.exec(
+			"CREATE TRIGGER r2_fail_m0_clear BEFORE UPDATE OF cached_m0_bytes ON session_meta WHEN NEW.cached_m0_bytes IS NULL BEGIN SELECT RAISE(FAIL, 'injected m0 clear failure'); END",
+		);
+		dropSlot(fixture.sessionId, "r2-no-lkg");
+		fixture.heldStep();
+		await serveCounting();
+		fixture.heldStep();
+		await serveCounting();
+		for (const n of [1, 2]) {
+			turn = n;
+			fixture.source.push(userMessage(`turn ${n}`, 200 + n));
+			fixture.ids.push(`turn-${n}`);
+			await serveCounting();
+			fixture.heldStep();
+			await serveCounting();
+		}
+		if (process.env.R2_DEBUG)
+			console.log(
+				"refused turns",
+				[...refusedTurns],
+				"pending",
+				readPiIdentityRebuilds(fixture.db, fixture.sessionId).length,
+			);
+		expect(refusedTurns.size).toBeLessThanOrEqual(1);
+		expect(servedPasses).toBeGreaterThanOrEqual(5);
+		expect(readPiIdentityRebuilds(fixture.db, fixture.sessionId)).toHaveLength(
+			1,
+		);
+		expect(
+			logs.mock.calls.some((call) =>
+				String(call[1]).includes("repair still pending"),
+			),
+		).toBe(true);
+	} finally {
+		logs.mockRestore();
+		clearContextHandlerSession(fixture.sessionId);
+		clearPiServedArraySession(fixture.sessionId);
+		fixture.db.close();
+	}
+}, 60_000);

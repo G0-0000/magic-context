@@ -71,6 +71,7 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+import { isRecord } from "../../shared/record-type-guard";
 import { withoutSqliteTransformPass } from "../../shared/sqlite";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import type { CavemanWordRules } from "./caveman";
@@ -133,7 +134,7 @@ import {
     captureLatestTurnOriginals,
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
-import { saveLkgSlotToDb } from "./lkg-persist";
+import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
@@ -698,6 +699,7 @@ export function createTransform(deps: TransformDeps) {
     const host = resolveTransformHostSeams(deps);
     const loadedSessions = new Set<string>();
     const prefixHoldLogTurnIds = new Map<string, string | null>();
+    const thinkingFitRetries = new Set<string>();
     const clearSessionLogState = (sessionId: string): void => {
         prefixHoldLogTurnIds.delete(sessionId);
     };
@@ -750,6 +752,15 @@ export function createTransform(deps: TransformDeps) {
         const startTime = performance.now();
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
+        const originalForThinkingFit = messages.some((message) =>
+            message.parts.some(
+                (part) =>
+                    isRecord(part) &&
+                    ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type)),
+            ),
+        )
+            ? structuredClone(messages)
+            : null;
         const passOutcome = createPassOutcome();
         const tSessionId = performance.now();
         const sessionId = findSessionId(messages);
@@ -2774,7 +2785,9 @@ export function createTransform(deps: TransformDeps) {
             client: deps.client,
             activeAgent,
             batch,
-            contextUsage,
+            contextUsage: thinkingFitRetries.has(sessionId)
+                ? { ...contextUsage, percentage: Math.max(95, contextUsage.percentage) }
+                : contextUsage,
             usableWindow: resolvedContextLimit ?? 0,
             schedulerDecision,
             schedulerDeferReason,
@@ -2790,6 +2803,16 @@ export function createTransform(deps: TransformDeps) {
             historyRefreshExplicitBeforePrepare,
             freezeM0M1,
             activeThinkingPrefixHold,
+            directoryPrefixHold: unresolvedDirectoryHold,
+            forceSignedRebuildForFit: thinkingFitRetries.has(sessionId),
+            readLastServedMessages: () => {
+                const slot = getInMemorySlot(sessionId) ?? loadPersistedLkgSlot(db, sessionId);
+                try {
+                    return slot ? JSON.parse(slot.jsonPrefix) : null;
+                } catch {
+                    return null;
+                }
+            },
             deferredHistoryWasPendingAtPassStart,
             compartmentInjectionRebuiltFromDb: pendingCompartmentInjection?.rebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare,
@@ -2935,6 +2958,38 @@ export function createTransform(deps: TransformDeps) {
                     sessionId,
                     `transform: final-wire telemetry estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} conversation=${finalWireEstimate.messageTokens.conversation} tools=${finalWireEstimate.messageTokens.toolCall} system=${finalWireEstimate.systemTokens} toolDefinitions=${finalWireEstimate.toolDefinitionTokens ?? "unknown"} tail=${finalWireTail}`,
                 );
+            }
+            if (
+                (finalWireEstimate?.refusalGrade ||
+                    (finalWireEstimate?.refusalBasis === "byte-bound" &&
+                        finalWireEstimate.refusalTokens !== undefined)) &&
+                boundaryContextLimit > 0 &&
+                (finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens) > boundaryContextLimit
+            ) {
+                if (
+                    !thinkingFitRetries.has(sessionId) &&
+                    activeThinkingPrefixHold &&
+                    originalForThinkingFit &&
+                    hasActiveAnthropicThinkingTurn(
+                        messages,
+                        resolvedProviderID,
+                        modelForBudget?.modelID,
+                    )
+                ) {
+                    thinkingFitRetries.add(sessionId);
+                    deps.pendingMaterializationSessions.add(sessionId);
+                    messages.splice(0, messages.length, ...originalForThinkingFit);
+                    try {
+                        await transform({}, output);
+                    } finally {
+                        thinkingFitRetries.delete(sessionId);
+                    }
+                    return;
+                }
+                if (thinkingFitRetries.has(sessionId) || postTransformResult.thinkingReleasedForFit)
+                    throw contextRefusalError(
+                        "The request remains over the model window after stripping signed thinking and reclaiming context",
+                    );
             }
             // The prefix trim could not find the history boundary, so the whole
             // window is about to go out uncut. That is harmless while it fits and

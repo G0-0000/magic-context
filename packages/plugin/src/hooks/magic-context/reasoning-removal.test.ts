@@ -450,7 +450,7 @@ describe("reasoning removal through postprocess", () => {
         await pass(database, sessionId, session, {
             busting: true,
             providerID: "google-vertex-anthropic",
-            prefixBound: true,
+            prefixBound: false,
             overrides: { keepReasoningTokens: 3 * rawCost },
         });
         expect(getRemovedReasoningIds(database, sessionId)).toEqual(

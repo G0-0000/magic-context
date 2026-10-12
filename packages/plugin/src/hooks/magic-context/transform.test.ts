@@ -5024,11 +5024,8 @@ for (const generation of ["v1", "v2"] as const) {
                 updatedAt: Date.now(),
                 hasUsageTokens: true,
             });
-            // The trailing output was legally reclaimable at 95%. A later
-            // signed block now freezes that output too, leaving no safe drop.
-            // Holding the unsafe drop never refuses the turn on its own: the
-            // unchanged turn is served, because only a proven final-wire
-            // overflow refuses a request.
+            // The wall cannot reclaim in front of kept signatures. It first
+            // omits every signed block, then applies the queued reduction.
             raw.push({
                 info: {
                     id: "last-thought",
@@ -5040,9 +5037,12 @@ for (const generation of ["v1", "v2"] as const) {
                 parts: [{ type: "reasoning", text: "last immutable thought" }],
             });
             const held = await pass();
-            expect(JSON.stringify(held.slice(0, baseline.length))).toBe(JSON.stringify(baseline));
-            expect(held.at(-1)?.parts).toEqual(raw.at(-1)?.parts);
-            expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toContain(tag.tagNumber);
+            expect(
+                held
+                    .flatMap((message) => message.parts)
+                    .filter((part) => part.type === "reasoning"),
+            ).toHaveLength(0);
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
             raw.push({
                 info: { id: "next", role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "Next real user" }],
@@ -5284,3 +5284,269 @@ it("OpenCode spent drain budget keeps served defer bytes unchanged without histo
         start.mockRestore();
     }
 });
+
+it("a flush in a held signed turn is parked through execute and defer passes and consumed by one release bust", async () => {
+    useTempDataHome("held-flush-standing-permission-");
+    const db = openDatabase();
+    const sessionId = "held-flush-live-sequence";
+    getOrCreateSessionMeta(db, sessionId);
+    updateSessionMeta(db, sessionId, {
+        systemPromptHash: "before",
+        lastResponseTime: Date.now(),
+        cacheTtl: "13h",
+    });
+    const flush = new Set<string>();
+    const usage = new Map([
+        [
+            sessionId,
+            {
+                usage: { percentage: 20, inputTokens: 40000 },
+                updatedAt: Date.now(),
+                hasUsageTokens: true,
+            },
+        ],
+    ]);
+    const transform = createTransform({
+        db,
+        tagger: createTagger(),
+        directory: makeTempDir("held-flush-project-"),
+        scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+        contextUsageMap: usage,
+        liveModelBySession: new Map([
+            [sessionId, { providerID: "anthropic", modelID: "claude-opus-5-5" }],
+        ]),
+        historyRefreshSessions: new Set(),
+        pendingMaterializationSessions: flush,
+        lastHeuristicsTurnId: new Map(),
+        protectedTokens: 4000,
+        clearReasoningAge: 1,
+        keepReasoningTokens: 1,
+        historianRunnable: false,
+    });
+    const source: TestMessage[] = [
+        {
+            info: { id: "old-user", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "old work" }],
+        },
+    ];
+    const serve = async () => {
+        const messages = structuredClone(source);
+        await transform({}, { messages });
+        return messages;
+    };
+    const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+    try {
+        await serve();
+        for (let n = 0; n < 402; n++)
+            source.push({
+                info: {
+                    id: `old-${n}`,
+                    role: "assistant",
+                    sessionID: sessionId,
+                    providerID: "anthropic",
+                    modelID: "claude-opus-5-5",
+                },
+                parts: [
+                    { type: "reasoning", text: `old signed reasoning ${n}` },
+                    { type: "text", text: `OLD_BODY_${n} `.repeat(4) },
+                ],
+            });
+        source.push(
+            {
+                info: { id: "active-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: {
+                    id: "active-signed",
+                    role: "assistant",
+                    sessionID: sessionId,
+                    providerID: "anthropic",
+                    modelID: "claude-opus-5-5",
+                },
+                parts: [
+                    { type: "reasoning", text: "kept signed thinking" },
+                    { type: "text", text: "current work" },
+                ],
+            },
+        );
+        const baseline = JSON.stringify(await serve());
+        const old = getTagsBySession(db, sessionId).filter(
+            (tag) =>
+                tag.type === "message" &&
+                tag.messageId.startsWith("old-") &&
+                !tag.messageId.startsWith("old-user"),
+        );
+        expect(old).toHaveLength(402);
+        for (const tag of old.slice(0, 33)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        usage.set(sessionId, {
+            usage: { percentage: 75.1, inputTokens: 150200 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        expect(JSON.stringify(await serve())).toBe(baseline);
+        flush.add(sessionId);
+        updateSessionMeta(db, sessionId, { systemPromptHash: "after" });
+        const start = logs.mock.calls.length;
+        expect(JSON.stringify(await serve())).toBe(baseline);
+        expect(getPendingOps(db, sessionId)).toHaveLength(33);
+        for (const tag of old.slice(33, 401)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        usage.set(sessionId, {
+            usage: { percentage: 40, inputTokens: 80000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        for (let pass = 0; pass < 3; pass++) {
+            expect(JSON.stringify(await serve())).toBe(baseline);
+            expect(getPendingOps(db, sessionId)).toHaveLength(401);
+        }
+        expect(flush.has(sessionId)).toBe(true);
+        const heldLogs = logs.mock.calls.slice(start).map((args) => String(args[1]));
+        expect(
+            heldLogs.some((line) => /WILL APPLY|WILL RUN|reasoning removal: froze/.test(line)),
+        ).toBe(false);
+        expect(
+            logs.mock.calls.filter((args) =>
+                String(args[1]).includes("m[0]/m[1] frozen: active thinking turn"),
+            ),
+        ).toHaveLength(1);
+        source.push({
+            info: { id: "next-user", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "next task" }],
+        });
+        const released = JSON.stringify(await serve());
+        expect(released).not.toBe(baseline);
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(flush.has(sessionId)).toBe(false);
+        for (let pass = 0; pass < 3; pass++) expect(JSON.stringify(await serve())).toBe(released);
+        expect(
+            logs.mock.calls
+                .slice(start)
+                .filter((args) =>
+                    String(args[1]).includes("pending ops WILL APPLY — reason=explicit_flush"),
+                ),
+        ).toHaveLength(1);
+    } finally {
+        logs.mockRestore();
+        db.close();
+    }
+}, 30_000);
+
+for (const trigger of ["wall", "final fit"] as const)
+    for (const outcome of ["fits", "still too large"] as const) {
+        it(`OpenCode ${trigger} strips kept thinking before emergency reclaim and ${outcome}`, async () => {
+            const fitModel = "unit-opus-5-5";
+            useTempDataHome("signed-emergency-fit-");
+            const db = openDatabase();
+            const sessionId = `signed-fit-${trigger}-${outcome}`;
+            getOrCreateSessionMeta(db, sessionId);
+            updateSessionMeta(db, sessionId, { cacheTtl: "13h", lastResponseTime: Date.now() });
+            const usage = new Map([
+                [
+                    sessionId,
+                    {
+                        usage: { percentage: 20, inputTokens: 20000 },
+                        updatedAt: Date.now(),
+                        hasUsageTokens: true,
+                    },
+                ],
+            ]);
+            const source: TestMessage[] = [
+                {
+                    info: { id: "u0", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "start" }],
+                },
+            ];
+            const transform = createTransform({
+                db,
+                tagger: createTagger(),
+                directory: makeTempDir("signed-fit-dir-"),
+                scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+                contextUsageMap: usage,
+                historyRefreshSessions: new Set(),
+                pendingMaterializationSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+                liveModelBySession: new Map([
+                    [sessionId, { providerID: "anthropic", modelID: fitModel }],
+                ]),
+                clearReasoningAge: 999,
+                protectedTokens: 4000,
+                protectedTools: { read: 0 },
+                historianRunnable: false,
+            });
+            const serve = async () => {
+                const messages = structuredClone(source);
+                await transform({}, { messages });
+                return messages;
+            };
+            try {
+                await serve();
+                source.push({
+                    info: {
+                        id: "old-tool",
+                        role: "assistant",
+                        sessionID: sessionId,
+                        providerID: "anthropic",
+                        modelID: fitModel,
+                    },
+                    parts: [
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "old-call",
+                            state: { status: "completed", output: "small result" },
+                        },
+                    ],
+                });
+                await serve();
+                const tag = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool")!;
+                (source[1].parts[0] as ToolPart).state.output = "RECLAIMABLE ".repeat(60000);
+                source.push(
+                    {
+                        info: { id: "active-user", role: "user", sessionID: sessionId },
+                        parts: [
+                            {
+                                type: "text",
+                                text:
+                                    outcome === "fits"
+                                        ? "continue"
+                                        : "MANDATORY_USER ".repeat(90000),
+                            },
+                        ],
+                    },
+                    {
+                        info: {
+                            id: "active",
+                            role: "assistant",
+                            sessionID: sessionId,
+                            providerID: "anthropic",
+                            modelID: fitModel,
+                        },
+                        parts: [{ type: "reasoning", text: "kept signed thinking" }],
+                    },
+                );
+                queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+                const percentage = trigger === "wall" ? 96 : 75;
+                usage.set(sessionId, {
+                    usage: { percentage, inputTokens: percentage * 1000 },
+                    updatedAt: Date.now(),
+                    hasUsageTokens: true,
+                });
+                if (outcome === "fits") {
+                    const output = await serve();
+                    expect(JSON.stringify(output)).not.toContain("kept signed thinking");
+                    expect(JSON.stringify(output)).not.toContain("RECLAIMABLE");
+                } else
+                    await expect(serve()).rejects.toMatchObject({
+                        name: "EmergencyFailClosedError",
+                    });
+                expect(getPendingOps(db, sessionId)).toHaveLength(0);
+                expect(
+                    getTagsBySession(db, sessionId).find((row) => row.tagNumber === tag.tagNumber)
+                        ?.status,
+                ).toBe("dropped");
+            } finally {
+                db.close();
+            }
+        }, 30_000);
+    }

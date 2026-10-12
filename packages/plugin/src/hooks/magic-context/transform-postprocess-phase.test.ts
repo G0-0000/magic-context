@@ -11353,7 +11353,7 @@ describe("issue 619 terminal first edits", () => {
     }
 });
 
-describe("prefix-bound oldest-prefix reasoning trim", () => {
+describe("prefix-bound all-or-none reasoning", () => {
     const PROVIDER = "google-vertex-anthropic";
     const sha256 = (value: unknown): string =>
         createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -11444,7 +11444,7 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
 
     for (const fullFeatureMode of [true, false]) {
         const who = fullFeatureMode ? "primary" : "subagent";
-        it(`${who}: "Remove \`thinking\` blocks from the start of the history" is valid, so a trim-only pass keeps every newer signed block byte-identical and defer passes replay it`, async () => {
+        it(`${who}: a pressure opportunity alone keeps every signed block byte-identical instead of trimming an older prefix`, async () => {
             openDb();
             const sessionId = `ses-bound-trim-only-${who}`;
             const served = boundLoop(sessionId, 8);
@@ -11453,8 +11453,8 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
 
             const trim = boundLoop(sessionId, 8);
             const result = await serve(sessionId, trim, { force: true, fullFeatureMode });
-            expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
-            for (const id of AGED) expect(reasoningCount(message(trim, id))).toBe(0);
+            expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
+            for (const id of AGED) expect(reasoningCount(message(trim, id))).toBe(1);
             // Nothing else changed, so no newer block is stripped.
             expect(result.proactiveThinkingStrip).toBeNull();
             expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
@@ -11487,7 +11487,7 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
             overrides: { targets: new Map([[8, makeDropTarget(dropped)]]) },
         });
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
-        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
         expect(result.proactiveThinkingStrip?.messageIds).toEqual(
             expect.arrayContaining([...AGED, ...NEWER]),
         );
@@ -11500,37 +11500,35 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         await serve(sessionId, boundLoop(sessionId, 8));
         const pass = boundLoop(sessionId, 8);
         const result = await serve(sessionId, pass, { flush: true });
-        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
         expect(result.proactiveThinkingStrip?.messageIds).toEqual(expect.arrayContaining(NEWER));
         for (const m of pass.messages.slice(1)) expect(reasoningCount(m)).toBe(0);
     });
 
-    it('"Remove a `thinking` block from the middle of the history and keep later ones" is invalid, so an ineligible message stops the trim and nothing after it is removed', async () => {
+    it("a missing tag cannot authorize partial stripping before kept signed thinking", async () => {
         openDb();
         const sessionId = "ses-bound-gap";
         await serve(sessionId, boundLoop(sessionId, 8, { untagged: 2 }));
         const pass = boundLoop(sessionId, 8, { untagged: 2 });
         const result = await serve(sessionId, pass, { force: true });
         expect(result.proactiveThinkingStrip).toBeNull();
-        expect(getRemovedReasoningIds(db, sessionId)).toEqual(
-            new Set(["assistant-0", "assistant-1"]),
-        );
-        for (const step of [2, 3, 4, 5, 6, 7]) {
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
+        for (const step of [0, 1, 2, 3, 4, 5, 6, 7]) {
             expect(reasoningCount(message(pass, `assistant-${step}`))).toBe(1);
         }
     });
 
-    it('"Put back a `thinking` block you removed on an earlier request" is invalid, so removed and stripped blocks never return and the trim continues behind a strip', async () => {
+    it("full-bust omissions never return and newer blocks are not partially stripped", async () => {
         openDb();
         const sessionId = "ses-bound-never-restore";
         await serve(sessionId, boundLoop(sessionId, 8));
         await serve(sessionId, boundLoop(sessionId, 8), { force: true });
-        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
 
         // A later busting pass that selects nothing new still serves the removal.
         const quiet = boundLoop(sessionId, 8);
         await serve(sessionId, quiet, { force: true, clearReasoningAge: 999 });
-        for (const id of AGED) expect(reasoningCount(message(quiet, id))).toBe(0);
+        for (const id of AGED) expect(reasoningCount(message(quiet, id))).toBe(1);
 
         // A materializing pass strips everything; the strip set is replayed.
         const flush = boundLoop(sessionId, 8);
@@ -11542,15 +11540,13 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         const grown = boundLoop(sessionId, 14);
         const result = await serve(sessionId, grown, { force: true });
         expect(result.proactiveThinkingStrip).toBeNull();
-        for (const step of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+        for (const step of [0, 1, 2, 3, 4, 5, 6, 7]) {
             expect(reasoningCount(message(grown, `assistant-${step}`))).toBe(0);
         }
-        for (const step of [11, 12, 13]) {
+        for (const step of [8, 9, 10, 11, 12, 13]) {
             expect(reasoningCount(message(grown, `assistant-${step}`))).toBe(1);
         }
-        expect(getRemovedReasoningIds(db, sessionId)).toEqual(
-            new Set([...AGED, ...[8, 9, 10].map((step) => `assistant-${step}`)]),
-        );
+        expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set());
     });
 
     it("timeout skips do not treat provisional hint rows as served prefix edits", async () => {
@@ -12417,106 +12413,130 @@ describe("signed-prefix hold review", () => {
 
 describe("signed-prefix riders on unavoidable busts", () => {
     for (const cause of ["first render", "idle expiry"] as const) {
-        it(`held ${cause} admits safe riders without a second bust`, async () => {
-            db = new Database(":memory:");
-            initializeDatabase(db);
-            const sessionId = `held-priced-${cause}`;
-            const injection = {
-                projectPath: "git:held-priced",
-                projectDirectory: "/nonexistent",
-                memoryEnabled: false,
-                injectDocs: false,
-                historyBudgetTokens: 1000,
-            };
-            if (cause === "idle expiry")
-                injectM0M1({
-                    db,
-                    sessionId,
-                    state: getOrCreateSessionMeta(db, sessionId),
-                    ...injection,
-                    isCacheBustingPass: true,
-                });
-            insertTag(db, sessionId, "late-call", "tool", 4000, 1, 0, "bash");
-            queuePendingOp(db, sessionId, 1, "drop");
-            const pass = async (cold: boolean) => {
-                const late = makeToolMessage("late-tool");
-                const source: MessageLike[] = [
-                    {
-                        info: { id: "old-user", role: "user" },
-                        parts: [{ type: "text", text: "old task" }],
-                    },
-                    {
-                        info: { id: "old-thought", role: "assistant" },
-                        parts: [
-                            { type: "reasoning", text: "old signed thought" },
-                            { type: "text", text: "old answer" },
-                        ],
-                    },
-                    {
-                        info: { id: "active-user", role: "user" },
-                        parts: [{ type: "text", text: "continue" }],
-                    },
-                    {
-                        info: { id: "active-thought", role: "assistant" },
-                        parts: [
-                            { type: "reasoning", text: "active signed thought" },
-                            { type: "text", text: "tool loop" },
-                        ],
-                    },
-                    late,
-                ];
-                const target = {
-                    ...makeDropTarget(late),
-                    mutationParts: [{ message: late, part: late.parts[0] }],
-                    dropReasoningParts: [],
+        it(
+            cause === "first render"
+                ? "a rewriting first render strips every signed block and admits queued work"
+                : "idle expiry admits suffix work while keeping every signed block",
+            async () => {
+                db = new Database(":memory:");
+                initializeDatabase(db);
+                const sessionId = `held-priced-${cause}`;
+                const injection = {
+                    projectPath: "git:held-priced",
+                    projectDirectory: "/nonexistent",
+                    memoryEnabled: false,
+                    injectDocs: false,
+                    historyBudgetTokens: 1000,
                 };
-                const targets = new Map([[1, target]]);
-                const replayed = applyFlushedStatuses(sessionId, db, targets);
-                const result = await runPostTransformPhase(
-                    basePostTransformArgs(db, sessionId, source, {
-                        activeThinkingTurn: true,
-                        activeThinkingPrefixHold: true,
-                        freezeM0M1: true,
-                        resolvedProviderID: "anthropic",
-                        resolvedModelID: "claude-opus-5-5",
-                        thinkingBindingRecoveryEnabledForModel: true,
-                        contextUsage: { percentage: 66, inputTokens: 66_000 },
-                        schedulerDecision: cold ? "execute" : "defer",
-                        tags: getActiveTagsBySession(db, sessionId),
-                        targets,
-                        protectedTools: { bash: 0 },
-                        didMutateFromFlushedStatuses: replayed,
-                        m0M1: {
-                            ...injection,
-                            hardSignals: {
-                                systemHash: "",
-                                modelKey: "anthropic/claude-opus-5-5",
-                                cacheExpired: cold && cause === "idle expiry",
-                                lastResponseTime: Date.now(),
-                            },
+                if (cause === "idle expiry")
+                    injectM0M1({
+                        db,
+                        sessionId,
+                        state: getOrCreateSessionMeta(db, sessionId),
+                        ...injection,
+                        isCacheBustingPass: true,
+                    });
+                insertTag(db, sessionId, "late-call", "tool", 4000, 1, 0, "bash");
+                queuePendingOp(db, sessionId, 1, "drop");
+                const pass = async (cold: boolean) => {
+                    const late = makeToolMessage("late-tool");
+                    const source: MessageLike[] = [
+                        {
+                            info: { id: "old-user", role: "user" },
+                            parts: [{ type: "text", text: "old task" }],
                         },
-                    }),
-                );
-                return { messages: source, result };
-            };
-            const priced = await pass(true);
-            expect(getPendingOps(db, sessionId)).toHaveLength(0);
-            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
-                "dropped",
-            );
-            expect(priced.result.proactiveThinkingStrip?.messageIds).toEqual(["old-thought"]);
-            expect(
-                priced.messages.find((message) => message.info.id === "active-thought")?.parts[0],
-            ).toEqual({ type: "reasoning", text: "active signed thought" });
-            const replay = await pass(false);
-            expect(replay.result.proactiveThinkingStrip).toBeNull();
-            expect(replay.result.bustedThisPass).toBe(false);
-            expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(priced.messages));
-        });
+                        {
+                            info: { id: "old-thought", role: "assistant" },
+                            parts: [
+                                { type: "reasoning", text: "old signed thought" },
+                                { type: "text", text: "old answer" },
+                            ],
+                        },
+                        {
+                            info: { id: "active-user", role: "user" },
+                            parts: [{ type: "text", text: "continue" }],
+                        },
+                        {
+                            info: { id: "active-thought", role: "assistant" },
+                            parts: [
+                                { type: "reasoning", text: "active signed thought" },
+                                { type: "text", text: "tool loop" },
+                            ],
+                        },
+                        late,
+                    ];
+                    const target = {
+                        ...makeDropTarget(late),
+                        mutationParts: [{ message: late, part: late.parts[0] }],
+                        dropReasoningParts: [],
+                    };
+                    const targets = new Map([[1, target]]);
+                    const replayed = applyFlushedStatuses(sessionId, db, targets);
+                    const result = await runPostTransformPhase(
+                        basePostTransformArgs(db, sessionId, source, {
+                            activeThinkingTurn: true,
+                            activeThinkingPrefixHold: true,
+                            freezeM0M1: true,
+                            resolvedProviderID: "anthropic",
+                            resolvedModelID: "claude-opus-5-5",
+                            thinkingBindingRecoveryEnabledForModel: true,
+                            contextUsage: { percentage: 66, inputTokens: 66_000 },
+                            schedulerDecision: cold ? "execute" : "defer",
+                            tags: getActiveTagsBySession(db, sessionId),
+                            targets,
+                            protectedTools: { bash: 0 },
+                            didMutateFromFlushedStatuses: replayed,
+                            m0M1: {
+                                ...injection,
+                                hardSignals: {
+                                    systemHash: "",
+                                    modelKey: "anthropic/claude-opus-5-5",
+                                    cacheExpired: cold && cause === "idle expiry",
+                                    lastResponseTime: Date.now(),
+                                },
+                            },
+                        }),
+                    );
+                    return { messages: source, result };
+                };
+                const priced = await pass(true);
+                expect(getPendingOps(db, sessionId)).toHaveLength(0);
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status,
+                ).toBe("dropped");
+                expect(priced.result.proactiveThinkingStrip).toBeNull();
+                if (cause === "first render") {
+                    expect(getMergedReasoningStrippedIds(db, sessionId)).toContain(
+                        "binding_mismatch:old-thought",
+                    );
+                    expect(getMergedReasoningStrippedIds(db, sessionId)).toContain(
+                        "binding_mismatch:active-thought",
+                    );
+                    expect(
+                        priced.messages
+                            .flatMap((message) => message.parts)
+                            .filter((part) => (part as { type?: string }).type === "reasoning"),
+                    ).toHaveLength(0);
+                } else {
+                    expect(
+                        priced.messages.find((message) => message.info.id === "old-thought")
+                            ?.parts[0],
+                    ).toEqual({ type: "reasoning", text: "old signed thought" });
+                    expect(
+                        priced.messages.find((message) => message.info.id === "active-thought")
+                            ?.parts[0],
+                    ).toEqual({ type: "reasoning", text: "active signed thought" });
+                }
+                const replay = await pass(false);
+                expect(replay.result.proactiveThinkingStrip).toBeNull();
+                expect(replay.result.bustedThisPass).toBe(false);
+                expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(priced.messages));
+            },
+        );
     }
 });
 
-it("an already-cold held pass runs routine cleanup and strips older thinking even when every queued target is protected", async () => {
+it("an already-cold held pass runs safe routine cleanup without stripping thinking before a kept block", async () => {
     db = new Database(":memory:");
     initializeDatabase(db);
     const sessionId = "held-cold-protected-only";
@@ -12588,9 +12608,65 @@ it("an already-cold held pass runs routine cleanup and strips older thinking eve
         expect(cleanup).toHaveBeenCalledTimes(1);
         expect(cleanup.mock.calls[0]?.[4].routine).toBe(true);
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
-        expect(result.proactiveThinkingStrip?.messageIds).toEqual(["old-tool"]);
+        expect(result.proactiveThinkingStrip).toBeNull();
+        expect(old.parts[0]).toEqual({ type: "reasoning", text: "old signed thought" });
         expect(active.parts).toEqual([{ type: "reasoning", text: "active signed thought" }]);
     } finally {
         cleanup.mockRestore();
     }
+});
+
+it("a first render reproducing the served pair keeps all signed thinking", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "first-render-same-binding-prefix";
+    const injection = {
+        projectPath: "git:same-pair",
+        projectDirectory: "/nonexistent",
+        memoryEnabled: false,
+        injectDocs: false,
+        historyBudgetTokens: 1000,
+    };
+    const warm: MessageLike[] = [
+        { info: { id: "u0", role: "user" }, parts: [{ type: "text", text: "start" }] },
+    ];
+    await runPostTransformPhase(basePostTransformArgs(db, sessionId, warm, { m0M1: injection }));
+    const heads = structuredClone(warm.slice(0, 2));
+    updateSessionMeta(db, sessionId, { cachedM0Bytes: null, cachedM1Bytes: null });
+    const messages: MessageLike[] = [
+        { info: { id: "old-user", role: "user" }, parts: [{ type: "text", text: "old" }] },
+        {
+            info: { id: "old-thinking", role: "assistant" },
+            parts: [
+                { type: "reasoning", text: "old signed" },
+                { type: "text", text: "old answer" },
+            ],
+        },
+        { info: { id: "active-user", role: "user" }, parts: [{ type: "text", text: "new" }] },
+        {
+            info: { id: "active-thinking", role: "assistant" },
+            parts: [{ type: "reasoning", text: "active signed" }],
+        },
+    ];
+    const result = await runPostTransformPhase(
+        basePostTransformArgs(db, sessionId, messages, {
+            activeThinkingTurn: true,
+            activeThinkingPrefixHold: true,
+            freezeM0M1: true,
+            resolvedProviderID: "anthropic",
+            resolvedModelID: "claude-opus-5-5",
+            thinkingBindingRecoveryEnabledForModel: true,
+            m0M1: injection,
+            readLastServedMessages: () => heads,
+            schedulerDecision: "execute",
+            contextUsage: { percentage: 66, inputTokens: 66000 },
+        }),
+    );
+    expect(messages.slice(0, 2)).toEqual(heads);
+    expect(
+        messages
+            .flatMap((message) => message.parts)
+            .filter((part) => (part as { type?: string }).type === "reasoning"),
+    ).toHaveLength(2);
+    expect(result.proactiveThinkingStrip).toBeNull();
 });

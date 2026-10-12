@@ -14,6 +14,7 @@ export type PiContentDecisionKind =
     | "seam-temporal-strip"
     | "tag-identity-repair-once"
     | "tag-identity-repair-pending"
+    | "tag-identity-rebuild-failed"
     | "tag-identity-recurring";
 
 export function encodePiContentDecision(kind: PiContentDecisionKind, messageId: string): string {
@@ -31,6 +32,7 @@ export function decodePiContentDecision(value: string): [PiContentDecisionKind, 
                 pair[0] === "seam-temporal-strip" ||
                 pair[0] === "tag-identity-repair-once" ||
                 pair[0] === "tag-identity-repair-pending" ||
+                pair[0] === "tag-identity-rebuild-failed" ||
                 pair[0] === "tag-identity-recurring") &&
             typeof pair[1] === "string" &&
             pair[1].length > 0
@@ -97,6 +99,7 @@ export function freezePiContentDecision(
                             !decision ||
                             decision[0] === "tag-identity-repair-once" ||
                             decision[0] === "tag-identity-repair-pending" ||
+                            decision[0] === "tag-identity-rebuild-failed" ||
                             decision[0] === "tag-identity-recurring" ||
                             !!(decision[0] === "seam-temporal-strip"
                                 ? ownsMessage.get(sessionId, `${decision[1]}:p`, `${decision[1]}:q`)
