@@ -27,12 +27,12 @@ export class PiContextSupersededError extends Error {}
 
 interface Operation {
 	pass?: PiContextBudget;
-	// The latest pass's context event. Its messages are read only when a late
-	// agent_end must be attributed to a run (see endBelongsToEarlierRun). The
-	// context hook stores the event without reading them: that code runs before
-	// the hook's try/refusal handling, so a throwing messages getter there would
-	// escape the hook instead of becoming a visible refusal.
-	input?: { readonly messages?: unknown };
+	// role:timestamp keys of the latest pass's input messages, captured before
+	// its handler ran. The handler rewrites the event's message array in place
+	// (synthetic history, todo and system messages OMP never holds), so only
+	// this snapshot can be compared with a late agent_end's messages (see
+	// endBelongsToEarlierRun). Undefined when the input could not be read.
+	inputKeys?: readonly string[];
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
 	started: boolean;
@@ -40,7 +40,7 @@ interface Operation {
 	refused: boolean;
 	ended: boolean;
 }
-const receiptMaps = new Set<Map<string | object, Operation>>();
+const receiptMaps = new Set<Map<string | object, unknown>>();
 export function clearPiContextReceipt(sessionId: string): void {
 	for (const receipts of receiptMaps) receipts.delete(sessionId);
 }
@@ -71,8 +71,9 @@ function messageKey(message: unknown): string | undefined {
  * has not been dispatched yet is attributed from evidence:
  * - `willContinue` says the agent continues, so a not-yet-dispatched pass is
  *   the continuation's own pass (or will be replaced by it);
- * - a pass whose input holds a message the ended run never had (OMP clones
- *   messages, so role + timestamp identify them) was built for a later run.
+ * - a pass whose input, as captured before its handler ran, holds a message
+ *   the ended run never had (OMP clones messages, so role + timestamp
+ *   identify them) was built for a later run.
  * A pass that was already dispatched keeps the original behaviour: the end
  * invalidates its receipt for any later request.
  */
@@ -80,23 +81,32 @@ function endBelongsToEarlierRun(operation: Operation, event: unknown): boolean {
 	if (!operation.pass || operation.dispatched) return false;
 	const end = event as { willContinue?: unknown; messages?: unknown };
 	if (end?.willContinue === true) return true;
-	let input: unknown;
-	try {
-		input = operation.input?.messages;
-	} catch {
-		return false;
-	}
-	if (!Array.isArray(input) || !Array.isArray(end?.messages)) return false;
+	if (!operation.inputKeys || !Array.isArray(end?.messages)) return false;
 	const ended = new Set<string>();
 	for (const message of end.messages) {
 		const key = messageKey(message);
 		if (key) ended.add(key);
 	}
 	if (ended.size === 0) return false;
-	return input.some((message) => {
-		const key = messageKey(message);
-		return key !== undefined && !ended.has(key);
-	});
+	return operation.inputKeys.some((key) => !ended.has(key));
+}
+
+function inputMessageKeys(event: {
+	readonly messages?: unknown;
+}): string[] | undefined {
+	try {
+		const messages = event.messages;
+		if (!Array.isArray(messages)) return undefined;
+		const keys: string[] = [];
+		for (const message of messages) {
+			const key = messageKey(message);
+			if (key) keys.push(key);
+		}
+		return keys;
+	} catch {
+		// An unreadable input cannot attribute an end; the end then applies.
+		return undefined;
+	}
 }
 
 /**
@@ -146,6 +156,8 @@ export function registerPiGuardedContext(
 		string | object,
 		{ starts: number; ends: number }
 	>();
+	// Cache eviction and session cleanup reset the counts with the receipts.
+	receiptMaps.add(lifecycle);
 	const lifecycleCounts = (key: string | object) => {
 		let counts = lifecycle.get(key);
 		if (!counts) {
@@ -215,7 +227,14 @@ export function registerPiGuardedContext(
 		pi.on("agent_end", (event, ctx) => {
 			const key = operationKey(ctx);
 			const lifecycleSeen = lifecycleCounts(key);
-			lifecycleSeen.ends++;
+			// An end without a delivered start (the extension loaded mid-run, or
+			// the counts were reset) must not leave ends ahead of starts: every
+			// later kept pass would then look unstarted and be adoptable by a
+			// new run's start.
+			lifecycleSeen.ends = Math.min(
+				lifecycleSeen.ends + 1,
+				lifecycleSeen.starts,
+			);
 			const counts = sideSessions.get(key);
 			if (counts)
 				log(
@@ -332,7 +351,7 @@ export function registerPiGuardedContext(
 		}
 		const active = operation;
 		active.pass = budget;
-		active.input = event;
+		active.inputKeys = undefined;
 		active.dispatched = false;
 		active.ready = false;
 		// A refusal aborts the run it was raised in. A later pass on the same
@@ -351,6 +370,11 @@ export function registerPiGuardedContext(
 				);
 		};
 		try {
+			// Snapshot the input before the handler rewrites it in place. Reading
+			// here, not on the hook's unguarded prefix, keeps a throwing messages
+			// getter on the refusal path.
+			if (fenceEnabled && !budget.sideTurn)
+				active.inputKeys = inputMessageKeys(event);
 			// Share at most 250 ms of synchronous waiting for later turn writes,
 			// including autocommit statements. Initial session-meta admission uses
 			// the separate yielding writer budget shared with OpenCode.

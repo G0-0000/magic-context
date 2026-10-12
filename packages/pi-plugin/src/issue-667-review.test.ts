@@ -86,10 +86,10 @@ afterEach(() => {
 	clearPiContextReceipt(SESSION);
 });
 
-test.failing("issue 667 review: a run that ends before its request goes out invalidates its receipt even when the pass rewrote its input in place", async () => {
-	// Witness for a gap in endBelongsToEarlierRun: it reads the stored event's
-	// messages after the handler has mutated them, so the run's own end looks
-	// like an earlier run's and the completed receipt survives the end.
+test("issue 667 review: a run that ends before its request goes out invalidates its receipt even when the pass rewrote its input in place", async () => {
+	// endBelongsToEarlierRun must compare the end with the input as it was
+	// before the handler rewrote it; otherwise the synthetic messages make the
+	// run's own end look like an earlier run's and the receipt survives it.
 	const h = harness(rewritesInPlace);
 	const prompt = userMessage("aborted before dispatch", 100);
 	h.emit("agent_start");
@@ -271,4 +271,75 @@ test("issue 667 review: a pass refused while waiting for its SQLite reservation 
 		clearContextHandlerSession(sessionId);
 		db.close();
 	}
+});
+
+test("issue 667 review: an agent_end without a delivered start does not make later kept passes adoptable", async () => {
+	const h = harness(async (event) => ({ messages: event.messages as never }));
+	// The extension loaded during a run: its end arrives with no start seen.
+	h.emit("agent_end", { messages: [userMessage("before load", 1)] });
+	const first = userMessage("first", 2);
+	const reply = assistantMessage("reply", 3);
+	h.emit("agent_start");
+	await h.emit("context", { messages: [first] });
+	h.dispatch();
+	// Run 2 starts and runs its pass; run 1's end is still in flight.
+	h.emit("agent_start");
+	await h.emit("context", {
+		messages: [first, reply, userMessage("second", 4)],
+	});
+	h.emit("agent_end", { messages: [first, reply] });
+	h.dispatch();
+	expect(h.refusals).toEqual([]);
+	// Run 2's start was delivered, so a third start is a new run that must
+	// not adopt run 2's receipt, whatever the unmatched end did to the counts.
+	h.emit("agent_start");
+	h.dispatch();
+	expect(h.refusals.at(-1)).toContain("no context pass ran for this operation");
+	expect(h.aborts).toBe(1);
+});
+
+test("issue 667 review: clearing a session's receipt also resets its lifecycle counts", async () => {
+	const h = harness(async (event) => ({ messages: event.messages as never }));
+	// Two runs whose ends were never delivered before the cache was cleared.
+	h.emit("agent_start");
+	h.emit("agent_start");
+	clearPiContextReceipt(SESSION);
+	const first = userMessage("first", 1);
+	const reply = assistantMessage("reply", 2);
+	h.emit("agent_start");
+	await h.emit("context", { messages: [first] });
+	h.dispatch();
+	// Run 2's pass lands before run 1's end, and run 2's start arrives last.
+	await h.emit("context", {
+		messages: [first, reply, userMessage("second", 3)],
+	});
+	h.emit("agent_end", { messages: [first, reply] });
+	h.emit("agent_start");
+	h.dispatch();
+	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(0);
+});
+
+test("issue 667 review: a dispatched pass's own run end invalidates its receipt even when OMP rewrote the run's messages", async () => {
+	// Once the fence admitted the pass's request, the next end is that run's
+	// own: the input comparison is not needed, and it would fail here because
+	// OMP compacted the run's state before ending, so the end no longer holds
+	// the pass's input messages.
+	const h = harness(async (event) => ({ messages: event.messages as never }));
+	const prompt = userMessage("before compaction", 100);
+	h.emit("agent_start");
+	await h.emit("context", { messages: [prompt] });
+	h.dispatch();
+	expect(h.refusals).toEqual([]);
+	h.emit("agent_end", {
+		messages: [
+			userMessage("<summary of earlier turns>", 102),
+			assistantMessage("done", 103),
+		],
+	});
+	h.dispatch();
+	expect(h.refusals.at(-1)).toContain(
+		"the run that owned the latest context pass has ended",
+	);
+	expect(h.aborts).toBe(1);
 });
