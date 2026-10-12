@@ -1,10 +1,10 @@
 /// <reference types="bun-types" />
 
 import { Database as UnwrappedDatabase } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { join } from "node:path";
 import { prewarmTagOwners } from "../../hooks/magic-context/tag-owner-warmup";
-import { Database, mayChangeTagIdentity } from "../../shared/sqlite";
+import { Database, getTagIdentityWriteGeneration, mayChangeTagIdentity } from "../../shared/sqlite";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import { runMigrations } from "./migrations";
@@ -23,9 +23,13 @@ import {
     getTagOwnerShapeChecksForTest,
     getTagsBySession,
     insertTag,
+    installTagOwnerDelta,
+    isTagOwnerSummaryReady,
     resetTagOwnerRowsReadForTest,
+    scanTagOwnerDelta,
     TAG_OWNER_APPENDED_WITH_SHAPE_SQL,
     TagOwnerSummaryNotReady,
+    tagOwnerWarmupState,
     updateTagDropMode,
     updateTagStatus,
 } from "./storage-tags";
@@ -529,6 +533,146 @@ describe("tag identity revision rows on session deletion", async () => {
             await expectMatchesFullRead(db, 1);
         } finally {
             other?.close();
+            db.close();
+            cleanup();
+        }
+    });
+});
+
+describe("initial owner revision capture", () => {
+    it("captures one indexed seed read on local append and still rejects a later identity rewrite", async () => {
+        const { dir, cleanup } = createTestTempDir("mc-owner-initial-seed-");
+        const path = join(dir, "context.db");
+        const db = new Database(path);
+        const peer = new UnwrappedDatabase(path);
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            initializeDatabase(peer as unknown as Database);
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
+            expect(tagOwnerWarmupState(db, SESSION)?.identityRevision).toBeNull();
+            const prepare = spyOn(db, "prepare");
+            try {
+                addTag(db, 1, "first:p0", "message");
+                expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+                const seeded = tagOwnerWarmupState(db, SESSION)?.identityRevision;
+                expect(seeded).toMatch(/^[1-9]\d*:0$/);
+                expect(
+                    prepare.mock.calls.filter(
+                        ([sql]) => sql === "SELECT value FROM schema_migrations_meta WHERE key = ?",
+                    ),
+                ).toHaveLength(1);
+                addTag(db, 2, "second:p0", "message");
+                expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+                expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+                expect(
+                    prepare.mock.calls.filter(
+                        ([sql]) => sql === "SELECT value FROM schema_migrations_meta WHERE key = ?",
+                    ),
+                ).toHaveLength(1);
+            } finally {
+                prepare.mockRestore();
+            }
+            peer.prepare(
+                "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES ('unrelated-owner-metadata','1')",
+            ).run();
+            expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+            const seeded = tagOwnerWarmupState(db, SESSION)?.identityRevision;
+            peer.prepare(
+                "UPDATE tags SET message_id='rewritten:p0',reasoning_token_count=20 WHERE session_id=? AND tag_number=1",
+            ).run(SESSION);
+            expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(false);
+            expect(tagOwnerWarmupState(db, SESSION)?.identityRevision).toBe(seeded);
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
+            expect(new Map(getMaxTagNumberByOwnerMessage(db, SESSION))).toEqual(
+                new Map([
+                    ["rewritten", 1],
+                    ["second", 2],
+                ]),
+            );
+            expect(new Map(getReasoningTokenEstimatesByMessage(db, SESSION, 1))).toEqual(
+                new Map([["rewritten", 20]]),
+            );
+        } finally {
+            peer.close();
+            db.close();
+            cleanup();
+        }
+    });
+
+    it("worker delta rejects null-to-seed changes and full warmup installs the seed", async () => {
+        const { dir, cleanup } = createTestTempDir("mc-owner-worker-seed-");
+        const path = join(dir, "context.db");
+        const db = new Database(path);
+        const peer = new UnwrappedDatabase(path);
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            initializeDatabase(peer as unknown as Database);
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
+            const state = tagOwnerWarmupState(db, SESSION);
+            if (!state) throw new Error("missing empty owner summary");
+            expect(state.identityRevision).toBeNull();
+            addTag(db, 1, "seeded:p0", "message");
+            peer.prepare(
+                "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES ('worker-peer-metadata','1')",
+            ).run();
+            expect(scanTagOwnerDelta(peer as unknown as Database, SESSION, state)).toBeNull();
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
+            expect(tagOwnerWarmupState(db, SESSION)?.identityRevision).toMatch(/^[1-9]\d*:0$/);
+            expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+        } finally {
+            peer.close();
+            db.close();
+            cleanup();
+        }
+    });
+
+    it("installed legacy null-revision deltas capture the seed on the next own append", async () => {
+        const { dir, cleanup } = createTestTempDir("mc-owner-null-delta-");
+        const path = join(dir, "context.db");
+        const db = new Database(path);
+        const peer = new UnwrappedDatabase(path);
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            expect(await prewarmTagOwners(db, SESSION, 1)).toBe(true);
+            const state = tagOwnerWarmupState(db, SESSION);
+            if (!state) throw new Error("missing empty owner summary");
+            // This connection intentionally lacks TEMP observers, so its rows
+            // exercise the existing null-revision delta path without seeding.
+            peer.prepare(
+                "INSERT INTO tags(session_id,message_id,type,status,tag_number,byte_size,harness) VALUES (?, 'legacy:p0','message','active',1,10,'opencode')",
+            ).run(SESSION);
+            const delta = scanTagOwnerDelta(peer as unknown as Database, SESSION, state);
+            if (!delta) throw new Error("expected legacy append delta");
+            const versions = db
+                .prepare(
+                    "SELECT data_version AS dataVersion, (SELECT schema_version FROM pragma_schema_version) AS schemaVersion FROM pragma_data_version",
+                )
+                .get() as { dataVersion: number; schemaVersion: number };
+            expect(
+                installTagOwnerDelta(db, SESSION, state, delta, {
+                    ...versions,
+                    generation: getTagIdentityWriteGeneration(),
+                }),
+            ).toBe(true);
+            expect(tagOwnerWarmupState(db, SESSION)?.identityRevision).toBeNull();
+            addTag(db, 2, "own:p0", "message");
+            expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+            expect(tagOwnerWarmupState(db, SESSION)?.identityRevision).toMatch(/^[1-9]\d*:0$/);
+            peer.prepare(
+                "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES ('delta-peer-metadata','1')",
+            ).run();
+            expect(isTagOwnerSummaryReady(db, SESSION, 1)).toBe(true);
+            expect(new Map(getMaxTagNumberByOwnerMessage(db, SESSION))).toEqual(
+                new Map([
+                    ["legacy", 1],
+                    ["own", 2],
+                ]),
+            );
+        } finally {
+            peer.close();
             db.close();
             cleanup();
         }

@@ -1051,6 +1051,23 @@ function readTagIdentityRevision(db: Database, sessionId: string): string | null
     return typeof row?.value === "string" ? row.value : null;
 }
 
+/** Record the revision created by the first append, not a later owner/reasoning edit. */
+function captureInitialTagOwnerRevision(
+    db: Database,
+    sessionId: string,
+    cached: TagOwnerSummary,
+    appendedRows: number,
+): boolean {
+    if (cached.identityRevision !== null || appendedRows === 0) return true;
+    const revision = readTagIdentityRevision(db, sessionId);
+    // The stamp's count tracks changes to owner IDs or reasoning estimates.
+    // A first append creates count zero. If it is already nonzero, the rows
+    // selected above may predate an edit; reject instead of marking them current.
+    if (revision !== null && !/^[1-9]\d*:0$/.test(revision)) return false;
+    cached.identityRevision = revision;
+    return true;
+}
+
 /**
  * After another connection's commit: the rows it appended to the session, or
  * null when the session changed in a way appends cannot explain.
@@ -1157,6 +1174,14 @@ function readTagOwnerSummary(
                     page = statement.all(page[page.length - 1].id, sessionId) as TagOwnerRow[];
                     rows.push(...page);
                 }
+            }
+            // A first tag INSERT creates the identity revision without changing the
+            // process's identity-edit generation. Remember that zero-count seed
+            // with these appended rows; otherwise an unrelated peer commit later
+            // compares it with cached null and discards this valid owner summary.
+            if (!captureInitialTagOwnerRevision(db, sessionId, cached, rows.length)) {
+                if (offThreadOnly) throw new TagOwnerSummaryNotReady();
+                rows = null;
             }
         } else {
             // The count, revision and appended rows must describe one commit.
