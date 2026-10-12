@@ -466,8 +466,9 @@ import { createPiTranscript } from "./transcript-pi";
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
 
 /**
- * Rows carrying `number` in a list sorted by tag number (legacy stores can
- * hold more than one), found by binary search.
+ * Returns every row whose `tagNumber` equals `number`, from a list sorted by
+ * tag number, using binary search. Legacy stores can hold more than one row
+ * with the same number.
  */
 function tagsWithNumber<T extends { tagNumber: number }>(
 	sorted: readonly T[],
@@ -8206,8 +8207,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	logTransformTiming(args.sessionId, "tagSnapshotSync", tTagSnapshotSync);
 	const tFallbackIdentity = performance.now();
 	// This indexed preflight avoids rebuilding fingerprints for every old message.
-	// adoptPiFallbackTags rechecks a negative result with a table query after
-	// this map is complete; its tool-owner probe also runs only at that point.
+	// adoptPiFallbackTags rechecks a negative result with a table query once the
+	// fingerprint map built below is complete; its tool-owner probe also runs
+	// only at that point.
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,

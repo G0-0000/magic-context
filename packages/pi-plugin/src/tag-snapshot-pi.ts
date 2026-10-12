@@ -206,12 +206,17 @@ export function createPiTagSnapshotReader(db: Database) {
 			stamp.durable - snapshot.durableVersion !==
 			stamp.own - snapshot.ownVersion
 		) {
-			// Another connection wrote tags without advancing the shared
-			// tag_revision: counter (see versionStamp), so the journal missed it.
-			// The fallback rows (tags still keyed by an unsettled pi-msg-* id)
-			// decide whether this pass looks for tags to move onto real entry
-			// ids; rescan them on next use. The cached tag rows themselves stay
-			// as they are for such writers, as before this detector existed.
+			// session_meta.tags_version is advanced by schema triggers on every
+			// tag write from any connection, while ownVersion counts only this
+			// connection's writes. A difference beyond our own writes means
+			// another connection changed tags without advancing the shared
+			// `tag_revision:` key, typically an older Magic Context build, so
+			// this connection's change journal never saw the write. Fallback rows
+			// are tags still keyed by a temporary `pi-msg-*` id, before Pi has
+			// assigned the message its real entry id. They decide whether this
+			// pass looks for tags to move onto real ids, so rescan them on next
+			// use. The cached tag rows are left as they are for such writers,
+			// which is unchanged behaviour.
 			snapshot.fallback = undefined;
 		}
 		snapshot.durableVersion = stamp.durable;
@@ -255,8 +260,11 @@ export interface PiFallbackTagRow {
 	entry_fingerprint: unknown;
 }
 
-// One predicate for every fallback probe. LIKE stays SQL's own operator (ASCII
-// case-insensitive), so these rows are exactly what the per-probe queries match.
+// Selects every fallback row: a message tag under a `pi-msg-*` id, or a tool
+// tag whose owner message has one. Every check that asks whether such rows
+// exist reads these cached rows instead of querying the table. Matching stays
+// in SQL's own LIKE (ASCII case-insensitive), so the cached set is exactly the
+// set a direct table query would return.
 const FALLBACK_ROW_COLUMNS =
 	"id, tag_number, type, message_id, tool_owner_message_id, entry_fingerprint";
 const FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE 'pi-msg-%')
