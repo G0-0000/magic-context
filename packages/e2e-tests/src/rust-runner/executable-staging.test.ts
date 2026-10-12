@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "bun:test";
 
+import { cleanupE2ETempDir, createE2ETempDir } from "../temp-dir";
 import { stageExecutable } from "./executable-staging";
 
 describe("content-named child executable staging", () => {
     it("keeps copies off the source tree, reuses identical bytes, and hashes changed bytes separately", () => {
-        const fixtureDir = mkdtempSync(join(tmpdir(), "magic-context-executable-test-"));
+        const fixtureDir = createE2ETempDir("magic-context-executable-test-");
         const firstSource = join(fixtureDir, "ck-mc");
         const changedSource = join(fixtureDir, "changed-ck-mc");
         let originalSource = firstSource;
@@ -42,7 +42,7 @@ describe("content-named child executable staging", () => {
             }
             expect(statSync("/tmp/magic-context-exec").mode & 0o777).toBe(0o700);
         } finally {
-            rmSync(fixtureDir, { recursive: true, force: true });
+            cleanupE2ETempDir(fixtureDir);
         }
     });
 
