@@ -410,16 +410,16 @@ it("full-row session revisions survive repeated clear/recreate and readers notic
 	const h = harness();
 	try {
 		const writer = required(h.foreign[0]);
-		const revision = () =>
-			Number(
-				(
-					writer
-						.prepare(
-							"SELECT value FROM schema_migrations_meta WHERE key='tag_revision:session'",
-						)
-						.get() as { value: string } | null
-				)?.value ?? 0,
-			);
+		const revision = () => {
+			const stored = (
+				writer
+					.prepare(
+						"SELECT value FROM schema_migrations_meta WHERE key='tag_revision:session'",
+					)
+					.get() as { value: string } | null
+			)?.value;
+			return Number(stored?.split(":").at(-1) ?? 0);
+		};
 		const read = createPiTagSnapshotReader(h.local);
 		let previous = revision();
 		for (let cycle = 0; cycle < 8; cycle++) {

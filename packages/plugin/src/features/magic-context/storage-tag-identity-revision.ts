@@ -12,12 +12,28 @@ import type { Database } from "../../shared/sqlite";
  *
  * It lives in `schema_migrations_meta`, the key/value table that already holds
  * per-session `retrospective_activity:<session>` rows, so no schema change is
- * needed. The value only ever grows. Deletes are not counted: they change the
- * session's tag count, which the cache checks separately.
+ * needed. Values encode a lifetime serial and a local count. The global serial
+ * allocator gives recreated revision rows different identities even when a
+ * retired session ID and its old count are reused. Scalar values from older
+ * builds use reserved serial zero. Owner summaries detect ordinary deletes
+ * by checking the session's row count and highest primary ID separately.
  */
 export const TAG_IDENTITY_REVISION_PREFIX = "tag_identity_revision:";
 export const TAG_REVISION_PREFIX = "tag_revision:";
 export const TAG_TOMBSTONE_OWNER_PREFIX = "tag_revision_owner:";
+/** Allocates unique lifetime serials for new revision rows; session deletion must not reset it. */
+export const TAG_REVISION_INCARNATION_KEY = "tag_revision_incarnation";
+
+/** Extract the serial/count from `serial:count`, or serial zero/count from an older integer value. */
+export const tagRevisionIncarnationSql = (value: string) =>
+    `CASE WHEN INSTR(${value}, ':') > 0 THEN SUBSTR(${value}, 1, INSTR(${value}, ':') - 1) ELSE '0' END`;
+export const tagRevisionCountSql = (value: string) =>
+    `CAST(CASE WHEN INSTR(${value}, ':') > 0 THEN SUBSTR(${value}, INSTR(${value}, ':') + 1) ELSE ${value} END AS INTEGER)`;
+
+const ADVANCE = (delta = "1") => `CASE
+    WHEN ${tagRevisionCountSql("value")} <= 9223372036854775807 - ${delta}
+    THEN (${tagRevisionIncarnationSql("value")}) || ':' || CAST(${tagRevisionCountSql("value")} + ${delta} AS TEXT)
+    ELSE NULL END`;
 
 /** JSON quoting keeps session IDs containing separators in their own key range. */
 export function tagTombstoneOwnerRange(sessionId: string): readonly [string, string] {
@@ -43,7 +59,7 @@ const BUMP = (
     prefix = TAG_IDENTITY_REVISION_PREFIX,
 ) => `INSERT INTO schema_migrations_meta (key, value)
         VALUES ('${prefix}' || ${session}, '1')
-        ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`;
+        ON CONFLICT(key) DO UPDATE SET value = ${ADVANCE()}`;
 
 /** Rows an INSERT can replace through the tag table's primary or unique keys.
  * Separate indexed probes avoid an OR predicate turning ordinary appends into a table scan.
@@ -60,7 +76,7 @@ export const TAG_INSERT_CONFLICT_ROWS = `SELECT id, session_id, tag_number FROM 
 const BUMP_INSERT_CONFLICTS = (prefix: string) => `INSERT INTO schema_migrations_meta (key, value)
     SELECT '${prefix}' || session_id, CAST(COUNT(*) AS TEXT)
     FROM (${TAG_INSERT_CONFLICT_ROWS}) GROUP BY session_id
-    ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT)`;
+    ON CONFLICT(key) DO UPDATE SET value = ${ADVANCE("CAST(excluded.value AS INTEGER)")}`;
 
 /**
  * A TEMP trigger exists only on the connection that creates it and is not part
@@ -83,10 +99,52 @@ const TRIGGER_SQL = `CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_identity_revision_
         INSERT INTO schema_migrations_meta (key, value)
             SELECT '${TAG_IDENTITY_REVISION_PREFIX}' || NEW.session_id, '1'
             WHERE NEW.session_id IS NOT OLD.session_id
-            ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+            ON CONFLICT(key) DO UPDATE SET value = ${ADVANCE()};
     END`;
 
 export function installTagIdentityRevisionTrigger(db: Database): void {
+    // Replace this connection's mc_tag_identity_revision_au and mc_tag_revision_*
+    // TEMP triggers on reload. Older bodies cast the entire value as an integer,
+    // which would discard the serial component of a new `serial:count` value.
+    db.exec(`DROP TRIGGER IF EXISTS temp.mc_tag_identity_revision_au;
+        DROP TRIGGER IF EXISTS temp.mc_tag_revision_bi;
+        DROP TRIGGER IF EXISTS temp.mc_tag_revision_ai;
+        DROP TRIGGER IF EXISTS temp.mc_tag_revision_au;
+        DROP TRIGGER IF EXISTS temp.mc_tag_revision_ad;
+        DROP TRIGGER IF EXISTS temp.mc_tag_revision_seed_ai;`);
+    // Existing counters take the UPSERT update branch, not AFTER INSERT, so only
+    // first creation allocates a lifetime serial. That serial cannot alias a
+    // retired row even if the replacement reaches the same local count.
+    // The first full-row counter also creates the identity counter at count
+    // zero: assignment caches need the new lifetime before any identity edit.
+    // Its already encoded inner INSERT skips this trigger when recursion is on.
+    db.exec(`CREATE TEMP TRIGGER mc_tag_revision_seed_ai AFTER INSERT ON main.schema_migrations_meta
+        WHEN INSTR(NEW.value, ':') = 0 AND (
+          SUBSTR(NEW.key, 1, ${TAG_REVISION_PREFIX.length}) = '${TAG_REVISION_PREFIX}'
+          OR SUBSTR(NEW.key, 1, ${TAG_IDENTITY_REVISION_PREFIX.length}) = '${TAG_IDENTITY_REVISION_PREFIX}')
+        BEGIN
+            INSERT INTO schema_migrations_meta (key, value) VALUES ('${TAG_REVISION_INCARNATION_KEY}', '1')
+                ON CONFLICT(key) DO UPDATE SET value = CAST(CASE
+                    WHEN CAST(value AS INTEGER) < 9223372036854775807 THEN CAST(value AS INTEGER) + 1
+                    ELSE NULL END AS TEXT);
+            UPDATE schema_migrations_meta SET value =
+                (SELECT value FROM schema_migrations_meta WHERE key = '${TAG_REVISION_INCARNATION_KEY}')
+                || ':' || CAST(NEW.value AS TEXT) WHERE key = NEW.key;
+            INSERT INTO schema_migrations_meta (key, value)
+                SELECT '${TAG_REVISION_INCARNATION_KEY}', '1'
+                WHERE SUBSTR(NEW.key, 1, ${TAG_REVISION_PREFIX.length}) = '${TAG_REVISION_PREFIX}'
+                  AND NOT EXISTS (SELECT 1 FROM schema_migrations_meta
+                    WHERE key = '${TAG_IDENTITY_REVISION_PREFIX}' || SUBSTR(NEW.key, ${TAG_REVISION_PREFIX.length + 1}))
+                ON CONFLICT(key) DO UPDATE SET value = CAST(CASE
+                    WHEN CAST(value AS INTEGER) < 9223372036854775807 THEN CAST(value AS INTEGER) + 1
+                    ELSE NULL END AS TEXT);
+            INSERT INTO schema_migrations_meta (key, value)
+                SELECT '${TAG_IDENTITY_REVISION_PREFIX}' || SUBSTR(NEW.key, ${TAG_REVISION_PREFIX.length + 1}),
+                    (SELECT value FROM schema_migrations_meta WHERE key = '${TAG_REVISION_INCARNATION_KEY}') || ':0'
+                WHERE SUBSTR(NEW.key, 1, ${TAG_REVISION_PREFIX.length}) = '${TAG_REVISION_PREFIX}'
+                  AND NOT EXISTS (SELECT 1 FROM schema_migrations_meta
+                    WHERE key = '${TAG_IDENTITY_REVISION_PREFIX}' || SUBSTR(NEW.key, ${TAG_REVISION_PREFIX.length + 1}));
+        END;`);
     db.exec(TRIGGER_SQL);
     // Record existing rows that INSERT might replace without enabling recursive
     // triggers on unrelated tables. A bump for an ignored insert/upsert may
@@ -110,7 +168,7 @@ export function installTagIdentityRevisionTrigger(db: Database): void {
         INSERT INTO schema_migrations_meta (key, value)
             SELECT '${TAG_REVISION_PREFIX}' || NEW.session_id, '1'
             WHERE NEW.session_id IS NOT OLD.session_id
-            ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+            ON CONFLICT(key) DO UPDATE SET value = ${ADVANCE()};
     END;
     CREATE TEMP TRIGGER IF NOT EXISTS mc_tag_revision_ad AFTER DELETE ON main.tags BEGIN
         ${BUMP("OLD.session_id", TAG_REVISION_PREFIX)};
@@ -129,7 +187,7 @@ export function installTagIdentityRevisionTrigger(db: Database): void {
 export function deleteTagIdentityRevisions(db: Database, sessionIds: readonly string[]): void {
     const statement = db.prepare(
         `INSERT INTO schema_migrations_meta (key, value) VALUES (?, '1')
-         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`,
+         ON CONFLICT(key) DO UPDATE SET value = ${ADVANCE()}`,
     );
     for (const sessionId of sessionIds) {
         statement.run(tagIdentityRevisionKey(sessionId));

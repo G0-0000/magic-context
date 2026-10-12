@@ -468,12 +468,14 @@ describe("tag identity write classification", async () => {
 });
 
 describe("tag identity revision rows on session deletion", async () => {
-    const revisionOf = (db: Database, sessionId: string) =>
-        (
+    const revisionOf = (db: Database, sessionId: string) => {
+        const value = (
             db
                 .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
                 .get(tagIdentityRevisionKey(sessionId)) as { value: string } | null
-        )?.value ?? null;
+        )?.value;
+        return value?.split(":").at(-1) ?? null;
+    };
 
     it("removes permanent tombstones but advances epochs while another harness's tags remain", async () => {
         const db = new Database(":memory:");

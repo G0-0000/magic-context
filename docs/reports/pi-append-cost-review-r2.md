@@ -1,5 +1,7 @@
 # Independent correctness review, round 2: Pi append and shared tag epochs
 
+> Historical review of `00a1d299`. The conditional ID-reuse finding is repaired in the follow-up described in [pi-session-local-append-cost.md](pi-session-local-append-cost.md). Its named reproduction now runs permanently in `packages/pi-plugin/src/tag-revision-incarnation.test.ts`; the original report assets otherwise remain review evidence. This follow-up is scheduled to merge after 0.48.0 ships.
+
 ## Scope and verdict
 
 Reviewed **00a1d299441ce7456136df9d4a4d301db3cb8fcb**, on **873ee68257a9075b4c09a386331d2519350b615b** and round-1 report **46185b24**. Read [the round-1 findings](pi-append-cost-review.md) first: they identified revision reuse after clear, missing REPLACE invalidation, duplicate-key hygiene attribution and duplicate-ID fallback-index membership, plus the documented raw-writer limit. This delivery changes only this report and reproducible report assets; no product or package test was changed.
@@ -12,7 +14,7 @@ All execution was on Linux, `runon: "linux,8c"`, Bun **1.4.2**, Node **24.21.0**
 
 ### Medium, conditional lifecycle correctness — terminal retirement reintroduces a revision alias if an ID is reused while another reader remains open
 
-**Failing test:** `r2 permanent deletion and same-ID reuse must invalidate an already-open foreign reader` in [checks.test.ts](pi-append-cost-review-r2/checks.test.ts).
+**Failing test:** `r2 permanent deletion and same-ID reuse must invalidate an already-open foreign reader` in [`tag-revision-incarnation.test.ts`](../../packages/pi-plugin/src/tag-revision-incarnation.test.ts) (originally the review's checks.test.ts).
 
 Minimal sequence, with initialized connections throughout:
 

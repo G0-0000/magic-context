@@ -1,5 +1,7 @@
 import {
 	TAG_INSERT_CONFLICT_ROWS,
+	tagRevisionCountSql,
+	tagRevisionIncarnationSql,
 	tagRevisionKey,
 } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
 import {
@@ -59,9 +61,11 @@ export function createPiTagSnapshotReader(db: Database) {
 			INSERT INTO pi_tag_changes SELECT OLD.session_id, OLD.tag_number WHERE EXISTS (SELECT 1 FROM pi_tag_watch WHERE session_id = OLD.session_id) AND NOT EXISTS (SELECT 1 FROM pi_tag_changes WHERE session_id = OLD.session_id AND tag_number = OLD.tag_number);
 		END;
 	`);
-	const revision = db.prepare(`SELECT
-		COALESCE((SELECT revision FROM pi_tag_session_revision WHERE session_id = ?), 0) AS local,
-		COALESCE((SELECT CAST(value AS INTEGER) FROM schema_migrations_meta WHERE key = ?), 0) AS total`);
+	const revision = db.prepare(`WITH stamp AS (SELECT
+		COALESCE((SELECT revision FROM pi_tag_session_revision WHERE session_id = ?), 0) AS own,
+		COALESCE((SELECT value FROM schema_migrations_meta WHERE key = ?), '0') AS total)
+		SELECT CAST(own AS TEXT) AS local,
+		(${tagRevisionIncarnationSql("total")}) || ':' || CAST(${tagRevisionCountSql("total")} - own AS TEXT) AS foreign_revision FROM stamp`);
 	revisionReaders.set(db, (sessionId) => {
 		const transaction = db as unknown as {
 			inTransaction?: boolean;
@@ -69,10 +73,10 @@ export function createPiTagSnapshotReader(db: Database) {
 		};
 		if (transaction.inTransaction || transaction.isTransaction) return null;
 		const row = revision.get(sessionId, tagRevisionKey(sessionId)) as {
-			local: number;
-			total: number;
+			local: string;
+			foreign_revision: string;
 		};
-		return [row.local, row.total - row.local] as const;
+		return [row.local, row.foreign_revision] as const;
 	});
 	const changed = db.prepare(
 		"SELECT tag_number FROM pi_tag_changes WHERE session_id = ? ORDER BY tag_number",
@@ -85,8 +89,8 @@ export function createPiTagSnapshotReader(db: Database) {
 	const cache = new Map<
 		string,
 		{
-			revision: number;
-			foreignRevision: number;
+			revision: string;
+			foreignRevision: string;
 			tags: ReturnType<typeof getTagsBySession>;
 		}
 	>();
@@ -104,7 +108,10 @@ export function createPiTagSnapshotReader(db: Database) {
 			return getTagsBySession(db, sessionId);
 		// Subtract this connection's writes from the shared session counter. Both
 		// counters roll back with the rows; unrelated foreign commits do not matter.
-		const [local, external] = revisionReaders.get(db)?.(sessionId) ?? [0, 0];
+		const [local, external] = revisionReaders.get(db)?.(sessionId) ?? [
+			"0",
+			"0:0",
+		];
 		let snapshot = cache.get(sessionId);
 		if (!snapshot || snapshot.foreignRevision !== external) {
 			snapshot = {
@@ -180,14 +187,14 @@ const readers = new WeakMap<
 
 const revisionReaders = new WeakMap<
 	Database,
-	(sessionId: string) => readonly [number, number] | null
+	(sessionId: string) => readonly [string, string] | null
 >();
 
 /** Revision for tag-only observations; transactions must use uncached reads. */
 export function readPiTagSnapshotRevision(
 	db: Database,
 	sessionId: string,
-): readonly [number, number] | null {
+): readonly [string, string] | null {
 	if (!readers.has(db)) createPiTagSnapshotReader(db);
 	return revisionReaders.get(db)?.(sessionId) ?? null;
 }

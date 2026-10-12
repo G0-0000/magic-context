@@ -447,9 +447,24 @@ export function createTagger(): Tagger {
             const memCounter = heapHolder.counters.get(sessionId) ?? 0;
             const dbMax = getMaxTagNumberBySession(db, sessionId);
             const next = Math.max(memCounter, dbMax) + 1;
+            const loaded = heapHolder.loadSignatures.get(sessionId);
+            let ownedInitialIdentity: string | null | undefined;
 
             try {
                 db.transaction(() => {
+                    // Only the first allocation can create a previously absent
+                    // identity epoch. Verify the loaded snapshot at writer
+                    // admission, then capture our new epoch while still locked:
+                    // adopting a foreign stamp after commit could bless stale bindings.
+                    const admitted =
+                        loaded?.db === db && loaded.identityRevision === null
+                            ? probeSignature(sessionId, db)
+                            : null;
+                    const initializesOwnedEpoch =
+                        admitted !== null &&
+                        loaded !== undefined &&
+                        admitted.identityRevision === null &&
+                        admitted.tagsVersion === loaded.tagsVersion;
                     // Ensure session_meta exists before the tags INSERT fires the
                     // per-session tags_version trigger. The transaction rolls both
                     // writes back if tag allocation fails.
@@ -468,6 +483,8 @@ export function createTagger(): Tagger {
                         entryFingerprint,
                         tokenCounts,
                     );
+                    if (initializesOwnedEpoch)
+                        ownedInitialIdentity = probeSignature(sessionId, db).identityRevision;
                 }).immediate();
             } catch (error: unknown) {
                 if (!isUniqueConstraintError(error)) {
@@ -498,6 +515,8 @@ export function createTagger(): Tagger {
                 // The INSERT trigger advanced exactly once. Mirror our own write
                 // so same-connection allocations retain the hot cache path.
                 signature.tagsVersion += 1;
+                if (signature === loaded && ownedInitialIdentity !== undefined)
+                    signature.identityRevision = ownedInitialIdentity;
             }
             if (type === "tool") {
                 getSessionToolAccounting(sessionId).set(next, {

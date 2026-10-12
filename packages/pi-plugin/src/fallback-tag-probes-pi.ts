@@ -6,8 +6,8 @@ import type { Database } from "@magic-context/core/shared/sqlite";
 import { readPiTagSnapshotRevision } from "./tag-snapshot-pi";
 
 interface ProbeSnapshot {
-	local: number;
-	external: number;
+	local: string;
+	external: string;
 	message?: boolean;
 	tool?: boolean;
 }

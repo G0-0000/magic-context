@@ -310,32 +310,3 @@ it("r2 terminal deletion then ID reuse starts with a clean counter and no inheri
 		h.close();
 	}
 });
-
-it("r2 permanent deletion and same-ID reuse must invalidate an already-open foreign reader", () => {
-	const h = fixture();
-	const writer = new Database(h.path);
-	initializeDatabase(writer);
-	const tagger = createTagger();
-	try {
-		insert(writer, "reuse-live", 1, "before:p0");
-		const read = createPiTagSnapshotReader(h.db);
-		const id = read("reuse-live")[0]!.id;
-		tagger.initFromDb("reuse-live", h.db);
-		clearSession(writer, "reuse-live", false, true);
-		writer
-			.prepare(
-				"INSERT INTO tags(id,session_id,message_id,type,status,tag_number,byte_size,harness) VALUES (?, 'reuse-live','after:p0','message','dropped',7,9,'pi')",
-			)
-			.run(id);
-		tagger.initFromDb("reuse-live", h.db);
-		console.log(
-			`TERMINAL_REUSE warmAssignment=${tagger.getTag("reuse-live", "before:p0", "message")} newAssignment=${tagger.getTag("reuse-live", "after:p0", "message")} snapshot=${JSON.stringify(read("reuse-live").map((r) => [r.messageId, r.tagNumber, r.status]))}`,
-		);
-		expect(read("reuse-live")).toEqual(getTagsBySession(h.db, "reuse-live"));
-		expect(tagger.getTag("reuse-live", "after:p0", "message")).toBe(7);
-	} finally {
-		tagger.cleanup("reuse-live");
-		writer.close();
-		h.close();
-	}
-});
