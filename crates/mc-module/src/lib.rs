@@ -27253,8 +27253,9 @@ mod tests {
                 // From pass 3 on, mark a pending bootstrap-seed fold in both stores. The
                 // fixture is one open Anthropic turn with signed thinking on a prefix-bound
                 // model, so the render-identity change below would wait for the turn to end
-                // (the m0/m1 head is frozen while that thinking is kept). A seed fold is a
-                // HARD whatever is pending, so it prices these passes instead.
+                // (the m0/m1 head is frozen while that thinking is kept). A pending seed fold
+                // makes the pass a HARD (a full m0/m1 rebuild) whatever else is queued, so it
+                // gives these passes their rewrite instead.
                 for store in [&store, &reference_store] {
                     let mut loaded = store.load("ses").unwrap();
                     loaded.meta.bootstrap_seed_fold_pending = true;
@@ -27490,8 +27491,8 @@ mod tests {
         let mut priced_request = make_request(&native);
         priced_request["render_config"] = json!("independent-priced-config-change");
         // Mark a pending bootstrap-seed fold. A render-identity change inside the open signed
-        // turn would wait for the turn to end, but a seed fold is a HARD whatever is pending,
-        // so it prices this pass (the HARD asserted below). It re-renders the same head, so
+        // turn would wait for the turn to end, but a pending seed fold makes the pass a
+        // HARD (a full m0/m1 rebuild) whatever else is queued (the HARD asserted below). It re-renders the same head, so
         // the turn's signed thinking stays valid.
         let mut loaded = store.load("ses").unwrap();
         loaded.meta.bootstrap_seed_fold_pending = true;
@@ -27600,8 +27601,8 @@ mod tests {
         let mut priced_request = make_request(&native, "claude-fable-5-1");
         priced_request["render_config"] = json!("independent-priced-config-change");
         // Mark a pending bootstrap-seed fold. A render-identity change inside the open signed
-        // turn would wait for the turn to end, but a seed fold is a HARD whatever is pending,
-        // so it prices this pass (the HARD asserted below). It re-renders the same head, so
+        // turn would wait for the turn to end, but a pending seed fold makes the pass a
+        // HARD (a full m0/m1 rebuild) whatever else is queued (the HARD asserted below). It re-renders the same head, so
         // the turn's signed thinking stays valid.
         let mut loaded = store.load("ses").unwrap();
         loaded.meta.bootstrap_seed_fold_pending = true;

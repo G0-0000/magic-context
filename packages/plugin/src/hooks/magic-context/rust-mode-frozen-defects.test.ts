@@ -334,7 +334,7 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         setModuleOutput: (value: (input: MessageLike[]) => unknown[]) => {
             moduleOutput = value;
         },
-        /** Extra response fields (such as `signed_thinking_reset`) for later passes. */
+        /** Extra fields (such as `signed_thinking_reset`) added to every later module response. */
         setResponseExtras: (value: Record<string, unknown>) => {
             responseExtras = value;
         },
@@ -1057,9 +1057,11 @@ describe("the replay registry follows the adapter's lifetime", () => {
     });
 });
 
-// Real Rust engine output (`review_r2_native_engine_exports_force_and_idle_for_host_strip`
-// in crates/mc-module, exported with its R2_HOST_FIXTURE records) replayed through this
-// adapter. A signed thinking block is valid only while every byte before it is unchanged.
+// Real Rust engine output replayed through this adapter. The fixtures are the
+// `R2_HOST_FIXTURE` lines printed by the mc-module test
+// `review_r2_native_engine_exports_force_and_idle_for_host_strip`: a session with an older
+// signed turn and an open signed tool loop (a4..a6 signed, a7 unsigned), before and after
+// a force-band pass, an idle-expired pass, and a pass whose m0/m1 head was rebuilt. A signed thinking block is valid only while every byte before it is unchanged.
 // Force and idle passes keep the head, so every block through the last kept reasoning must
 // stay; a rewritten head invalidates all of them, so none may be served, in the healthy,
 // reactive-recovery and previously frozen host states alike.
@@ -1086,7 +1088,8 @@ function reasoningIds(messages: MessageLike[]): string[] {
         .map((message) => String(message.info.id));
 }
 
-/** The served messages through the last reasoning part of `a6`, the newest signed step. */
+/** The served messages through the last reasoning part of message `a6`, the fixture's
+ * newest signed step: everything a kept signature is bound to. */
 function prefixThroughKeptThinking(messages: MessageLike[]): string {
     const end = messages.findIndex((message) => message.info.id === "a6");
     expect(end).toBeGreaterThanOrEqual(0);
@@ -1101,8 +1104,9 @@ function prefixThroughKeptThinking(messages: MessageLike[]): string {
 }
 
 /**
- * Serve the fixture's baseline, put the host in `mode`, then serve the pressured pass.
- * `override` replaces the module's pressured output and response fields.
+ * Serve the fixture's baseline, put the host in `mode` (healthy; reactive, with a provider
+ * rejection armed; or frozen, after a module failure), then serve the pressured pass. When
+ * given, `override` replaces the module's pressured native output and extra response fields.
  */
 async function runSignedThinkingFixture(
     label: string,
@@ -1163,13 +1167,14 @@ describe("Rust host thinking strips with real engine output", () => {
                 "HARD",
             );
             expect(reasoningIds(after)).toEqual([]);
-            // The module replays its persisted reset; the host must not restore the turn.
+            // The module replays its persisted strip on the next pass; the host must not
+            // restore the turn's original signed thinking either.
             const next = (await s.run(input, "SOFT+")) as MessageLike[];
             expect(reasoningIds(next)).toEqual([]);
         });
     }
-    // The decision, not the module's own output, drives the host: given output that still
-    // carries signed thinking, a reported reset strips every block of it.
+    // The reported `signed_thinking_reset`, not the module's own output, drives the host:
+    // given output that still carries signed thinking, the host strips every block of it.
     for (const mode of ["healthy", "reactive"] as const) {
         it(`a reported reset strips thinking the module output still carries (${mode})`, async () => {
             const fixture = signedThinkingFixtures.rewrite;

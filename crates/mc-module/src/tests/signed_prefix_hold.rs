@@ -340,9 +340,10 @@ fn signed_prefix_hold_subagent_yields_to_an_armed_overflow_recovery() {
 }
 
 /// A pass that rebuilds the m0/m1 head changes the bytes every signed thinking block after
-/// it is bound to, so it strips every signed block (the active turn's included), reports
-/// that decision, and lands all queued work, the drop before the old kept thinking too.
-/// The next pass replays the persisted strip unchanged.
+/// it is bound to, so it strips every signed block (the active turn's included) and reports
+/// `signed_thinking_reset`. With no signed thinking left to protect, both queued drops are
+/// applied, including `old-answer#0` before the previously kept thinking. The next pass
+/// replays the persisted strip unchanged.
 fn assert_signed_hold_reset(
     s: &McStore,
     session: &str,
@@ -364,7 +365,8 @@ fn assert_signed_hold_reset(
     assert_eq!(signed_hold_bytes(&replay), signed_hold_bytes(rewritten));
 }
 
-/// `prepare` makes the head of a bootstrapped session impossible to replay.
+/// `prepare` edits the stored state of a bootstrapped session so its m0/m1 head cannot be
+/// replayed (for example, by deleting the frozen m1 unit), forcing a HARD rebuild.
 fn check_signed_hold_rides_unavoidable_rewrite(
     session: &str,
     prepare: impl FnOnce(&McStore, &mut ProducerContext<'static>),
@@ -484,7 +486,8 @@ fn signed_prefix_hold_idle_expiry_replays_the_head_and_carries_queued_drops() {
     assert_eq!(signed_hold_head(&expired), signed_hold_head(&baseline));
 }
 
-/// A bootstrap-seed fold is a HARD whatever is queued, so its queued work rides it. Here the
+/// A pending bootstrap-seed fold makes the pass a HARD (a full m0/m1 rebuild), so queued
+/// work is applied on it. Here the
 /// rebuilt head is byte-identical to the one already served, so nothing before the kept
 /// signed thinking changed: the thinking stays, and only the drop after it lands. The reset
 /// follows changed head bytes, not the HARD itself.

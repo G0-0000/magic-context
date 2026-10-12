@@ -5222,13 +5222,16 @@ fn apply_once(
     let active_thinking_turn = active_anthropic_thinking_turn(req);
     let protected_signed_prefix =
         active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
-    // Signed-thinking reset (a retry decided by a first attempt below): strip every signed
-    // reasoning block the request carries, the active turn's included. Removing all thinking
-    // is valid under strict prefix binding, while any block kept after a changed prefix byte
-    // is not. The removal uses the frozen unit the reasoning-age lane already replays on every
-    // later pass, and with no signed thinking kept, thinking-prefix protection lifts, so all
-    // queued work lands on this same pass. Primary only: the reductions-only subagent branch
-    // carries no strip units.
+    // Signed-thinking reset. `reset_signed_thinking` is set on a retry of this pass, after
+    // a first attempt returned `TransformError::SignedThinkingReset` (see the head check
+    // after the plan and the fit check before the commit). The retry strips every signed
+    // reasoning block the request carries, the active turn's included: removing all thinking
+    // keeps the request valid when bytes before a signed block changed, while keeping any
+    // such block does not. Each removal is a `strip:reasoning_age:<mid>` frozen unit, which
+    // every later pass already replays. With no signed thinking left to protect,
+    // `active_thinking_prefix_edit_ids` protects nothing, so all queued work is applied on
+    // this same pass. Primary only: the reductions-only subagent branch carries no strip
+    // units.
     let signed_thinking_reset_units: Vec<FrozenUnit> = if reset_signed_thinking && !req.is_subagent
     {
         let already_removed = loaded
@@ -5252,8 +5255,9 @@ fn apply_once(
         Vec::new()
     };
     let signed_thinking_reset = reset_signed_thinking && !req.is_subagent;
-    // Planning that protects bytes before kept signed thinking reads the frozen set as this
-    // pass will serve it, with the reset's removals in place.
+    // The selection, caveman and strip planning below protect blocks before kept signed
+    // thinking; they read the frozen units with the reset's removals already in place, so
+    // they see that no signed thinking is kept.
     let reset_planning_core;
     let planning_core: &CoreState = if signed_thinking_reset_units.is_empty() {
         &loaded.core
@@ -5794,7 +5798,8 @@ fn apply_once(
     if cache_sections_discarded {
         plan = PassPlan::Hard;
     }
-    // A signed-thinking reset must serve its removals: it is a rewrite by construction.
+    // A signed-thinking reset changes the served thinking by construction, so its strip
+    // units must be committed and served: it is never a Defer.
     if signed_thinking_reset && matches!(plan, PassPlan::Defer) && !loaded.core.reconcile_pending {
         plan = PassPlan::Soft;
     }
@@ -7717,7 +7722,8 @@ fn apply_once(
             return Err(TransformError::ProtectedToolResultsOverLimit);
         }
     }
-    // Fit or refuse inside an open signed turn at the wall. Thinking-prefix protection keeps
+    // Fit or refuse inside an open signed turn near the context limit (the force band or the
+    // 95% emergency). Thinking-prefix protection keeps
     // every block before the turn's kept signed thinking unchanged, so in a long signed tool
     // loop the reclaimable output can all sit behind it and the request stays over the
     // window. Stripping all signed thinking is valid under strict binding and lifts that
