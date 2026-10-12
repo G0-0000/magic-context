@@ -113,12 +113,12 @@ function reachableEntries(): Entry[] {
 	return entries;
 }
 
-function seed(db: Database, sessionId: string): void {
+function seed(db: Database, sessionId: string, offset = LOST): void {
 	appendCompartments(db, sessionId, [
 		{
 			sequence: 0,
 			startMessage: 1,
-			endMessage: LOST + 9,
+			endMessage: offset + 9,
 			startMessageId: "old-1",
 			endMessageId: "b9",
 			title: "Older work",
@@ -127,8 +127,8 @@ function seed(db: Database, sessionId: string): void {
 		},
 		{
 			sequence: 1,
-			startMessage: LOST + 10,
-			endMessage: END,
+			startMessage: offset + 10,
+			endMessage: offset + 18,
 			startMessageId: "b10",
 			endMessageId: "anchor-call",
 			title: "Latest work",
@@ -182,11 +182,12 @@ async function withFixture(
 		sessionId: string,
 		entries: Entry[],
 	) => void | Promise<void>,
+	offset = LOST,
 ) {
 	const db = createTestDb();
 	const sessionId = `ordinal-review-${crypto.randomUUID()}`;
 	try {
-		seed(db, sessionId);
+		seed(db, sessionId, offset);
 		await run(db, sessionId, reachableEntries());
 	} finally {
 		clearContextHandlerSession(sessionId);
@@ -425,9 +426,12 @@ describe("Pi ordinal offset independent review", () => {
 	});
 });
 
-// Create the complete historical prefix so the test can later remove its last
-// parent entry: the older rows remain in the file but become unreachable from b1.
-function persistedFixture(sessionId: string): {
+// Keep the missing parent in the middle of the file without making each open
+// parse tens of thousands of unrelated historical entries.
+function persistedFixture(
+	sessionId: string,
+	offset: number,
+): {
 	path: string;
 	complete: Entry[];
 } {
@@ -436,16 +440,19 @@ function persistedFixture(sessionId: string): {
 	const dir = temp.dir;
 	const path = join(dir, "session.jsonl");
 	const prefix = Array.from(
-		{ length: LOST },
+		{ length: offset },
 		(_, index): Entry => ({
 			type: "message",
-			id: index === LOST - 1 ? "missing-parent" : `old-${index + 1}`,
+			id: index === offset - 1 ? "missing-parent" : `old-${index + 1}`,
 			parentId: index ? `old-${index}` : null,
-			timestamp: new Date(START_TIME - (LOST - index) * 1000).toISOString(),
+			timestamp: new Date(START_TIME - (offset - index) * 1000).toISOString(),
 			message:
 				index % 2
-					? assistantMessage("old history", START_TIME - (LOST - index) * 1000)
-					: userMessage("old history", START_TIME - (LOST - index) * 1000),
+					? assistantMessage(
+							"old history",
+							START_TIME - (offset - index) * 1000,
+						)
+					: userMessage("old history", START_TIME - (offset - index) * 1000),
 		}),
 	);
 	const complete = [...prefix, ...reachableEntries()];
@@ -476,8 +483,10 @@ function writeSession(
 
 describe("Pi ordinal offset persisted recovery", () => {
 	it("a missing mid-file parent recovers automatically, grows, and leaves the defer head unchanged", async () => {
+		const offset = reachableEntries().length;
+		const recoveredStart = offset + 19;
 		await withFixture(async (db, sessionId) => {
-			const { path, complete } = persistedFixture(sessionId);
+			const { path, complete } = persistedFixture(sessionId, offset);
 			let manager = SessionManager.open(path);
 			const fake = createFakePi();
 			const chunks: Array<{ start: number; text: string }> = [];
@@ -564,7 +573,7 @@ describe("Pi ordinal offset persisted recovery", () => {
 			});
 			expect(
 				resolvePiOrdinalAlignment(db, sessionId, manager.getBranch()).offset,
-			).toBe(LOST);
+			).toBe(offset);
 			const broken = await pass(10_000);
 			expect(JSON.stringify(broken.messages.slice(0, 2))).toBe(head);
 			manager.appendMessage(
@@ -572,18 +581,18 @@ describe("Pi ordinal offset persisted recovery", () => {
 			);
 			expect(
 				resolvePiOrdinalAlignment(db, sessionId, manager.getBranch()).offset,
-			).toBe(LOST);
+			).toBe(offset);
 			const grown = await pass(10_000);
 			expect(JSON.stringify(grown.messages.slice(0, 2))).toBe(head);
 			const trigger = await pass(85_000);
 			expect(JSON.stringify(trigger.messages.slice(0, 2))).toBe(head);
 			await awaitInFlightHistorians();
 			expect(runner.run).toHaveBeenCalledTimes(1);
-			expect(chunks[0]?.start).toBe(65_939);
-			expect(chunks[0]?.text).toContain("65939");
+			expect(chunks[0]?.start).toBe(recoveredStart);
+			expect(chunks[0]?.text).toContain(String(recoveredStart));
 			expect(chunks[0]?.text).toContain("answer after both results");
 			expect(getCompartments(db, sessionId)[2]).toMatchObject({
-				startMessage: 65_939,
+				startMessage: recoveredStart,
 				startMessageId: "synth-user-result-a",
 			});
 			const deferAfterPublish = await pass(10_000);
@@ -595,6 +604,6 @@ describe("Pi ordinal offset persisted recovery", () => {
 			expect(
 				resolvePiOrdinalAlignment(db, sessionId, manager.getBranch()),
 			).toEqual({ kind: "aligned", offset: 0 });
-		});
+		}, offset);
 	}, 60_000);
 });
