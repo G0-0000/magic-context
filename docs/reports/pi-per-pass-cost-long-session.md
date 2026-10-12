@@ -340,3 +340,80 @@ Each control followed the same procedure. The file was staged so that
     2,058 tests in 208 files.
 * Plugin tests on the core table code (`storage-tags*`, `tagger*`,
   `tag-transcript`): 142 passed.
+
+## Follow-up: review findings 1 and 2
+
+The independent review in `docs/reports/pi-per-pass-cost-review.md` (cherry-picked
+here) found two defects. Both are fixed. Its findings 3 and 4 also exist on master
+and are unchanged; that known-gap test stays skipped.
+
+### 1. Old-build writers were invisible to the cached fallback probes
+
+Builds older than the `tag_revision:` triggers (v0.47.x, v0.48.x), and
+connections that never ran `initializeDatabase`, do not advance the shared
+revision. Every writer does advance `session_meta.tags_version`, through schema
+triggers that fire on tag insert, delete and
+`UPDATE OF session_id, message_id, tag_number, type, tool_owner_message_id, status`.
+
+New TEMP triggers, `pi_tag_version_ai/ad/au`, count this connection's firings of
+the same events in `pi_tag_version_own`. On each sync, the snapshot reads two
+indexed scalars: `tags_version` and its own count. If the durable value moved by
+more than this connection's own share, some write was missed by the revision.
+The cached fallback rows are then rescanned on next use.
+
+The common pass adds one two-scalar query and scans nothing. Other ways
+`tags_version` can move, such as a session clear or the REPLACE-conflict
+trigger, only cause an extra rescan.
+
+The cached snapshot rows themselves keep master's approved limit for such
+writers. The test `known limit: uninitialized foreign writes stay stale…` is
+unchanged.
+
+### 2. A pass could read two different tag states
+
+`getPiActiveTagSnapshotView(db, session, passTags)` returns the cached active rows
+only while the snapshot still holds the caller's `passTags` array. Every row
+change publishes a new array. If another connection committed between the two
+reads, the result is a filter of `passTags`, so both lists come from one state.
+
+### Mutation controls
+
+Each control followed the same procedure as above: stage the file, confirm an
+empty `git diff --stat`, apply the mutant (marked `NON-VACUITY BREAK`), confirm a
+non-empty diff, run the tests, then restore with checkout plus `touch` and
+confirm an empty diff. The test run covered 7 files and 57 tests.
+
+| fix | mutation | red tests |
+|---|---|---|
+| durable-counter detector | skip the `tags_version` delta check | only `witness (red on the branch, green on master): an old-build sibling's fallback row is visible to the cached probes after a local tag write` (52 pass, 4 skip, 1 fail) |
+| one tag state per pass | ignore whether the snapshot moved since `passTags` | only `witness (red on the branch, green on master): a foreign commit between the two snapshot reads of a pass cannot split its active tags from its full tags` (52 pass, 4 skip, 1 fail) |
+
+Both witnesses now run by default. Their names describe the reviewed commit
+`b960feedfb`.
+
+### Rerun
+
+All runs were on Linux, Bun 1.4.2, using the same fixture and scripts as above.
+
+* **Steady append.** The median hook total is **61.6 ms**, against 55.5 ms in the
+  first delivery. Master measured 90.2 ms in the same job, against 87.1 ms before,
+  so the machine was about 3.5% slower this time. Means: master 101.2 ms, branch
+  65.1 ms. getTagsBySessionSnapshot is 0.49 ms median. Fallback identity and
+  adoption is 6.0 ms against master's 6.1 ms. All 35 passes were identical.
+* **Randomized differential.**
+  * Seed 7: 114 of 114 passes identical (23 drops, 2 flushes, 6 folds, 26
+    foreign writes, 11 model switches). Mean total 148.0 ms on master, 96.9 ms
+    on the branch.
+  * Seed 11: 114 of 114 identical (19 drops, 12 flushes, 5 folds, 23 foreign
+    writes, 5 model switches). Mean total 151.3 ms on master, 104.0 ms on the
+    branch.
+* **Two-process driver.** Command: `two-process-review.ts --seed 23 --messages 700
+  --start 400 --passes 80 --race 30 --historical 3000`. 80 of 80 lockstep turns
+  were identical to master: served-JSON SHA-256, bytes, message counts and
+  tag-row hash. 30 race rounds on each tree, with 0 invariant violations on
+  either.
+* **Linux, 8 vCPUs.** `bun run typecheck` passed. `bun run lint` passed: 309
+  files and the same 49 warnings as master. `bun run test`: 2,032 passed, 32
+  skipped, 0 failed (2,064 tests). An earlier run of the suite reported one
+  failure while a benchmark job shared the machine. Its name was not captured;
+  the rerun was clean.
