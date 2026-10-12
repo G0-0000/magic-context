@@ -2887,6 +2887,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/generate-tool-tail.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 generate hook after a tool step: the side-question request replays the last served runner request byte for byte, including id-less tool results",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/degraded-pass-lock.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
