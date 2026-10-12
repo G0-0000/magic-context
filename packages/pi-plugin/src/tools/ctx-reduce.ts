@@ -26,7 +26,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
-import { getInertWhitespaceAssistantTags } from "@magic-context/core/features/magic-context/storage-tags";
+import { getInertWhitespaceAssistantTagsByNumbers } from "@magic-context/core/features/magic-context/storage-tags";
 import { getErrorMessage } from "@magic-context/core/shared/error-message";
 import {
 	CTX_REDUCE_DESCRIPTION,
@@ -167,10 +167,14 @@ export function createCtxReduceTool(
 			const tagStatusMap = new Map(
 				allTags.map((tag) => [tag.tagNumber, tag.status]),
 			);
+			// Only membership of the requested tags is consulted below, so look
+			// up just those instead of every inert tag in the session.
 			const inertWhitespaceTagNumbers = new Set(
-				getInertWhitespaceAssistantTags(deps.db, sessionId).map(
-					(tag) => tag.tagNumber,
-				),
+				getInertWhitespaceAssistantTagsByNumbers(
+					deps.db,
+					sessionId,
+					dropIds,
+				).map((tag) => tag.tagNumber),
 			);
 			const inertDropIds = [
 				...new Set(dropIds.filter((id) => inertWhitespaceTagNumbers.has(id))),
