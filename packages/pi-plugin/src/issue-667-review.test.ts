@@ -225,10 +225,9 @@ test("issue 667 review: a pass refused while waiting for its SQLite reservation 
 	try {
 		await chunkRunning;
 		const fake = createFakePi();
-		registerPiContextHandler(
-			{ ...fake.pi, appendEntry: () => {} } as never,
-			{ db },
-		);
+		registerPiContextHandler({ ...fake.pi, appendEntry: () => {} } as never, {
+			db,
+		});
 		const raw = [userMessage("held behind maintenance", 1)];
 		let aborts = 0;
 		const ctx = {
