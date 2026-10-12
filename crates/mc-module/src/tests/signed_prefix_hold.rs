@@ -103,6 +103,11 @@ fn signed_hold_compartments(s: &McStore, session: &str) {
 fn signed_hold_baseline(s: &McStore, session: &str, used: u64) -> TransformResponse {
     let ctx = pctx("git:proj", "/nonexistent-docs", 0);
     signed_hold_compartments(s, session);
+    // Render the first head before the turn's signed thinking exists: a first render inside
+    // the open turn would itself strip that thinking (see the rewrite tests below).
+    let mut before_turn = signed_hold_request(session, 20_000);
+    before_turn.messages.truncate(3);
+    transform(s, &before_turn, &ctx).unwrap();
     transform(s, &signed_hold_request(session, 20_000), &ctx).unwrap();
     let baseline = transform(s, &signed_hold_request(session, used), &ctx).unwrap();
     assert_eq!(
@@ -334,10 +339,32 @@ fn signed_prefix_hold_subagent_yields_to_an_armed_overflow_recovery() {
     );
 }
 
-/// A pass that must rewrite the prefix anyway also applies the queued drops, except the one
-/// before the kept signed thinking, which stays untouched (editing it would invalidate the
-/// signed thinking after it). `prepare` sets up the unavoidable rewrite on a bootstrapped
-/// session.
+/// A pass that rebuilds the m0/m1 head changes the bytes every signed thinking block after
+/// it is bound to, so it strips every signed block (the active turn's included), reports
+/// that decision, and lands all queued work, the drop before the old kept thinking too.
+/// The next pass replays the persisted strip unchanged.
+fn assert_signed_hold_reset(
+    s: &McStore,
+    session: &str,
+    request: &TransformRequest,
+    ctx: &ProducerContext<'_>,
+    rewritten: &TransformResponse,
+) {
+    assert_eq!(rewritten.action, "HARD", "{session}");
+    assert!(rewritten.signed_thinking_reset, "{session}");
+    assert!(
+        signed_hold_pending(s, session).is_empty(),
+        "{session}: every queued drop lands on the rewrite"
+    );
+    let served = String::from_utf8(signed_hold_bytes(rewritten)).unwrap();
+    assert!(!served.contains("sig-plan"), "{session}: {served}");
+    let replay = transform(s, request, ctx).unwrap();
+    assert_eq!(replay.action, "SOFT+", "{session}");
+    assert!(!replay.signed_thinking_reset);
+    assert_eq!(signed_hold_bytes(&replay), signed_hold_bytes(rewritten));
+}
+
+/// `prepare` makes the head of a bootstrapped session impossible to replay.
 fn check_signed_hold_rides_unavoidable_rewrite(
     session: &str,
     prepare: impl FnOnce(&McStore, &mut ProducerContext<'static>),
@@ -346,17 +373,14 @@ fn check_signed_hold_rides_unavoidable_rewrite(
     let s = store(dir.path());
     let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
     let baseline = signed_hold_baseline(&s, session, 20_000);
+    assert!(String::from_utf8(signed_hold_bytes(&baseline))
+        .unwrap()
+        .contains("sig-plan"));
     prepare(&s, &mut ctx);
     signed_hold_queue_both(&s, session);
-    let rewritten = transform(&s, &signed_hold_request(session, 20_000), &ctx).unwrap();
-    assert_eq!(
-        signed_hold_pending(&s, session),
-        BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()]),
-        "{session}: the late drop rides; the one before kept signed thinking waits ({})",
-        rewritten.action
-    );
-    assert_eq!(rewritten.action, "HARD", "{session}");
-    assert_ne!(signed_hold_bytes(&rewritten), signed_hold_bytes(&baseline));
+    let request = signed_hold_request(session, 20_000);
+    let rewritten = transform(&s, &request, &ctx).unwrap();
+    assert_signed_hold_reset(&s, session, &request, &ctx, &rewritten);
 }
 
 #[test]
@@ -367,12 +391,9 @@ fn signed_prefix_hold_first_render_carries_queued_drops() {
     let session = "signed-hold-first-render";
     signed_hold_compartments(&s, session);
     signed_hold_queue_both(&s, session);
-    let first = transform(&s, &signed_hold_request(session, 20_000), &ctx).unwrap();
-    assert_eq!(first.action, "HARD");
-    assert_eq!(
-        signed_hold_pending(&s, session),
-        BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()])
-    );
+    let request = signed_hold_request(session, 20_000);
+    let first = transform(&s, &request, &ctx).unwrap();
+    assert_signed_hold_reset(&s, session, &request, &ctx, &first);
 }
 
 #[test]
@@ -386,9 +407,9 @@ fn signed_prefix_hold_missing_m1_carries_queued_drops() {
     });
 }
 
-/// A lineage descent onto a new host conversation epoch serves a different message array,
-/// so the provider's cached prefix is gone and the descent's HARD (full m0/m1 rebuild) pass
-/// applies the queued drops too.
+/// A lineage descent onto a new host conversation epoch serves a different message array
+/// and rebuilds the m0/m1 head (a HARD), so the turn's signed thinking is stripped and the
+/// queued drops all land on that pass.
 #[test]
 fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
     let dir = tempfile::tempdir().unwrap();
@@ -418,10 +439,9 @@ fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
     request.new_epoch = 2;
     request.constituents = vec![(prior.to_string(), session.to_string(), 2)];
     let descended = transform(&s, &request, &ctx).unwrap();
-    assert_eq!(
-        signed_hold_pending(&s, session),
-        BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()]),
-        "the late drop rides the descent; the one before kept signed thinking waits ({} {:?})",
+    assert!(
+        signed_hold_pending(&s, session).is_empty(),
+        "every queued drop lands on the descent ({} {:?})",
         descended.action,
         descended.materialize_reason
     );
@@ -430,6 +450,10 @@ fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
         descended.materialize_reason.as_deref(),
         Some("lineage_descent")
     );
+    assert!(descended.signed_thinking_reset);
+    assert!(!String::from_utf8(signed_hold_bytes(&descended))
+        .unwrap()
+        .contains("sig-plan"));
 }
 
 /// An expired provider cache does not let the head change: the cached m0/m1 pair can still
@@ -460,14 +484,33 @@ fn signed_prefix_hold_idle_expiry_replays_the_head_and_carries_queued_drops() {
     assert_eq!(signed_hold_head(&expired), signed_hold_head(&baseline));
 }
 
+/// A bootstrap-seed fold is a HARD whatever is queued, so its queued work rides it. Here the
+/// rebuilt head is byte-identical to the one already served, so nothing before the kept
+/// signed thinking changed: the thinking stays, and only the drop after it lands. The reset
+/// follows changed head bytes, not the HARD itself.
 #[test]
 fn signed_prefix_hold_bootstrap_seed_fold_carries_queued_drops() {
-    check_signed_hold_rides_unavoidable_rewrite("signed-hold-seed", |s, _| {
-        signed_hold_edit_meta(s, "signed-hold-seed", |meta| {
-            meta.bootstrap_seed_fold_pending = true;
-            meta.soft_refresh_pending = true;
-        });
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    let session = "signed-hold-seed";
+    let baseline = signed_hold_baseline(&s, session, 20_000);
+    signed_hold_edit_meta(&s, session, |meta| {
+        meta.bootstrap_seed_fold_pending = true;
+        meta.soft_refresh_pending = true;
     });
+    signed_hold_queue_both(&s, session);
+    let rebuilt = transform(&s, &signed_hold_request(session, 20_000), &ctx).unwrap();
+    assert_eq!(rebuilt.action, "HARD");
+    assert!(!rebuilt.signed_thinking_reset);
+    assert_eq!(signed_hold_head(&rebuilt), signed_hold_head(&baseline));
+    assert_eq!(
+        signed_hold_pending(&s, session),
+        BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()])
+    );
+    assert!(String::from_utf8(signed_hold_bytes(&rebuilt))
+        .unwrap()
+        .contains("sig-plan"));
 }
 
 #[test]
@@ -785,4 +828,60 @@ fn signed_prefix_hold_idle_expiry_with_only_an_m1_delta_replays() {
     let expired = sim.run(false).unwrap();
     assert_eq!(expired.action, "SOFT+", "{:?}", expired.materialize_reason);
     assert_eq!(review_bytes(&expired), review_bytes(&held));
+}
+
+/// At the wall inside an open signed turn, a request that stays over the context window even
+/// after the signed-thinking reset (every signed block stripped, every reclaimable block
+/// dropped) is refused rather than sent. Here the turn's own prompt is larger than the
+/// window, and nothing may reduce a user prompt. The refusal commits nothing.
+#[test]
+fn signed_prefix_hold_refuses_a_signed_turn_that_cannot_fit_after_the_reset() {
+    let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "refuse-over-window");
+    sim.ctx.protected_tools.clear();
+    let prompt = (0..17_000)
+        .map(|n| format!("entry{n:05} value{n:05}\n"))
+        .collect::<String>();
+    sim.messages[2] = item("u3", 3, &prompt);
+    sim.run(false).unwrap();
+    for _ in 0..2 {
+        sim.tool_step();
+        sim.run(false).unwrap();
+    }
+    let late = sim.tool_results.last().unwrap().clone();
+    sim.s()
+        .append_pending_agent_drops(&sim.session, std::slice::from_ref(&late), 1)
+        .unwrap();
+    let before = sim.s().load(&sim.session).unwrap().row_version;
+    sim.used = 95_000;
+    let mut request = sim.request(false);
+    let usage = request.usage.as_mut().unwrap();
+    usage.final_wire_trusted = true;
+    usage.final_wire_input_tokens = 120_000;
+    match transform(sim.s(), &request, &sim.ctx) {
+        Err(TransformError::SignedTurnOverLimit) => {}
+        other => panic!("expected the over-window refusal, got {other:?}"),
+    }
+    assert_eq!(sim.s().load(&sim.session).unwrap().row_version, before);
+    assert_eq!(
+        review_pending(sim.s(), &sim.session),
+        BTreeSet::from([late])
+    );
+}
+
+/// The over-window refusal's code and message are a contract with the TypeScript host,
+/// which turns this module error into its user-facing refusal.
+#[test]
+fn signed_turn_over_limit_refusal_matches_the_cross_language_contract() {
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/signed-turn-refusal.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        SIGNED_TURN_OVER_LIMIT_CODE,
+        golden["code"].as_str().unwrap()
+    );
+    assert_eq!(
+        TransformError::SignedTurnOverLimit.to_string(),
+        golden["message"].as_str().unwrap()
+    );
 }

@@ -1,8 +1,8 @@
-// Ignored probes of prefix-bound signed thinking: the cached m0/m1 head and
-// bytes before kept reasoning must replay unchanged until a real user message,
-// or a genuine head rewrite removes the signatures bound to the old prefix.
-// Include this file after signed_prefix_hold_review.rs in transform.rs's test
-// module to run the probes. Only temporary stores are used; no provider is called.
+// Probes of prefix-bound signed thinking: the cached m0/m1 head and bytes before
+// kept reasoning must replay unchanged until a real user message, or a genuine
+// head rewrite removes the signatures bound to the old prefix. Included after
+// signed_prefix_hold_review.rs in transform.rs's test module. Only temporary
+// stores are used; no provider is called.
 
 #[test]
 #[ignore = "report-only extended randomized review"]
@@ -64,7 +64,6 @@ fn review_r2_prefix_through(response: &TransformResponse, mid: &str) -> Vec<Vec<
 }
 
 #[test]
-#[ignore = "report-only tail SOFT and next-turn release review"]
 fn review_r2_tail_soft_preserves_ordered_prefix_and_releases_once() {
     for (used, recovery, idle) in [
         (86_000, false, false),
@@ -138,7 +137,6 @@ fn review_r2_tail_soft_preserves_ordered_prefix_and_releases_once() {
 }
 
 #[test]
-#[ignore = "report-only pre-snapshot floor release review"]
 fn review_r2_changed_floor_is_applied_on_release_and_not_lost() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "r2-floor");
     sim.run(false).unwrap();
@@ -222,7 +220,6 @@ fn review_r2_result_token_lower_bound(response: &TransformResponse) -> usize {
 }
 
 #[test]
-#[ignore = "report-only witness: pressure with no safe reclaim must fit or refuse"]
 fn review_r2_witness_signed_loop_over_window_must_fit_or_refuse() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "r2-pressure");
     // Later signed reasoning binds the large results to unchanged prefix bytes.
@@ -294,7 +291,6 @@ fn review_r2_witness_signed_loop_over_window_must_fit_or_refuse() {
 }
 
 #[test]
-#[ignore = "report-only render-identity release after a tail SOFT"]
 fn review_r2_render_identity_change_survives_tail_soft_until_release() {
     let (mut sim, baseline) = review_open_turn_with_publication("r2-identity");
     let late = sim.tool_results.last().unwrap().clone();
@@ -320,9 +316,14 @@ fn review_r2_render_identity_change_survives_tail_soft_until_release() {
     assert_eq!(review_bytes(&replay), review_bytes(&released));
 }
 
+/// Not a defect, and not the module's contract. Queued drops never originate a bust
+/// (ARCHITECTURE invariant 4): they ride the next bust, whenever it comes. Held work that
+/// would itself bust (a flush, a publication, a HARD trigger) is what releases in one bust
+/// on the first pass after the turn. This probe asserts the stronger, rejected rule, so it
+/// stays ignored as a record of that ruling.
 #[test]
-#[ignore = "report-only witness: held drops alone must land on the first next-turn pass"]
-fn review_r2_witness_drop_only_release_applies_all_held_work() {
+#[ignore = "not the contract: plain queued drops ride the next bust (invariant 4); only held work that busts by itself releases on the next user turn"]
+fn review_r2_rejected_rule_drop_only_release_applies_all_held_work() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "r2-drop-only");
     sim.run(false).unwrap();
     for _ in 0..3 {
@@ -378,7 +379,6 @@ fn review_r2_native_run(sim: &ReviewSession, raw: &[Value]) -> TransformResponse
 }
 
 #[test]
-#[ignore = "report-only real-engine fixtures for the Rust host strip probe"]
 fn review_r2_native_engine_exports_force_and_idle_for_host_strip() {
     for variant in 0..3 {
         let idle = variant == 1;
@@ -479,14 +479,13 @@ fn review_r2_native_engine_exports_force_and_idle_for_host_strip() {
             json!({
                 "session_id": sim.session, "kind": kind, "idle": idle, "input": fixture["input"],
                 "before": {"decision": fixture["before"]["decision"], "prefix_bust_permitted": fixture["before"]["prefix_bust_permitted"], "native_messages": fixture["before"]["native_messages"], "reasoning_trim_only": fixture["before"]["reasoning_trim_only"]},
-                "pressured": {"decision": fixture["pressured"]["decision"], "prefix_bust_permitted": fixture["pressured"]["prefix_bust_permitted"], "native_messages": fixture["pressured"]["native_messages"], "reasoning_trim_only": fixture["pressured"]["reasoning_trim_only"]}
+                "pressured": {"decision": fixture["pressured"]["decision"], "prefix_bust_permitted": fixture["pressured"]["prefix_bust_permitted"], "native_messages": fixture["pressured"]["native_messages"], "reasoning_trim_only": fixture["pressured"]["reasoning_trim_only"], "signed_thinking_reset": fixture["pressured"]["signed_thinking_reset"]}
             })
         );
     }
 }
 
 #[test]
-#[ignore = "report-only witness: a rewritten head must strip every signed block"]
 fn review_r2_witness_rewriting_head_cannot_keep_signed_thinking() {
     let (mut sim, before) = review_open_turn_with_publication("r2-unreplayable");
     let mut loaded = sim.s().load(&sim.session).unwrap();

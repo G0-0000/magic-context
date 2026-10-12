@@ -10628,6 +10628,8 @@ impl McHandler {
                 crate::transform::TransformError::ProtectedToolResultsOverLimit
             ) {
                 crate::transform::PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE
+            } else if matches!(e, crate::transform::TransformError::SignedTurnOverLimit) {
+                crate::transform::SIGNED_TURN_OVER_LIMIT_CODE
             } else {
                 "transform_failed"
             };
@@ -27248,14 +27250,14 @@ mod tests {
         ];
         for pass in 0..5 {
             if pass >= 3 {
-                // From pass 3 on, remove the frozen m1 unit from both stores. The fixture is
-                // one open Anthropic turn with signed thinking on a prefix-bound model, so the
-                // render-identity change below would wait for the turn to end (the m0/m1 head
-                // is frozen while that thinking is kept). Without m1 the head cannot be
-                // replayed, so the transform rebuilds it (a HARD pass) on these passes.
+                // From pass 3 on, mark a pending bootstrap-seed fold in both stores. The
+                // fixture is one open Anthropic turn with signed thinking on a prefix-bound
+                // model, so the render-identity change below would wait for the turn to end
+                // (the m0/m1 head is frozen while that thinking is kept). A seed fold is a
+                // HARD whatever is pending, so it prices these passes instead.
                 for store in [&store, &reference_store] {
                     let mut loaded = store.load("ses").unwrap();
-                    loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+                    loaded.meta.bootstrap_seed_fold_pending = true;
                     store
                         .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
                         .unwrap();
@@ -27487,11 +27489,12 @@ mod tests {
             .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
         let mut priced_request = make_request(&native);
         priced_request["render_config"] = json!("independent-priced-config-change");
-        // Remove the frozen m1 unit. A render-identity change inside the open signed turn
-        // would wait for the turn to end, but without m1 the head cannot be replayed, so the
-        // transform rebuilds it (the HARD asserted below).
+        // Mark a pending bootstrap-seed fold. A render-identity change inside the open signed
+        // turn would wait for the turn to end, but a seed fold is a HARD whatever is pending,
+        // so it prices this pass (the HARD asserted below). It re-renders the same head, so
+        // the turn's signed thinking stays valid.
         let mut loaded = store.load("ses").unwrap();
-        loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+        loaded.meta.bootstrap_seed_fold_pending = true;
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
@@ -27596,11 +27599,12 @@ mod tests {
         }
         let mut priced_request = make_request(&native, "claude-fable-5-1");
         priced_request["render_config"] = json!("independent-priced-config-change");
-        // Remove the frozen m1 unit. A render-identity change inside the open signed turn
-        // would wait for the turn to end, but without m1 the head cannot be replayed, so the
-        // transform rebuilds it (the HARD asserted below).
+        // Mark a pending bootstrap-seed fold. A render-identity change inside the open signed
+        // turn would wait for the turn to end, but a seed fold is a HARD whatever is pending,
+        // so it prices this pass (the HARD asserted below). It re-renders the same head, so
+        // the turn's signed thinking stays valid.
         let mut loaded = store.load("ses").unwrap();
-        loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+        loaded.meta.bootstrap_seed_fold_pending = true;
         store
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();

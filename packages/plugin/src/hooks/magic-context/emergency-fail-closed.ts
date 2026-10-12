@@ -19,16 +19,26 @@ export const ENGINE_BUSY_USER_MESSAGE =
 export const PROTECTED_TOOL_RESULTS_OVER_LIMIT =
     "The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts.";
 export const PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE = "protected_tool_results_over_limit";
+/** The Rust module's refusal of an open signed thinking turn that cannot fit the context
+ * window even after all of its thinking and reclaimable tool output were removed. Must
+ * match `SIGNED_TURN_OVER_LIMIT_{CODE,MESSAGE}` in crates/mc-module/src/transform.rs. */
+export const SIGNED_TURN_OVER_LIMIT =
+    "This turn's context is larger than the model's context window even after all of its thinking and reclaimable tool output were removed, so it was not sent. Send a new message or start a new session to continue.";
+export const SIGNED_TURN_OVER_LIMIT_CODE = "signed_turn_over_limit";
 
 export function contextRefusalError(message: string): EmergencyFailClosedError {
     return new EmergencyFailClosedError(message, {
         code:
             message === PROTECTED_TOOL_RESULTS_OVER_LIMIT
                 ? PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE
-                : undefined,
+                : message === SIGNED_TURN_OVER_LIMIT
+                  ? SIGNED_TURN_OVER_LIMIT_CODE
+                  : undefined,
     });
 }
 
+/** A module refusal of a request that cannot fit the context window (protected tool
+ * results, or a signed turn that cannot fit even after its thinking was stripped). */
 export function protectedToolRefusal(error: unknown): EmergencyFailClosedError | undefined {
     const seen = new Set<unknown>();
     while (error && typeof error === "object" && !seen.has(error)) {
@@ -36,6 +46,8 @@ export function protectedToolRefusal(error: unknown): EmergencyFailClosedError |
         const current = error as { code?: unknown; cause?: unknown };
         if (current.code === PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE)
             return contextRefusalError(PROTECTED_TOOL_RESULTS_OVER_LIMIT);
+        if (current.code === SIGNED_TURN_OVER_LIMIT_CODE)
+            return contextRefusalError(SIGNED_TURN_OVER_LIMIT);
         error = current.cause;
     }
     return undefined;

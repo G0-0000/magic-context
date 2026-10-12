@@ -95,6 +95,7 @@ import {
 } from "./latest-assistant-turn";
 import {
     captureLatestTurnOriginals,
+    endLatestThinkingRecoveryAfterReset,
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
 import {
@@ -4434,6 +4435,7 @@ export function createRustModeTransform(
                         cacheBustingPass: moduleDecisionBusts,
                         prefixPermissionSupported: permissionSupported,
                         moduleReasoningTrimOnly: response.reasoning_trim_only === true,
+                        moduleSignedThinkingReset: response.signed_thinking_reset === true,
                         // A frozen session hands the strip gate the last-served array on
                         // every pass that reaches postprocess. That includes a module bust
                         // whose own edit only trims the oldest reasoning: it still replaces
@@ -4455,6 +4457,17 @@ export function createRustModeTransform(
                     });
                     thinkingBindingRecovery = postprocess.thinkingBindingRecovery;
                     markerAt = postprocess.markerAt;
+                    // A served signed-thinking reset removed every signed block of the
+                    // turn a provider rejection armed for restoration; its originals are
+                    // bound to bytes that changed, so the recovery has nothing left to
+                    // restore on later passes of this turn.
+                    if (
+                        thinkingRecovery.restore &&
+                        moduleDecisionBusts &&
+                        response.signed_thinking_reset === true
+                    ) {
+                        endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
+                    }
                     // A possibly committed host write with unfinished mirror/CAS
                     // work is not an admitted cut, even if fresh native output fits.
                     // Keep the durable fence until a supported recovery repairs it.
