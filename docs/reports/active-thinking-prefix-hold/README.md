@@ -2,12 +2,15 @@
 
 ## Current-master integration and second witness
 
-Merged `origin/master` at `1c947fb0e8cb9ce121ae05d35c680745c606f17d`. The sole
+Merged `origin/master` through `24ebef59e11a61a0317aafe53ce16c73451b7439`. The sole
 textual conflict was Pi's pipeline argument construction. It retains master's
 `fallbackInputFields` reuse together with the held-repair replay callbacks and
 the signed-thinking fit-retry argument snapshot. Dispatch/receipt fences, the
 per-pass fast paths, stall-read fixes and the Rust-mode hold/reset implementation
 were retained from master; no held-turn or flush rule had to be discarded.
+The first merge included the Rust hold revision at `1c947fb0e8`; a second clean
+merge included the newer search changes and reports. The hold suites, every
+mutation selection and both Linux host arms were rerun after that second merge.
 
 The regression named **a flush in a held signed turn is parked through execute
 and defer passes and consumed by one release bust** now explicitly covers the
@@ -23,9 +26,10 @@ mutation, which also makes the same test fail.
 
 All merged-tree gates and mutation selections ran on **Linux with 4 vCPUs**, Bun
 1.4.2, TypeScript 5.9.3 and Biome 2.5.1. Both builds, both typechecks and both lint
-scripts pass. Pi's full suite passes 2,106 tests with 32 skips (2,138 total).
-Plugin's full suite passes 7,857 tests with 28 skips and three failures (7,888
-total): the existing ONNX fixture and two timing-sensitive SQLite diagnostic
+scripts pass. Full package suites on the first merged snapshot reported Pi:
+2,106 passes with 32 skips (2,138 total), and plugin: 7,857 passes with 28 skips
+and three failures (7,888 total): the existing ONNX fixture and two timing-sensitive
+SQLite diagnostic
 checks. The latter file passes all five tests when rerun in isolation; it was not
 edited. Every original mutation control was rerun, with the same outcomes, plus
 the two second-witness controls described above.
@@ -37,6 +41,8 @@ lint also pass after the added assertions; the initial formatting-only lint
 failure was corrected without changing the test contract. There are 21 merged-
 tree mutation selections: 20 named tests fail alone, while the previously noted
 Pi caller-only omission control stays green because the final helper repeats it.
+Final builds bundle 712 plugin-entry, 754 v2 and 1,021 Pi modules. Final lint
+checks 1,388 plugin and 314 Pi files, with warnings only.
 
 The real OpenCode **2.0.26 Linux** differential also has the same result: zero
 loop rewrites and one next-user rewrite after the fix, versus one loop rewrite

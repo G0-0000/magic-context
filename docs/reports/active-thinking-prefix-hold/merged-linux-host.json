@@ -1,5 +1,6 @@
 {
   "hostVersion": "2.0.26",
+  "masterSha": "24ebef59e11a61a0317aafe53ce16c73451b7439",
   "runner": "linux,4c",
   "bunVersion": "1.4.2",
   "cliPackage": "@opencode/cli-linux-x64@2.0.26",
@@ -20,8 +21,8 @@
     "allDatabasePathsUnderFixtureRoot": true
   },
   "after": {
-    "hostPid": 99,
-    "root": "/motor-home/tmp/magic-context/bg_a50a6413bb418af2-merge/runs/mc-opencode2-wQvK8u",
+    "hostPid": 1101,
+    "root": "/motor-home/tmp/magic-context/bg_a50a6413bb418af2-merge/runs/mc-opencode2-3TEer4",
     "loopRequests": 4,
     "loopPrefixChanges": 0,
     "totalPrefixChanges": 1,
@@ -40,8 +41,8 @@
     ]
   },
   "neutralizedSharedVeto": {
-    "hostPid": 98,
-    "root": "/motor-home/tmp/magic-context/bg_a50a6413bb418af2-merge/runs/mc-opencode2-KQQQgu",
+    "hostPid": 312,
+    "root": "/motor-home/tmp/magic-context/bg_a50a6413bb418af2-merge/runs/mc-opencode2-dYX94j",
     "loopRequests": 4,
     "loopPrefixChanges": 1,
     "totalPrefixChanges": 2,
