@@ -288,7 +288,10 @@ import {
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
-import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
+import {
+	hasPiFallbackMessageTags,
+	hasPiFallbackToolOwnerTags,
+} from "./fallback-tag-probes-pi";
 import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
@@ -442,6 +445,7 @@ import { clearPiSystemPromptSession } from "./system-prompt";
 import {
 	getPiActiveTagSnapshotView,
 	getPiTagSnapshotView,
+	hasPiTagSnapshotReader,
 	readPiFallbackTagRows,
 } from "./tag-snapshot-pi";
 import {
@@ -3595,11 +3599,29 @@ function adoptPiFallbackTags(
 	if (!batches.length && !ownerMap?.size && !options.rebuildFingerprints)
 		return outcome;
 	const revision = () => readPiAdoptionRevision(db);
+	// Use the tag snapshot's fallback rows only on a connection that already
+	// keeps snapshots: creating one writes TEMP tables, which would count as a
+	// local change against the caller's preflight revision. Bring it up to date
+	// before beforeDiscovery for the same reason (consuming its change journal
+	// is a TEMP write).
+	const cachedProbes = hasPiTagSnapshotReader(db);
+	if (cachedProbes) readPiFallbackTagRows(db, sessionId);
 	const beforeDiscovery = revision();
 	// Discover candidates without blocking writers and prepare their target ids.
 	// The revision check below is authoritative: discovery may miss a sibling's
 	// newly committed row, or include one another connection already renamed.
-	const discovered = hasPersistedPiFallbackMessageTags(db, sessionId)
+	// The existence probes are read after beforeDiscovery: if no commit lands
+	// before writer admission, they still describe the table then and need not
+	// be repeated under the writer.
+	const discoveredMessageFallback = cachedProbes
+		? hasPiFallbackMessageTags(db, sessionId)
+		: hasPersistedPiFallbackMessageTags(db, sessionId);
+	const discoveredToolOwnerFallback = ownerMap?.size
+		? cachedProbes
+			? hasPiFallbackToolOwnerTags(db, sessionId)
+			: hasPersistedPiFallbackToolOwnerTags(db, sessionId)
+		: false;
+	const discovered = discoveredMessageFallback
 		? readAdoptablePiFallbackFingerprints(db, sessionId, batches)
 		: new Set<string>();
 	const targetsFor = (fingerprints: Iterable<string>) =>
@@ -3700,6 +3722,10 @@ function adoptPiFallbackTags(
 
 	runImmediateTransaction(db, () => {
 		const admitted = revision();
+		// No commit from this or another connection since discovery.
+		const unchangedSinceDiscovery =
+			beforeDiscovery.external.data_version === admitted.external.data_version &&
+			beforeDiscovery.local.changes === admitted.local.changes;
 		const preflight = options.preflightRevision;
 		const rebuild = options.rebuildFingerprints;
 		const expanded = Boolean(
@@ -3714,18 +3740,19 @@ function adoptPiFallbackTags(
 			({ realIdsByFingerprint, fallbackIdsByFingerprint, batches } =
 				preparePiAdoptionFingerprints(rebuild()));
 		}
-		if (batches.length && hasPersistedPiFallbackMessageTags(db, sessionId)) {
+		if (
+			batches.length &&
+			(unchangedSinceDiscovery
+				? discoveredMessageFallback
+				: hasPersistedPiFallbackMessageTags(db, sessionId))
+		) {
 			// After writer admission the candidate set cannot gain rows from a
 			// sibling connection. Missing fingerprints need no per-message read;
 			// present ones still use the sequential, authoritative migration path.
 			// data_version detects other connections' commits; total_changes catches
 			// this connection's own writes. With BEGIN held, an unchanged revision
 			// makes discovery authoritative without repeating the large IN queries.
-			const unchanged =
-				!expanded &&
-				beforeDiscovery.external.data_version ===
-					admitted.external.data_version &&
-				beforeDiscovery.local.changes === admitted.local.changes;
+			const unchanged = !expanded && unchangedSinceDiscovery;
 			const adoptable = unchanged
 				? discovered
 				: readAdoptablePiFallbackFingerprints(db, sessionId, batches);
@@ -3837,7 +3864,12 @@ function adoptPiFallbackTags(
 			}
 		}
 
-		if (ownerMap && hasPersistedPiFallbackToolOwnerTags(db, sessionId)) {
+		if (
+			ownerMap &&
+			(unchangedSinceDiscovery
+				? discoveredToolOwnerFallback
+				: hasPersistedPiFallbackToolOwnerTags(db, sessionId))
+		) {
 			for (const row of findPiFallbackToolOwnerTags(db, sessionId)) {
 				const parsed = parsePiFallbackToolOwnerId(row.toolOwnerMessageId);
 				if (parsed?.role !== "assistant") continue;
@@ -8198,6 +8230,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// This indexed preflight avoids rebuilding fingerprints for every old message.
 	// A negative result is rechecked by adoption after this map is complete, while
 	// tool-owner adoption performs its only existence probe at that later point.
+	// Bring the tag snapshot (and its fallback rows) up to date before the
+	// preflight revision: consuming its change journal is a TEMP-table write,
+	// which adoption would otherwise mistake for a tag change after preflight.
+	readPiFallbackTagRows(args.db, args.sessionId);
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,
