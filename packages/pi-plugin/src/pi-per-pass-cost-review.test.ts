@@ -4,7 +4,10 @@
  * writer-admission reuse of fallback existence probes). The findings are in
  * docs/reports/pi-per-pass-cost-review.md.
  *
- * Skipped by default. Run one by name:
+ * The two "witness" tests run by default: their findings are fixed (the
+ * durable tags_version detector in tag-snapshot-pi.ts, and the shared tag state
+ * of getPiActiveTagSnapshotView). Their names describe b960feedfb. The other
+ * tests are skipped by default. Run one by name:
  *   PI_PER_PASS_COST_REVIEW=1 bun test src/pi-per-pass-cost-review.test.ts -t "<name>"
  *
  * "Master" means master at 43ddbe1bec, before the change; "the branch" means
@@ -137,40 +140,37 @@ const insertTag = (
 			extra.owner ?? null,
 		);
 
-review(
-	"witness (red on the branch, green on master): an old-build sibling's fallback row is visible to the cached probes after a local tag write",
-	() => {
-		const { db, sibling, close } = openStore(false);
-		try {
-			insertTag(db, "s", 1, "entry-a:p0");
-			// Inserting tag 1 created the session's `tag_revision:` row. A newly
-			// created row gets a new serial, and a changed serial makes the next
-			// snapshot read reload every row, which would hide the defect. So prime
-			// both cached probes only after that row exists.
-			expect(hasPiFallbackMessageTags(db, "s")).toBe(false);
-			expect(hasPiFallbackToolOwnerTags(db, "s")).toBe(false);
-			// The old-build process tags its in-flight message and tool call.
-			insertTag(sibling, "s", 2, "pi-msg-0-1-user:p0");
-			insertTag(sibling, "s", 3, "call-1", {
-				type: "tool",
-				owner: "pi-msg-0-2-assistant",
-			});
-			// This process then tags a new message of the same session. On master the
-			// probe cache was keyed by this connection's own revision too, so this
-			// write made the next probe query the table again.
-			insertTag(db, "s", 4, "entry-b:p0");
-			expect({
-				message: hasPiFallbackMessageTags(db, "s"),
-				tool: hasPiFallbackToolOwnerTags(db, "s"),
-			}).toEqual({
-				message: tableHasFallbackMessageTags(db, "s"),
-				tool: tableHasFallbackToolOwnerTags(db, "s"),
-			});
-		} finally {
-			close();
-		}
-	},
-);
+test("witness (red on the branch, green on master): an old-build sibling's fallback row is visible to the cached probes after a local tag write", () => {
+	const { db, sibling, close } = openStore(false);
+	try {
+		insertTag(db, "s", 1, "entry-a:p0");
+		// Inserting tag 1 created the session's `tag_revision:` row. A newly
+		// created row gets a new serial, and a changed serial makes the next
+		// snapshot read reload every row, which would hide the defect. So prime
+		// both cached probes only after that row exists.
+		expect(hasPiFallbackMessageTags(db, "s")).toBe(false);
+		expect(hasPiFallbackToolOwnerTags(db, "s")).toBe(false);
+		// The old-build process tags its in-flight message and tool call.
+		insertTag(sibling, "s", 2, "pi-msg-0-1-user:p0");
+		insertTag(sibling, "s", 3, "call-1", {
+			type: "tool",
+			owner: "pi-msg-0-2-assistant",
+		});
+		// This process then tags a new message of the same session. On master the
+		// probe cache was keyed by this connection's own revision too, so this
+		// write made the next probe query the table again.
+		insertTag(db, "s", 4, "entry-b:p0");
+		expect({
+			message: hasPiFallbackMessageTags(db, "s"),
+			tool: hasPiFallbackToolOwnerTags(db, "s"),
+		}).toEqual({
+			message: tableHasFallbackMessageTags(db, "s"),
+			tool: tableHasFallbackToolOwnerTags(db, "s"),
+		});
+	} finally {
+		close();
+	}
+});
 
 review(
 	"known gap (red on master and on the branch): an old-build sibling's drop for an already-served historical message is adopted on the next pass",
@@ -329,36 +329,33 @@ for (const initialized of [false, true]) {
 	);
 }
 
-review(
-	"witness (red on the branch, green on master): a foreign commit between the two snapshot reads of a pass cannot split its active tags from its full tags",
-	() => {
-		const { db, sibling, close } = openStore(true);
-		try {
-			for (let number = 1; number <= 5; number += 1)
-				insertTag(db, "s", number, `entry-${number}:p0`);
-			getPiTagSnapshotView(db, "s");
-			// runPipeline reads allTagsForPass, then its active tags, as two calls.
-			const allTagsForPass = getPiTagSnapshotView(db, "s");
-			// Another process commits in between: it drops tag 3 and tags a new
-			// message.
-			sibling
-				.prepare(
-					"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 3",
-				)
-				.run();
-			insertTag(sibling, "s", 6, "entry-6:p0");
-			const activeTags = activeView(db, "s", allTagsForPass);
-			// The pass uses both lists (computeProtectionWindow, servedTagNumbers and
-			// the channel baseline read allTagsForPass; heuristics, the count-based
-			// protection window and protected tool tags read activeTags). On master
-			// the second is always a filter of the first.
-			expect(activeTags.map((tag) => tag.tagNumber)).toEqual(
-				allTagsForPass
-					.filter((tag) => tag.status === "active")
-					.map((tag) => tag.tagNumber),
-			);
-		} finally {
-			close();
-		}
-	},
-);
+test("witness (red on the branch, green on master): a foreign commit between the two snapshot reads of a pass cannot split its active tags from its full tags", () => {
+	const { db, sibling, close } = openStore(true);
+	try {
+		for (let number = 1; number <= 5; number += 1)
+			insertTag(db, "s", number, `entry-${number}:p0`);
+		getPiTagSnapshotView(db, "s");
+		// runPipeline reads allTagsForPass, then its active tags, as two calls.
+		const allTagsForPass = getPiTagSnapshotView(db, "s");
+		// Another process commits in between: it drops tag 3 and tags a new
+		// message.
+		sibling
+			.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 3",
+			)
+			.run();
+		insertTag(sibling, "s", 6, "entry-6:p0");
+		const activeTags = activeView(db, "s", allTagsForPass);
+		// The pass uses both lists (computeProtectionWindow, servedTagNumbers and
+		// the channel baseline read allTagsForPass; heuristics, the count-based
+		// protection window and protected tool tags read activeTags). On master
+		// the second is always a filter of the first.
+		expect(activeTags.map((tag) => tag.tagNumber)).toEqual(
+			allTagsForPass
+				.filter((tag) => tag.status === "active")
+				.map((tag) => tag.tagNumber),
+		);
+	} finally {
+		close();
+	}
+});

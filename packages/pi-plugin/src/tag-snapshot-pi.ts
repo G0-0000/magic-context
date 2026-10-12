@@ -28,6 +28,10 @@ export function createPiTagSnapshotReader(db: Database) {
 		CREATE TEMP TABLE IF NOT EXISTS pi_tag_session_revision (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL);
 		CREATE TEMP TABLE IF NOT EXISTS pi_tag_watch (session_id TEXT PRIMARY KEY);
 		CREATE TEMP TABLE IF NOT EXISTS pi_tag_changes (session_id TEXT, tag_number INTEGER, PRIMARY KEY (session_id, tag_number));
+		CREATE TEMP TABLE IF NOT EXISTS pi_tag_version_own (session_id TEXT PRIMARY KEY, count INTEGER NOT NULL);
+		DROP TRIGGER IF EXISTS temp.pi_tag_version_ai;
+		DROP TRIGGER IF EXISTS temp.pi_tag_version_ad;
+		DROP TRIGGER IF EXISTS temp.pi_tag_version_au;
 		DROP TRIGGER IF EXISTS temp.pi_tag_insert;
 		DROP TRIGGER IF EXISTS temp.pi_tag_update;
 		DROP TRIGGER IF EXISTS temp.pi_tag_delete;
@@ -60,7 +64,30 @@ export function createPiTagSnapshotReader(db: Database) {
 			INSERT INTO pi_tag_session_revision VALUES (OLD.session_id, 1) ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
 			INSERT INTO pi_tag_changes SELECT OLD.session_id, OLD.tag_number WHERE EXISTS (SELECT 1 FROM pi_tag_watch WHERE session_id = OLD.session_id) AND NOT EXISTS (SELECT 1 FROM pi_tag_changes WHERE session_id = OLD.session_id AND tag_number = OLD.tag_number);
 		END;
+		CREATE TEMP TRIGGER pi_tag_version_ai AFTER INSERT ON main.tags BEGIN
+			INSERT INTO pi_tag_version_own VALUES (NEW.session_id, 1) ON CONFLICT(session_id) DO UPDATE SET count = count + 1;
+		END;
+		CREATE TEMP TRIGGER pi_tag_version_ad AFTER DELETE ON main.tags BEGIN
+			INSERT INTO pi_tag_version_own VALUES (OLD.session_id, 1) ON CONFLICT(session_id) DO UPDATE SET count = count + 1;
+		END;
+		CREATE TEMP TRIGGER pi_tag_version_au
+		AFTER UPDATE OF session_id, message_id, tag_number, type, tool_owner_message_id, status ON main.tags BEGIN
+			INSERT INTO pi_tag_version_own VALUES (OLD.session_id, 1) ON CONFLICT(session_id) DO UPDATE SET count = count + 1;
+			INSERT INTO pi_tag_version_own SELECT NEW.session_id, 1 WHERE NEW.session_id != OLD.session_id
+				ON CONFLICT(session_id) DO UPDATE SET count = count + 1;
+		END;
 	`);
+	// Writers from builds older than the tag_revision: triggers (and connections
+	// that never ran initializeDatabase) do not advance the shared revision, so
+	// the snapshot cannot see their commits. Every writer does advance the
+	// durable session_meta.tags_version through schema triggers. The TEMP
+	// pi_tag_version_* triggers above count this connection's firings of those
+	// same events, so a durable advance this connection did not make is a write
+	// the revision missed. Other bumps of tags_version (session clears, the
+	// REPLACE conflict trigger) only cause a conservative extra rescan.
+	const versionStamp = db.prepare(`SELECT
+		COALESCE((SELECT tags_version FROM session_meta WHERE session_id = ?), 0) AS durable,
+		COALESCE((SELECT count FROM pi_tag_version_own WHERE session_id = ?), 0) AS own`);
 	const revision = db.prepare(`WITH stamp AS (SELECT
 		COALESCE((SELECT revision FROM pi_tag_session_revision WHERE session_id = ?), 0) AS own,
 		COALESCE((SELECT value FROM schema_migrations_meta WHERE key = ?), '0') AS total)
@@ -109,6 +136,10 @@ export function createPiTagSnapshotReader(db: Database) {
 			"0",
 			"0:0",
 		];
+		const stamp = versionStamp.get(sessionId, sessionId) as {
+			durable: number;
+			own: number;
+		};
 		let snapshot = cache.get(sessionId);
 		if (!snapshot || snapshot.foreignRevision !== external) {
 			// Another connection changed this session's tags. There is no record
@@ -124,6 +155,8 @@ export function createPiTagSnapshotReader(db: Database) {
 				foreignRevision: external,
 				tags,
 				active: tags.filter(isActive),
+				durableVersion: stamp.durable,
+				ownVersion: stamp.own,
 			};
 			if (cache.size >= 100 && !cache.has(sessionId)) {
 				const oldest = cache.keys().next().value;
@@ -169,6 +202,18 @@ export function createPiTagSnapshotReader(db: Database) {
 			}
 			snapshot.revision = local;
 		}
+		if (
+			stamp.durable - snapshot.durableVersion !==
+			stamp.own - snapshot.ownVersion
+		) {
+			// A tag write the shared revision did not record (see versionStamp).
+			// Fallback rows answer issue 650 adoption probes, so rescan them on
+			// next use rather than trust them; the cached rows keep their
+			// existing (approved) limit for such writers.
+			snapshot.fallback = undefined;
+		}
+		snapshot.durableVersion = stamp.durable;
+		snapshot.ownVersion = stamp.own;
 		clearChanged.run(sessionId);
 		return snapshot;
 	};
@@ -221,6 +266,9 @@ interface SnapshotEntry {
 	tags: SnapshotTag[];
 	/** `tags` rows whose status is "active", in the same order. */
 	active: SnapshotTag[];
+	/** session_meta.tags_version and this connection's share of it at the last sync. */
+	durableVersion: number;
+	ownVersion: number;
 	/**
 	 * Fallback rows, loaded on first use after each full reload (a reread of
 	 * every row of the session) and then kept current from the same journal as
@@ -364,20 +412,24 @@ export function getPiTagSnapshotView(db: Database, sessionId: string) {
  * Internal read-only projection of the rows whose status is "active", in tag
  * order: the same rows as filtering `getPiTagSnapshotView`, maintained from
  * changed rows instead of refiltering every tag of the session. Rows are the
- * frozen cached objects. Inside a transaction it filters `uncachedTags` (the
- * caller's own uncached read, so both lists share row objects) or a new read.
+ * frozen cached objects. Pass `passTags`, the full list this caller already
+ * read, to keep both lists one tag state: if the snapshot has moved since that
+ * read (another connection committed in between), or inside a transaction,
+ * the result is a filter of `passTags` itself.
  */
 export function getPiActiveTagSnapshotView(
 	db: Database,
 	sessionId: string,
-	uncachedTags?: readonly SnapshotTag[],
+	passTags?: readonly SnapshotTag[],
 ): SnapshotTag[] {
 	createPiTagSnapshotReader(db);
 	const snapshot = entryReaders.get(db)?.(sessionId);
 	// Copy the array (not the frozen rows) so a caller that sorts or splices
-	// its list cannot reorder the cached projection.
-	if (snapshot) return snapshot.active.slice();
-	return (uncachedTags ?? getTagsBySession(db, sessionId)).filter(isActive);
+	// its list cannot reorder the cached projection. Every change to the rows
+	// publishes a new `tags` array, so the same array means the same state.
+	if (snapshot && (!passTags || snapshot.tags === passTags))
+		return snapshot.active.slice();
+	return (passTags ?? getTagsBySession(db, sessionId)).filter(isActive);
 }
 
 /**
