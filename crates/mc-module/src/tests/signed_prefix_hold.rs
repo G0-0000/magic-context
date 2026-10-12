@@ -1,11 +1,13 @@
-// An unfinished Anthropic thinking turn on a prefix-bound model holds every pass below the
-// force band: whatever is queued (an explicit flush, ctx_reduce drops, a selected reduction,
-// a marker HARD) stays queued, the pass serves the previous bytes, and the next real user
-// message applies all of it in one rewrite. The force band and the 95% emergency still
-// relieve pressure inside the turn, and a pass that rewrites the prefix anyway carries the
-// queued work with it. Every case below keeps one drop target before the kept signed
-// thinking (`old-answer#0`), which the per-target thinking protection must withhold while
-// the turn is open, and one after it (`a2#0`), which any rewrite may apply.
+// Signed-prefix hold. An unfinished Anthropic thinking turn on a prefix-bound model holds
+// every pass below the force band (85% usage for the 65% execute threshold): whatever is
+// queued (an explicit flush, ctx_reduce drops, a selected reduction, a pending HARD marker)
+// stays queued, the pass (action "SOFT+", a Defer) serves the previous bytes, and the next
+// real user message applies all of it in one rewrite. The force band and the 95% emergency
+// still relieve pressure inside the turn, and a pass that must rewrite the prefix anyway
+// applies the queued work too. Every case below queues one drop target before the turn's
+// kept signed thinking (`old-answer#0`), which must stay untouched while the turn is open
+// (editing it would invalidate the signed thinking after it), and one after it (`a2#0`),
+// which any rewrite may apply.
 
 const SIGNED_HOLD_MODEL: &str = "anthropic/claude-opus-5-5";
 const SIGNED_HOLD_LATE_TARGET: &str = "a2#0";
@@ -167,7 +169,8 @@ fn signed_prefix_hold_keeps_a_selected_reduction_pending() {
     let session = "signed-hold-reduction";
     let baseline = signed_hold_baseline(&s, session, 20_000);
     let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
-    // A reduction selected on its own, with no other ride on the pass.
+    // Inject one selected drop while nothing else on this pass rewrites the prefix; the
+    // hold must keep it from opening a rewrite of its own.
     ctx.injected_reductions = vec![ReductionDecision {
         target_id: SIGNED_HOLD_LATE_TARGET.to_string(),
         kind: "drop".to_string(),
@@ -229,13 +232,17 @@ fn signed_prefix_hold_keeps_subagent_execute_drops_pending() {
     assert!(signed_hold_pending(&s, session).is_empty());
 }
 
-/// Pressure relief inside the held turn: the late drop lands, the early one stays withheld.
+/// Pressure relief inside the held turn. The force episode and the 95% emergency let queued
+/// drops ride on their own, so the held-back inputs are checked separately: a pending
+/// project-memory marker must get its HARD here instead of waiting for the next user turn.
+/// The late drop lands; the early one, before the kept signed thinking, stays withheld.
 fn check_signed_hold_relief(session: &str, used: u64, recovery_armed: bool) {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
     let ctx = pctx("git:proj", "/nonexistent-docs", 0);
     let baseline = signed_hold_baseline(&s, session, 20_000);
     signed_hold_queue_both(&s, session);
+    signed_hold_edit_meta(&s, session, |meta| meta.project_memory_epoch_pending = true);
     let mut request = signed_hold_request(session, used);
     request.emergency_recovery_armed = recovery_armed;
     let relieved = transform(&s, &request, &ctx).unwrap();
@@ -245,13 +252,15 @@ fn check_signed_hold_relief(session: &str, used: u64, recovery_armed: bool) {
         "{session}: only the drop before the kept signed thinking waits ({})",
         relieved.action
     );
-    assert_ne!(
-        relieved.action, "SOFT+",
-        "{session}: pressure relief must rewrite"
+    assert_eq!(
+        relieved.action, "HARD",
+        "{session}: the marker HARD is not held"
     );
+    assert!(!s.load(session).unwrap().meta.project_memory_epoch_pending);
     assert_ne!(signed_hold_bytes(&relieved), signed_hold_bytes(&baseline));
 }
 
+/// 86% is at or above the force band (85% for the 65% execute threshold).
 #[test]
 fn signed_prefix_hold_yields_to_the_force_band() {
     check_signed_hold_relief("signed-hold-force", 86_000, false);
@@ -262,14 +271,18 @@ fn signed_prefix_hold_yields_to_the_95_percent_emergency() {
     check_signed_hold_relief("signed-hold-emergency", 95_000, false);
 }
 
-/// An armed overflow recovery is a 95% emergency below the force band.
+/// A provider already rejected this session's wire as too long, so the scheduler makes the
+/// pass a 95% emergency (`PassDecision::Emergency95`) even though local usage reads 30%,
+/// below the force band. The hold must yield to it exactly as it does at 95% usage.
 #[test]
 fn signed_prefix_hold_yields_to_an_armed_overflow_recovery() {
     check_signed_hold_relief("signed-hold-recovery", 30_000, true);
 }
 
-/// A pass that rewrites the prefix anyway carries the queued drops, under the per-target
-/// thinking protection. `prepare` sets up the unavoidable rewrite on a bootstrapped session.
+/// A pass that must rewrite the prefix anyway also applies the queued drops, except the one
+/// before the kept signed thinking, which stays untouched (editing it would invalidate the
+/// signed thinking after it). `prepare` sets up the unavoidable rewrite on a bootstrapped
+/// session.
 fn check_signed_hold_rides_unavoidable_rewrite(
     session: &str,
     prepare: impl FnOnce(&McStore, &mut ProducerContext<'static>),
@@ -319,7 +332,8 @@ fn signed_prefix_hold_missing_m1_carries_queued_drops() {
 }
 
 /// A lineage descent onto a new host conversation epoch serves a different message array,
-/// so the provider's cached prefix is gone and the queued drops ride the descent HARD.
+/// so the provider's cached prefix is gone and the descent's HARD (full m0/m1 rebuild) pass
+/// applies the queued drops too.
 #[test]
 fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
     let dir = tempfile::tempdir().unwrap();
@@ -513,9 +527,11 @@ fn signed_hold_differential_digest(
     format!("{:x}", hasher.finalize())
 }
 
-/// Sessions the hold never covers serve exactly what master served before the hold existed.
-/// The digests were captured on master (dda49e3850) with this same sequence; a change here
-/// means a session without prefix-bound signed thinking changed behaviour.
+/// Sessions the signed-prefix hold never covers (no thinking, or a model whose thinking is
+/// not prefix-bound) must serve exactly what the code served before the hold existed. The
+/// golden digests below were recorded from that code (commit dda49e3850) with this same
+/// seeded sequence. A mismatch means such a session changed behaviour; regenerate them only
+/// for an intended change to unheld sessions, from the assertion message.
 #[test]
 fn signed_prefix_hold_leaves_unheld_sessions_byte_identical() {
     let cases = [

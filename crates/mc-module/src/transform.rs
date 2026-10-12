@@ -5011,8 +5011,8 @@ fn apply_once(
                 || (!active_legitimate_publication_window
                     && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT))
     });
-    // Applied below, once the signed-prefix hold is known: a held pass defers the recut and
-    // must keep the count that makes the next unheld pass recut at once.
+    // Applied below, once the signed-prefix hold is known: a held pass skips the recut and
+    // must keep the count, so the next pass that is not held recuts at once.
     let recut_resets_pending_count =
         boundary_divergence_recut.is_some() && !active_legitimate_publication_window;
     let current_m1_digest = m1_signal.revision;
@@ -5166,27 +5166,31 @@ fn apply_once(
     } else {
         false
     };
-    // An unfinished Anthropic thinking turn on a prefix-bound model signs its thinking against
-    // the request prefix, and the provider caches that prefix mid-loop. Rewriting it now buys
-    // little and is paid again when the next real user message lands. Below the force band
-    // such a pass is held: every input that could price a rewrite is vetoed here, before
-    // classification, so the pass is a Defer that replays the previous serve byte for byte
-    // and all queued work (flushes, drops, folds, markers) stays persisted for the next unheld
-    // pass. This is the one shared permission every lane reads; no lane is vetoed on its own.
-    // The force band and the 95% emergency still relieve pressure inside the turn.
+    // Signed-prefix hold. An unfinished Anthropic thinking turn on a prefix-bound model signs
+    // its thinking against the request prefix, and the provider caches that prefix between the
+    // turn's tool steps. Rewriting the prefix now throws that cache away for little gain, and
+    // the next real user message pays for a second rewrite anyway. So below the force band
+    // (usage at or above `force_materialize_percentage`, 85% for a 65% execute threshold) and
+    // outside the 95% emergency (`PassDecision::Emergency95`), such a pass is held: every input
+    // that could pay for a rewrite is vetoed here, before `classify`, so the plan is a Defer
+    // (the pass that replays the previously served bytes unchanged). Queued work (flushes,
+    // agent drops, folds, HARD markers) stays persisted for the next pass that is not held.
+    // This is the single permission every mutation path reads (reductions, m1 refresh,
+    // cleanup, todo injection); none of them is vetoed separately.
     let active_thinking_turn = active_anthropic_thinking_turn(req);
     let protected_signed_prefix =
         active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
-    // Passes that rewrite the prefix whatever they decide: there is no cached pair to replay
-    // (first render, missing m1), a new host conversation epoch or discarded cache sections
-    // (both set lineage force_hard), or the provider's cache already expired. Holding their
-    // riders would only buy a second rewrite later, so they are never held, and the queued
-    // work rides them under the per-target thinking protection.
-    // Subagents never fold or render m0/m1 and ignore a lineage HARD, so only an expired
-    // cache or discarded sections rewrite theirs.
+    // Passes that rewrite the prefix whatever is queued: there is no cached m0/m1 pair to
+    // replay (first render, missing m1), a new host conversation epoch or discarded cache
+    // sections (both set lineage force_hard), or the provider's cache already expired.
+    // Holding the queued work on such a pass would only buy a second rewrite later, so these
+    // passes are never held and the queued work is applied on them. Blocks before the turn's
+    // kept signed thinking stay untouched either way (`active_thinking_prefix_edit_ids`).
+    // Subagents never fold or render m0/m1 and ignore a lineage descent, so only an expired
+    // cache or discarded sections rewrite a subagent's prefix.
     let prefix_rewrite_unavoidable = scheduler_outcome.idle_ttl_fired
         || cache_sections_discarded
         || (!req.is_subagent
@@ -5197,18 +5201,19 @@ fn apply_once(
         && !force_band_active
         && scheduler_outcome.pass != scheduler::PassDecision::Emergency95
         && !prefix_rewrite_unavoidable
-        // Bootstrap-seed and legacy-baseline passes are HARD whatever is queued, so their
-        // riders are not held either.
+        // `classify` makes bootstrap-seed and legacy-baseline passes HARD (a full m0/m1
+        // rebuild) whatever is queued, so they are not held either.
         && !loaded.meta.bootstrap_seed_fold_pending
         && !is_legacy_baseline(&loaded.core);
-    // A held pass leaves a pending recut for the next unheld pass, together with the
-    // pending count that makes it fire there.
+    // A held pass drops this pass's boundary-divergence recut and keeps
+    // boundary_divergence_pending_count instead of resetting it, so the recut still fires on
+    // the next pass that is not held.
     let boundary_divergence_recut = boundary_divergence_recut.filter(|_| !signed_prefix_hold);
     if recut_resets_pending_count && !signed_prefix_hold {
         boundary_divergence_pending_count = 0;
     }
-    // This change detector remembers the inputs it has seen, so a held pass must not call
-    // it: the change would be consumed without the HARD it asks for.
+    // pre_snapshot_inputs_changed records every input it sees, so a held pass must not call
+    // it: the change would be marked seen without the HARD fold it asks for.
     let pre_snapshot_inputs_changed = !signed_prefix_hold
         && req.protected_tokens_effective.is_none()
         && loaded.meta.protected_tokens_effective.is_none()
@@ -5239,7 +5244,9 @@ fn apply_once(
     // Reconcile (the boundary left the live array after a revert) and lineage descent (a new
     // host conversation epoch) are separate HARD inputs below; both serve a different
     // message array than the cached one, so they keep pricing too.
-    // A held pass requests none of them; their markers persist until the next unheld pass.
+    // A signed-prefix hold requests none of the triggers listed in this expression. Each one
+    // is derived from persisted state (or, for pre_snapshot_inputs_changed, was not consumed
+    // above), so it fires on the next pass that is not held.
     let hard_fold_requested = !signed_prefix_hold
         && (pre_snapshot_inputs_changed
             || first_fold_due
@@ -5334,11 +5341,14 @@ fn apply_once(
                 && current_m1_digest != applied_m1_revision)))
         || (loaded.meta.soft_refresh_pending && !signed_prefix_hold)
         || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired)
-        // An active signed turn keeps m0/m1 out of the optional rebuilds above, but a pass
-        // that rewrites the prefix anyway is a rebuild like any other: queued work rides it,
-        // and the per-target thinking protection keeps the signed blocks intact.
+        // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
+        // that rewrites the prefix anyway is a rebuild like any other: queued work is applied
+        // on it, and blocks before the kept signed thinking stay untouched
+        // (`active_thinking_prefix_edit_ids`).
         || (!req.is_subagent && protected_signed_prefix && prefix_rewrite_unavoidable);
-    // Execute is a subagent's one shared permission; a held pass is a Defer for it too.
+    // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
+    // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
+    // held subagent pass also replays its previous bytes.
     let subagent_execute_permitted =
         !signed_prefix_hold && scheduler_outcome.pass != scheduler::PassDecision::Defer;
     let supersession_ride_available = independent_rebuild
@@ -5566,7 +5576,8 @@ fn apply_once(
     // It does not mean this request is already rewriting the cached prefix: pending m1
     // publications still need Execute or an independently authorized repair/force/flush.
     let independent_bust_opportunity = supersession_ride_available;
-    // A selected reduction is pending work, not a permission: a held pass leaves it queued.
+    // A selected reduction is pending work, not a permission: under a signed-prefix hold it
+    // does not open a rewrite and stays pending.
     let bust_opportunity =
         independent_bust_opportunity || (reductions_pending_now && !signed_prefix_hold);
     // Discover non-tool lanes before classification: a force batch containing only
