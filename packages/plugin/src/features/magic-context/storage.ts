@@ -182,6 +182,7 @@ export {
     type ProtectedTailSeedResult,
     persistCachedM0,
     protectedTailWindowBudget,
+    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     recordDetectedContextLimit,
     recordHistorianDrainFailure,

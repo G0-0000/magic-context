@@ -3816,8 +3816,10 @@ export async function runPostTransformPhase(
             }
         }
         const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
-        // Auto-search decisions outlive branch visibility: a restored user message
-        // must replay its original hint or no-hint bytes, even after a cache bust.
+        // A branch switch can hide user messages that will later be served again.
+        // Keep their saved search hints, including no-hint omissions. Only the actual
+        // prefix trim, after a history summary replaces those messages, may discard
+        // these records; today's visible IDs are not proof of deletion.
         if (prunedAnchors > 0) {
             sessionLog(
                 args.sessionId,

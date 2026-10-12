@@ -51,6 +51,7 @@ import {
 	getOrCreateSessionMeta,
 	getProjectState,
 	persistCachedM0,
+	pruneAutoSearchHintDecisions,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
 import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
@@ -179,6 +180,7 @@ function trimPiMessagesToBoundary(
 	trimMutableEntryIds = false,
 	sessionId?: string,
 	preserveBoundary = false,
+	retireDecisions?: (messageIds: ReadonlySet<string>) => void,
 ): number {
 	// Pi tool calls and results occupy separate entries. If only part of the
 	// boundary message was summarized, keep the prefix: removing an earlier call
@@ -278,6 +280,14 @@ function trimPiMessagesToBoundary(
 		}
 	}
 
+	const retiredIds = new Set<string>();
+	if (retireDecisions) {
+		for (const index of remove) {
+			if (index > cutoffIndex) continue;
+			const id = resolveStableId(piMessages[index], index, entryIds);
+			if (id) retiredIds.add(id);
+		}
+	}
 	const kept = piMessages.filter((_, index) => !remove.has(index));
 	const removed = piMessages.length - kept.length;
 	piMessages.splice(0, piMessages.length, ...kept);
@@ -285,6 +295,11 @@ function trimPiMessagesToBoundary(
 		const keptIds = entryIds.filter((_, index) => !remove.has(index));
 		entryIds.splice(0, entryIds.length, ...keptIds);
 	}
+	// These IDs belong to the summarized prefix just removed, not to missing branch
+	// entries or tool-pair cleanup beyond the boundary. Saved search hints (or no-hint
+	// omissions) can go: restoring raw history before this summary boundary requires
+	// a full rebuild of the cached request prefix, so a new hint adds no extra cache miss.
+	retireDecisions?.(retiredIds);
 	return removed;
 }
 
@@ -871,6 +886,7 @@ export function trimPiMessagesToCachedBoundary(
 		compartments.some(
 			(c) => c.endMessageId === boundary && c.endBlockIndex != null,
 		),
+		(ids) => pruneAutoSearchHintDecisions(db, sessionId, ids),
 	);
 }
 
@@ -2642,6 +2658,7 @@ function prependM0M1Messages(
 // Cached bytes and their boundary come from one row. Replaying them must not
 // depend on live marker validation or fresh rendering succeeding.
 function replayCompletePiPrefix(
+	db: ContextDatabase,
 	state: PiM0M1State,
 	row: CachedPiM0M1Row,
 	compartments: PiCompartment[],
@@ -2671,6 +2688,7 @@ function replayCompletePiPrefix(
 				compartments.some(
 					(c) => c.endMessageId === trimBoundaryId && c.endBlockIndex != null,
 				),
+				(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
 			)
 		: 0;
 	const head: PiAgentMessage[] = [];
@@ -2715,7 +2733,7 @@ export function prepareCachedM0M1PiReplay(
 		freezePrefixForPass: true,
 		preparedPrefix: undefined,
 	};
-	replayCompletePiPrefix(snapshot, cached, [], [], undefined, "cache_hit");
+	replayCompletePiPrefix(db, snapshot, cached, [], [], undefined, "cache_hit");
 	return snapshot.preparedPrefix;
 }
 
@@ -2737,6 +2755,7 @@ export function injectM0M1Pi(
 					false,
 					state.sessionId,
 					isPartialCompartmentEnd(db, state.sessionId, prepared.trimBoundaryId),
+					(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
 				)
 			: 0;
 		const head = structuredClone(prepared.messages);
@@ -2809,6 +2828,7 @@ export function injectM0M1Pi(
 				: snapshot.cachedRow;
 			if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
 				return replayCompletePiPrefix(
+					db,
 					state,
 					cached,
 					currentCompartments,
@@ -2854,6 +2874,7 @@ export function injectM0M1Pi(
 					: snapshot.cachedRow;
 				if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
 					return replayCompletePiPrefix(
+						db,
 						state,
 						cached,
 						currentCompartments,
@@ -3047,6 +3068,7 @@ export function injectM0M1Pi(
 				false,
 				state.sessionId,
 				isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId),
+				(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
 			)
 		: 0;
 	const muralWire = m0.includes("<memory-mural>")

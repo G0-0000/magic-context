@@ -10113,8 +10113,10 @@ function applyNoteNudges(args: {
 		const allResolved = messageIdByIndex.size === realMessageCount;
 		if (allResolved && visibleIds.size > 0) {
 			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
-			// A branch switch can hide and later restore a served user message.
-			// Keep its auto-search decision so restoration replays identical bytes.
+			// A branch switch can hide user messages that will later be served again.
+			// Keep their saved search hints, including no-hint omissions. Only the actual
+			// prefix trim, after a history summary replaces those messages, may discard
+			// these records; today's visible IDs are not proof of deletion.
 		}
 	}
 

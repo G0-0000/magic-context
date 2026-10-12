@@ -35,6 +35,7 @@ import {
     insertTag,
     markNoteReady,
     openDatabase,
+    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     queuePendingOp,
     removeAutoSearchHintDecisionByMessageId,
@@ -352,6 +353,39 @@ describe("magic-context storage", () => {
         expect(getNoteNudgeAnchors(db, "ses-bad-json")).toEqual([]);
         expect(getAutoSearchHintDecisions(db, "ses-bad-json")).toEqual([]);
         closeQuietly(db);
+    });
+
+    it("prunes only proven retired auto-search ids and preserves hidden live decisions", () => {
+        const db = makeMemoryDatabase();
+        const sessionId = "ses-auto-retired";
+        const entries = ["compacted", "live", "hidden-branch"].map((messageId) => ({
+            messageId,
+            decision: "no-hint" as const,
+            reason: "error" as const,
+        }));
+        try {
+            for (const entry of entries) appendAutoSearchHintDecision(db, sessionId, entry);
+            expect(pruneAutoSearchHintDecisions(db, sessionId, new Set())).toBe(0);
+            expect(pruneAutoSearchHintDecisions(db, sessionId, new Set(["compacted"]))).toBe(1);
+            expect(getAutoSearchHintDecisions(db, sessionId)).toEqual(entries.slice(1));
+            expect(pruneAutoSearchHintDecisions(db, sessionId, new Set(["compacted"]))).toBe(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("session clear retires auto-search decisions without clearing another session", () => {
+        const db = makeMemoryDatabase();
+        const decision = { messageId: "served", decision: "hint" as const, text: "cached hint" };
+        try {
+            appendAutoSearchHintDecision(db, "cleared", decision);
+            appendAutoSearchHintDecision(db, "retained", decision);
+            clearSession(db, "cleared");
+            expect(getAutoSearchHintDecisions(db, "cleared")).toEqual([]);
+            expect(getAutoSearchHintDecisions(db, "retained")).toEqual([decision]);
+        } finally {
+            closeQuietly(db);
+        }
     });
 
     it("stores smart notes in the unified notes table and filters by status", () => {

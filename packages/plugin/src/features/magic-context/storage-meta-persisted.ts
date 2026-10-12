@@ -1847,6 +1847,34 @@ export function removeNoteNudgeAnchorByMessageId(
     return ok && removed;
 }
 
+/**
+ * Discard saved search hints and no-hint omissions only for message IDs the caller
+ * proved were removed by a summary boundary or deleted by the host. An ID absent
+ * from today's branch may reappear and still needs its record to restore cached
+ * bytes, so callers must not pass the complement of today's visible IDs.
+ */
+export function pruneAutoSearchHintDecisions(
+    db: Database,
+    sessionId: string,
+    retiredMessageIds: ReadonlySet<string>,
+): number {
+    if (retiredMessageIds.size === 0) return 0;
+    let pruned = 0;
+    const ok = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "auto_search_hint_decisions",
+        isValidAutoSearchHintDecision,
+        (current) => {
+            const next = current.filter((decision) => !retiredMessageIds.has(decision.messageId));
+            pruned = current.length - next.length;
+            return pruned > 0 ? next : null;
+        },
+        { ensureRow: false },
+    );
+    return ok ? pruned : 0;
+}
+
 export function removeAutoSearchHintDecisionByMessageId(
     db: Database,
     sessionId: string,

@@ -11,6 +11,8 @@ import {
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
+	appendAutoSearchHintDecision,
+	getAutoSearchHintDecisions,
 	getCompartments,
 	getOrCreateSessionMeta,
 	queueMemoryMutation,
@@ -39,6 +41,7 @@ import {
 	mustMaterializePi,
 	renderM0Pi,
 	renderM1Pi,
+	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
 
@@ -72,6 +75,131 @@ function result(toolCallId: string) {
 		timestamp: 1,
 	};
 }
+
+it("pi applied compaction bounds auto-search blob across 20000 user messages", () => {
+	const db = createTestDb();
+	const sessionId = "pi-auto-search-bounded";
+	const state = { sessionId, injectDocs: false };
+	const window = 100;
+	const total = 20000;
+	const id = (number: number) => `user-${number}`;
+	let live: Parameters<typeof injectM0M1Pi>[2] = [];
+	let maxEntries = 0;
+	let maxBytes = 0;
+	const readBlob = db.prepare(
+		"SELECT auto_search_hint_decisions AS blob FROM session_meta WHERE session_id = ?",
+	);
+	try {
+		for (let number = 1; number <= total; number++) {
+			live.push(userMessage(`Question ${number}`, number));
+			expect(
+				appendAutoSearchHintDecision(
+					db,
+					sessionId,
+					number % 3 === 0
+						? { messageId: id(number), decision: "hint", text: "h".repeat(512) }
+						: {
+								messageId: id(number),
+								decision: "no-hint",
+								reason: number % 2 ? "error" : "timeout",
+							},
+				),
+			).toMatchObject({ ok: true, kind: "appended" });
+			if (number % window !== 0) continue;
+			const before = (readBlob.get(sessionId) as { blob: string }).blob;
+			const count = JSON.parse(before).length;
+			expect(count).toBe(live.length);
+			expect(count).toBeLessThanOrEqual(window * 2);
+			maxEntries = Math.max(maxEntries, count);
+			maxBytes = Math.max(maxBytes, Buffer.byteLength(before));
+			if (number === window) continue;
+			const cutoff = number - window;
+			appendCompartments(db, sessionId, [
+				{
+					sequence: number / window - 2,
+					startMessage: cutoff - window,
+					endMessage: cutoff - 1,
+					startMessageId: id(cutoff - window + 1),
+					endMessageId: id(cutoff),
+					title: "Compacted questions",
+					content: "Earlier questions were answered.",
+				},
+			]);
+			materializeM0Pi(state, db);
+			const entryIds = Array.from({ length: live.length }, (_, index) =>
+				id(number - live.length + index + 1),
+			);
+			const result = injectM0M1Pi(state, db, live, entryIds);
+			expect(result.skippedVisibleMessages).toBe(window);
+			live = live.slice(-window);
+			const after = (readBlob.get(sessionId) as { blob: string }).blob;
+			expect(
+				JSON.parse(after).map(
+					(decision: { messageId: string }) => decision.messageId,
+				),
+			).toEqual(
+				Array.from({ length: window }, (_, index) => id(cutoff + index + 1)),
+			);
+			expect(Buffer.byteLength(after)).toBeLessThanOrEqual(window * 800);
+		}
+		expect(getAutoSearchHintDecisions(db, sessionId)).toHaveLength(window);
+		console.log(
+			`AUTO_SEARCH_BOUNDED pi users=${total} live=${window} maxEntries=${maxEntries} maxBytes=${maxBytes}`,
+		);
+	} finally {
+		closeQuietly(db);
+	}
+}, 30000);
+
+it("pi cached boundary prunes decisions only after a complete prefix trim", () => {
+	const db = createTestDb();
+	const sessionId = "pi-auto-search-cut";
+	const state = { sessionId, injectDocs: false };
+	try {
+		for (const messageId of ["covered", "live", "hidden-branch"]) {
+			appendAutoSearchHintDecision(db, sessionId, {
+				messageId,
+				decision: "no-hint",
+				reason: "error",
+			});
+		}
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 0,
+				endMessage: 0,
+				startMessageId: "covered",
+				endMessageId: "covered",
+				endBlockIndex: 0,
+				title: "Partial turn",
+				content: "Only the first block was summarized.",
+			},
+		]);
+		materializeM0Pi(state, db);
+		const before = getAutoSearchHintDecisions(db, sessionId);
+		const live = [userMessage("covered"), userMessage("live")];
+		expect(
+			trimPiMessagesToCachedBoundary(db, sessionId, live, ["covered", "live"]),
+		).toBe(0);
+		expect(getAutoSearchHintDecisions(db, sessionId)).toEqual(before);
+		db.prepare(
+			"UPDATE compartments SET end_block_index = NULL WHERE session_id = ?",
+		).run(sessionId);
+		const absent = [userMessage("live")];
+		expect(
+			trimPiMessagesToCachedBoundary(db, sessionId, absent, ["live"]),
+		).toBe(0);
+		expect(getAutoSearchHintDecisions(db, sessionId)).toEqual(before);
+		expect(
+			trimPiMessagesToCachedBoundary(db, sessionId, live, ["covered", "live"]),
+		).toBe(1);
+		expect(
+			getAutoSearchHintDecisions(db, sessionId).map((entry) => entry.messageId),
+		).toEqual(["live", "hidden-branch"]);
+	} finally {
+		closeQuietly(db);
+	}
+});
 
 describe("Pi render-to-commit concurrency", () => {
 	for (const change of ["memory", "compartment"] as const) {
