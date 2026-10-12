@@ -18,6 +18,7 @@ import { resolveSessionCacheTtl } from "../../features/magic-context/session-cac
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
+    addMergedReasoningStrippedIds,
     casChannel2NudgeState,
     clearEmergencyRecovery,
     clearPersistedTodoSyntheticAnchor,
@@ -35,6 +36,7 @@ import {
     resolveEpochFloorForPass,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
+    thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import { hasPendingDropOps } from "../../features/magic-context/storage-ops";
 import {
@@ -75,7 +77,9 @@ import { isEditTool } from "./edit-marker";
 import { invalidateAutoEmbedSession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
+    ENGINE_BUSY_USER_MESSAGE,
     ENGINE_RECONNECTING_USER_MESSAGE,
+    SIGNED_THINKING_RESET_FENCE_FAILED,
 } from "./emergency-fail-closed";
 import {
     resolveContextWindowGeometry,
@@ -94,6 +98,7 @@ import {
 } from "./latest-assistant-turn";
 import {
     captureLatestTurnOriginals,
+    endLatestThinkingRecoveryAfterReset,
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
 import {
@@ -177,7 +182,10 @@ import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries"
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { STORE_AHEAD_OF_BINARY_CODE, storeAheadOfBinaryFailure } from "./store-ahead-refusal";
-import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
+import {
+    findReasoningBearingAssistantIds,
+    snapshotTrailingBlankSourceDecisions,
+} from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
 import type { TransformDeps } from "./transform";
 import { resolveHistoryBudgetTokens } from "./transform";
@@ -221,6 +229,28 @@ class FrozenReplayOverProvenLimitRefusal extends Error {
 type FrozenFit = "under" | "over" | "unproven";
 
 export const RUST_FAILURE_PARK_THRESHOLD = 3;
+/**
+ * Error code for a transform whose final page the plugin stopped waiting for. The
+ * module keeps applying such a page after the plugin's deadline and may still commit
+ * it, so the pass may not fall back to raw history.
+ */
+export const TRANSFORM_FINAL_PAGE_ABANDONED_CODE = "transform_final_page_abandoned";
+/**
+ * Module error code for a transform refused because another transform of the same
+ * session is still pending there (its pages still arriving, or its final page still
+ * being applied). The plugin sends one transform per session at a time, so the pending
+ * one is a transform an earlier pass of this plugin stopped waiting for.
+ */
+const TRANSFORM_PAGE_IN_PROGRESS_CODE = "authority_transform_page_in_progress";
+/**
+ * How long a session's unbroken run of `authority_transform_page_in_progress`
+ * refusals is exempt from parking. The plugin abandons a final page after its first
+ * attempt (45 s on heavy passes) plus a 45 s identical-page wait, about 90 s, and a
+ * slow module finishing that page was seen taking several minutes more. A pending
+ * page that outlasts this bound is treated as a stuck module again, so the session
+ * reaches the park cadence and its recovery.
+ */
+export const RUST_IN_PROGRESS_PARK_EXEMPTION_MS = 5 * 60_000;
 export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
@@ -403,6 +433,9 @@ interface RustSessionState extends ModuleStateSyncState {
      * full wire array (delta eligibility bypassed) until a pass applies. Wire-layer
      * only — never triggers a state re-seed. */
     forceFullWire: boolean;
+    /** When the current unbroken run of `authority_transform_page_in_progress`
+     * refusals began, on the adapter clock; null when the last pass was not one. */
+    transformInProgressSinceMs: number | null;
     ordinalMemoAnchor: RawMessageOrdinalAnchor | null;
     ordinalMemoStoredCount: number | null;
     ordinalMemoCanonicalCount: number;
@@ -480,6 +513,13 @@ export interface RustModeTransformOptions {
     installNativeMessagesForTests?: (output: { messages: unknown[] }, messages: unknown[]) => void;
     /** Override only to exercise raw-fallback estimator failures in tests. */
     rawFallbackEstimatorForTests?: typeof estimateFinalWireInputTokens;
+    /**
+     * Test-only crash seam. Runs on a pass where the module reports `signed_thinking_reset`
+     * (it removed every signed thinking block), after the host has durably recorded those
+     * messages in its persisted thinking-strip set and before the previous last-known-good
+     * snapshot is dropped.
+     */
+    afterSignedThinkingResetFenceForTests?: (sessionId: string) => void;
     /** Override only to observe mural candidate resolution in tests. */
     muralResolverForTests?: typeof resolveMuralWire;
     /** Override only to observe session-identity caching in tests. */
@@ -546,6 +586,17 @@ function moduleFailureCode(error: unknown): string | null {
 
 function isNonRetryableStateSyncFailure(error: unknown): boolean {
     return moduleFailureCode(error) === "state_sync_non_retryable";
+}
+
+/**
+ * True when a transform of this session that the plugin stopped waiting for may still
+ * be running in the module: either this pass gave up on its own final page, or the
+ * module refused this pass because such a transform is still pending there. Only the
+ * second proves the module is connected.
+ */
+function isModuleBusyWithAbandonedTransform(error: unknown): boolean {
+    const code = moduleFailureCode(error);
+    return code === TRANSFORM_FINAL_PAGE_ABANDONED_CODE || code === TRANSFORM_PAGE_IN_PROGRESS_CODE;
 }
 
 /**
@@ -1083,6 +1134,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             passesSincePark: 0,
             warningSent: false,
             forceFullWire: false,
+            transformInProgressSinceMs: null,
             ordinalMemoAnchor: null,
             ordinalMemoStoredCount: null,
             ordinalMemoCanonicalCount: 0,
@@ -1424,6 +1476,31 @@ export function applyNativeMessagesVerbatim(
     ]);
 }
 
+/**
+ * The historian fields a Rust-mode `session.wrapup` carries, resolved from the current
+ * config: the model chain with its limits and variants, the per-attempt timeout and the
+ * output cap. The module would otherwise reuse the values from the session's last
+ * completed transform, which stay stale while that session's passes are failing. An
+ * unset output cap is omitted, as it is on a transform, so the module keeps its default.
+ */
+export function rustWrapupHistorianFields(
+    historian: Pick<TransformDeps, "historianModel" | "fallbackModels"> & {
+        timeoutMs: number;
+        maxOutputTokens?: number;
+    },
+): Record<string, unknown> {
+    const chain = resolvedHistorianModelChain(historian);
+    return {
+        historian_model_chain: chain,
+        historian_model_limits: resolvedHistorianModelLimits(chain),
+        historian_model_variants: resolvedHistorianModelVariants(historian),
+        historian_timeout_ms: historian.timeoutMs,
+        ...(historian.maxOutputTokens !== undefined
+            ? { historian_max_output_tokens: historian.maxOutputTokens }
+            : {}),
+    };
+}
+
 function resolvedHistorianModelChain(
     deps: Pick<TransformDeps, "historianModel" | "fallbackModels">,
 ): string[] {
@@ -1761,6 +1838,15 @@ export function createRustModeTransform(
                 // the next run, as it does for the host's own historian.
                 attemptTimeoutMs: () =>
                     deps.resolveHistorianRun?.().timeoutMs ?? deps.historianTimeoutMs,
+                // Sampled per claim, like the timeout: the variant comes from the
+                // current historian config, matched by model name.
+                resolveVariant: (model) => {
+                    const run = deps.resolveHistorianRun?.();
+                    return resolvedHistorianModelVariants({
+                        historianModel: run?.model ?? deps.historianModel,
+                        fallbackModels: run?.fallbackModels ?? deps.fallbackModels,
+                    })[model];
+                },
             });
         } catch (error) {
             // A loop that cannot be built leaves the runs for another claimant rather
@@ -1898,21 +1984,33 @@ export function createRustModeTransform(
                     "rust transform deadline: waiting up to 45000ms for identical final-page completion",
                 );
                 const completionDeadline = clock.now() + 45_000;
+                // Past this budget the plugin gives the final page up while the module
+                // may still be applying it and may still commit it. The error says so
+                // by code: the pass then must not send raw history, and the next pass's
+                // "in progress" refusal is known to be this page, not a module fault.
+                const abandoned = (cause: unknown) =>
+                    Object.assign(new Error(timeoutError.message, { cause }), {
+                        code: TRANSFORM_FINAL_PAGE_ABANDONED_CODE,
+                    });
                 for (;;) {
                     const remaining = completionDeadline - clock.now();
-                    if (remaining <= 0) throw timeoutError;
+                    if (remaining <= 0) throw abandoned(timeoutError);
                     try {
                         return await callModule(args, remaining, false);
                     } catch (retryError) {
-                        if (
-                            moduleFailureCode(retryError) !== "authority_transform_page_in_progress"
-                        )
+                        if (moduleFailureCode(retryError) !== TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+                            if (
+                                retryError instanceof Error &&
+                                /timed out|deadline/i.test(retryError.message)
+                            )
+                                throw abandoned(retryError);
                             throw retryError;
+                        }
                         // The original execution is still applying. Re-submit only
                         // its identical final page after yielding, until its cached
                         // committed result is available or this one budget expires.
                         const wait = Math.min(250, completionDeadline - clock.now());
-                        if (wait <= 0) throw timeoutError;
+                        if (wait <= 0) throw abandoned(retryError);
                         await new Promise<void>((resolve) => clock.setTimeout(resolve, wait));
                     }
                 }
@@ -1985,7 +2083,44 @@ export function createRustModeTransform(
         return original;
     };
 
+    /** Whether the session's current run of "in progress" refusals is inside its bound. */
+    const inProgressRunWithinBound = (state: RustSessionState): boolean =>
+        state.transformInProgressSinceMs !== null &&
+        clock.now() - state.transformInProgressSinceMs <= RUST_IN_PROGRESS_PARK_EXEMPTION_MS;
+
+    /**
+     * Whether `error` is an "in progress" refusal inside the run's exemption bound.
+     * Records the run's start on its first refusal and ends the run on any other error.
+     */
+    const exemptInProgressRefusal = (state: RustSessionState, error: unknown): boolean => {
+        if (moduleFailureCode(error) !== TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+            state.transformInProgressSinceMs = null;
+            return false;
+        }
+        state.transformInProgressSinceMs ??= clock.now();
+        return inProgressRunWithinBound(state);
+    };
+
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
+        if (isModuleBusyWithAbandonedTransform(error)) {
+            // The module may still commit the abandoned transform, which moves the
+            // state a tail delta would build on, so the next pass sends complete arrays.
+            state.forceFullWire = true;
+        }
+        if (exemptInProgressRefusal(state, error)) {
+            // The module answered: it is still applying a transform of this session that
+            // an earlier pass stopped waiting for. Within the bound that is not a module
+            // failure, so it leaves consecutiveFailures (the parking counter) alone and
+            // shows no reconnecting notice. failureCount is only the lifetime tally of
+            // failed passes, which this pass still is.
+            state.failureCount += 1;
+            sessionLog(
+                sessionId,
+                "rust transform deferred; the module is still applying an earlier transform of this session; attempting LKG replay:",
+                error,
+            );
+            return;
+        }
         state.consecutiveFailures = isNonRetryableStateSyncFailure(error)
             ? Math.max(RUST_FAILURE_PARK_THRESHOLD, state.consecutiveFailures + 1)
             : state.consecutiveFailures + 1;
@@ -2497,6 +2632,7 @@ export function createRustModeTransform(
         let requestInputTokens = 0;
         let decision = "error";
         let materializeReason = "none";
+        let frozenReleaseReason: string | null = null;
         let schedulerDecision: string | undefined;
         let responseCommitted: boolean | undefined;
         let responsePrefixBustPermitted: boolean | undefined;
@@ -2621,6 +2757,18 @@ export function createRustModeTransform(
             // compaction is disabled; only a verified last-good replay may continue.
             if (moduleFailureCode(cause) === "transform_transport_interrupted") {
                 throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, { cause });
+            }
+            // A transform the module may still commit cannot authorize unmanaged history
+            // either. When the module itself refused this pass as busy it is connected,
+            // so the refusal says so; a page this pass gave up on may also mean the
+            // module stopped answering, which is the reconnecting case.
+            if (isModuleBusyWithAbandonedTransform(cause)) {
+                throw new EmergencyFailClosedError(
+                    moduleFailureCode(cause) === TRANSFORM_PAGE_IN_PROGRESS_CODE
+                        ? ENGINE_BUSY_USER_MESSAGE
+                        : ENGINE_RECONNECTING_USER_MESSAGE,
+                    { cause },
+                );
             }
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
                 throw new StorageBusyRefusalError(cause, "rust-mode-transform");
@@ -2815,6 +2963,8 @@ export function createRustModeTransform(
                     materializeReason: materializeReason === "none" ? null : materializeReason,
                     inputTokens: requestInputTokens,
                     tsMs: passObservedAtMs,
+                    lkgFrozenReleaseReason:
+                        applied && served ? (frozenReleaseReason ?? undefined) : undefined,
                 });
             }
         };
@@ -3747,6 +3897,9 @@ export function createRustModeTransform(
                     );
                 }
                 if (!response) throw new Error("rust module returned no transform response");
+                // The module accepted a transform of this session, which ends any run of
+                // "still applying" refusals.
+                state.transformInProgressSinceMs = null;
                 return { response };
             };
             let transformSeriesRestarted = false;
@@ -4001,6 +4154,39 @@ export function createRustModeTransform(
                     "rust transform wire invariant failed: SOFT+ cannot permit a prefix bust",
                 );
             }
+            // The module reports `signed_thinking_reset`: it has durably removed every signed
+            // thinking block it serves. Two pieces of host state still hold that thinking and
+            // are not part of the module's commit: the previous last-known-good (LKG) snapshot,
+            // replayed when the module cannot answer, and a reactive latest-thinking recovery,
+            // which restores the turn's original thinking. Before this pass can clear the
+            // recovery, drop the snapshot or fall back to it, record a strip fence: every
+            // reasoning-bearing assistant of this input joins the persisted thinking-strip set
+            // (the binding-mismatch ids). Every later host pass strips those messages, and an
+            // LKG snapshot taken before the reset no longer matches what its replay would serve,
+            // so it is not admitted. A crash after this point therefore never brings the
+            // removed thinking back. If the fence cannot be written, the pass is refused.
+            const signedThinkingReset =
+                moduleDecisionBusts && response.signed_thinking_reset === true;
+            if (signedThinkingReset) {
+                const fenced = findReasoningBearingAssistantIds(messages as MessageLike[]);
+                let recorded = false;
+                try {
+                    recorded = addMergedReasoningStrippedIds(
+                        deps.db,
+                        sessionId,
+                        fenced.map(thinkingBindingRecoveryFrozenId),
+                    );
+                } catch (error) {
+                    sessionLog(sessionId, "signed thinking reset fence: persistence threw:", error);
+                }
+                if (!recorded) {
+                    throw new EmergencyFailClosedError(SIGNED_THINKING_RESET_FENCE_FAILED);
+                }
+                sessionLog(
+                    sessionId,
+                    `signed thinking reset fence: ${fenced.length} assistant(s) [${fenced.join(",")}]`,
+                );
+            }
             // Only the producer grants prefix-rebuild authority. A local safety escape
             // may replace the frozen representation, but cannot grant any other edits.
             const cacheBustingPass = moduleDecisionBusts;
@@ -4046,7 +4232,6 @@ export function createRustModeTransform(
             );
             let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
             let frozenHealthyPassesAfterApply: number | null = null;
-            let frozenReleaseReason: string | null = null;
             const applyStartedAt = performance.now();
             try {
                 // Validate and postprocess the module result before touching the caller-owned
@@ -4298,6 +4483,7 @@ export function createRustModeTransform(
                         cacheBustingPass: moduleDecisionBusts,
                         prefixPermissionSupported: permissionSupported,
                         moduleReasoningTrimOnly: response.reasoning_trim_only === true,
+                        moduleSignedThinkingReset: response.signed_thinking_reset === true,
                         // A frozen session hands the strip gate the last-served array on
                         // every pass that reaches postprocess. That includes a module bust
                         // whose own edit only trims the oldest reasoning: it still replaces
@@ -4363,15 +4549,25 @@ export function createRustModeTransform(
                         },
                         resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
                     );
-                    const refusal = outgoingContextRefusal(
-                        servedFinalWireEstimate,
-                        resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
-                        protectedToolTokenCount(
-                            getActiveTagsBySession(deps.db, sessionId),
-                            deps.protectedTools,
-                            resolveDecisionCalibration(model?.providerID, model?.modelID),
-                        ),
-                    );
+                    const refusal =
+                        outgoingContextRefusal(
+                            servedFinalWireEstimate,
+                            resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
+                            protectedToolTokenCount(
+                                getActiveTagsBySession(deps.db, sessionId),
+                                deps.protectedTools,
+                                resolveDecisionCalibration(model?.providerID, model?.modelID),
+                            ),
+                        ) ??
+                        // A signed-thinking reset pass already removed all signed thinking
+                        // and everything the module could reclaim, so nothing more can be
+                        // removed: a whole request still over the window is refused, not sent.
+                        (signedThinkingReset
+                            ? signedTurnContextRefusal(
+                                  servedFinalWireEstimate,
+                                  resolvedWindowGeometry?.usableHard ?? resolvedContextLimit,
+                              )
+                            : undefined);
                     if (refusal) {
                         // A priced module replacement invalidates its prior durable
                         // snapshot even when final admission refuses before installation.
@@ -4415,6 +4611,7 @@ export function createRustModeTransform(
                 // A cache-busting replacement invalidates the previous snapshot only after the
                 // replacement is installed. If installation fails, the prior LKG remains available
                 // and its replay still applies durable binding-mismatch strips.
+                if (signedThinkingReset) options.afterSignedThinkingResetFenceForTests?.(sessionId);
                 if (synchronousReplacement && !markerDefinitelyNoCut) {
                     dropSlot(sessionId, "lkg_cache_bust_pending_capture");
                     state.lkgAcceptedCapture = undefined;
@@ -4434,6 +4631,17 @@ export function createRustModeTransform(
                 );
                 let captureMode = "async";
                 if (capturePlan) state.lkgLastServedCaptureSequence = capturePlan.captureSequence;
+                // After a provider rejected edits to the latest turn, reactive recovery restores
+                // that turn's original thinking on each pass. A served signed-thinking reset
+                // removed all of it because bytes before it changed, so there is nothing valid
+                // to restore. End the recovery only after the stripped replacement is saved as
+                // the new last-known-good snapshot, so no surviving state can restore the old
+                // thinking.
+                const endRecoveryAfterResetCapture = (): void => {
+                    if (signedThinkingReset && thinkingRecovery.restore) {
+                        endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
+                    }
+                };
                 const captureFailed = (mode: "async" | "sync", error: unknown): void => {
                     if (
                         states.get(sessionId) !== state ||
@@ -4459,6 +4667,7 @@ export function createRustModeTransform(
                     captureMode = synchronousReplacement ? "sync_priced" : "sync_recovery";
                     try {
                         commitRustCapture(state, capturePlan, synchronousReplacement);
+                        endRecoveryAfterResetCapture();
                     } catch (error) {
                         captureFailed("sync", error);
                         if (synchronousReplacement) throw error;
@@ -4469,6 +4678,7 @@ export function createRustModeTransform(
                             const asyncStartedAt = performance.now();
                             try {
                                 const result = commitRustCapture(state, capturePlan);
+                                endRecoveryAfterResetCapture();
                                 logTransformTiming(
                                     sessionId,
                                     "rust.lkg_snapshot_async",
@@ -4819,6 +5029,18 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "mc_rust_emergency_refusal before_lkg");
                 markFailure(sessionId, state, error);
                 finishPass(false, false);
+                if (
+                    moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE &&
+                    inProgressRunWithinBound(state)
+                ) {
+                    // The module answered that it is busy, so there is no reconnect to
+                    // wait for: the refusal names the real state and arms no reconnect
+                    // recovery. Past the exemption bound the pending page counts as a
+                    // stuck module, and the refusal below arms reconnect recovery.
+                    throw new EmergencyFailClosedError(ENGINE_BUSY_USER_MESSAGE, {
+                        cause: error,
+                    });
+                }
                 const refusedUser = newestUserMessage(messages);
                 const refusedUserMessageId = refusedUser ? messageIdOf(refusedUser) : null;
                 if (refusedUserMessageId) {
@@ -5012,4 +5234,5 @@ import {
     contextRefusalError,
     outgoingContextRefusal,
     protectedToolRefusal,
+    signedTurnContextRefusal,
 } from "./emergency-fail-closed";

@@ -1,5 +1,4 @@
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
-
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -103,6 +102,7 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
 import { importPluginModule } from "./shared/stale-plugin-build";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
+import { applyHiddenSubagentTemperature } from "./shared/subagent-temperature";
 import { reloadWindowOverlay } from "./shared/window-geometry";
 import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { setup } from "./v2/server";
@@ -912,6 +912,7 @@ const server: Plugin = async (ctx) => {
         }),
         "chat.params": async (input, output) => {
             dreamerCap.apply(input, output);
+            applyHiddenSubagentTemperature(input, output, log);
         },
         "experimental.chat.messages.transform": createMessagesTransformHandler({
             magicContext: magicContextRuntime.magicContext,

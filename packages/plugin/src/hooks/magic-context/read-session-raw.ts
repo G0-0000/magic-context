@@ -267,39 +267,67 @@ function readRawMessagePageRows(
     const pageSize = Math.min(Math.max(1, Math.floor(limit)), remaining);
     if (pageSize === 0) return [];
 
-    // The ordinal seek is needed only for the first page of a range. Later
-    // pages resume after the last filtered row, including timestamp ties. The
-    // redundant lower bound lets SQLite seek the session/time index before
-    // evaluating the tie-break and JSON filter.
-    const parameters: Array<string | number> = [sessionId];
-    if (after) parameters.push(after.timeCreated, after.timeCreated, after.timeCreated, after.id);
-    parameters.push(pageSize);
-    if (!after) parameters.push(Math.max(0, Math.floor(afterOrdinal)));
-    return db
-        .prepare(
-            `SELECT id, data, time_created, time_updated
-             FROM message
-             WHERE session_id = ?
-                ${after ? "AND time_created >= ? AND (time_created > ? OR (time_created = ? AND id > ?))" : ""}
-                AND NOT (
-                   CASE WHEN json_valid(data) = 1
-                        THEN COALESCE(json_extract(data, '$.summary'), 0)
-                        ELSE 0 END = 1
-                   AND CASE WHEN json_valid(data) = 1
-                            THEN COALESCE(json_extract(data, '$.finish'), '')
-                            ELSE '' END = 'stop'
-               )
-             ORDER BY time_created ASC, id ASC
-             LIMIT ? ${after ? "" : "OFFSET ?"}`,
-        )
-        .all(...parameters)
-        .filter(isRawMessageRow)
-        .map(
-            (row, index): PagedRawMessageRow => ({
-                ...row,
-                ordinal: Math.floor(afterOrdinal) + index + 1,
-            }),
-        );
+    return withReadSnapshot(db, () => {
+        const ordinal = Math.max(0, Math.floor(afterOrdinal));
+        // A restarted reconciler has an ordinal but no keyset anchor. Worker
+        // ranks let it start at the nearest page, not parse the entire prefix.
+        const points = currentOrdinalCheckpoints(db, sessionId)?.scan.checkpoints ?? [];
+        let low = 0;
+        let high = points.length;
+        while (low < high) {
+            const middle = Math.floor((low + high) / 2);
+            if (points[middle].ordinal <= ordinal) low = middle + 1;
+            else high = middle;
+        }
+        const floor = points[low - 1];
+        const useFloor = floor && (!after || compareOrdinalKeys(floor, after) > 0);
+        const anchor = useFloor ? floor : after;
+        const skip = anchor === after && after ? 0 : ordinal - (floor?.ordinal ?? 0);
+        if (skip > ORDINAL_LOOKUP_LIMIT) {
+            void prewarmRawSessionOrdinalsForDb(db, sessionId);
+            throw new RawOrdinalsNotReady();
+        }
+        // Limit index keys BEFORE touching JSON. Even a long run of excluded
+        // summaries cannot turn a small LIMIT into an unbounded table scan.
+        const rawLimit = skip + pageSize + ORDINAL_LOOKUP_LIMIT;
+        const rows = db
+            .prepare(`SELECT id, data, time_created, time_updated, ${EXCLUDED_ROW_SQL} AS excluded
+                FROM message WHERE id IN (
+                    SELECT id FROM message WHERE session_id = ?
+                    ${anchor ? "AND (time_created, id) > (?, ?)" : ""}
+                    ORDER BY time_created, id LIMIT ?)
+                ORDER BY time_created, id`)
+            .all(sessionId, ...(anchor ? [anchor.timeCreated, anchor.id] : []), rawLimit) as Array<
+            RawMessageRow & { excluded: number }
+        >;
+        rawMessagePageRowsVisited += rows.length;
+        const eligible = rows.filter((row) => row.excluded !== 1);
+        if (eligible.length <= skip && rows.length === rawLimit) {
+            void prewarmRawSessionOrdinalsForDb(db, sessionId);
+            throw new RawOrdinalsNotReady();
+        }
+        return eligible
+            .slice(skip, skip + pageSize)
+            .filter(isRawMessageRow)
+            .map(
+                (row, index): PagedRawMessageRow => ({
+                    ...row,
+                    ordinal: ordinal + index + 1,
+                }),
+            );
+    });
+}
+
+let rawMessagePageRowsVisited = 0;
+
+/** @internal Message rows examined by raw page reads, including excluded rows. */
+export function getRawMessagePageRowsVisitedForTest(): number {
+    return rawMessagePageRowsVisited;
+}
+
+/** @internal */
+export function resetRawMessagePageRowsVisitedForTest(): void {
+    rawMessagePageRowsVisited = 0;
 }
 
 function assembleRawMessagePage(
@@ -1814,4 +1842,215 @@ export function readRawSeedTailFromDb(
     if (boundaryId !== null && !messages.has(boundaryId))
         throw new Error("state_sync materialized boundary is missing from raw storage");
     return messages;
+}
+
+/**
+ * What compartment boundary resolution needs to know about one boundary
+ * message. `null` in the result map means the message is not servable (absent,
+ * unreadable, or a finished compaction summary), exactly the messages
+ * {@link readRawSessionMessagePartsByIdFromDb} returns null for.
+ */
+export interface RawBoundaryEndpoint {
+    /** Ordinal as {@link readRawSessionMessageIdOrdinalsForRangeFromDb} numbers it; null when it has none. */
+    ordinal: number | null;
+    createdAt: number;
+    /**
+     * Index of the message's last module block, the value
+     * `moduleRawBlockMappings(parts).at(-1)?.blockIndex ?? 0` yields. Only
+     * present when the caller asked for it.
+     */
+    lastBlockIndex?: number;
+}
+
+/**
+ * Ordinals of the requested ids. The numbering repeats
+ * {@link readRawSessionMessageIdOrdinalsForRangeFromDb} from ordinal 1: the
+ * same summary predicate and order, and a row whose id or data is not text
+ * takes no ordinal (that reader drops such rows before numbering). SQLite
+ * numbers the whole session, but only the requested ids come back.
+ */
+const BOUNDARY_ORDINAL_SQL = `
+    SELECT id, ordinal FROM (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY time_created, id) AS ordinal
+        FROM message
+        WHERE session_id = ?
+          AND typeof(id) = 'text' AND typeof(data) = 'text'
+          AND CASE WHEN json_valid(data) THEN NOT (
+                COALESCE(json_type(data, '$.summary'), '') = 'true'
+                AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
+              ) ELSE 1 END
+    )
+    WHERE id IN (SELECT value FROM json_each(?))`;
+
+/**
+ * The requested rows themselves, by primary key (unary `+` keeps the planner
+ * off the session index), with their small info JSON.
+ */
+const BOUNDARY_MESSAGE_SQL = `
+    SELECT id, data, time_created FROM message
+    WHERE +session_id = ? AND id IN (SELECT value FROM json_each(?))`;
+
+/**
+ * Module blocks per message, computed inside SQLite so multi-MiB tool parts
+ * are never copied into JavaScript. The weights repeat `moduleRawBlockMappings`
+ * in module-wire.ts: a part that is not a JSON object adds nothing; a type
+ * that is not a string counts as "unknown"; ignored text and bookkeeping
+ * parts add nothing; a tool call adds one block, plus one for its result once
+ * the state is completed or errored; every other part adds one. Keep the two
+ * in step.
+ */
+const BOUNDARY_BLOCK_COUNT_SQL = `
+    SELECT message_id AS id, SUM(
+        CASE
+            WHEN NOT json_valid(data) OR json_type(data) <> 'object' THEN 0
+            ELSE CASE (CASE WHEN json_type(data, '$.type') = 'text'
+                            THEN json_extract(data, '$.type') ELSE 'unknown' END)
+                WHEN 'text' THEN CASE WHEN json_type(data, '$.ignored') = 'true' THEN 0 ELSE 1 END
+                WHEN 'reasoning' THEN 1
+                WHEN 'thinking' THEN 1
+                WHEN 'redacted_thinking' THEN 1
+                WHEN 'tool' THEN 1 + CASE
+                    WHEN json_type(data, '$.state') = 'object'
+                     AND json_type(data, '$.state.status') = 'text'
+                     AND json_extract(data, '$.state.status') IN ('completed', 'error')
+                    THEN 1 ELSE 0 END
+                WHEN 'compaction' THEN 0
+                WHEN 'step-finish' THEN 0
+                WHEN 'snapshot' THEN 0
+                WHEN 'patch' THEN 0
+                WHEN 'agent' THEN 0
+                WHEN 'retry' THEN 0
+                ELSE 1
+            END
+        END) AS blocks
+    FROM part
+    WHERE +session_id = ?
+      AND message_id IN (SELECT value FROM json_each(?))
+      AND typeof(message_id) = 'text' AND typeof(data) = 'text'
+    GROUP BY message_id`;
+
+interface BoundaryEndpointCache {
+    stamp: StoreStamp;
+    endpoints: Map<string, RawBoundaryEndpoint | null>;
+}
+
+/**
+ * Boundary facts per connection and session, valid only while the store stamp
+ * they were read under is unchanged: any write anywhere in the store moves the
+ * stamp, so a reused fact is one no write could have changed.
+ */
+const boundaryEndpointCaches = new WeakMap<Database, Map<string, BoundaryEndpointCache>>();
+/** Sessions kept per connection; a host process works on a handful at a time. */
+const BOUNDARY_ENDPOINT_CACHE_SESSIONS = 16;
+let boundaryEndpointRowsRead = 0;
+
+/** @internal Boundary message ids read from the store since the last reset. */
+export function getRawBoundaryEndpointRowsReadForTest(): number {
+    return boundaryEndpointRowsRead;
+}
+
+/** @internal */
+export function resetRawBoundaryEndpointRowsReadForTest(): void {
+    boundaryEndpointRowsRead = 0;
+}
+
+function readBoundaryEndpointRows(
+    db: Database,
+    sessionId: string,
+    ids: readonly string[],
+    blockIds: readonly string[],
+    into: Map<string, RawBoundaryEndpoint | null>,
+): void {
+    if (ids.length > 0) {
+        boundaryEndpointRowsRead += ids.length;
+        const wanted = JSON.stringify(ids);
+        const ordinals = new Map<string, number>();
+        for (const row of db.prepare(BOUNDARY_ORDINAL_SQL).all(sessionId, wanted) as Array<{
+            id: string;
+            ordinal: number;
+        }>) {
+            ordinals.set(row.id, row.ordinal);
+        }
+        const rows = db.prepare(BOUNDARY_MESSAGE_SQL).all(sessionId, wanted) as RawMessageRow[];
+        for (const id of ids) into.set(id, null);
+        for (const row of rows) {
+            // Skip rows readRawSessionMessagePartsByIdFromDb would return null for:
+            // non-text id or data, a non-numeric time_created, info that is not a
+            // JSON object, and finished compaction summaries.
+            if (!isRawMessageRow(row) || typeof row.time_created !== "number") continue;
+            const info = parseJsonRecord(row.data);
+            if (!info || isRawCompactionSummaryInfo(info)) continue;
+            into.set(row.id, {
+                ordinal: ordinals.get(row.id) ?? null,
+                createdAt: row.time_created,
+            });
+        }
+    }
+    const servable = blockIds.filter((id) => {
+        const endpoint = into.get(id);
+        return endpoint && endpoint.lastBlockIndex === undefined;
+    });
+    if (servable.length === 0) return;
+    const counts = new Map<string, number>();
+    for (const row of db
+        .prepare(BOUNDARY_BLOCK_COUNT_SQL)
+        .all(sessionId, JSON.stringify(servable)) as Array<{ id: string; blocks: number }>) {
+        counts.set(row.id, row.blocks);
+    }
+    for (const id of servable) {
+        const endpoint = into.get(id);
+        if (!endpoint) continue;
+        const blocks = counts.get(id) ?? 0;
+        into.set(id, { ...endpoint, lastBlockIndex: blocks > 0 ? blocks - 1 : 0 });
+    }
+}
+
+/**
+ * For each id, its ordinal and creation time, or null when it is not
+ * servable (see RawBoundaryEndpoint). Ids in `blockIds` also get
+ * `lastBlockIndex`, the index of the message's last module block. Message rows
+ * are read in two statements over just the requested ids, and block counts in
+ * one more, so no message JSON other than theirs reaches JavaScript. While the
+ * store is unchanged since an earlier call, ids answered then are not read
+ * again.
+ */
+export function readRawSessionBoundaryEndpointsFromDb(
+    db: Database,
+    sessionId: string,
+    ids: readonly string[],
+    blockIds: readonly string[] = [],
+): Map<string, RawBoundaryEndpoint | null> {
+    const wanted = [...new Set(ids)];
+    const wantedBlocks = [...new Set(blockIds)];
+    let sessions = boundaryEndpointCaches.get(db);
+    if (!sessions) {
+        sessions = new Map();
+        boundaryEndpointCaches.set(db, sessions);
+    }
+    for (let attempt = 1; ; attempt += 1) {
+        const before = readStoreStamp(db);
+        const cached = sessions.get(sessionId);
+        // The second attempt reads everything again, so the answer comes from
+        // one snapshot even when the store moved while the first was reading.
+        const reuse = attempt === 1 && cached && sameStoreStamp(cached.stamp, before);
+        const endpoints = new Map(reuse ? cached.endpoints : []);
+        const missing = wanted.filter((id) => !endpoints.has(id));
+        withReadSnapshot(db, () =>
+            readBoundaryEndpointRows(db, sessionId, missing, wantedBlocks, endpoints),
+        );
+        const unchanged = before !== null && sameStoreStamp(before, readStoreStamp(db));
+        if (unchanged) {
+            sessions.delete(sessionId);
+            sessions.set(sessionId, { stamp: before, endpoints });
+            while (sessions.size > BOUNDARY_ENDPOINT_CACHE_SESSIONS) {
+                const oldest = sessions.keys().next().value;
+                if (oldest === undefined) break;
+                sessions.delete(oldest);
+            }
+        } else if (reuse) {
+            // Cached facts and fresh reads may describe different store states.
+            continue;
+        }
+        return new Map(wanted.map((id) => [id, endpoints.get(id) ?? null]));
+    }
 }

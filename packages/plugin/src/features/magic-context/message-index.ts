@@ -23,6 +23,7 @@ import {
     recordMessageFtsRowid,
 } from "./message-fts-rowid-map";
 import { deleteSessionScopedRows, SESSION_SCOPED_TABLES } from "./storage-session-tables";
+import { TAG_TOMBSTONE_OWNER_PREFIX } from "./storage-tag-identity-revision";
 
 interface MessageHistoryIndexRow {
     last_indexed_ordinal?: number;
@@ -964,13 +965,23 @@ function getOpenCodeSessionScopedCandidateSourceSql(harness: "opencode" | "openc
     // OpenCode sweep: the same shared row could belong to Pi. Once an
     // OpenCode-scoped table is listed for deletion, it automatically becomes a
     // discovery source too; storage-db.test.ts fences that list to the schema.
-    return SESSION_SCOPED_TABLES.filter((definition) => definition.harnessScoped === true)
-        .map((definition) => {
-            const predicates = ["session_id IS NOT NULL", `harness = '${harness}'`];
-            if (definition.extraPredicate) predicates.push(definition.extraPredicate);
-            return `SELECT session_id FROM ${definition.table} WHERE ${predicates.join(" AND ")}`;
-        })
-        .join("\nUNION\n");
+    const sources = SESSION_SCOPED_TABLES.filter(
+        (definition) => definition.harnessScoped === true,
+    ).map((definition) => {
+        const predicates = ["session_id IS NOT NULL", `harness = '${harness}'`];
+        if (definition.extraPredicate) predicates.push(definition.extraPredicate);
+        return `SELECT session_id FROM ${definition.table} WHERE ${predicates.join(" AND ")}`;
+    });
+    // A context reset can leave only its retained tag-change counters. The
+    // marker records the session ID and producing harness, so this sweep checks
+    // OpenCode's session table only for OpenCode-owned counters, not resumable Pi sessions.
+    const jsonId = `SUBSTR(key, ${TAG_TOMBSTONE_OWNER_PREFIX.length + 1}, LENGTH(key) - ${TAG_TOMBSTONE_OWNER_PREFIX.length + harness.length + 1})`;
+    sources.push(`SELECT CASE WHEN json_valid(${jsonId}) THEN
+        CASE WHEN json_type(${jsonId}) = 'text' THEN json_extract(${jsonId}, '$') END END AS session_id
+        FROM schema_migrations_meta WHERE value = '${harness}'
+        AND key >= '${TAG_TOMBSTONE_OWNER_PREFIX}' AND key < '${TAG_TOMBSTONE_OWNER_PREFIX.slice(0, -1)};'
+        AND SUBSTR(key, -${harness.length + 1}) = ':${harness}'`);
+    return sources.join("\nUNION\n");
 }
 
 /**

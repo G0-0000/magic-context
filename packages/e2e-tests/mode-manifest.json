@@ -664,6 +664,31 @@
             "behavior": true
         },
         {
+            "path": "tests/subagent-temperature-hosts.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 1, OpenCode 2 and Pi hosts run the historian against models whose metadata comes from a copied models.dev catalogue; the mock-captured request bodies prove Gemini 3.8 Flash gets the configured temperature and Codex GPT-6.1 Sol gets none, and lsof over every spawned process proves no live store is open. OMP shares the Pi calibration extension and has unit gates.",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ],
+            "hosts": [
+                "opencode",
+                "opencode2",
+                "pi"
+            ],
+            "divergences": [
+                {
+                    "host": "omp",
+                    "reason": "OMP loads the same historian calibration extension as Pi, and its Gemini models carry no sampling flag either, so the shared catalogue fallback is covered by the Pi lane and the OMP unit gates in historian-calibration-extension.test.ts",
+                    "contract_ref": "packages/pi-plugin/src/historian-calibration-extension.test.ts"
+                }
+            ],
+            "behavior": true
+        },
+        {
             "path": "tests/long-running-session.test.ts",
             "tier": "both-modes",
             "invocation": {
@@ -2883,6 +2908,14 @@
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
             "rationale": "Real OpenCode 2 generate hook: managed prefix and applied drops, read-only database, pure replay and counterfactual next-main wire identity",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/generate-tool-tail.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 generate hook after a tool step: the side-question request replays the last served runner request byte for byte, including id-less tool results",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
         },

@@ -1051,6 +1051,23 @@ function readTagIdentityRevision(db: Database, sessionId: string): string | null
     return typeof row?.value === "string" ? row.value : null;
 }
 
+/** Record the revision created by the first append, not a later owner/reasoning edit. */
+function captureInitialTagOwnerRevision(
+    db: Database,
+    sessionId: string,
+    cached: TagOwnerSummary,
+    appendedRows: number,
+): boolean {
+    if (cached.identityRevision !== null || appendedRows === 0) return true;
+    const revision = readTagIdentityRevision(db, sessionId);
+    // The stamp's count tracks changes to owner IDs or reasoning estimates.
+    // A first append creates count zero. If it is already nonzero, the rows
+    // selected above may predate an edit; reject instead of marking them current.
+    if (revision !== null && !/^[1-9]\d*:0$/.test(revision)) return false;
+    cached.identityRevision = revision;
+    return true;
+}
+
 /**
  * After another connection's commit: the rows it appended to the session, or
  * null when the session changed in a way appends cannot explain.
@@ -1157,6 +1174,14 @@ function readTagOwnerSummary(
                     page = statement.all(page[page.length - 1].id, sessionId) as TagOwnerRow[];
                     rows.push(...page);
                 }
+            }
+            // A first tag INSERT creates the identity revision without changing the
+            // process's identity-edit generation. Remember that zero-count seed
+            // with these appended rows; otherwise an unrelated peer commit later
+            // compares it with cached null and discards this valid owner summary.
+            if (!captureInitialTagOwnerRevision(db, sessionId, cached, rows.length)) {
+                if (offThreadOnly) throw new TagOwnerSummaryNotReady();
+                rows = null;
             }
         } else {
             // The count, revision and appended rows must describe one commit.
@@ -1366,7 +1391,10 @@ function getAssignableTagNumberByMessageIdStatement(db: Database): PreparedState
     let stmt = getAssignableTagNumberByMessageIdStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT tag_number FROM tags
+            // Pin the owner index for the same reason as the statement above: a
+            // miss (every newly seen message) otherwise walks the whole session in
+            // tag order looking for a first match that does not exist.
+            `SELECT tag_number FROM tags INDEXED BY idx_tags_session_message_id
              WHERE session_id = ?
                AND message_id = ?
                AND NOT (
@@ -1576,7 +1604,9 @@ export function getInertWhitespaceAssistantTags(
 ): InertWhitespaceAssistantTag[] {
     if (messageIds) {
         // The fingerprint index lets the wire reader seek each visible owner instead
-        // of scanning every compacted tag. Keep the unscoped API for reduction tools.
+        // of scanning every compacted tag. The unscoped form below reads every
+        // retired tag in the session; ctx_reduce uses
+        // getInertWhitespaceAssistantTagsByNumbers instead.
         let statement = inertWhitespaceStatements.get(db);
         if (!statement) {
             // CROSS JOIN keeps the small owner list outside the fingerprint index
@@ -1620,6 +1650,50 @@ export function getInertWhitespaceAssistantTags(
         tagNumber: number;
         entryFingerprint: string;
     }>;
+    return rows.flatMap((row) => {
+        const contentId = row.entryFingerprint.slice(
+            WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX.length,
+        );
+        return contentId.length > 0 ? [{ tagNumber: row.tagNumber, contentId }] : [];
+    });
+}
+
+const inertWhitespaceByNumberStatements = new WeakMap<Database, PreparedStatement>();
+
+/**
+ * The inert whitespace tags among `tagNumbers`: the same rows, with the same
+ * predicate and content-id rule, as the unscoped
+ * {@link getInertWhitespaceAssistantTags}, restricted to the given numbers.
+ * Each number is a seek on the UNIQUE(session_id, tag_number) index, so the
+ * cost follows the request rather than the session's tag count, which runs to
+ * tens of thousands of retired rows on long sessions.
+ */
+export function getInertWhitespaceAssistantTagsByNumbers(
+    db: Database,
+    sessionId: string,
+    tagNumbers: readonly number[],
+): InertWhitespaceAssistantTag[] {
+    if (tagNumbers.length === 0) return [];
+    let statement = inertWhitespaceByNumberStatements.get(db);
+    if (!statement) {
+        // CROSS JOIN keeps the requested numbers outside the index seek.
+        statement = db.prepare(
+            `SELECT tags.tag_number AS tagNumber, tags.entry_fingerprint AS entryFingerprint
+             FROM json_each(?) AS wanted CROSS JOIN tags
+             WHERE tags.session_id = ?
+               AND tags.tag_number = wanted.value
+               AND tags.type = 'message'
+               AND tags.status = 'compacted'
+               AND tags.entry_fingerprint LIKE ?
+             ORDER BY tags.tag_number, tags.id`,
+        );
+        inertWhitespaceByNumberStatements.set(db, statement);
+    }
+    const rows = statement.all(
+        JSON.stringify([...new Set(tagNumbers)]),
+        sessionId,
+        `${WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX}%`,
+    ) as Array<{ tagNumber: number; entryFingerprint: string }>;
     return rows.flatMap((row) => {
         const contentId = row.entryFingerprint.slice(
             WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX.length,
@@ -2535,12 +2609,15 @@ export function markTagsCompactedByMessageIds(
     // never cross the JS boundary. Delimiter-bearing and NUL-bearing source ids
     // use the general matcher above rather than assuming a single base id.
     // All subsequent writes are primary-key lookups, not session scans.
+    // Protected-tool retirement already supplies an eligibility set. Seek those
+    // tag numbers before matching source ids; discarded history is not new work.
     const rows = db
         .prepare(`WITH ids AS MATERIALIZED (
             SELECT value AS source_id, lower(value) AS folded_id FROM json_each(?)
         )
         SELECT id, tag_number, message_id, tool_owner_message_id FROM tags INDEXED BY ${tagOrderConstraintIndex(db)}
-        WHERE session_id = ? AND status IN ('active', 'dropped') AND (
+        WHERE session_id = ? ${eligibleTagNumbers ? "AND tag_number IN (SELECT value FROM json_each(?))" : ""}
+        AND status IN ('active', 'dropped') AND (
             message_id IN (SELECT source_id FROM ids)
             OR tool_owner_message_id IN (SELECT source_id FROM ids)
             OR (instr(lower(message_id), ':p') > 0 AND
@@ -2553,6 +2630,7 @@ export function markTagsCompactedByMessageIds(
         .all(
             JSON.stringify(Array.from(ids)),
             sessionId,
+            ...(eligibleTagNumbers ? [JSON.stringify([...eligibleTagNumbers])] : []),
             Array.from(ids).some((id) => id.includes(":")) ? 1 : 0,
             nulPrefixes.size > 0 ? 1 : 0,
         ) as {

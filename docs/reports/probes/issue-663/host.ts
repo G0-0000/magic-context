@@ -55,12 +55,22 @@ if (
 		"late-start",
 		"skip",
 		"no-result",
+		"slow-context",
 	].includes(mode)
 )
 	throw new Error("unknown probe mode");
 const baseline = process.argv.includes("--baseline");
+const master = process.argv.includes("--master");
 const fullPlugin = process.argv.includes("--full-plugin");
+if ((baseline && master) || (fullPlugin && (master || baseline))) throw new Error("invalid fence selection");
+const variant = baseline ? "baseline" : master ? "master" : "fixed";
 const responses = process.argv.includes("--responses");
+const delayFirstMs = Number(
+	process.argv.find((arg) => arg.startsWith("--delay-first-ms="))?.split("=")[1] ?? 0,
+);
+if (!Number.isFinite(delayFirstMs) || delayFirstMs < 0 || delayFirstMs > 120000)
+	throw new Error("invalid first-response delay");
+const timeoutMs = 90000 + delayFirstMs + (mode === "slow-context" ? 65000 : 0);
 const mock = new MockProvider();
 const { baseURL } = await mock.start();
 const iso = createPiIsolatedEnv(undefined, "omp");
@@ -123,18 +133,22 @@ Object.assign(env, {
 	MAGIC_CONTEXT_LOG_PATH: join(iso.baseDir, "magic-context.log"),
 });
 const probe = join(iso.baseDir, "probe.mjs");
-const bundle = baseline ? "guard-baseline.mjs" : "guard.mjs";
+const bundle = baseline ? "guard-baseline.mjs" : master ? "guard-master.mjs" : "guard.mjs";
 writeFileSync(
 	probe,
 	`
 import { appendFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { Database } from 'bun:sqlite';
+import { convertAnthropicMessages } from ${JSON.stringify(join(repo, ".cache/issue-663/host/node_modules/@oh-my-pi/pi-ai/src/providers/anthropic.ts"))};
+import { DateCwdReminderInjector } from ${JSON.stringify(join(repo, ".cache/issue-663/host/node_modules/@oh-my-pi/pi-coding-agent/src/session/date-cwd-reminder.ts"))};
+import { normalizePromptPath } from ${JSON.stringify(join(repo, ".cache/issue-663/host/node_modules/@oh-my-pi/pi-coding-agent/src/utils/prompt-path.ts"))};
 import guard from ${JSON.stringify(fullPlugin ? join(repo, "packages/pi-plugin/dist/index.js") : join(repo, ".cache/issue-663", bundle))};
 const db = new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR + '/context.db');
 const audit = value => appendFileSync(process.env.MC663_ROOT + '/audit.jsonl', JSON.stringify({at:Date.now(),pid:process.pid,...value})+'\\n');
 export default async function(pi) {
   const mode = process.env.MC663_MODE;
+  let managed;
   let releaseStart, recordStart;
   const heldStart=new Promise(resolve=>{releaseStart=resolve;});
   const started=new Promise(resolve=>{recordStart=resolve;});
@@ -151,8 +165,18 @@ export default async function(pi) {
       }
       if(mode==='skip' && name==='context') { audit({phase:'skipped-context'}); return; }
       const abort=ctx.abort;
-      const before=name==='before_provider_request'?JSON.stringify(event.payload):undefined;
-      const result=await handler(event,Object.assign(Object.create(ctx),{abort:()=>{audit({phase:'abort',hook:name});return abort();}}));
+       const before=name==='before_provider_request'?JSON.stringify(event.payload):undefined;
+       if(name==='before_provider_request' && managed && !${responses} && !${fullPlugin} && ['slow-context','retry'].includes(mode)) {
+         const now=new Date();
+         const date=[now.getFullYear(),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0')].join('-');
+         const expectedContext=new DateCwdReminderInjector().transform({messages:managed,systemPrompt:'probe'},date,normalizePromptPath(ctx.sessionManager.getCwd()));
+         const expected=convertAnthropicMessages(expectedContext.messages,ctx.model,false);
+         audit({phase:'managed-bytes-comparison',expected,actual:event.payload.messages});
+         if(JSON.stringify(expected)!==JSON.stringify(event.payload.messages)) throw new Error('dispatch history differs from recorded managed output');
+         audit({phase:'managed-bytes-match',expected,actual:event.payload.messages});
+       }
+       const result=await handler(event,Object.assign(Object.create(ctx),{abort:()=>{audit({phase:'abort',hook:name});return abort();}}));
+       if(name==='context' && result?.messages) managed=structuredClone(result.messages);
       if(before!==undefined && before!==JSON.stringify(event.payload)) throw new Error('dispatch changed provider bytes');
       if(name==='context' && mode==='late-start') {
         audit({phase:'managed-context-ready'});
@@ -167,6 +191,13 @@ export default async function(pi) {
     const value=target[key];return typeof value==='function'?value.bind(target):value;
   }});
   await guard(proxied);
+  // Each host listener has a 30s timeout. Three successful later listeners can
+  // delay this same prepared request for 65s without invalidating its receipt.
+  if(mode==='slow-context') for(let i=0;i<3;i++) pi.on('context',async()=>{
+    audit({phase:'later-context-blocked',listener:i});
+    await Bun.sleep(65000/3);
+    audit({phase:'later-context-released',listener:i});
+  });
   if(mode==='late-start') pi.on('agent_start',()=>{recordStart();});
   if(mode==='side') pi.on('agent_start',async(_event,ctx)=>{
     if(ctx.sessionManager.getHeader()?.parentSession) return;
@@ -183,6 +214,7 @@ mock.setDefault({
 	usage,
 });
 let retry = false;
+let firstRequest = true;
 let delegated = false;
 let notifyWire!: () => void;
 const wireStarted = new Promise<void>((resolve) => {
@@ -191,6 +223,8 @@ const wireStarted = new Promise<void>((resolve) => {
 let notifyInternalWire!: () => void;
 const internalWire = new Promise<void>(resolve => { notifyInternalWire = resolve; });
 mock.addMatcher((body) => {
+	const delayMs = firstRequest ? delayFirstMs : 0;
+	firstRequest = false;
   if ((body.tools as Array<{ name: string }> | undefined)?.some(tool => tool.name.replace(/^_/, "") === "advise")) notifyInternalWire();
 	notifyWire();
 	appendFileSync(
@@ -200,6 +234,7 @@ mock.addMatcher((body) => {
 	if (mode === "retry" && !retry) {
 		retry = true;
 		return {
+			delayMs,
 			error: { status: 529, type: "overloaded_error", message: "retry probe" },
 		};
 	}
@@ -245,7 +280,7 @@ mock.addMatcher((body) => {
 			usage,
 		};
 	}
-	return null;
+	return delayMs ? { text: "mock reply", usage, delayMs } : null;
 });
 const cli = join(
 	repo,
@@ -291,7 +326,7 @@ rpc.onEvent((event) =>
 );
 const command = (type: string, params = {}) =>
 	rpc.sendCommand((line) => host.stdin!.write(line), type, params, {
-		timeoutMs: 90000,
+		timeoutMs,
 	});
 try {
 	await command("get_state");
@@ -302,7 +337,7 @@ try {
 						e.type === "extension_ui_request" &&
 						e.method === "notify" &&
 						e.message === "SIDE663_DONE",
-					{ timeoutMs: 90000 },
+					{ timeoutMs },
 				)
 			: undefined;
 	const internalDone = ["advisor", "capture"].includes(mode)
@@ -311,11 +346,11 @@ try {
 					e.type === "extension_ui_request" &&
 					e.method === "notify" &&
 					e.message === "INTERNAL663_DONE",
-				{ timeoutMs: 90000 },
+				{ timeoutMs },
 			)
 		: undefined;
 	const done = rpc.waitForEvent((e) => e.type === "agent_end", {
-		timeoutMs: 90000,
+		timeoutMs,
 	});
 	await command("prompt", { message: "ORIGINAL663" });
 	if (mode === "steer") {
@@ -330,19 +365,19 @@ try {
 	await sideDone;
 	const resumed =
 		mode === "task"
-			? rpc.waitForEvent((e) => e.type === "agent_end", { timeoutMs: 90000 })
+			? rpc.waitForEvent((e) => e.type === "agent_end", { timeoutMs })
 			: undefined;
 	if (mode === "task")
 		await rpc.waitForEvent(
 			(e) =>
 				e.type === "message_end" &&
 				(e.message as { customType?: string })?.customType === "async-result",
-			{ timeoutMs: 90000 },
+			{ timeoutMs },
 		);
 	await resumed;
 	if (mode === "compact") {
 		const next = rpc.waitForEvent((e) => e.type === "agent_end", {
-			timeoutMs: 90000,
+			timeoutMs,
 		});
 		await command("prompt", {
 			message: "COMPACT663 " + "throwaway summary input ".repeat(600),
@@ -354,7 +389,7 @@ try {
 	}
 	if (mode === "title") {
 		const title = rpc.waitForEvent((e) => e.type === "session_info_update", {
-			timeoutMs: 90000,
+			timeoutMs,
 		});
 		await command("prompt", { message: "/rename" });
 		await title;
@@ -377,8 +412,10 @@ try {
 		version,
 		mode,
 		baseline,
+		fenceRevision: baseline ? "e720b700^" : master ? "e720b700" : "working-tree",
 		fullPlugin,
 		responses,
+		delayFirstMs,
 		isolatedEnvironment,
         root: iso.baseDir,
 		pid: host.pid,
@@ -388,7 +425,7 @@ try {
 	writeFileSync(
 		join(
 			evidence,
-			`${mode}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${baseline ? "baseline" : "fixed"}.json`,
+			`${mode}${delayFirstMs ? "-delayed" : ""}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${variant}.json`,
 		),
 		JSON.stringify({ summary, audit, requests: mock.requests() }, null, 2) +
 			"\n",
@@ -396,21 +433,21 @@ try {
 	writeFileSync(
 		join(
 			evidence,
-			`${mode}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${baseline ? "baseline" : "fixed"}-lsof.txt`,
+			`${mode}${delayFirstMs ? "-delayed" : ""}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${variant}-lsof.txt`,
 		),
 		lsof,
 	);
 	writeFileSync(
 		join(
 			evidence,
-			`${mode}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${baseline ? "baseline" : "fixed"}-stderr.txt`,
+			`${mode}${delayFirstMs ? "-delayed" : ""}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${variant}-stderr.txt`,
 		),
 		readFileSync(join(iso.baseDir, "stderr.txt"), "utf8"),
 	);
 	writeFileSync(
 		join(
 			evidence,
-			`${mode}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${baseline ? "baseline" : "fixed"}-events.jsonl`,
+			`${mode}${delayFirstMs ? "-delayed" : ""}${fullPlugin ? "-plugin" : ""}${responses ? "-responses" : ""}-${variant}-events.jsonl`,
 		),
 		readFileSync(join(iso.baseDir, "events.jsonl"), "utf8"),
 	);
@@ -432,6 +469,7 @@ try {
 		"no-result": 0,
 		advisor: baseline ? 1 : 2,
 		"late-start": baseline ? 0 : 1,
+		"slow-context": 1,
 	}[mode];
 	if (expected !== undefined && count !== expected)
 		throw new Error(`expected ${expected} requests, got ${count}`);
@@ -454,6 +492,7 @@ try {
 			"compact",
 			"advisor",
 			"late-start",
+			"slow-context",
 		].includes(mode) &&
 		entries.length
 	)
@@ -475,6 +514,30 @@ try {
 			side.responseCompletedAt <= main.receivedAt
 		)
 			throw new Error("same-session operations did not overlap");
+	}
+	if (mode === "retry") {
+		if (JSON.stringify(mock.requests()[0].body) !== JSON.stringify(mock.requests()[1].body))
+			throw new Error("provider retry changed managed request bytes");
+		if (audit.filter(row => row.phase === "context").length !== 1 || audit.filter(row => row.phase === "before_provider_request").length !== 1)
+			throw new Error("provider retry unexpectedly prepared a new pass");
+	}
+	if (["retry", "slow-context"].includes(mode) && !fullPlugin && !responses && !audit.some(row => row.phase === "managed-bytes-match"))
+		throw new Error("managed output comparison was not reached");
+	if (mode === "slow-context") {
+		const prepared = audit.find(row => row.phase === "context-end");
+		const dispatch = audit.find(row => row.phase === "before_provider_request");
+		if (!prepared || !dispatch || dispatch.at - prepared.at < 64000)
+			throw new Error("prepared request was not delayed for 65 seconds");
+	}
+	if (delayFirstMs) {
+		const context = audit.find(row => row.phase === "context");
+		const dispatches = audit.filter(row => row.phase === "before_provider_request");
+		const lastWire = mock.requests().at(-1);
+		const delayedAt = mode === "retry" ? lastWire?.receivedAt : dispatches.at(-1)?.at;
+		if (!context || !delayedAt || delayedAt - context.at < delayFirstMs)
+			throw new Error("delayed dispatch/retry was not reached");
+		if (baseline && mode === "advisor" && !entries.some(row => row.data.message.includes("Pi context pass superseded before writer admission")))
+			throw new Error("reported supersession fingerprint was not reproduced");
 	}
 	if (["main", "late-start", "task"].includes(mode) && count) {
     const text = JSON.stringify(mock.requests()[0].body.messages ?? mock.requests()[0].body.input);

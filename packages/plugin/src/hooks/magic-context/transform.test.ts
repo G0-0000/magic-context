@@ -31,6 +31,7 @@ import {
     getOverflowState,
     getPendingCompactionMarkerState,
     getPendingOps,
+    getStrippedPlaceholderIds,
     getTagById,
     getTagsBySession,
     incrementHistorianFailure,
@@ -5353,6 +5354,10 @@ it("a flush in a held signed turn is parked through execute and defer passes and
             });
         source.push(
             {
+                info: { id: "held-placeholder", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "[dropped §903§]" }],
+            },
+            {
                 info: { id: "active-user", role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "continue" }],
             },
@@ -5379,15 +5384,27 @@ it("a flush in a held signed turn is parked through execute and defer passes and
         );
         expect(old).toHaveLength(402);
         for (const tag of old.slice(0, 33)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        // The placeholder is visible but has no persisted neutralization. Both
+        // held execute and a later explicit-flush defer must leave it that way.
+        expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(false);
+        const start = logs.mock.calls.length;
         usage.set(sessionId, {
             usage: { percentage: 75.1, inputTokens: 150200 },
             updatedAt: Date.now(),
             hasUsageTokens: true,
         });
         expect(JSON.stringify(await serve())).toBe(baseline);
+        expect(getPendingOps(db, sessionId)).toHaveLength(33);
+        expect(
+            getTagsBySession(db, sessionId)
+                .filter((tag) =>
+                    old.slice(0, 33).some((pending) => pending.tagNumber === tag.tagNumber),
+                )
+                .filter((tag) => tag.status === "active"),
+        ).toHaveLength(33);
+        expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(false);
         flush.add(sessionId);
         updateSessionMeta(db, sessionId, { systemPromptHash: "after" });
-        const start = logs.mock.calls.length;
         expect(JSON.stringify(await serve())).toBe(baseline);
         expect(getPendingOps(db, sessionId)).toHaveLength(33);
         for (const tag of old.slice(33, 401)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
@@ -5399,11 +5416,16 @@ it("a flush in a held signed turn is parked through execute and defer passes and
         for (let pass = 0; pass < 3; pass++) {
             expect(JSON.stringify(await serve())).toBe(baseline);
             expect(getPendingOps(db, sessionId)).toHaveLength(401);
+            expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(false);
         }
         expect(flush.has(sessionId)).toBe(true);
         const heldLogs = logs.mock.calls.slice(start).map((args) => String(args[1]));
         expect(
-            heldLogs.some((line) => /WILL APPLY|WILL RUN|reasoning removal: froze/.test(line)),
+            heldLogs.some((line) =>
+                /WILL APPLY|WILL RUN|reasoning removal: froze|proactive thinking strip:|neutralized \d+ dropped/.test(
+                    line,
+                ),
+            ),
         ).toBe(false);
         expect(
             logs.mock.calls.filter((args) =>
@@ -5418,6 +5440,7 @@ it("a flush in a held signed turn is parked through execute and defer passes and
         expect(released).not.toBe(baseline);
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
         expect(flush.has(sessionId)).toBe(false);
+        expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(true);
         for (let pass = 0; pass < 3; pass++) expect(JSON.stringify(await serve())).toBe(released);
         expect(
             logs.mock.calls

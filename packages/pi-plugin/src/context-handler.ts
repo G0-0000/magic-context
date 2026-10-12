@@ -114,6 +114,7 @@ import {
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
 	clearThinkingBindingRecoveryIf,
+	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
 	getEmergencyInputSample,
 	getNoteNudgeAnchors,
@@ -121,13 +122,13 @@ import {
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
-	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
+import { tagIdentityRevisionKey } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
 import {
 	findPiTagIdentityConflict,
 	getPiMessageTagCandidates,
@@ -242,6 +243,7 @@ import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
+import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
 import { getHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
@@ -327,6 +329,7 @@ import {
 	PiContextSupersededError,
 	registerPiGuardedContext,
 } from "./pi-context-refusal";
+import { createPiFallbackIndex } from "./pi-fallback-index";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import {
 	clearPiLkgSessionState,
@@ -439,11 +442,14 @@ import {
 	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
-import { getPiTagSnapshot } from "./tag-snapshot-pi";
+import {
+	getPiActiveTagSnapshotView,
+	getPiTagSnapshotView,
+	readPiFallbackTagRows,
+} from "./tag-snapshot-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
 	clearPiTailHygieneContentMemo,
-	countRealPiUserMessages,
 	effectivePiTailHygiene,
 	refreshPiTailHygieneBaseline,
 } from "./tail-hygiene-walk-pi";
@@ -461,6 +467,32 @@ import { createPiTranscript } from "./transcript-pi";
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
+
+/**
+ * Returns every row whose `tagNumber` equals `number`, from a list sorted by
+ * tag number, using binary search. Legacy stores can hold more than one row
+ * with the same number.
+ */
+function tagsWithNumber<T extends { tagNumber: number }>(
+	sorted: readonly T[],
+	number: number,
+): T[] {
+	let low = 0;
+	let high = sorted.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if ((sorted[middle]?.tagNumber ?? Number.POSITIVE_INFINITY) < number)
+			low = middle + 1;
+		else high = middle;
+	}
+	const rows: T[] = [];
+	for (let index = low; index < sorted.length; index += 1) {
+		const row = sorted[index];
+		if (row?.tagNumber !== number) break;
+		rows.push(row);
+	}
+	return rows;
+}
 
 function newestActiveTagNumbersByCount(
 	tags: readonly { status: string; tagNumber: number }[],
@@ -752,6 +784,14 @@ const piTagToolTokenCacheBySession = new Map<
 const piTextIdentitySourceCacheBySession = new Map<
 	string,
 	Map<number, string>
+>();
+
+const piFallbackIndexesBySession = new Map<
+	string,
+	{
+		db: ContextDatabase;
+		index: ReturnType<typeof createPiFallbackIndex>;
+	}
 >();
 
 interface PiTextIdentityPlan {
@@ -2878,7 +2918,10 @@ const piToolGuardFallbackStatements = new WeakMap<
 >();
 const piToolGuardCallIds = new WeakMap<
 	ContextDatabase,
-	Map<string, { version: number; ids: Set<string> }>
+	Map<
+		string,
+		{ version: number; identityRevision: string | null; ids: Set<string> }
+	>
 >();
 function fallbackPiToolCallIds(
 	db: ContextDatabase,
@@ -2887,19 +2930,27 @@ function fallbackPiToolCallIds(
 	let statement = piToolGuardVersionStatements.get(db);
 	if (!statement) {
 		statement = db.prepare(
-			"SELECT tags_version AS version FROM session_meta WHERE session_id = ?",
+			`SELECT COALESCE((SELECT tags_version FROM session_meta WHERE session_id = ?), 0) AS version,
+			(SELECT value FROM schema_migrations_meta WHERE key = ?) AS identity_revision`,
 		);
 		piToolGuardVersionStatements.set(db, statement);
 	}
-	const version =
-		(statement.get(sessionId) as { version: number } | undefined)?.version ?? 0;
+	const stamp = statement.get(sessionId, tagIdentityRevisionKey(sessionId)) as
+		| { version: number; identity_revision?: string | null }
+		| undefined;
+	const version = stamp?.version ?? 0;
+	const identityRevision = stamp?.identity_revision ?? null;
 	let sessions = piToolGuardCallIds.get(db);
 	if (!sessions) {
 		sessions = new Map();
 		piToolGuardCallIds.set(db, sessions);
 	}
 	const cached = sessions.get(sessionId);
-	if (cached?.version === version) return cached.ids;
+	if (
+		cached?.version === version &&
+		cached.identityRevision === identityRevision
+	)
+		return cached.ids;
 	let fallbackStatement = piToolGuardFallbackStatements.get(db);
 	if (!fallbackStatement) {
 		fallbackStatement = db.prepare(
@@ -2914,7 +2965,7 @@ function fallbackPiToolCallIds(
 	);
 	if (!sessions.has(sessionId) && sessions.size >= MAX_TRACKED_SESSIONS)
 		sessions.delete(sessions.keys().next().value as string);
-	sessions.set(sessionId, { version, ids });
+	sessions.set(sessionId, { version, identityRevision, ids });
 	return ids;
 }
 
@@ -2958,10 +3009,11 @@ function guardPiToolAllocations(
 	messages: readonly PiAgentMessage[],
 	resolveId: (msg: unknown, index: number) => string | undefined,
 	tagger?: Tagger,
+	messageIndexes?: readonly number[],
 ): PiUnresolvedIdentity[] {
 	const unresolved: PiUnresolvedIdentity[] = [];
 	const fallbackCalls = fallbackPiToolCallIds(db, sessionId);
-	for (let index = 0; index < messages.length; index++) {
+	for (const index of messageIndexes ?? messages.keys()) {
 		const message = messages[index];
 		if (message?.role !== "assistant" || !Array.isArray(message.content))
 			continue;
@@ -3169,6 +3221,8 @@ interface AdoptPiFallbackTagsOptions {
 	hasFallbackToolOwnerTags?: boolean;
 	preflightRevision?: ReturnType<typeof readPiAdoptionRevision>;
 	rebuildFingerprints?: () => ReadonlyMap<string, string>;
+	toolOwners?: Map<string, Set<string>>;
+	realIdPositions?: ReadonlyMap<string, number>;
 }
 
 function readPiAdoptionRevision(db: ContextDatabase) {
@@ -3521,17 +3575,29 @@ function adoptPiFallbackTags(
 	let { realIdsByFingerprint, fallbackIdsByFingerprint, batches } =
 		preparePiAdoptionFingerprints(fingerprintById);
 	const ownerMap =
-		options.messages && options.resolveStableId
+		options.toolOwners ??
+		(options.messages && options.resolveStableId
 			? buildPiToolOwnerMap(options.messages, options.resolveStableId)
-			: null;
+			: null);
 	if (!batches.length && !ownerMap?.size && !options.rebuildFingerprints)
 		return outcome;
 	const revision = () => readPiAdoptionRevision(db);
 	const beforeDiscovery = revision();
 	// Discover candidates without blocking writers and prepare their target ids.
-	// The revision check below is authoritative: discovery may miss a sibling's
-	// newly committed row, or include one another connection already renamed.
-	const discovered = hasPersistedPiFallbackMessageTags(db, sessionId)
+	// The data_version/total_changes comparison inside the immediate transaction
+	// below is authoritative: discovery may miss a fallback row another
+	// connection just committed, or include one it already moved to a real id.
+	// Both existence probes query the tags table, so they see every writer. If
+	// no commit happened between beforeDiscovery and that transaction, their
+	// results still describe the table and are not re-run under the lock.
+	const discoveredMessageFallback = hasPersistedPiFallbackMessageTags(
+		db,
+		sessionId,
+	);
+	const discoveredToolOwnerFallback = ownerMap?.size
+		? hasPersistedPiFallbackToolOwnerTags(db, sessionId)
+		: false;
+	const discovered = discoveredMessageFallback
 		? readAdoptablePiFallbackFingerprints(db, sessionId, batches)
 		: new Set<string>();
 	const targetsFor = (fingerprints: Iterable<string>) =>
@@ -3632,6 +3698,11 @@ function adoptPiFallbackTags(
 
 	runImmediateTransaction(db, () => {
 		const admitted = revision();
+		// No commit from this or another connection since discovery.
+		const unchangedSinceDiscovery =
+			beforeDiscovery.external.data_version ===
+				admitted.external.data_version &&
+			beforeDiscovery.local.changes === admitted.local.changes;
 		const preflight = options.preflightRevision;
 		const rebuild = options.rebuildFingerprints;
 		const expanded = Boolean(
@@ -3646,18 +3717,19 @@ function adoptPiFallbackTags(
 			({ realIdsByFingerprint, fallbackIdsByFingerprint, batches } =
 				preparePiAdoptionFingerprints(rebuild()));
 		}
-		if (batches.length && hasPersistedPiFallbackMessageTags(db, sessionId)) {
+		if (
+			batches.length &&
+			(unchangedSinceDiscovery
+				? discoveredMessageFallback
+				: hasPersistedPiFallbackMessageTags(db, sessionId))
+		) {
 			// After writer admission the candidate set cannot gain rows from a
 			// sibling connection. Missing fingerprints need no per-message read;
 			// present ones still use the sequential, authoritative migration path.
 			// data_version detects other connections' commits; total_changes catches
 			// this connection's own writes. With BEGIN held, an unchanged revision
 			// makes discovery authoritative without repeating the large IN queries.
-			const unchanged =
-				!expanded &&
-				beforeDiscovery.external.data_version ===
-					admitted.external.data_version &&
-				beforeDiscovery.local.changes === admitted.local.changes;
+			const unchanged = !expanded && unchangedSinceDiscovery;
 			const adoptable = unchanged
 				? discovered
 				: readAdoptablePiFallbackFingerprints(db, sessionId, batches);
@@ -3669,16 +3741,18 @@ function adoptPiFallbackTags(
 					...targetsFor([...adoptable].filter((fp) => !discovered.has(fp))),
 				);
 			const pairedBaseByRealId = new Map<string, string | null>();
-			let positions: Map<string, number> | undefined;
-			const realIdPositions = (): Map<string, number> | undefined => {
+			let positions: ReadonlyMap<string, number> | undefined =
+				options.realIdPositions;
+			const realIdPositions = (): ReadonlyMap<string, number> | undefined => {
 				if (positions) return positions;
 				const { messages, resolveStableId } = options;
 				if (!messages || !resolveStableId) return undefined;
-				positions = new Map();
+				const computed = new Map<string, number>();
 				for (let index = 0; index < messages.length; index += 1) {
 					const id = resolveStableId(messages[index], index);
-					if (id !== undefined && !positions.has(id)) positions.set(id, index);
+					if (id !== undefined && !computed.has(id)) computed.set(id, index);
 				}
+				positions = computed;
 				return positions;
 			};
 			for (const [realMessageId, fingerprint] of targets) {
@@ -3767,7 +3841,12 @@ function adoptPiFallbackTags(
 			}
 		}
 
-		if (ownerMap && hasPersistedPiFallbackToolOwnerTags(db, sessionId)) {
+		if (
+			ownerMap &&
+			(unchangedSinceDiscovery
+				? discoveredToolOwnerFallback
+				: hasPersistedPiFallbackToolOwnerTags(db, sessionId))
+		) {
 			for (const row of findPiFallbackToolOwnerTags(db, sessionId)) {
 				const parsed = parsePiFallbackToolOwnerId(row.toolOwnerMessageId);
 				if (parsed?.role !== "assistant") continue;
@@ -4019,6 +4098,11 @@ export function registerPiContextHandler(
 		ctx,
 		budget,
 	) => {
+		// The guarded wrapper may start this handler late, after waiting for the
+		// foreground SQLite reservation. If the pass was replaced, ended or ran
+		// out of time meanwhile, stop before claiming the session's pass
+		// generation: claiming it would mark a newer pass as superseded.
+		budget.assertOutcome();
 		const passSessionId = ctx.sessionManager
 			? resolveSessionId(ctx)
 			: undefined;
@@ -4039,7 +4123,8 @@ export function registerPiContextHandler(
 				contextPassGeneration.get(passSessionId) !== generation
 			)
 				throw new PiContextSupersededError(
-					"Pi context pass superseded before writer admission",
+					"Pi context pass superseded by a newer context generation",
+					"context generation",
 				);
 			signal?.throwIfAborted();
 		};
@@ -4236,6 +4321,14 @@ export function registerPiContextHandler(
 				transport: (ctx.model as { transport?: string } | undefined)?.transport,
 			});
 			lkgPassSnapshot = snapshot;
+			const lkgInputFields = new WeakMap(
+				snapshot.inputs.flatMap((input) => {
+					const message = event.messages[input.messageIndex];
+					return message && typeof message === "object"
+						? [[message, input.fields] as const]
+						: [];
+				}),
+			);
 			let checkedReplay = false;
 			budget.stage = "writer admission";
 			assertCurrentPass();
@@ -4517,6 +4610,8 @@ export function registerPiContextHandler(
 			if (currentModelKey !== undefined) {
 				liveModelBySession.set(sessionId, currentModelKey);
 			}
+			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
+			const tPressureResolution = performance.now();
 
 			// Resolve scheduler decision: execute-vs-defer based on TTL
 			// + threshold. Drives whether heuristic cleanup runs on this
@@ -4714,6 +4809,15 @@ export function registerPiContextHandler(
 				typeof ctx.model?.provider === "string"
 					? ctx.model.provider
 					: undefined;
+			// With temporal markers disabled and thinking strips delayed until the
+			// end of the pass, adoption still sees these raw inputs. Reuse LKG's
+			// detached fields unless the intervening test hook may edit them.
+			const fallbackInputFields: RunPipelineArgs["fallbackInputFields"] =
+				bindingStripOrder === "end" &&
+				!options.injection?.temporalAwareness &&
+				!beforePipelineForTests
+					? lkgInputFields
+					: undefined;
 			const canUseEmptySentinels = modelAcceptsEmptyContent(providerId);
 			// Cold-start stable-limit fallback: if `getContextUsage()` hasn't
 			// reported a (sane) window yet (first pass after restart, before any
@@ -4888,7 +4992,7 @@ export function registerPiContextHandler(
 					`transform: large imported session detected (${piMessageCount} messages, no usage baseline) — forcing execute on first pass`,
 				);
 			}
-			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
+			logTransformTiming(sessionId, "pressureResolution", tPressureResolution);
 
 			// Pi stable-id scheme cutover (one-time, per session). When this
 			// session's persisted tags/source_contents/caveman/placeholder state
@@ -5206,6 +5310,7 @@ export function registerPiContextHandler(
 				entryIds,
 				entryIdByRef,
 				reusableMessageIds,
+				fallbackInputFields,
 				stableIdSchemeCutover,
 				schedulerDecision,
 				schedulerDeferReason,
@@ -5692,12 +5797,15 @@ export function registerPiContextHandler(
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
 						tags,
+						tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
 						protectedTagNumbers,
 						protectedTools: options.protectedTools,
 						pendingDropTagNumbers,
 						stableId,
+						// Only active rows can be protected; the active projection gives
+						// the same numbers without sorting every historical tag.
 						protectedToolTags: protectedToolTagNumbers(
-							tags,
+							result.channelBaselineSnapshot.activeTags,
 							options.protectedTools,
 						),
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -5747,14 +5855,7 @@ export function registerPiContextHandler(
 					const channelState = {
 						...baseline,
 						usableWindow: usageContextLimit ?? 0,
-						realUserTurnCount: countRealPiUserMessages({
-							messages: outputMessages,
-							tags,
-							protectedTagNumbers,
-							pendingDropTagNumbers,
-							stableId,
-							syntheticLeadingCount: result.syntheticLeadingCount,
-						}),
+						realUserTurnCount: baseline.realUserTurnCount,
 						reducedSinceRefresh: false,
 						agentDropsAppliedThisPass: result.agentDropsAppliedThisPass,
 						oldestReclaimableToolTags,
@@ -7366,6 +7467,10 @@ interface RunPipelineArgs {
 	entryIdByRef?: ReadonlyMap<object, string> | null;
 	/** Real entry ids whose append-only Pi message objects were tagged previously. */
 	reusableMessageIds?: ReadonlySet<string>;
+	fallbackInputFields?: WeakMap<
+		object,
+		PiLkgPassSnapshot["inputs"][number]["fields"]
+	>;
 	/**
 	 * True on the one-time stable-id-scheme cutover pass (Pi message identity
 	 * switched from index-based to real-entry-id). Forces placeholder rediscovery
@@ -7435,7 +7540,10 @@ interface RunPipelineArgs {
 }
 
 interface PiChannelBaselineSnapshot {
+	tagCacheKey?: object;
 	tags: ReturnType<typeof getTagsBySession>;
+	/** The rows of `tags` whose status is "active", in the same order. */
+	activeTags: readonly ReturnType<typeof getTagsBySession>[number][];
 	protectedTagNumbers: Set<number>;
 	pendingDropTagNumbers: Set<number>;
 }
@@ -7628,6 +7736,7 @@ async function runCompactionOffPipeline(
 		activeTags: [],
 		channelBaselineSnapshot: {
 			tags: [],
+			activeTags: [],
 			protectedTagNumbers: new Set(),
 			pendingDropTagNumbers: new Set(),
 		},
@@ -8277,25 +8386,38 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// text) and migrate any fallback-id tag onto the real id up front, so the
 	// message keeps its tag_number/§N§ instead of getting a fresh tag. No-op for
 	// OpenCode (this path is Pi-only) and for messages already on a real id.
+	// Sync the tag snapshot (and its cached fallback rows) before taking
+	// preflightRevision. Syncing deletes consumed rows from a TEMP change table;
+	// if that write came after preflightRevision, adoptPiFallbackTags would count
+	// it as a tag change since preflight and take its slower rebuild path.
+	const tTagSnapshotSync = performance.now();
+	readPiFallbackTagRows(args.db, args.sessionId);
+	logTransformTiming(args.sessionId, "tagSnapshotSync", tTagSnapshotSync);
 	const tFallbackIdentity = performance.now();
 	// This indexed preflight avoids rebuilding fingerprints for every old message.
-	// A negative result is rechecked by adoption after this map is complete, while
-	// tool-owner adoption performs its only existence probe at that later point.
+	// adoptPiFallbackTags rechecks a negative result with a table query once the
+	// fingerprint map built below is complete; its tool-owner probe also runs
+	// only at that point.
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,
 		args.sessionId,
 	);
-	const entryFingerprintByMessageId = buildEntryFingerprintMap(
-		args.messages as PiAgentMessage[],
-		stableIdResolver,
-		args.reusableMessageIds,
-		// Existing fallback rows may match any old real-id message. Once the
-		// indexed gate is empty, only the newly observed tail needs fingerprints.
-		hasFallbackMessageTags,
-		// Read after preflightRevision. A fallback row committed after that point
-		// changes the revision, and adoptPiFallbackTags then rebuilds this map
-		// from headers it re-reads while holding the writer.
+	let fallbackCache = piFallbackIndexesBySession.get(args.sessionId);
+	if (!fallbackCache || fallbackCache.db !== args.db) {
+		fallbackCache = { db: args.db, index: createPiFallbackIndex() };
+		piFallbackIndexesBySession.set(args.sessionId, fallbackCache);
+	}
+	const fallbackIndex = fallbackCache.index.update({
+		messages: args.messages as PiAgentMessage[],
+		fields: args.fallbackInputFields,
+		resolveId: stableIdResolver,
+		header: piMessageEntryFingerprintHeader,
+		fingerprint: piMessageEntryFingerprint,
+		toolOwners: (message, id) => buildPiToolOwnerMap([message], () => id),
+		reusable: args.reusableMessageIds,
+	});
+	const entryFingerprintByMessageId = fallbackIndex.fingerprints(
 		hasFallbackMessageTags
 			? readPiFallbackFingerprintHeaders(args.db, args.sessionId)
 			: undefined,
@@ -8311,6 +8433,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			deferUnprovenRebuild: !prefixMutationAllowed,
 			messages: args.messages as PiAgentMessage[],
 			resolveStableId: stableIdResolver,
+			toolOwners: fallbackIndex.owners,
+			realIdPositions: fallbackIndex.positions,
 			hasFallbackMessageTags,
 			preflightRevision,
 			rebuildFingerprints: args.reusableMessageIds?.size
@@ -8318,12 +8442,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.assertCurrentPass?.();
 						// Runs with the writer held, so the fallback rows read here are
 						// authoritative. Only messages sharing a fallback row's header
-						// can match it; hash those instead of the whole session.
-						const full = buildEntryFingerprintMap(
-							args.messages as PiAgentMessage[],
-							stableIdResolver,
-							args.reusableMessageIds,
-							true,
+						// can match it; retrieve those indexed fingerprints, not history.
+						const full = fallbackIndex.fingerprints(
 							readPiFallbackFingerprintHeaders(args.db, args.sessionId),
 						);
 						for (const [id, fingerprint] of full)
@@ -8411,6 +8531,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.messages as PiAgentMessage[],
 			stableIdResolver,
 			args.tagger,
+			fallbackIndex.guardIndexes,
 		),
 		...guardPiMessageAllocations(
 			args.db,
@@ -8966,8 +9087,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tActiveTags = performance.now();
 	// Load the canonical tag set once after pending operations. Heuristics use its
 	// active projection; Channel-1 baseline construction reuses the full set.
-	const allTagsForPass = getPiTagSnapshot(args.db, args.sessionId);
-	const activeTags = allTagsForPass.filter((tag) => tag.status === "active");
+	const allTagsForPass = getPiTagSnapshotView(args.db, args.sessionId);
+	// Same rows as filtering allTagsForPass by status, kept current from changed
+	// rows instead of walking every tag the session ever had.
+	const activeTags = getPiActiveTagSnapshotView(
+		args.db,
+		args.sessionId,
+		allTagsForPass,
+	);
 	logTransformTiming(
 		args.sessionId,
 		"getTagsBySessionSnapshot",
@@ -10007,7 +10134,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				protectionFloorResolution.floor,
 				activeCalibration.toolsRatio,
 			).protectedTagNumbers
-		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
+		: newestActiveTagNumbersByCount(activeTags, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete
 	// targets remain), and therefore retain the one correctness-required re-read.
@@ -10017,7 +10144,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			? pendingOps
 			: getPendingOps(args.db, args.sessionId);
 	const channelBaselineSnapshot: PiChannelBaselineSnapshot = {
+		tagCacheKey: fallbackCache.index,
 		tags: allTagsForPass,
+		activeTags,
 		protectedTagNumbers,
 		pendingDropTagNumbers: new Set(
 			channelPendingOps
@@ -10046,19 +10175,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	const servedTagNumbers = new Set(
-		allTagsForPass
-			.filter(
-				(tag) =>
-					targets.has(tag.tagNumber) &&
-					(tag.type === "message"
-						? ctxReduceCallable || tag.status !== "active"
-						: tag.type === "tool" &&
-							visibleCallIds.has(tag.messageId) &&
-							(ctxReduceCallable || tag.status !== "active")),
+	// Look up only this pass's target numbers in the tag-ordered snapshot, in
+	// ascending order, instead of filtering every tag the session ever had.
+	const servedTagNumbers = new Set<number>();
+	for (const number of [...targets.keys()].sort((a, b) => a - b)) {
+		for (const tag of tagsWithNumber(allTagsForPass, number)) {
+			if (
+				tag.type === "message"
+					? ctxReduceCallable || tag.status !== "active"
+					: tag.type === "tool" &&
+						visibleCallIds.has(tag.messageId) &&
+						(ctxReduceCallable || tag.status !== "active")
 			)
-			.map((tag) => tag.tagNumber),
-	);
+				servedTagNumbers.add(tag.tagNumber);
+		}
+	}
 	return {
 		messages: outputMessages,
 		prefixBustPermitted: isCacheBustingPass,
@@ -10298,7 +10429,11 @@ function applyNoteNudges(args: {
 		args.postTransformSnapshot?.autoSearchDecisions ??
 		getAutoSearchHintDecisions(db, sessionId);
 	for (const decision of autoSearchDecisions) {
-		if (decision.decision === "hint") {
+		if (
+			decision.decision === "hint" &&
+			getUnpublishedAutoSearchNoHint(sessionId, decision.messageId) ===
+				undefined
+		) {
 			appendReminderToUserMessageByIdPi(
 				messages,
 				replayMessageIdByIndex,
@@ -10406,7 +10541,12 @@ function applyNoteNudges(args: {
 		const allResolved = messageIdByIndex.size === realMessageCount;
 		if (allResolved && visibleIds.size > 0) {
 			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
-			pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
+			flushAutoSearchHintDecisionRetirement(db, sessionId, visibleIds);
+			// A branch switch can hide user messages that will later be served again.
+			// Keep their saved search hints, including no-hint omissions. Only the actual
+			// prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
+			// may flush them to storage, while cached-prefix replay must not write them.
+			// Today's visible IDs are not proof of deletion.
 		}
 	}
 
@@ -10676,6 +10816,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	piTagTextTokenCacheBySession.delete(sessionId);
 	piTagToolTokenCacheBySession.delete(sessionId);
 	piTextIdentitySourceCacheBySession.delete(sessionId);
+	piFallbackIndexesBySession.delete(sessionId);
 	piBranchProjectionBySession.delete(sessionId);
 	piAlignmentMismatchLoggedSessions.delete(sessionId);
 	clearPiOrdinalAlignmentSession(sessionId);

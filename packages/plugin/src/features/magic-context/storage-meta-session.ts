@@ -1,5 +1,8 @@
 import { Buffer } from "node:buffer";
-import { cancelAutoSearchWork } from "../../shared/auto-search-lifecycle";
+import {
+    cancelAutoSearchWork,
+    clearUnpublishedAutoSearchNoHints,
+} from "../../shared/auto-search-lifecycle";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import {
@@ -259,7 +262,7 @@ export function retryPendingSessionCleanups(
                     db.prepare(
                         "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
                     ).run(Date.now(), row.session_id);
-                    clearSession(db, row.session_id);
+                    clearSession(db, row.session_id, false, true);
                 }),
             );
             cleared += 1;
@@ -306,7 +309,7 @@ export async function retryPendingRustSessionCleanupsForProject(
                 ),
             );
             await deleteSession(row.session_id);
-            clearSession(db, row.session_id, true);
+            clearSession(db, row.session_id, true, true);
             cleared += 1;
         } catch {
             failedSessionIds.push(row.session_id);
@@ -319,6 +322,9 @@ export function clearSession(
     db: Database,
     sessionId: string,
     rustModuleCleanupAcknowledged = false,
+    // A deleted host session cannot resume; its retained tag-change counters can
+    // be removed. Administrative reset/reimport keeps them to invalidate live caches.
+    permanentlyDeleted = false,
 ): void {
     cancelAutoSearchWork(sessionId);
     let transactionStartedAt = 0;
@@ -329,10 +335,12 @@ export function clearSession(
                     transactionStartedAt = performance.now();
                     deleteSessionScopedRows(db, [sessionId], undefined, {
                         rustModuleCleanupAcknowledged,
+                        preserveTagRevisionTombstones: !permanentlyDeleted,
                     });
                 })
                 .immediate(),
         ),
     );
+    clearUnpublishedAutoSearchNoHints(sessionId);
     logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

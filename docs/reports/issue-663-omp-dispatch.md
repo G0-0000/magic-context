@@ -79,3 +79,76 @@ Additional modes: `main`, `retry`, `side`, `steer`, `title`, `compact`, `skip`, 
 - New unit coverage: **11 tests / 42 assertions**. Existing dispatch, budget, side-latch, supersession and publication tests also ran in the Pi suite.
 - Five deliberate implementation-breaking mutation checks each produced **exactly one named failure and one passing control test**, showing that the tests detect their targeted regressions: erase the early pass on start; admit no-pass conversations; deny recognized advisor requests; let raw capture borrow the main receipt; remove advisor system identity. Each mutant was marked `NON-VACUITY BREAK`, applied only after staging the live state, proved with a non-empty diff stat, and restored from the index with an empty diff stat. Exact failure/control names and stats are in the worker delivery's `mutation_evidence`.
 - Ordinary context returns the exact managed message array. The host wrapper also compares payload JSON before and after dispatch handlers, refusing its own probe if those handlers change provider bytes. This verifies that the new backstop does not rewrite ordinary payloads; it is not a claim that volatile session IDs, working directories or provider billing metadata match between distinct sessions.
+
+## Second refusal mode: an old receipt is not necessarily an old request
+
+The follow-up report includes `elapsed=64543ms` and `115468ms` with `Pi context pass superseded before writer admission`. The same fingerprint is reproduced on **OMP 18.8.6**: delay the main provider response by 65 or 115 seconds, then let OMP start its advisor review. The pre-`e720b700` fence reports **65084ms** (Anthropic) and **115070ms** (Responses), respectively, and aborts the review. There is **one main context pass**, followed by main HTTP, `agent_end`, and the advisor's `before_provider_request` with **no advisor context event**. There is no newer main generation in this sequence. The assertion checks that the pass still belongs to an unended operation. `agent_end` marks that operation ended and revokes its receipt, so this assertion fails even though no fresher main result exists.
+
+Thus the elapsed clock identifies the **receipt the fence looked up**, not the request's preparation time or ownership. In this reproduction the late request is not the completed main pass's own request at all: it is a separately formatted advisor review. A supersession exception alone cannot authorize it, or any other provider payload.
+
+[`issue-663-supersession-receipts.json`](issue-663-supersession-receipts.json) records **18 selected real-host runs**, including an exact `e720b700` fence comparison. Raw provider bodies, hook events, stderr, and `lsof` evidence remain in `local-ignore/issue-663/host/`. The collector checks expected HTTP counts, isolated descriptors, and removal of every selected throwaway session root.
+
+For this follow-up, **(a)** means the dispatched history matches a still-valid managed pass; **(b)** means a newer pass must supply the history and the older request must not be sent; **(c)** means our tracking or attribution incorrectly reports supersession.
+
+| Sequence | Observation and disposition |
+| --- | --- |
+| Main response delayed 65s, then advisor | The released fence fails with the reporter's supersession reason. **`e720b700` already fixes it**: the exact master fence sends both requests, without authorizing the advisor from the main receipt. Classification **(c)**: wrong attribution, not a newer conversation pass. |
+| Main response delayed 115s, then Responses advisor | Same released failure. The built full plugin sends the managed main request and the independently recognized review. The existing structured advisor exception is sufficient; no supersession exemption was added. |
+| Three later context listeners, each below OMP's 30s listener timeout | The managed result completes, then dispatch waits about 65s. Classification **(a)**: still-valid completed pass. The probe converts a separately recorded managed output with OMP's own Anthropic converter and date/cwd injector and compares the **entire serialized provider message array** against dispatch, not just a marker or elapsed time. |
+| HTTP overload after a 65s delay | One context and one payload hook, two HTTP attempts with **identical complete request bodies**. The serialized message array also matches the recorded managed output. Classification **(a)**: completed provider retry; no new generation or preparation budget. |
+| Native delegated task | Parent and child context passes use distinct session IDs; parent continuation prepares another managed result. Four requests; no stale-parent supersession at dispatch. |
+| Ephemeral work concurrent with main | Real overlapping same-session passes, but the side event is attributed and uses the existing side-context latch. It does not bump the main generation. The existing session-wide abort limitation is unchanged. |
+| Steer during pending HTTP | A new main context pass prepares the steer for the next request. The first HTTP request already dispatched before the steer; no old request reaches dispatch later. The second payload contains the managed steer, not raw replacement history. |
+| Delayed first `agent_start` | Classification **(c)**, already fixed by `e720b700`: the full plugin adopts its early preparation. The released fence still produces zero HTTP requests. |
+| Auto-learn capture after main end | Separate raw conversation copy, with no managed result for that capture. It remains refused in both adapters, even if a main pass completed. This is **not (a)** and is not the advisor exception. |
+| Skipped handler / no result | Both remain zero-HTTP refusals with separate no-pass/no-result diagnostics. A supersession bypass must not admit either. |
+
+The real host did **not** produce an unattributed stale main request that reaches dispatch after a newer main result has completed. The native tool/steer sequences serialize those preparations; the actual same-session overlap is attributed side work. The report therefore does not claim that all possible third-party extension combinations are covered. If such a **(b)** sequence is found, the newer pass cannot authorize the older request merely because it is ready: refusing or replacing that request requires its own payload attribution. This change does not add that speculative admission path. In particular, it does **not** implement the reporter's unconditional early return on supersession.
+
+### Diagnostic change before issue 667
+
+Ownership errors now name their source: `agent_end`, operation replacement/cache eviction, a newer guarded pass, or context-generation invalidation. At dispatch the diagnostic retains the preparation checkpoint, for example `stage=provider dispatch (origin=agent_end; context stage=final publication)`. When an already-prepared pass loses ownership or its operation ends, the diagnostic reports `recovery=superseded context result; refused`: the attempted dispatch was refused, rather than falsely claiming `no managed result`. Missing/no-result receipts retain their distinct messages. The dispatch hook stays synchronous and storage-independent; there is no hashing, replay, or payload replacement in production. Writer admission and decision-publication guards are unchanged.
+
+### Reproduce the comparisons
+
+After installing `@oh-my-pi/pi-coding-agent@18.8.6` in `.cache/issue-663/host` (see [Isolation and reproduction](#isolation-and-reproduction)):
+
+```sh
+nice -n 10 bun docs/reports/probes/issue-663/bundle-comparison.ts
+nice -n 10 bun build docs/reports/probes/issue-663/guard.ts --outfile .cache/issue-663/guard.mjs --target node
+nice -n 10 bun docs/reports/probes/issue-663/host.ts advisor --baseline --delay-first-ms=65000
+nice -n 10 bun docs/reports/probes/issue-663/host.ts advisor --master --delay-first-ms=65000
+nice -n 10 bun docs/reports/probes/issue-663/host.ts advisor --baseline --responses --delay-first-ms=115000
+nice -n 10 bun docs/reports/probes/issue-663/host.ts slow-context
+nice -n 10 bun docs/reports/probes/issue-663/host.ts retry --delay-first-ms=65000
+# Build the plugin locally before --full-plugin, as above.
+nice -n 10 bun docs/reports/probes/issue-663/host.ts advisor --responses --full-plugin --delay-first-ms=115000
+bun docs/reports/probes/issue-663/collect.ts --supersession
+```
+
+The collector also needs the quick `advisor --baseline`, `advisor --delay-first-ms=65000`, `retry`, `capture --full-plugin`, `capture --responses --full-plugin`, `task --full-plugin`, `side --full-plugin`, `steer --full-plugin`, `late-start --baseline`, `late-start --full-plugin`, `skip`, and `no-result` runs. Historical bundles preserve the exact fence source and only relocate imports for building inside the isolated worktree. The byte comparison is deliberately limited to the simple one-user-message Anthropic histories returned by the guarded-context fixture in `retry` and `slow-context`; it is not a general provider-payload matcher or a new authorization rule.
+
+### Follow-up verification before issue 667
+
+- Linux `linux,8c`, Bun **1.4.2**: final complete Pi suite **1977 passed, 28 skipped, 0 failed**, 2005 tests / 204 files / 87342 assertions. The first run found two legacy assertions expecting the old writer-admission wording and the previously documented unrelated embedding wall-clock failure (5048ms versus 3150ms). Only the diagnostic strings in those legacy supersession assertions were updated; their no-late-write, no-abort, and LKG-publication checks remain intact. The final full run passes without changing the embedding test or any timeout.
+- TypeScript **5.9.3**: package typecheck (retina build config and Pi no-emit config) and the probe-project no-emit check pass on Linux. Biome **2.5.1**: Pi lint passes, **303 files**, with 49 existing warnings.
+- Three new unit tests cover ended-pass ownership origin, fatal dispatch-generation invalidation, and byte-preserving completed retries at 115s. Existing issue 640/641 cancellation, writer, deadline, receipt-reset and side-latch tests run in the full suite.
+- Three selective unit mutation controls each fail exactly one named test while another named control passes: admit supersession unconditionally; erase the dispatch ownership origin; expire completed retries on the preparation clock. A fourth, real-host mutation corrupts the separately recorded expected managed history: the payload comparison emits `dispatch history differs from recorded managed output` and the collector-side host check fails with `managed output comparison was not reached`, while HTTP-count and retry-byte checks still pass. All mutations use `NON-VACUITY BREAK`, staged-live-state restoration, and non-empty/empty diff-stat pairs. The positive `retry` probe was rerun after restoration before collecting the final receipts.
+- All hosts run locally at nice level 10. Both per-session throwaway roots and the enclosing `issue-663` temporary root (including native extraction caches) were removed after host exit. Suite logs are retained outside build output in `local-ignore/issue-663/verification/`; host evidence remains in `local-ignore/issue-663/host/`.
+
+## Dispatch outcome after issue 667
+
+The reproduction and 18 receipts above were recorded before master switched dispatch from writer-ownership checks to the latest completed managed receipt (issue 667, merged at `6309150a`). They remain evidence of the older advisor-attribution failure, not a claim that current master still refuses a superseded pass. The branch has now been rebased onto that master revision.
+
+The latest-receipt dispatch decision reads the current operation's completed managed receipt directly, without re-running its writer-ownership assertion. Supersession of an older pass does not refuse the current turn. The issue 663 test that previously required a dispatch-generation abort now requires admission of the completed managed result, no owner-guard call at dispatch, unchanged payload bytes, and zero aborts. Its old unconditional-supersession-bypass mutation proof is historical and no longer describes the current dispatch contract.
+
+An ended run is different: its receipt cannot authorize a request after its own end. The latest-receipt check retains the explicit refusal text `recovery=no managed result; refused (the run that owned the latest context pass has ended; no managed result for this request)`. The diagnostic improvement that still applies is its source and last preparation stage: `stage=provider dispatch (origin=agent_end; context stage=final publication)`. The ended-run test now checks this label alongside that reason and recovery text; it does not classify that refusal as a superseded context result. The obsolete special supersession recovery branch was removed. No ownership assertion or supersession refusal was reintroduced at dispatch.
+
+The historical host receipts were not regenerated or relabeled as runs of the latest-receipt dispatch check. New verification and selective mutation controls cover the rebased tests and retained ended-run diagnostic.
+
+### Verification on the rebased branch
+
+- Linux `linux,8c`, Bun **1.4.2**: complete Pi suite **2064 passed, 32 skipped, 0 failed**, 2096 tests / 213 files / 162236 assertions. The targeted issue 663/667 suites also pass: **28 tests / 104 assertions**.
+- TypeScript **5.9.3**: package typecheck and probe-project no-emit checks pass on Linux. Biome **2.5.1**: Pi lint passes, **313 files**, with 49 existing warnings.
+- Two new selective mutation controls each fail one named test with a passing control: erasing the ended-run origin/stage fails `issue 663: ended run refusal preserves its ownership origin and preparation stage`; reintroducing `budget.assertOwner()` at dispatch fails `issue 663: completed managed pass stays admitted when its writer owner guard reports supersession`. Both mutations were marked `NON-VACUITY BREAK`, applied after staging the live state, and restored from the index with empty diff stats. These replace the old fatal-supersession test's obsolete dispatch contract.
+- No new host runs were needed for this compatibility change. The 18 historical receipts remain byte-for-byte unchanged. Rebased suite logs are retained in `local-ignore/issue-663/verification/` outside build directories.

@@ -50,6 +50,7 @@ import type {
 	SubagentRunOptions,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+import { logTemperatureDecision } from "@magic-context/core/shared/subagent-temperature";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
@@ -1445,6 +1446,9 @@ export class PiSubagentRunner implements SubagentRunner {
 			};
 
 			let child: ReturnType<typeof childProcess.spawn>;
+			const parentEnv = { ...process.env };
+			// Calibration belongs to this invocation, not to a spawning historian child.
+			delete parentEnv.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE;
 			try {
 				child = this.spawnImpl(
 					this.invocation.command,
@@ -1456,7 +1460,7 @@ export class PiSubagentRunner implements SubagentRunner {
 						// through for provider extensions. The guard only disables Magic
 						// Context's full entry; it must not replace the process env.
 						env: {
-							...process.env,
+							...parentEnv,
 							[MAGIC_CONTEXT_PI_SUBAGENT_ENV]: "1",
 							MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE: systemPromptPath,
 							MAGIC_CONTEXT_SUBAGENT_BUDGET_GUARD_FILE: budgetGuardFile,
@@ -1557,6 +1561,42 @@ export class PiSubagentRunner implements SubagentRunner {
 				}
 			}
 
+			const observeTemperatureDecision = (event: unknown): void => {
+				if (!event || typeof event !== "object") return;
+				const notice = event as {
+					type?: string;
+					model?: unknown;
+					supported?: unknown;
+					source?: unknown;
+					entry?: unknown;
+				};
+				if (
+					notice.type !== "mc_temperature" ||
+					typeof notice.model !== "string"
+				)
+					return;
+				if (
+					notice.source !== "host" &&
+					notice.source !== "catalog" &&
+					notice.source !== "none"
+				)
+					return;
+				if (notice.supported !== null && typeof notice.supported !== "boolean")
+					return;
+				logTemperatureDecision(
+					notice.model,
+					{
+						supported: notice.supported ?? undefined,
+						source: notice.source,
+						...(typeof notice.entry === "string"
+							? { entry: notice.entry }
+							: {}),
+					},
+					(message) =>
+						sessionLog(options.accountingSessionId ?? "pi-subagent", message),
+				);
+			};
+
 			// Capture stderr so we can attach it to error reasons. Pi prints
 			// unrecoverable errors (auth failures, network) here before the
 			// process exits. Also forward each chunk to the progress channel
@@ -1572,15 +1612,24 @@ export class PiSubagentRunner implements SubagentRunner {
 				const text = stderrDecoder.write(chunk);
 				if (text.length === 0) return;
 				// Pi 0.87 redirects extension stdout writes to stderr to protect its
-				// protocol. Accept only our content-free provenance event there.
+				// protocol. Accept only our content-free diagnostic events there.
 				stderrLine += text;
 				const lines = stderrLine.split("\n");
 				stderrLine = (lines.pop() ?? "").slice(-4096);
 				for (const line of lines) {
-					if (settled || !line.startsWith('{"type":"mc_system_prompt"'))
+					if (
+						settled ||
+						!(
+							line.startsWith('{"type":"mc_system_prompt"') ||
+							line.startsWith('{"type":"mc_temperature"')
+						)
+					)
 						continue;
 					const parsed = parsePiEventLine(line);
-					if (parsed.ok) telemetry.observe(parsed.event);
+					if (parsed.ok) {
+						telemetry.observe(parsed.event);
+						observeTemperatureDecision(parsed.event);
+					}
 				}
 				stderr += text;
 				// Cap to prevent unbounded growth on chatty failures.
@@ -1702,6 +1751,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					return;
 				}
 				const event = parsed.event;
+				observeTemperatureDecision(event);
 
 				if (typeof event !== "object" || event === null) return;
 				const e = event as {

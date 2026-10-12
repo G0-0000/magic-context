@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { PiContextBudget } from "./pi-context-budget";
 import {
 	clearPiContextReceipt,
+	PiContextSupersededError,
 	registerPiGuardedContext,
 } from "./pi-context-refusal";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
@@ -135,6 +136,80 @@ test("issue 663: a pass without a result has a distinct receipt refusal", async 
 	);
 	expect(h.refusals.at(-1)).not.toContain("no context pass ran");
 	expect(h.aborts).toBe(1);
+});
+
+test("issue 663: ended run refusal preserves its ownership origin and preparation stage", async () => {
+	let budget!: PiContextBudget;
+	const h = harness(async (_event, _ctx, pass) => {
+		budget = pass;
+		pass.stage = "final publication";
+		return { messages: [userMessage("managed history", 1)] };
+	});
+	h.emit("agent_start");
+	await h.emit("context", conversation);
+	h.emit("agent_end");
+	budget.elapsed = () => 115468;
+	h.emit("before_provider_request", payload);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals).toHaveLength(1);
+	expect(h.refusals[0]).toContain(
+		"stage=provider dispatch (origin=agent_end; context stage=final publication)",
+	);
+	expect(h.refusals[0]).toContain("elapsed=115468ms");
+	expect(h.refusals[0]).toContain("recovery=no managed result; refused");
+	expect(h.refusals[0]).toContain(
+		"the run that owned the latest context pass has ended; no managed result for this request",
+	);
+	expect(h.refusals[0]).not.toContain("superseded context result");
+	expect(h.refusals[0]).not.toContain("before writer admission");
+});
+
+test("issue 663: completed managed pass stays admitted when its writer owner guard reports supersession", async () => {
+	let superseded = false;
+	let ownerChecks = 0;
+	const managed = [userMessage("managed history", 1)];
+	const h = harness(async (_event, _ctx, budget) => {
+		const owner = budget.assertOwner;
+		budget.stage = "tagging";
+		budget.assertOwner = () => {
+			ownerChecks++;
+			owner();
+			if (superseded)
+				throw new PiContextSupersededError(
+					"Pi context pass superseded by a newer context generation",
+					"context generation",
+				);
+		};
+		return { messages: managed };
+	});
+	h.emit("agent_start");
+	expect(await h.emit("context", conversation)).toEqual({ messages: managed });
+	const preparationChecks = ownerChecks;
+	const bytes = JSON.stringify(payload);
+	superseded = true;
+	h.emit("before_provider_request", payload);
+	expect(ownerChecks).toBe(preparationChecks);
+	expect(JSON.stringify(payload)).toBe(bytes);
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
+});
+
+test("issue 663: completed retry keeps managed bytes and the original clock after 115 seconds", async () => {
+	let budget!: PiContextBudget;
+	const h = harness(async (_event, _ctx, pass) => {
+		budget = pass;
+		return { messages: [userMessage("managed history", 1)] };
+	});
+	h.emit("agent_start");
+	await h.emit("context", conversation);
+	const bytes = JSON.stringify(payload);
+	h.emit("before_provider_request", payload);
+	budget.elapsed = () => 115468;
+	h.emit("before_provider_request", payload);
+	expect(JSON.stringify(payload)).toBe(bytes);
+	expect(budget.elapsed()).toBe(115468);
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
 });
 
 const advisorPayload = {

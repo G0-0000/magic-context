@@ -17,6 +17,7 @@ import {
     captureChannel1PostReduceGraceBaseline,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
+    flushAutoSearchHintDecisionRetirement,
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
@@ -28,7 +29,6 @@ import {
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
     type PendingCompactionMarker,
-    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     replacePendingCompactionMarkerStateIf,
     setPendingCompactionMarkerState,
@@ -73,6 +73,7 @@ import {
 } from "../../features/magic-context/temporal-decisions";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
+import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -988,6 +989,9 @@ export function clearRustModeBoundaryRecord(db: ContextDatabase, sessionId: stri
  * Rust-mode host thinking strips for prefix-bound models: replay the persisted
  * binding-mismatch set, apply an armed reactive recovery, and on a busting pass
  * freeze and remove every remaining signed block past the pass's first change.
+ * A module signed-thinking reset (bytes before the active turn's kept thinking
+ * changed) removes every signed block, the active turn's included, and skips the
+ * reactive restore of the turn's originals, which are bound to the old bytes.
  */
 function applyRustModeThinkingStrips(
     args: Parameters<typeof runRustModePostprocess>[0],
@@ -999,6 +1003,11 @@ function applyRustModeThinkingStrips(
     const recoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
+    // A module signed-thinking reset invalidates every signed block served before this
+    // pass, the active turn's included, so no thinking is protected from it.
+    const signedThinkingReset =
+        args.cacheBustingPass === true && args.moduleSignedThinkingReset === true;
+    const stripProtection = signedThinkingReset ? undefined : args.protectedThinkingMessages;
     {
         try {
             for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
@@ -1036,7 +1045,7 @@ function applyRustModeThinkingStrips(
             args.messages,
             args.resolvedProviderID,
             recoveryMessageIds,
-            args.protectedThinkingMessages,
+            stripProtection,
         );
         // On a busting pass of a prefix-bound model, every remaining assistant
         // with reasoning past the pass's first changed byte is persisted into the
@@ -1048,34 +1057,45 @@ function applyRustModeThinkingStrips(
         // is no permission to strip them, unless this host edited earlier
         // bytes itself on the same pass.
         const moduleBustStrips =
-            !args.activeThinkingTurn &&
-            args.cacheBustingPass === true &&
-            (args.moduleReasoningTrimOnly !== true || hostEditBeforeNewestThinking);
+            signedThinkingReset ||
+            (!args.activeThinkingTurn &&
+                args.cacheBustingPass === true &&
+                (args.moduleReasoningTrimOnly !== true || hostEditBeforeNewestThinking));
         const stripFrom =
-            args.thinkingBindingRecoveryEnabledForModel === true
+            args.thinkingBindingRecoveryEnabledForModel === true || signedThinkingReset
                 ? proactiveStripStartIndex({ ...args, cacheBustingPass: moduleBustStrips })
                 : null;
         if (stripFrom !== null) {
+            const stripped = args.messages.slice(stripFrom);
             const outcome = freezeReasoningOnBustingPass({
                 db: args.db,
                 sessionId: args.sessionId,
-                messages: args.messages.slice(stripFrom),
-                protectedMessages: args.protectedThinkingMessages,
+                messages: stripped,
+                protectedMessages: stripProtection,
                 alreadyFrozen: recoveryMessageIds,
             });
             if (outcome.strip) {
                 proactiveThinkingStrip = outcome.strip;
                 for (const id of outcome.strip.messageIds) recoveryMessageIds.add(id);
+            }
+            // The module already persisted the reset, so its removal is served even when
+            // this host's own record of it could not be written.
+            const removed = signedThinkingReset
+                ? new Set(findReasoningBearingAssistantIds(stripped))
+                : new Set(outcome.strip?.messageIds ?? []);
+            if (removed.size > 0) {
                 stripReasoningFromAssistantIds(
                     args.messages,
                     args.resolvedProviderID,
-                    new Set(outcome.strip.messageIds),
-                    args.protectedThinkingMessages,
+                    removed,
+                    stripProtection,
                 );
             }
         }
     }
-    args.restoreLatestTurnOriginals?.();
+    // The turn's originals are bound to the bytes the reset changed: restoring them would
+    // put back exactly the thinking the reset removed.
+    if (!signedThinkingReset) args.restoreLatestTurnOriginals?.();
     return { thinkingBindingRecovery, proactiveThinkingStrip };
 }
 
@@ -1113,6 +1133,14 @@ export function runRustModePostprocess(args: {
      * blocks on a prefix-bound model.
      */
     moduleReasoningTrimOnly?: boolean;
+    /**
+     * The module removed every signed thinking block it serves on this busting pass
+     * (`signed_thinking_reset` in its response): bytes before the active turn's kept
+     * thinking changed, so no signed block from before this pass is valid any more.
+     * The host strips and freezes all of them, the active turn's included, and skips
+     * the reactive restore of the turn's originals.
+     */
+    moduleSignedThinkingReset?: boolean;
     /**
      * Set when the module deferred but this pass stops serving a frozen
      * last-known-good replay. The frozen replay served the messages that arrived
@@ -1198,7 +1226,10 @@ export function runRustModePostprocess(args: {
         appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
     }
     for (const decision of getAutoSearchHintDecisions(args.db, args.sessionId)) {
-        if (decision.decision === "hint") {
+        if (
+            decision.decision === "hint" &&
+            getUnpublishedAutoSearchNoHint(args.sessionId, decision.messageId) === undefined
+        ) {
             appendReminderToUserMessageById(args.messages, decision.messageId, decision.text);
         }
     }
@@ -3898,11 +3929,16 @@ export async function runPostTransformPhase(
             }
         }
         const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
-        const prunedDecisions = pruneAutoSearchHintDecisions(args.db, args.sessionId, visibleIds);
-        if (prunedAnchors > 0 || prunedDecisions > 0) {
+        flushAutoSearchHintDecisionRetirement(args.db, args.sessionId, visibleIds);
+        // A branch switch can hide user messages that will later be served again.
+        // Keep their saved search hints, including no-hint omissions. Only the actual
+        // prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
+        // may flush them to storage, while cached-prefix replay must not write them.
+        // Today's visible IDs are not proof of deletion.
+        if (prunedAnchors > 0) {
             sessionLog(
                 args.sessionId,
-                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s), ${prunedDecisions} auto-search decision(s)`,
+                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s)`,
             );
         }
     }

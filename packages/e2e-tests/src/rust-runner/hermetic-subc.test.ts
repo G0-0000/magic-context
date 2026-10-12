@@ -29,16 +29,15 @@ describe("hermetic Rust process isolation", () => {
         mkdirSync(scratchParent, { recursive: true });
         const scratch = createTestTempDirFromPath(join(scratchParent, "run-"));
         try {
-            const source = join(scratch, "ck-mc");
-            writeFileSync(source, "test executable");
-            const staged = __hermeticSubcTest.stageDevBinary(
-                source,
-                "ckdev-mc-e2e-test",
-                join(scratch, "bin"),
-            );
+            const source = process.platform === "darwin" ? process.execPath : join(scratch, "ck-mc");
+            if (process.platform !== "darwin") writeFileSync(source, "test executable");
+            const staged = __hermeticSubcTest.stageDevBinary(source, "ckdev-mc-e2e-test");
 
-            expect(staged).toBe(join(scratch, "bin", "ckdev-mc-e2e-test"));
-            expect(readFileSync(staged, "utf8")).toBe("test executable");
+            expect(staged.startsWith("/tmp/magic-context-exec/")).toBe(true);
+            expect(staged).toContain("/ckdev-mc-e2e-test");
+            if (process.platform !== "darwin") {
+                expect(readFileSync(staged, "utf8")).toBe("test executable");
+            }
         } finally {
             rmSync(scratch, { recursive: true, force: true });
         }

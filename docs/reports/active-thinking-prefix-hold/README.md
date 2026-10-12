@@ -1,5 +1,51 @@
 # Active thinking prefix hold (issue 665 and issue 664)
 
+## Current-master integration and second witness
+
+Merged `origin/master` at `1c947fb0e8cb9ce121ae05d35c680745c606f17d`. The sole
+textual conflict was Pi's pipeline argument construction. It retains master's
+`fallbackInputFields` reuse together with the held-repair replay callbacks and
+the signed-thinking fit-retry argument snapshot. Dispatch/receipt fences, the
+per-pass fast paths, stall-read fixes and the Rust-mode hold/reset implementation
+were retained from master; no held-turn or flush rule had to be discarded.
+
+The regression named **a flush in a held signed turn is parked through execute
+and defer passes and consumed by one release bust** now explicitly covers the
+second witness. At 75.1%, all 33 queued drops remain pending and their tags stay
+active. An old dropped-message placeholder remains visible with no persisted
+neutralization. A flush is parked, the queue grows to 401, and repeated 40% defer
+passes neither strip thinking nor first-neutralize that placeholder. A real next
+user applies the queue and neutralization together, consumes the flush once, and
+subsequent serves remain identical. The test passes 28 assertions. A defer-only
+neutralization mutant fails at the first 40% pass: the old placeholder becomes
+empty while signed thinking remains. This is independent of the shared-veto
+mutation, which also makes the same test fail.
+
+All merged-tree gates and mutation selections ran on **Linux with 4 vCPUs**, Bun
+1.4.2, TypeScript 5.9.3 and Biome 2.5.1. Both builds, both typechecks and both lint
+scripts pass. Pi's full suite passes 2,106 tests with 32 skips (2,138 total).
+Plugin's full suite passes 7,857 tests with 28 skips and three failures (7,888
+total): the existing ONNX fixture and two timing-sensitive SQLite diagnostic
+checks. The latter file passes all five tests when rerun in isolation; it was not
+edited. Every original mutation control was rerun, with the same outcomes, plus
+the two second-witness controls described above.
+
+The final restored hold, strict-binding and Rust-mode regression gate passes
+940 tests with one skip across 11 files (10,659 assertions). This includes the
+strengthened witness after restoring both of its mutants. Plugin typecheck and
+lint also pass after the added assertions; the initial formatting-only lint
+failure was corrected without changing the test contract. There are 21 merged-
+tree mutation selections: 20 named tests fail alone, while the previously noted
+Pi caller-only omission control stays green because the final helper repeats it.
+
+The real OpenCode **2.0.26 Linux** differential also has the same result: zero
+loop rewrites and one next-user rewrite after the fix, versus one loop rewrite
+and two total with the shared veto neutralized. `merged-linux-host.json` retains
+the measured hashes, counts, host PIDs and normalized `lsof` inventories. Both
+host runs had only throwaway database descriptors; the runner removed both roots.
+The Linux CLI tarball was fetched locally and transferred as temporary input,
+not installed with remote network access or added to the repository.
+
 ## Review follow-up
 
 The independent review and its two tests were cherry-picked from `62fa1e27`.
