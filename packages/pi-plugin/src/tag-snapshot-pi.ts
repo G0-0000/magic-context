@@ -111,7 +111,13 @@ export function createPiTagSnapshotReader(db: Database) {
 		];
 		let snapshot = cache.get(sessionId);
 		if (!snapshot || snapshot.foreignRevision !== external) {
-			const tags = getTagsBySession(db, sessionId);
+			// Another connection changed this session's tags. There is no record
+			// of which rows, so reread them all, but keep the cached object of
+			// every row that did not change: consumers that fold deltas by row
+			// identity (tail hygiene attribution) then see only the real changes.
+			const tags = snapshot
+				? reuseUnchangedRows(snapshot.tags, getTagsBySession(db, sessionId))
+				: getTagsBySession(db, sessionId);
 			snapshot = {
 				revision: local,
 				foreignRevision: external,
@@ -222,6 +228,50 @@ interface SnapshotEntry {
 }
 
 const isActive = (tag: SnapshotTag) => tag.status === "active";
+
+function sameRow(
+	left: SnapshotTag,
+	right: SnapshotTag,
+	keys: readonly (keyof SnapshotTag)[],
+): boolean {
+	for (const key of keys) if (!Object.is(left[key], right[key])) return false;
+	return true;
+}
+
+/**
+ * Return `fresh` with each row that equals its cached counterpart (same id,
+ * same fields) replaced by the cached frozen object. Both lists are in
+ * canonical tag_number/id order, so one merge walk pairs them.
+ */
+function reuseUnchangedRows(
+	cached: readonly SnapshotTag[],
+	fresh: SnapshotTag[],
+): SnapshotTag[] {
+	// Every row of both lists was built by the same toTagEntry, so they share
+	// one key set; read it once instead of per row.
+	const first = fresh[0];
+	if (!first) return fresh;
+	const keys = Object.keys(first) as (keyof SnapshotTag)[];
+	let index = 0;
+	for (let position = 0; position < fresh.length; position += 1) {
+		const row = fresh[position];
+		if (!row) continue;
+		while (index < cached.length) {
+			const old = cached[index];
+			if (
+				!old ||
+				old.tagNumber > row.tagNumber ||
+				(old.tagNumber === row.tagNumber && (old.id ?? 0) >= (row.id ?? 0))
+			)
+				break;
+			index += 1;
+		}
+		const old = cached[index];
+		if (old && old.id === row.id && sameRow(old, row, keys))
+			fresh[position] = old;
+	}
+	return fresh;
+}
 
 /**
  * Replace the rows of `dirty` tag numbers in canonical tag_number/id order.

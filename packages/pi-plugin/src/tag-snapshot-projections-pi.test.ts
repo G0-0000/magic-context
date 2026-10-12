@@ -111,7 +111,11 @@ function randomWrite(
 		],
 		[
 			"INSERT OR REPLACE INTO tags (session_id, message_id, type, status, tag_number, byte_size, tool_owner_message_id) VALUES ('s', ?, 'tool', 'active', ?, 0, ?)",
-			[MESSAGE_IDS[pick(MESSAGE_IDS.length)], number, OWNERS[pick(OWNERS.length)]],
+			[
+				MESSAGE_IDS[pick(MESSAGE_IDS.length)],
+				number,
+				OWNERS[pick(OWNERS.length)],
+			],
 		],
 		["DELETE FROM tags WHERE session_id = 's' AND tag_number = ?", [number]],
 	];
@@ -190,6 +194,35 @@ it("cached fallback rows answer every pi-msg probe exactly like the table after 
 		expect(hasPiFallbackToolOwnerTags(db, "s")).toBe(
 			tableHasFallbackToolOwnerTags(db, "s"),
 		);
+	} finally {
+		close();
+	}
+});
+
+it("a foreign write rereads the session but keeps every unchanged row object", () => {
+	const { db, foreign, close } = openPair();
+	try {
+		const insert = db.prepare(
+			"INSERT INTO tags (session_id, message_id, type, status, tag_number, byte_size) VALUES ('s', ?, 'message', 'active', ?, 0)",
+		);
+		db.transaction(() => {
+			for (let number = 1; number <= 500; number += 1)
+				insert.run(`entry-${number}:p0`, number);
+		})();
+		const before = getPiTagSnapshotView(db, "s");
+		foreign
+			.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 250",
+			)
+			.run();
+		const after = getPiTagSnapshotView(db, "s");
+		expect(after).not.toBe(before);
+		expect(after).toEqual(getTagsBySession(db, "s"));
+		const changed = after.filter((row, index) => row !== before[index]);
+		expect(changed.map((row) => [row.tagNumber, row.status])).toEqual([
+			[250, "dropped"],
+		]);
+		expect(getPiActiveTagSnapshotView(db, "s")).toHaveLength(499);
 	} finally {
 		close();
 	}

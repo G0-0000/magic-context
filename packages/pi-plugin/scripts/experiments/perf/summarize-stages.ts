@@ -87,6 +87,6 @@ for (const pass of report.passes) {
 		pass.stages.find((s) => s.stage === "getTagsBySessionSnapshot")?.extra ??
 		"";
 	console.log(
-		`pass ${pass.pass} in=${pass.inputMessages} out=${pass.outputMessages} wire=${pass.wireHash.slice(0, 12)} tags=${pass.tagRowsHash.slice(0, 12)} ${extra}`,
+		`pass ${pass.pass} in=${pass.inputMessages} out=${pass.outputMessages} bytes=${pass.outputBytes} wire=${pass.wireHash.slice(0, 12)} tags=${pass.tagRowsHash.slice(0, 12)} ${extra} ${pass.chaos?.length ? `chaos=${pass.chaos.join(",")}` : ""}`,
 	);
 }

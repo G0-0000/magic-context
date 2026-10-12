@@ -3724,7 +3724,8 @@ function adoptPiFallbackTags(
 		const admitted = revision();
 		// No commit from this or another connection since discovery.
 		const unchangedSinceDiscovery =
-			beforeDiscovery.external.data_version === admitted.external.data_version &&
+			beforeDiscovery.external.data_version ===
+				admitted.external.data_version &&
 			beforeDiscovery.local.changes === admitted.local.changes;
 		const preflight = options.preflightRevision;
 		const rebuild = options.rebuildFingerprints;
@@ -8226,14 +8227,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// text) and migrate any fallback-id tag onto the real id up front, so the
 	// message keeps its tag_number/§N§ instead of getting a fresh tag. No-op for
 	// OpenCode (this path is Pi-only) and for messages already on a real id.
-	const tFallbackIdentity = performance.now();
 	// This indexed preflight avoids rebuilding fingerprints for every old message.
 	// A negative result is rechecked by adoption after this map is complete, while
 	// tool-owner adoption performs its only existence probe at that later point.
 	// Bring the tag snapshot (and its fallback rows) up to date before the
 	// preflight revision: consuming its change journal is a TEMP-table write,
 	// which adoption would otherwise mistake for a tag change after preflight.
+	const tTagSnapshotSync = performance.now();
 	readPiFallbackTagRows(args.db, args.sessionId);
+	logTransformTiming(args.sessionId, "tagSnapshotSync", tTagSnapshotSync);
+	const tFallbackIdentity = performance.now();
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,
