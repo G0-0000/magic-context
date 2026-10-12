@@ -7,6 +7,15 @@
 export const ENGINE_RECONNECTING_USER_MESSAGE =
     "Magic Context's engine is reconnecting. Send your message again in a few seconds.";
 
+/**
+ * Calm user-facing line for a refusal while the engine is connected but still
+ * applying an earlier context update of this session (one whose reply the plugin
+ * stopped waiting for). Saying "reconnecting" there would be wrong: the engine
+ * answers, it is only busy.
+ */
+export const ENGINE_BUSY_USER_MESSAGE =
+    "Magic Context is still applying the previous context update for this session. Send your message again in a moment.";
+
 export const PROTECTED_TOOL_RESULTS_OVER_LIMIT =
     "The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts.";
 export const PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE = "protected_tool_results_over_limit";

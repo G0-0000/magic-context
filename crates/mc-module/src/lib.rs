@@ -4312,6 +4312,81 @@ fn terminal_wrapup_failure_summary(reason: &str, summary: &str, detail: &str) ->
     )
 }
 
+/// The historian settings a `session.wrapup` request carries, resolved by the host from
+/// the current config. Every field is optional: an older host sends none of them, and
+/// wrapup then uses the values from the session's last completed transform, which go
+/// stale while that session's passes keep failing.
+#[derive(Debug, Default)]
+struct WrapupHistorianOverrides {
+    chain: Option<WrapupHistorianChain>,
+    timeout_ms: Option<u64>,
+    max_output_tokens: Option<u32>,
+}
+
+/// The chain with its per-model limits and variants. The two maps are keyed by the
+/// chain's models, so they only apply together with a chain.
+#[derive(Debug)]
+struct WrapupHistorianChain {
+    models: Vec<String>,
+    limits: std::collections::BTreeMap<String, historian::HistorianModelLimits>,
+    variants: std::collections::BTreeMap<String, String>,
+}
+
+impl WrapupHistorianOverrides {
+    fn is_empty(&self) -> bool {
+        self.chain.is_none() && self.timeout_ms.is_none() && self.max_output_tokens.is_none()
+    }
+
+    /// The snapshot's request with every carried setting replacing the snapshot's own.
+    fn apply_to(self, request: &TransformRequest) -> TransformRequest {
+        let mut request = request.clone();
+        if let Some(chain) = self.chain {
+            request.historian_model_chain = Some(chain.models);
+            request.historian_model_limits = chain.limits;
+            request.historian_model_variants = chain.variants;
+        }
+        if let Some(timeout_ms) = self.timeout_ms {
+            request.historian_timeout_ms = Some(timeout_ms);
+        }
+        if let Some(max_output_tokens) = self.max_output_tokens {
+            request.historian_max_output_tokens = Some(max_output_tokens);
+        }
+        request
+    }
+}
+
+fn wrapup_historian_overrides(request: &Value) -> Result<WrapupHistorianOverrides, String> {
+    fn field<T: serde::de::DeserializeOwned>(
+        request: &Value,
+        name: &str,
+    ) -> Result<Option<T>, String> {
+        request
+            .get(name)
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .map_err(|error| format!("session.wrapup {name}: {error}"))
+            })
+            .transpose()
+    }
+    let chain = match field::<Vec<String>>(request, "historian_model_chain")? {
+        None => None,
+        Some(models) => Some(WrapupHistorianChain {
+            models,
+            limits: field(request, "historian_model_limits")?.unwrap_or_default(),
+            variants: field(request, "historian_model_variants")?.unwrap_or_default(),
+        }),
+    };
+    // Null reads as absent, as it does on a transform request, where both fields are
+    // `Option`s.
+    let timeout_ms = field::<Option<u64>>(request, "historian_timeout_ms")?.flatten();
+    let max_output_tokens = field::<Option<u32>>(request, "historian_max_output_tokens")?.flatten();
+    Ok(WrapupHistorianOverrides {
+        chain,
+        timeout_ms,
+        max_output_tokens,
+    })
+}
+
 fn terminal_wrapup_failure_fields(summary: &str) -> Option<(String, String, String)> {
     let encoded = summary.strip_prefix(TERMINAL_WRAPUP_FAILURE_PREFIX)?;
     let value: Value = serde_json::from_str(encoded).ok()?;
@@ -7021,7 +7096,11 @@ impl McHandler {
             harness: binding.harness.clone(),
             language,
             historian_temperature: binding.config.historian_temperature,
-            historian_await_timeout: historian::historian_await_timeout(None),
+            // The host's per-attempt timeout, as the autonomous historian uses: the wrapup
+            // request's own when it carries one, else the session's last transform's.
+            historian_await_timeout: historian::historian_await_timeout(
+                parsed.historian_timeout_ms,
+            ),
             project_path,
             project_root: binding.project_root.clone(),
             project_slug,
@@ -9025,6 +9104,17 @@ impl McHandler {
                 }
             },
         };
+        // Validated with the other request fields, so a malformed chain is refused before
+        // the wrapup claims the session or reports a retryable state such as a backoff.
+        let historian_overrides = match wrapup_historian_overrides(request) {
+            Ok(overrides) => overrides,
+            Err(message) => {
+                return HandlerOutcome::Error {
+                    code: "bad_request".to_string(),
+                    message,
+                };
+            }
+        };
 
         // The module owns the only store writer, so a process-local per-session latch is
         // sufficient to prevent duplicate producer drives. Durable historian state still
@@ -9091,7 +9181,14 @@ impl McHandler {
                 );
             }
         };
-        let parsed = Arc::clone(&ready.request);
+        // The snapshot's historian settings are whatever the last completed transform
+        // carried. A session whose passes have been failing keeps old ones, so the host
+        // sends the settings resolved from the current config with the wrapup itself.
+        let parsed = if historian_overrides.is_empty() {
+            Arc::clone(&ready.request)
+        } else {
+            Arc::new(historian_overrides.apply_to(&ready.request))
+        };
         let initial_snapshot = match store.load_historian_assembly_snapshot(&session_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -35742,6 +35839,158 @@ mod tests {
             "{response}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// The chain a wrapup request carries is the host's current config. It replaces the
+    /// chain cached from the session's last completed transform, which goes stale while
+    /// that session's passes keep failing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_wrapup_request_chain_overrides_the_snapshot_chain() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_snapshot(
+            &handler,
+            "ses",
+            wrapup_messages(80, 800),
+            200_000,
+            Some(vec!["test/stale-snapshot-model".to_string()]),
+        );
+        let response = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({
+                        "method": "session.wrapup",
+                        "v": 1,
+                        "session_id": "ses",
+                        "historian_model_chain": ["test/live-config-model", "test/live-fallback"],
+                        "historian_model_limits": {
+                            "test/live-config-model": { "context": 200_000 }
+                        },
+                        "historian_model_variants": { "test/live-config-model": "medium" },
+                        "historian_timeout_ms": 90_000,
+                        "historian_max_output_tokens": 12_000
+                    }),
+                )
+                .await,
+        );
+
+        assert_eq!(response["ok"], json!(true), "{response}");
+        assert_eq!(response["disposition"], json!("completed"), "{response}");
+        let models = producer.models.lock().expect("models mutex").clone();
+        assert!(!models.is_empty(), "the wrapup must reach the producer");
+        assert!(
+            models.iter().all(|model| model == "test/live-config-model"),
+            "every round runs on the request's head model, never the snapshot's: {models:?}"
+        );
+        let variants = producer.variants.lock().expect("variants mutex").clone();
+        assert_eq!(
+            variants.len(),
+            models.len(),
+            "every start names its variant: {variants:?}"
+        );
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant.as_deref() == Some("medium")),
+            "the request's variant rides with its model: {variants:?}"
+        );
+        // The snapshot's transform carried no timeout, which would mean the 600 s
+        // default; every await uses the request's 90 s instead.
+        let await_timeouts = producer
+            .await_timeouts
+            .lock()
+            .expect("await timeouts mutex")
+            .clone();
+        assert!(!await_timeouts.is_empty());
+        assert!(
+            await_timeouts
+                .iter()
+                .all(|timeout| *timeout == Duration::from_secs(90)),
+            "{await_timeouts:?}"
+        );
+    }
+
+    /// Each historian setting a wrapup request carries replaces the snapshot's value; a
+    /// setting it omits, or sends as null, keeps the snapshot's.
+    #[test]
+    fn wrapup_historian_overrides_replace_only_the_settings_they_carry() {
+        let mut snapshot = transform_request(Vec::new(), 1, 200_000);
+        snapshot.historian_model_chain = Some(vec!["test/snapshot".to_string()]);
+        snapshot.historian_timeout_ms = Some(600_000);
+        snapshot.historian_max_output_tokens = Some(4_000);
+
+        let all = wrapup_historian_overrides(&json!({
+            "historian_model_chain": ["test/live"],
+            "historian_timeout_ms": 90_000,
+            "historian_max_output_tokens": 12_000,
+        }))
+        .unwrap()
+        .apply_to(&snapshot);
+        assert_eq!(
+            all.historian_model_chain,
+            Some(vec!["test/live".to_string()])
+        );
+        assert_eq!(all.historian_timeout_ms, Some(90_000));
+        assert_eq!(all.historian_max_output_tokens, Some(12_000));
+
+        let output_only = wrapup_historian_overrides(&json!({
+            "historian_max_output_tokens": 12_000,
+            "historian_timeout_ms": null,
+        }))
+        .unwrap();
+        assert!(!output_only.is_empty());
+        let output_only = output_only.apply_to(&snapshot);
+        assert_eq!(
+            output_only.historian_model_chain,
+            Some(vec!["test/snapshot".to_string()])
+        );
+        assert_eq!(output_only.historian_timeout_ms, Some(600_000));
+        assert_eq!(output_only.historian_max_output_tokens, Some(12_000));
+
+        let none = wrapup_historian_overrides(&json!({ "keep": 20 })).unwrap();
+        assert!(none.is_empty());
+    }
+
+    /// A chain field of the wrong shape is a malformed request, not a reason to fall back
+    /// to the snapshot's chain.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_wrapup_malformed_request_chain_is_bad_request() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        for (field, value) in [
+            ("historian_model_chain", json!("test/live-config-model")),
+            ("historian_model_chain", json!(["test/model", 7])),
+            ("historian_model_limits", json!(["not", "a", "map"])),
+            ("historian_model_variants", json!({ "test/model": 3 })),
+            ("historian_timeout_ms", json!("90s")),
+            ("historian_timeout_ms", json!(-1)),
+            ("historian_max_output_tokens", json!(5_000_000_000_u64)),
+            ("historian_max_output_tokens", json!(1.5)),
+        ] {
+            let mut request = json!({
+                "method": "session.wrapup",
+                "v": 1,
+                "session_id": "ses",
+                "historian_model_chain": ["test/model"],
+            });
+            request[field] = value.clone();
+            match handler.dispatch_value(7, request).await {
+                HandlerOutcome::Error { code, message } => {
+                    assert_eq!(code, "bad_request", "{field}={value}: {message}");
+                    assert!(message.contains(field), "{field}={value}: {message}");
+                }
+                other => panic!("{field}={value} must be a bad request, got {other:?}"),
+            }
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(
+            !handler.wrapup_active("ses"),
+            "a refused request leaves no wrapup claim behind"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

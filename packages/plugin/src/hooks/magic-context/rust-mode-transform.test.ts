@@ -87,6 +87,7 @@ import { primeCtxReduceSpawnPermission } from "./ctx-reduce-availability";
 import { autoEmbedAttemptedBySession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
+    ENGINE_BUSY_USER_MESSAGE,
     ENGINE_RECONNECTING_USER_MESSAGE,
 } from "./emergency-fail-closed";
 import { getVisibleMemoryIds } from "./inject-compartments";
@@ -109,6 +110,7 @@ import {
     createRustModeTransform as createRustModeTransformImpl,
     RUST_EMERGENCY_WALL_PCT,
     RUST_FAILURE_PARK_THRESHOLD,
+    RUST_IN_PROGRESS_PARK_EXEMPTION_MS,
     RUST_PARK_PROBE_PRESSURE_BYPASS_PCT,
     RUST_PARK_RETRY_INTERVAL,
     type RustModeModuleClient,
@@ -7917,6 +7919,270 @@ describe("Rust stalled transform probe", () => {
         expect(clock.now()).toBe(45000);
     });
 
+    /**
+     * A module stub that applies one transform at a time per session, like ck-mc's page
+     * coordinator: while a final page is applying, every transform of the session is
+     * refused as `authority_transform_page_in_progress`. When `slowNext` is set, the next
+     * transform starts applying for `applyMs` and its reply never reaches the plugin
+     * before the plugin's own deadline, so the plugin abandons it while it still runs.
+     */
+    function slowApplyingModule(clock: ReturnType<typeof fakeClock>, sessionId: string) {
+        const stub = {
+            slowNext: false,
+            applyMs: 300_000,
+            applyingUntil: null as number | null,
+            transformCalls: 0,
+            client: {} as RustModeModuleClient,
+        };
+        stub.client = {
+            call: async ({ method, signal }) => {
+                if (method !== "transform") return { ok: true };
+                stub.transformCalls++;
+                if (stub.applyingUntil !== null && clock.now() >= stub.applyingUntil)
+                    stub.applyingUntil = null;
+                if (stub.applyingUntil !== null)
+                    throw Object.assign(new Error("the final transform page is being applied"), {
+                        code: "authority_transform_page_in_progress",
+                    });
+                if (stub.slowNext) {
+                    stub.slowNext = false;
+                    stub.applyingUntil = clock.now() + stub.applyMs;
+                    // The module keeps applying after the plugin stops waiting; only the
+                    // plugin's side of the call ends when it aborts.
+                    return abortableSilence(signal);
+                }
+                return {
+                    decision: "HARD",
+                    prefix_bust_permitted: true,
+                    native_messages: [
+                        {
+                            info: { id: "served", role: "assistant", sessionID: sessionId },
+                            parts: [{ type: "text", text: "last good module bytes" }],
+                        },
+                    ],
+                };
+            },
+        };
+        return stub;
+    }
+
+    /** Advance fake time in steps until `outcome` settles, yielding real turns between. */
+    async function settleOnClock<T>(
+        clock: ReturnType<typeof fakeClock>,
+        outcome: Promise<T>,
+    ): Promise<T> {
+        let settled = false;
+        void outcome.then(
+            () => {
+                settled = true;
+            },
+            () => {
+                settled = true;
+            },
+        );
+        for (let step = 0; step < 400 && !settled; step++) {
+            await new Promise((resolve) => setImmediate(resolve));
+            await clock.advance(1_000);
+        }
+        return outcome;
+    }
+
+    it("a final page the module answers past the plugin's deadline does not park the session while the module finishes it", async () => {
+        const sessionId = `rust-abandoned-final-page-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        const module = slowApplyingModule(clock, sessionId);
+        const parkNotices: string[] = [];
+        const transform = createRustModeTransform(makeDeps(db, module.client), {
+            moduleClient: module.client,
+            clockForTests: clock,
+            notifyParked: (_sessionId, message) => parkNotices.push(message),
+        });
+        const input = makeMessages(sessionId);
+        const runPass = (messages: MessageLike[]) => {
+            const output = { messages: [...messages] as unknown[] };
+            const outcome = transform
+                .run(sessionId, messages, output, makeMeta(db, sessionId))
+                .then(
+                    () => "served",
+                    (error) => error,
+                );
+            return { output, outcome: settleOnClock(clock, outcome) };
+        };
+
+        const first = runPass(input);
+        expect(await first.outcome).toBe("served");
+        const lastGoodBytes = JSON.stringify(first.output.messages);
+        expect(lastGoodBytes).toContain("last good module bytes");
+
+        // The module's next apply outlasts the plugin's whole final-page wait (the
+        // first attempt's deadline plus the 45-second identical-page retry window), so
+        // the plugin abandons the call while the module keeps applying.
+        module.slowNext = true;
+        const abandoned = runPass(input);
+        expect(await abandoned.outcome).toBe("served");
+        expect(JSON.stringify(abandoned.output.messages)).toBe(lastGoodBytes);
+        expect(module.applyingUntil).not.toBeNull();
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+        expect(transform.getState(sessionId).forceFullWire).toBe(true);
+
+        // Every later pass meets the module still applying the abandoned page. Each is
+        // served the last good request; none counts as a module failure.
+        const later = [
+            ...input,
+            {
+                info: { id: "m2", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "next turn" }],
+            },
+        ] as MessageLike[];
+        for (let pass = 0; pass < RUST_FAILURE_PARK_THRESHOLD + 1; pass++) {
+            const busy = runPass(later);
+            expect(await busy.outcome).toBe("served");
+            expect(JSON.stringify(busy.output.messages)).toContain("last good module bytes");
+        }
+        expect(module.applyingUntil).not.toBeNull();
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+        expect(transform.getState(sessionId).parked).toBe(false);
+        expect(parkNotices).toEqual([]);
+
+        // Once the module has finished, the next pass is served by the module again.
+        await clock.advance(module.applyMs);
+        const recovered = runPass(later);
+        expect(await recovered.outcome).toBe("served");
+        expect(module.applyingUntil).toBeNull();
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+    });
+
+    /** A transform with a module stuck applying an earlier page, plus its park notices. */
+    async function stuckApplyingSession(label: string) {
+        const sessionId = `rust-in-progress-${label}-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const clock = fakeClock();
+        const module = slowApplyingModule(clock, sessionId);
+        const parkNotices: string[] = [];
+        const transform = createRustModeTransform(makeDeps(db, module.client), {
+            moduleClient: module.client,
+            clockForTests: clock,
+            notifyParked: (_sessionId, message) => parkNotices.push(message),
+        });
+        const pass = async () => {
+            const messages = makeMessages(sessionId);
+            const output = { messages: [...messages] as unknown[] };
+            const outcome = transform
+                .run(sessionId, messages, output, makeMeta(db, sessionId))
+                .then(
+                    () => "served",
+                    (error) => error,
+                );
+            return settleOnClock(clock, outcome);
+        };
+        // A healthy first pass leaves a last good request to replay.
+        expect(await pass()).toBe("served");
+        return { sessionId, clock, module, parkNotices, transform, pass };
+    }
+
+    it("in-progress refusals inside the exemption bound never park, and a pass the module accepts restarts the bound", async () => {
+        const { sessionId, clock, module, parkNotices, transform, pass } =
+            await stuckApplyingSession("inside");
+        const state = () => transform.getState(sessionId);
+        module.applyingUntil = clock.now() + 60 * 60_000;
+
+        expect(await pass()).toBe("served");
+        const runStartedAt = state().transformInProgressSinceMs;
+        expect(runStartedAt).not.toBeNull();
+        // Just inside the bound: every refusal is still exempt.
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS - 30_000);
+        for (let i = 0; i < RUST_FAILURE_PARK_THRESHOLD + 1; i++)
+            expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBe(runStartedAt);
+        expect(state().consecutiveFailures).toBe(0);
+        expect(state().parked).toBe(false);
+        expect(parkNotices).toEqual([]);
+
+        // The module finishes and accepts a transform: the run ends.
+        module.applyingUntil = null;
+        expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBeNull();
+
+        // A later run is timed from its own first refusal, not the earlier run's.
+        module.applyingUntil = clock.now() + 60 * 60_000;
+        expect(await pass()).toBe("served");
+        expect(state().transformInProgressSinceMs).toBeGreaterThan(runStartedAt ?? 0);
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS - 30_000);
+        expect(await pass()).toBe("served");
+        expect(state().consecutiveFailures).toBe(0);
+        expect(parkNotices).toEqual([]);
+    });
+
+    it("in-progress refusals past the exemption bound count toward parking again", async () => {
+        const { sessionId, clock, module, parkNotices, transform, pass } =
+            await stuckApplyingSession("beyond");
+        const state = () => transform.getState(sessionId);
+        module.applyingUntil = clock.now() + 60 * 60_000;
+
+        expect(await pass()).toBe("served");
+        expect(state().consecutiveFailures).toBe(0);
+        await clock.advance(RUST_IN_PROGRESS_PARK_EXEMPTION_MS + 1_000);
+        for (let i = 1; i <= RUST_FAILURE_PARK_THRESHOLD; i++) {
+            expect(await pass()).toBe("served");
+            expect(state().consecutiveFailures).toBe(i);
+        }
+        expect(state().parked).toBe(true);
+        expect(parkNotices).toEqual([ENGINE_RECONNECTING_USER_MESSAGE]);
+    });
+
+    it("an abandoned or still-applying final page never falls back to raw history, even with compaction off", async () => {
+        const sessionId = `rust-abandoned-final-page-raw-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        recordDetectedContextLimit(db, sessionId, 20_000, "test-provider/test-model");
+        const clock = fakeClock();
+        const module = slowApplyingModule(clock, sessionId);
+        const deps = makeDeps(db, module.client);
+        // Compaction off admits raw history on an ordinary module failure; the tiny
+        // estimate below would let it through.
+        deps.compactionOff = true;
+        const transform = createRustModeTransform(deps, {
+            moduleClient: module.client,
+            clockForTests: clock,
+            rawFallbackEstimatorForTests: () => ({
+                tokens: 1,
+                trusted: true,
+                messageTokens: { conversation: 1, toolCall: 0 },
+                systemTokens: 0,
+                toolDefinitionTokens: 0,
+            }),
+        });
+        const runPass = () => {
+            const output = { messages: [] as unknown[] };
+            const outcome = transform
+                .run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId))
+                .then(
+                    () => "served",
+                    (error) => error,
+                );
+            return { output, outcome: settleOnClock(clock, outcome) };
+        };
+
+        module.slowNext = true;
+        const abandoned = runPass();
+        const abandonedRefusal = await abandoned.outcome;
+        expect(abandonedRefusal).toBeInstanceOf(EmergencyFailClosedError);
+        expect((abandonedRefusal as Error).message).toBe(ENGINE_RECONNECTING_USER_MESSAGE);
+        expect(abandoned.output.messages).toEqual([]);
+
+        const busy = runPass();
+        const busyRefusal = await busy.outcome;
+        expect(busyRefusal).toBeInstanceOf(EmergencyFailClosedError);
+        expect((busyRefusal as Error).message).toBe(ENGINE_BUSY_USER_MESSAGE);
+        expect(busy.output.messages).toEqual([]);
+        expect(module.applyingUntil).not.toBeNull();
+    });
     it("parked no-LKG uses a short hard health deadline but admits a healthy slow module", async () => {
         const sessionId = `rust-park-probe-${Date.now()}`;
         sessions.push(sessionId);
