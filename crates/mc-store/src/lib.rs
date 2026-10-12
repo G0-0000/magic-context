@@ -11561,8 +11561,22 @@ impl McStore {
             single_store_schema::apply_compartment_dates(conn, session_id, compartments)
         })?;
         let boundaries = self.cached_context_boundaries(session_id)?;
+        // Index the cached coordinates by sequence once: a long session has thousands of
+        // both, and a boundary can only match the row with its sequence. Each sequence
+        // keeps its boundaries in cache order, so the first match is the same one a scan
+        // of the whole list finds.
+        let mut by_sequence: HashMap<i64, Vec<&ResolvedContextBoundary>> = HashMap::new();
+        for boundary in &boundaries {
+            by_sequence
+                .entry(boundary.sequence)
+                .or_default()
+                .push(boundary);
+        }
         for row in compartments {
-            if let Some(boundary) = boundaries.iter().find(|boundary| boundary.matches(row)) {
+            if let Some(boundary) = by_sequence
+                .get(&row.sequence)
+                .and_then(|candidates| candidates.iter().find(|boundary| boundary.matches(row)))
+            {
                 boundary.apply(row);
             }
         }

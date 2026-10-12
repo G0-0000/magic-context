@@ -82,6 +82,15 @@ use crate::ck_wire::{
 };
 
 #[cfg(test)]
+#[path = "tests/compose_large_session.rs"]
+mod compose_large_session;
+#[cfg(test)]
+#[path = "tests/compose_review_differential.rs"]
+mod compose_review_differential;
+#[cfg(test)]
+#[path = "tests/compose_review_head.rs"]
+mod compose_review_head;
+#[cfg(test)]
 #[path = "tests/perf_audit_identity.rs"]
 mod perf_audit_identity;
 #[cfg(test)]
@@ -6061,7 +6070,7 @@ fn apply_once(
                     coverage_bounds.map(|(start, _)| start),
                     serializer_profile,
                 );
-                let mut comp = crate::m0_compose::compose_m0_from_store_timed(
+                let mut comp = crate::m0_compose::compose_m0_with_compartments(
                     store,
                     &crate::m0_compose::M0ComposeInputs {
                         session_id: &req.session_id,
@@ -6080,6 +6089,7 @@ fn apply_once(
                         temporal_awareness: ctx.temporal_awareness,
                         mural: m0_mural_input(req, serializer_profile),
                     },
+                    &compartments_for_live_coverage,
                     estimate_tokens,
                     incremental_history,
                     &mut timings.compose,
@@ -6171,7 +6181,7 @@ fn apply_once(
                                     recut_coverage_bounds.map(|(start, _)| start),
                                     serializer_profile,
                                 );
-                            comp = crate::m0_compose::compose_m0_from_store_timed(
+                            comp = crate::m0_compose::compose_m0_with_compartments(
                                 store,
                                 &crate::m0_compose::M0ComposeInputs {
                                     session_id: &req.session_id,
@@ -6191,6 +6201,7 @@ fn apply_once(
                                     temporal_awareness: ctx.temporal_awareness,
                                     mural: m0_mural_input(req, serializer_profile),
                                 },
+                                &recut_compartments,
                                 estimate_tokens,
                                 incremental_history,
                                 &mut timings.compose,
@@ -6264,9 +6275,15 @@ fn apply_once(
                         &req.session_id,
                     );
                 }
-                let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                let channel1_survivors =
-                    surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
+                let live_ordinals = live_ordinals_by_id(&live);
+                let survivors =
+                    surviving_red_units(&effective, &live_ordinals, comp.coverage_ordinal);
+                let channel1_survivors = surviving_channel1_units(
+                    &core,
+                    &effective,
+                    &live_ordinals,
+                    comp.coverage_ordinal,
+                );
                 let mut strip_survivors = surviving_strip_units(&core, req);
                 strip_survivors.extend(new_strip_units.clone());
                 let caveman_survivors = surviving_caveman_units(
@@ -6407,7 +6424,10 @@ fn apply_once(
                     .frozen_units
                     .iter()
                     .find(|unit| unit.key == "m0")
-                    .map(|unit| mc_tokenizer::estimate_tokens(&unit.frozen_payload))
+                    // Most of m0 is rendered history whose paragraphs the last HARD fold's
+                    // compose already counted into the history render cache. This returns
+                    // the same count as estimate_tokens on the payload, mostly from cache.
+                    .map(|unit| mc_tokenizer::estimate_history_render_tokens(&unit.frozen_payload))
                     .unwrap_or(0);
                 let m1_has_content = m1.body != M1_PLACEHOLDER;
                 let m1_tokens = if m1_has_content {
@@ -6432,7 +6452,7 @@ fn apply_once(
                         coverage_bounds.map(|(start, _)| start),
                         serializer_profile,
                     );
-                    let comp = crate::m0_compose::compose_m0_from_store_timed(
+                    let comp = crate::m0_compose::compose_m0_with_compartments(
                         store,
                         &crate::m0_compose::M0ComposeInputs {
                             session_id: &req.session_id,
@@ -6451,6 +6471,7 @@ fn apply_once(
                             temporal_awareness: ctx.temporal_awareness,
                             mural: m0_mural_input(req, serializer_profile),
                         },
+                        &compartments_for_fold,
                         estimate_tokens,
                         incremental_history,
                         &mut timings.compose,
@@ -6510,9 +6531,15 @@ fn apply_once(
                             &req.session_id,
                         );
                     }
-                    let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                    let channel1_survivors =
-                        surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
+                    let live_ordinals = live_ordinals_by_id(&live);
+                    let survivors =
+                        surviving_red_units(&effective, &live_ordinals, comp.coverage_ordinal);
+                    let channel1_survivors = surviving_channel1_units(
+                        &core,
+                        &effective,
+                        &live_ordinals,
+                        comp.coverage_ordinal,
+                    );
                     let mut strip_survivors = surviving_strip_units(&core, req);
                     strip_survivors.extend(new_strip_units.clone());
                     let caveman_survivors = surviving_caveman_units(
@@ -9149,16 +9176,33 @@ fn protected_tail_floor_ordinal(
             ..Default::default()
         });
     let floor_tokens = target.effective_floor.ceil().max(1.0) as usize;
-    let mut tokens_by_ordinal = BTreeMap::<u64, usize>::new();
-    for block in live.iter().filter(|block| block.role != "system") {
-        let tokens = estimate_tokens(block.bytes.as_ref());
-        *tokens_by_ordinal.entry(block.ordinal).or_default() += tokens;
+    // Walk the non-system blocks newest ordinal first and tokenize only the ordinals the
+    // walk reaches. The floor is usually met within the newest messages, so a long live
+    // array (a host may send its whole history) no longer tokenizes every block. Each
+    // ordinal still sums all of its blocks before the floor check, as a per-ordinal total.
+    let mut blocks: Vec<&FlatBlock> = live
+        .iter()
+        .copied()
+        .filter(|block| block.role != "system")
+        .collect();
+    if !blocks
+        .windows(2)
+        .all(|pair| pair[0].ordinal <= pair[1].ordinal)
+    {
+        blocks.sort_by_key(|block| block.ordinal);
     }
     let mut accumulated = 0usize;
     let mut floor_ordinal = newest_live;
-    for (ordinal, tokens) in tokens_by_ordinal.iter().rev() {
-        floor_ordinal = *ordinal;
-        accumulated = accumulated.saturating_add(*tokens);
+    let mut end = blocks.len();
+    while end > 0 {
+        let ordinal = blocks[end - 1].ordinal;
+        let mut tokens = 0usize;
+        while end > 0 && blocks[end - 1].ordinal == ordinal {
+            tokens += estimate_tokens(blocks[end - 1].bytes.as_ref());
+            end -= 1;
+        }
+        floor_ordinal = ordinal;
+        accumulated = accumulated.saturating_add(tokens);
         if accumulated >= floor_tokens {
             break;
         }
@@ -9699,16 +9743,24 @@ fn prune_covered_red_units(
     });
 }
 
+/// Each live block id's ordinal, built once per HARD rebuild and shared by the unit
+/// survival checks. If an id repeats, the later block's ordinal overwrites the
+/// earlier one, the same result the per-check maps gave.
+fn live_ordinals_by_id<'a>(live: &[&'a FlatBlock]) -> HashMap<&'a str, u64> {
+    live.iter()
+        .map(|block| (block.id(), block.ordinal()))
+        .collect()
+}
+
 /// The `red:*` units that SURVIVE a HARD rebuild: a target that is COVERED (folded into
 /// m0) is dropped; a target in the new TAIL is kept; a target ABSENT from the live array
 /// (reverted away) is dropped as an orphan. So a unit survives iff its target is in the
 /// live array AND still in the tail after the fold.
 fn surviving_red_units(
     effective: &BTreeMap<String, (String, String, String)>,
-    live: &[&FlatBlock],
+    live_ord: &HashMap<&str, u64>,
     new_coverage: Option<u64>,
 ) -> Vec<FrozenUnit> {
-    let live_ord: BTreeMap<&str, u64> = live.iter().map(|i| (i.id(), i.ordinal())).collect();
     effective
         .iter()
         .filter_map(
@@ -9727,13 +9779,9 @@ fn surviving_red_units(
 fn surviving_channel1_units(
     core: &CoreState,
     effective_reductions: &BTreeMap<String, (String, String, String)>,
-    live: &[&FlatBlock],
+    live_ord: &HashMap<&str, u64>,
     new_coverage: Option<u64>,
 ) -> Vec<FrozenUnit> {
-    let live_ord = live
-        .iter()
-        .map(|block| (block.id(), block.ordinal()))
-        .collect::<HashMap<_, _>>();
     core.frozen_units
         .iter()
         .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
@@ -9808,7 +9856,7 @@ fn compose_hard_fold_m0(
         coverage_bounds.map(|(start, _)| start),
         serializer_profile,
     );
-    crate::m0_compose::compose_m0_from_store_timed(
+    crate::m0_compose::compose_m0_with_compartments(
         store,
         &crate::m0_compose::M0ComposeInputs {
             session_id: &req.session_id,
@@ -9827,6 +9875,7 @@ fn compose_hard_fold_m0(
             temporal_awareness: ctx.temporal_awareness,
             mural: m0_mural_input(req, serializer_profile),
         },
+        &compartments,
         estimate_tokens,
         incremental_history,
         timings,
@@ -9979,6 +10028,9 @@ fn coverage_shrank(old: Option<u64>, new: Option<u64>) -> bool {
     }
 }
 
+/// The per-compartment coverage test the merged ranges in `CoveredOrdinals` must agree
+/// with; kept as the reference for that equivalence test.
+#[cfg(test)]
 fn stored_compartment_covers_ordinal(compartment: &StoredCompartment, ordinal: u64) -> bool {
     let start = compartment.start_message.max(0) as u64;
     let end = compartment.end_message.max(0) as u64;
@@ -9991,15 +10043,52 @@ fn first_uncovered_live_block<'a>(
     coverage: Option<u64>,
 ) -> Option<&'a FlatBlock> {
     let coverage = coverage?;
+    let covered = CoveredOrdinals::new(compartments);
     live.iter()
         .copied()
         .filter(|block| block.role != "system" && block.ordinal() <= coverage)
-        .filter(|block| {
-            !compartments
-                .iter()
-                .any(|compartment| stored_compartment_covers_ordinal(compartment, block.ordinal()))
-        })
+        .filter(|block| !covered.contains(block.ordinal()))
         .min_by_key(|block| block.ordinal())
+}
+
+/// The union of the compartments' inclusive ordinal ranges, merged and sorted, so a
+/// membership test is a binary search instead of a scan over every compartment. A long
+/// session holds thousands of compartments, and the live coverage guard asks once per
+/// live block. An ordinal is contained exactly when some compartment covers it under
+/// `stored_compartment_covers_ordinal`.
+struct CoveredOrdinals {
+    ranges: Vec<(u64, u64)>,
+}
+
+impl CoveredOrdinals {
+    fn new(compartments: &[StoredCompartment]) -> Self {
+        let mut spans = compartments
+            .iter()
+            .map(|compartment| {
+                (
+                    compartment.start_message.max(0) as u64,
+                    compartment.end_message.max(0) as u64,
+                )
+            })
+            .filter(|(start, end)| start <= end)
+            .collect::<Vec<_>>();
+        spans.sort_unstable();
+        let mut ranges: Vec<(u64, u64)> = Vec::with_capacity(spans.len());
+        for (start, end) in spans {
+            match ranges.last_mut() {
+                // Ordinals are integers, so a span starting right after the previous end
+                // continues it.
+                Some(last) if start <= last.1.saturating_add(1) => last.1 = last.1.max(end),
+                _ => ranges.push((start, end)),
+            }
+        }
+        Self { ranges }
+    }
+
+    fn contains(&self, ordinal: u64) -> bool {
+        let after = self.ranges.partition_point(|(start, _)| *start <= ordinal);
+        after > 0 && ordinal <= self.ranges[after - 1].1
+    }
 }
 
 fn validate_live_boundary_ordinal(
@@ -14494,6 +14583,55 @@ fn apply_surface_strips(
 }
 
 fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<FrozenUnit> {
+    // Each live message id with its largest block count. A target names a live block
+    // `<mid>#<index>` exactly when its last `#` splits off a canonical decimal index below
+    // that count, which is how block ids are formatted. Checking that avoids formatting
+    // one id string per live block on every rebuild.
+    let mut block_counts: HashMap<&str, usize> = HashMap::new();
+    for message in &req.messages {
+        let count = block_counts.entry(message.mid.as_str()).or_default();
+        *count = (*count).max(message.ck.content.len());
+    }
+    let is_live_block = |target: &str| {
+        target.rsplit_once('#').is_some_and(|(mid, index)| {
+            let canonical = !index.is_empty()
+                && index.bytes().all(|byte| byte.is_ascii_digit())
+                && (index == "0" || !index.starts_with('0'));
+            canonical
+                && index
+                    .parse::<usize>()
+                    .is_ok_and(|index| block_counts.get(mid).is_some_and(|count| index < *count))
+        })
+    };
+    core.frozen_units
+        .iter()
+        .filter(|unit| unit.key.starts_with("strip:"))
+        .filter(|unit| {
+            // A request may be a transient subset or revert. Keep reasoning applied-set message
+            // ids durable so their strip resumes deterministically if they return in a later
+            // full-array request.
+            unit.key.starts_with("strip:merged_reasoning:")
+                || unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX)
+                || unit.key.starts_with("strip:reasoning_age:")
+                || unit.key.starts_with("strip:reasoning_clear:")
+                || unit.key.starts_with("strip:trailing_blank_keep:")
+                || unit.key.starts_with("strip:trailing_blank_strip:")
+                || unit
+                    .key
+                    .strip_prefix("strip:")
+                    .and_then(|rest| rest.split_once(':'))
+                    .is_some_and(|(_, target)| {
+                        block_counts.contains_key(target) || is_live_block(target)
+                    })
+        })
+        .cloned()
+        .collect()
+}
+
+/// The id-set form of [`surviving_strip_units`] before it stopped formatting every live
+/// block id; the reference its equivalence test compares against.
+#[cfg(test)]
+fn surviving_strip_units_reference(core: &CoreState, req: &TransformRequest) -> Vec<FrozenUnit> {
     let live_mids: HashSet<&str> = req
         .messages
         .iter()
@@ -18260,7 +18398,7 @@ pub(crate) mod tests {
     }
     use serde_json::{json, Value};
 
-    fn store(dir: &std::path::Path) -> McStore {
+    pub(crate) fn store(dir: &std::path::Path) -> McStore {
         McStore::open_for_test(&StorageDescriptor {
             module_id: "magic-context-test".to_string(),
             storage_namespace: "mc_cache".to_string(),
@@ -18954,7 +19092,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
+    pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
         CkIngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -20153,7 +20291,11 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+    pub(crate) fn req(
+        session: &str,
+        cfg: &str,
+        messages: Vec<CkIngressMessage>,
+    ) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
             effective_execute_threshold: None,
@@ -20360,7 +20502,7 @@ pub(crate) mod tests {
         request
     }
 
-    fn memory_input<'a>(
+    pub(crate) fn memory_input<'a>(
         project_path: &'a str,
         category: &'a str,
         content: &'a str,
@@ -20383,7 +20525,7 @@ pub(crate) mod tests {
     /// A producer context over a throwaway project dir (no docs on disk → empty docs
     /// block). `now_ms` is FIXED per test (never wall-clock) so the frozen expiry cutoff
     /// is deterministic.
-    fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
+    pub(crate) fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
             project_path: project,
             note_project_path: project,
