@@ -118,11 +118,11 @@ On the real host, the input of run N's context pass was a subset of run N's `age
 
 1. **Attribute a late `agent_end`.** `endBelongsToEarlierRun` keeps the operation when the latest pass has not been dispatched yet and either:
    * the end says `willContinue`, so a continuation follows; or
-   * the pass's input holds a message (role + timestamp) that the ended run never had.
+   * the pass's input, snapshotted before its handler ran, holds a message (role + timestamp) that the ended run never had. Section 6 explains why the snapshot is needed.
 
    Otherwise the end invalidates the receipt as before: a dispatched pass, or an undispatched pass whose input is all part of the ended run.
 
-   Per-session `agent_start`/`agent_end` counts decide whether the kept operation is marked unstarted. When it is, the late start of its own run adopts it, using the existing issue 663 adoption rule.
+   Per-session `agent_start`/`agent_end` counts decide whether the kept operation is marked unstarted. The counts are clamped so ends never exceed starts, and `clearPiContextReceipt` resets them (section 6). When it is, the late start of its own run adopts it, using the existing issue 663 adoption rule.
 2. **The fence judges operation state only.** It no longer calls the pass's `assertOwner()`, which turned an unattributed end, or a generation claimed by a stale pass, into a "superseded" refusal. A replaced pass is never read at the fence. The fence still refuses, visibly as before, when:
    * no pass ran;
    * the latest pass is unfinished, including past its outcome deadline;
@@ -228,3 +228,107 @@ MC667_PLUGIN=$PWD/packages/pi-plugin/.cache/issue-667/npm-0.48.0/dist/index.js \
   bun docs/reports/probes/issue-667/host.ts late-end --full-plugin --baseline
 # MC667_HOST=18.8.6 selects .cache/issue-667/host-18.8.6.
 ```
+
+## 6. Review follow-up
+
+The independent review is in `docs/reports/issue-667-review.md`. It found the reported bug fixed on both OMP versions, and no adversarial ordering got an unmanaged request through. This section covers its two code findings.
+
+### F1: attribute an end against the input as it was before the handler ran
+
+**Problem.** `endBelongsToEarlierRun` read the stored context event's messages when an `agent_end` arrived. By then the real handler had already rewritten that array in place: it prepends the m0/m1 history heads stamped `baseTimestamp - 2` and `- 1`, and it inserts todo and system entries. OMP's `agent_end` never contains those messages.
+
+So in production every undispatched pass looked like it belonged to a later run. A run that ended before its request was sent kept its receipt, and the next run's `agent_start` adopted it.
+
+**Fix** (`pi-context-refusal.ts`):
+
+* Inside the hook's `try`, before the handler is called, the hook snapshots the input's `role:timestamp` keys into `Operation.inputKeys`. It does this only for OMP's main passes.
+* The snapshot catches its own read errors. An unreadable input leaves no keys, so the end applies, and the existing refusal path for a throwing `messages` getter is unchanged.
+* The attribution compares the end against that snapshot.
+
+**Evidence.**
+
+* **Unit.** The review's `a run that ends before its request goes out invalidates its receipt even when the pass rewrote its input in place` is now a plain `test` and passes.
+* **Real hosts.** `docs/reports/probes/issue-667-review/host.ts abort-before-dispatch --full-plugin` was run on OMP 18.7.0 and 18.8.6 against this build. Run 1's own `agent_end` no longer logs `agent_end attributed to an earlier run; keeping the latest context pass`, as it did in the review's runs. Because the end now ends the operation, run 1's queued served capture is discarded (`DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission`). Run 2 then sends one managed request with no refusal. The guard-bundle runs, whose handler does not rewrite in place, behave the same as before.
+
+  [`issue-667-followup-host-receipts.json`](issue-667-followup-host-receipts.json) holds these and the other reruns: PIDs, roots, request markers, refusals, fence log lines, event order, and 15 distinct `.db` paths per run, all under the run's throwaway root.
+
+### F3: lifecycle counts survive an unmatched end and are reset with the receipts
+
+* On `agent_end`, `ends` is clamped to `starts`. An end without a delivered start (the extension loaded mid-run, or counts reset by cache cleanup) can therefore no longer leave `ends` permanently ahead. Without the clamp, every later kept pass would look unstarted, and a new run's `agent_start` could adopt it.
+* `clearPiContextReceipt` now clears the per-session counts together with the receipts.
+
+### F2: defended lines
+
+The review's five tests are kept. With F1 fixed, the input rule also attributes a dispatched pass's own end, so the review's "dispatched pass rewrote its input" test no longer needs the `dispatched` check. That made R1 (`|| operation.dispatched`) and R3 (`active.dispatched = true`) undefended again. A new test restores that defence: `a dispatched pass's own run end invalidates its receipt even when OMP rewrote the run's messages`. In it, OMP compacts the run's state before ending, so the end no longer holds the pass's input.
+
+### Mutation controls
+
+Each control staged the live file, applied the change (non-empty `git diff --stat`), ran both issue 667 test files, restored with `git checkout -- <path> && touch <path>`, and confirmed an empty diff. Every test not listed under Red stayed green.
+
+| Control | Red |
+|---|---|
+| F1-a no input snapshot | worker 1, worker 3; review "kept pass whose own start was delivered", "end without a delivered start", "clearing … resets its lifecycle counts" |
+| F1-b any undispatched pass counts as a later run (the pre-fix production behaviour) | worker 4 ("a run's own end still invalidates its receipt"); review "a run that ends before its request goes out … rewrote its input in place" |
+| F3-a no clamp (`ends++`) | review "an agent_end without a delivered start does not make later kept passes adoptable" |
+| F3-b no reset in `clearPiContextReceipt` | review "clearing a session's receipt also resets its lifecycle counts" |
+| R1 drop `\|\| operation.dispatched` | review "a dispatched pass's own run end invalidates its receipt even when OMP rewrote the run's messages" |
+| R2 always mark kept passes unstarted | review "kept continuation pass …", "kept pass whose own start was delivered …", "end without a delivered start …" |
+| R3 never record dispatch | review "a dispatched pass's own run end invalidates its receipt even when OMP rewrote the run's messages" |
+
+### Reruns after the follow-up (this build; OMP 18.7.0 and 18.8.6; throwaway roots; `lsof` checks passed)
+
+**Issue 667 review probes**:
+
+| Mode | Build | Requests | Refusals | Notes |
+|---|---|---|---|---|
+| `abort-before-dispatch` | guard and full plugin, both hosts | 1 | 0 | The full plugin's own end now ends the operation (above) |
+| `late-start-end` | guard and full plugin, both hosts | 2 | 0 | The previous run's late end is still attributed and kept |
+| `start-before-end` | guard and full plugin, both hosts | 1 | 1 | The known `no context pass ran for this operation` residual |
+
+**Issue 667 worker probes**:
+
+| Mode | Build and hosts | Requests | Refusals |
+|---|---|---|---|
+| `late-end` | guard and full plugin, both hosts | 2 | 0 |
+| `retry` (`MC667_FAILS=11`) | 18.7.0 | 12 | 0 |
+| `slow` | 18.7.0 | 1 | 1, at `elapsed=25007ms` |
+
+Every request carried the managed result.
+
+**Issue 641** (OMP 18.8.6, `--fixed`):
+
+| Probe | Result |
+|---|---|
+| `fast` | 1 request |
+| `slow` | 0 requests |
+| `outcome` | 0 requests; 4 ms fallback; handler 25,289 ms |
+| `ephemeral` | 2 requests |
+
+**Issue 640 task-child writer holds** (`docs/reports/probes/issue-641/subagent.ts`; each managed child request arrived only after the writer released):
+
+| Hold | First child request after the lock |
+|---|---|
+| 2.2 s | 2,961 ms |
+| 10 s | 10,845 ms |
+| 60 s | 60,734 ms |
+
+**Issue 663** (OMP 18.8.6). All counts match the expected values:
+
+| Probe | Requests |
+|---|---|
+| `main` | 1 |
+| `retry` | 2 |
+| `late-start` | 1 |
+| `skip` | 0 |
+| `no-result` | 0 |
+| `capture` | 1 |
+| `advisor` | 2 |
+| `side` | 2 |
+| `steer` | 2 |
+| `task --full-plugin` | 4 |
+
+### Gates (Linux, `linux,8c`; Bun 1.4.2, TypeScript 5.9.3, Biome 2.5.1; throwaway HOME/XDG/storage roots, `OPENCODE_DB` unset)
+
+* `bun run typecheck` in `packages/pi-plugin` exits 0. `tsc --noEmit` on both probe projects (`issue-667`, `issue-667-review`) exits 0.
+* `bun run lint` checks 309 files: 0 errors, 49 existing warnings.
+* The full Pi suite, run with the command-local `safe.directory` override, gives **2,041 pass / 28 skip / 0 fail** across 2,069 tests and 209 files, with 156,117 assertions.
