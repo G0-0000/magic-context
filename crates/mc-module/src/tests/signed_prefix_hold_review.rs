@@ -752,13 +752,11 @@ fn review_check_idle_expiry_keeps_head(label: &str, response_after_fold: bool) {
 }
 
 #[test]
-#[ignore = "review witness: an idle-expired pass re-renders m0/m1 under kept signed thinking"]
 fn review_witness_idle_expiry_fold_rewrites_head_under_kept_signed_thinking() {
     review_check_idle_expiry_keeps_head("witness-idle-fold", true);
 }
 
 #[test]
-#[ignore = "review witness: an idle-expired resend re-renders m0/m1 under kept signed thinking"]
 fn review_witness_idle_expiry_resend_rewrites_head_under_kept_signed_thinking() {
     review_check_idle_expiry_keeps_head("witness-idle-resend", false);
 }
@@ -768,7 +766,6 @@ fn review_witness_idle_expiry_resend_rewrites_head_under_kept_signed_thinking() 
 /// open turn (`freezeM0M1` in `transform-postprocess-phase.ts` has no force exception): at
 /// 85% it applies queued drops but does not fold or refresh m0/m1.
 #[test]
-#[ignore = "review witness: a force-band pass re-renders m0/m1 under kept signed thinking"]
 fn review_witness_force_band_rewrites_head_under_kept_signed_thinking() {
     let (mut sim, held) = review_open_turn_with_publication("witness-force");
     let kept = format!("think {}", sim.ordinal - 1);
@@ -841,7 +838,6 @@ fn review_discarded_sections_hard_carries_a_drop_in_a_signed_turn() {
 /// sections) is not among them. So the HARD still runs but applies none of the queued
 /// drops, which then cost a second rewrite later.
 #[test]
-#[ignore = "review witness: a discarded-sections HARD on a scheduler Defer applies no queued drop"]
 fn review_witness_discarded_sections_hard_drops_nothing_on_a_defer_pass() {
     let (_, plain) = review_discarded_sections_pending("discard-defer-plain", false, 20_000);
     let (_, signed) = review_discarded_sections_pending("discard-defer-signed", true, 20_000);
@@ -856,7 +852,6 @@ fn review_witness_discarded_sections_hard_drops_nothing_on_a_defer_pass() {
 /// the hold clears. So a render-identity change inside a held turn still rewrites the
 /// prefix, and the queued drop is not applied on that pass.
 #[test]
-#[ignore = "review witness: a render-identity change busts a held pass and carries nothing"]
 fn review_witness_render_config_change_busts_a_held_pass() {
     let mut sim = ReviewSession::new(REVIEW_BOUND, true, false, "witness-render-config");
     sim.run(false).unwrap();
@@ -957,7 +952,7 @@ fn review_subagent_hold_is_released_by_the_force_band_and_idle_expiry() {
 }
 
 /// For a subagent the hold is lifted by an idle-expired cache or by discarded cache
-/// sections (subagents ignore lineage `force_hard`, so `prefix_rewrite_unavoidable` names
+/// sections (subagents ignore lineage `force_hard`, so `signed_drains_released` names
 /// `cache_sections_discarded` itself). When sections are discarded on a pass the scheduler
 /// executes (66% usage), the forced HARD also applies the drop queued after the last signed
 /// thinking, instead of leaving it for a turn end the subagent never reaches.

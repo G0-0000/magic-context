@@ -5167,54 +5167,68 @@ fn apply_once(
         false
     };
     // Signed-prefix hold. An unfinished Anthropic thinking turn on a prefix-bound model signs
-    // its thinking against the request prefix, and the provider caches that prefix between the
-    // turn's tool steps. Rewriting the prefix now throws that cache away for little gain, and
-    // the next real user message pays for a second rewrite anyway. So below the force band
-    // (usage at or above `force_materialize_percentage`, 85% for a 65% execute threshold) and
-    // outside the 95% emergency (`PassDecision::Emergency95`), such a pass is held: every input
-    // that could pay for a rewrite is vetoed here, before `classify`, so the plan is a Defer
-    // (the pass that replays the previously served bytes unchanged). Queued work (flushes,
-    // agent drops, folds, HARD markers) stays persisted for the next pass that is not held.
-    // This is the single permission every mutation path reads (reductions, m1 refresh,
-    // cleanup, todo injection); none of them is vetoed separately.
+    // its thinking against the request prefix: a signed thinking block stays valid only while
+    // everything sent before it is unchanged (docs/reports/anthropic-thinking-binding.md),
+    // and re-rendering the synthetic m0/m1 head invalidates every signed block after it
+    // (HTTP 400 on strict-binding accounts). The provider also caches that prefix between the
+    // turn's tool steps, and the next real user message pays for a rewrite anyway. So inside
+    // such a turn two things are held, each decided once here, before `classify`:
+    // - The head freeze (`signed_head_frozen`): m0/m1 replay byte for byte for the whole open
+    //   turn, whatever the pressure or the cache's age. Every input that would re-render them
+    //   (HARD fold triggers, a render-identity change, a reconcile HARD, an m1 delta or
+    //   refresh) waits for the turn to end. Only a head that cannot be replayed at all is
+    //   rebuilt: no cached m0/m1 pair, a missing m1, a lineage descent or discarded cache
+    //   sections (both set lineage force_hard), a bootstrap-seed fold or a legacy baseline.
+    // - The drain hold (`signed_prefix_hold`): below the force band (usage at or above
+    //   `force_materialize_percentage`, 85% for a 65% execute threshold), outside the 95%
+    //   emergency (`PassDecision::Emergency95`), on a warm cache and with a replayable head,
+    //   nothing pays for a rewrite either: queued drops, selected reductions and flushes stay
+    //   persisted and the plan is a Defer (the previously served bytes, unchanged). Where the
+    //   drain hold is lifted, queued work is applied only to blocks after the turn's kept
+    //   signed thinking (`active_thinking_prefix_edit_ids`), and with the head still frozen.
+    // Each is the single permission its mutation paths read; none is vetoed separately.
     let active_thinking_turn = active_anthropic_thinking_turn(req);
     let protected_signed_prefix =
         active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
-    // Passes that rewrite the prefix whatever is queued: there is no cached m0/m1 pair to
-    // replay (first render, missing m1), a new host conversation epoch or discarded cache
-    // sections (both set lineage force_hard), or the provider's cache already expired.
-    // Holding the queued work on such a pass would only buy a second rewrite later, so these
-    // passes are never held and the queued work is applied on them. Blocks before the turn's
-    // kept signed thinking stay untouched either way (`active_thinking_prefix_edit_ids`).
-    // Subagents never fold or render m0/m1 and ignore a lineage descent, so only an expired
-    // cache or discarded sections rewrite a subagent's prefix.
-    let prefix_rewrite_unavoidable = scheduler_outcome.idle_ttl_fired
-        || cache_sections_discarded
+    // The rebuilds an unprotected session also counts as independent (see
+    // `independent_rebuild`): no cached m0/m1 pair, a missing m1, or lineage force_hard (a new
+    // host conversation epoch, or discarded cache sections). Subagents never render m0/m1 and
+    // ignore a lineage descent.
+    let head_rebuild_forced = !req.is_subagent
+        && (!loaded.meta.initialized
+            || cached_m1_missing(&loaded.core)
+            || lineage_state.force_hard);
+    // `classify` also makes bootstrap-seed and legacy-baseline passes HARD whatever is queued:
+    // neither has an m0/m1 pair matching the stored coverage to replay.
+    let head_replay_impossible = head_rebuild_forced
         || (!req.is_subagent
-            && (!loaded.meta.initialized
-                || cached_m1_missing(&loaded.core)
-                || lineage_state.force_hard));
-    let signed_prefix_hold = protected_signed_prefix
-        && !force_band_active
-        && scheduler_outcome.pass != scheduler::PassDecision::Emergency95
-        && !prefix_rewrite_unavoidable
-        // `classify` makes bootstrap-seed and legacy-baseline passes HARD (a full m0/m1
-        // rebuild) whatever is queued, so they are not held either.
-        && !loaded.meta.bootstrap_seed_fold_pending
-        && !is_legacy_baseline(&loaded.core);
-    // A held pass drops this pass's boundary-divergence recut and keeps
+            && (loaded.meta.bootstrap_seed_fold_pending || is_legacy_baseline(&loaded.core)));
+    let signed_head_frozen = protected_signed_prefix && !head_replay_impossible;
+    // An expired provider cache or discarded cache sections make this pass a full cache write
+    // anyway, so queued work may ride it; for a primary the head still replays unchanged.
+    let signed_drains_released = force_band_active
+        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
+        || scheduler_outcome.idle_ttl_fired
+        || cache_sections_discarded
+        || head_replay_impossible;
+    let signed_prefix_hold = protected_signed_prefix && !signed_drains_released;
+    // The inputs below would re-render m0/m1, so a frozen head vetoes them; each is derived
+    // from persisted state and fires on the first pass after the turn.
+    let render_config_changed = render_config_changed && !signed_head_frozen;
+    let reconcile_hard_due = reconcile_hard_due && !signed_head_frozen;
+    // A frozen head drops this pass's boundary-divergence recut and keeps
     // boundary_divergence_pending_count instead of resetting it, so the recut still fires on
-    // the next pass that is not held.
-    let boundary_divergence_recut = boundary_divergence_recut.filter(|_| !signed_prefix_hold);
-    if recut_resets_pending_count && !signed_prefix_hold {
+    // the next pass whose head is not frozen.
+    let boundary_divergence_recut = boundary_divergence_recut.filter(|_| !signed_head_frozen);
+    if recut_resets_pending_count && !signed_head_frozen {
         boundary_divergence_pending_count = 0;
     }
-    // pre_snapshot_inputs_changed records every input it sees, so a held pass must not call
-    // it: the change would be marked seen without the HARD fold it asks for.
-    let pre_snapshot_inputs_changed = !signed_prefix_hold
+    // pre_snapshot_inputs_changed records every input it sees, so a pass with a frozen head
+    // must not call it: the change would be marked seen without the HARD fold it asks for.
+    let pre_snapshot_inputs_changed = !signed_head_frozen
         && req.protected_tokens_effective.is_none()
         && loaded.meta.protected_tokens_effective.is_none()
         && crate::protection_window::pre_snapshot_inputs_changed(
@@ -5244,10 +5258,10 @@ fn apply_once(
     // Reconcile (the boundary left the live array after a revert) and lineage descent (a new
     // host conversation epoch) are separate HARD inputs below; both serve a different
     // message array than the cached one, so they keep pricing too.
-    // A signed-prefix hold requests none of the triggers listed in this expression. Each one
+    // A frozen signed head requests none of the triggers listed in this expression. Each one
     // is derived from persisted state (or, for pre_snapshot_inputs_changed, was not consumed
-    // above), so it fires on the next pass that is not held.
-    let hard_fold_requested = !signed_prefix_hold
+    // above), so it fires on the first pass after the turn.
+    let hard_fold_requested = !signed_head_frozen
         && (pre_snapshot_inputs_changed
             || first_fold_due
             || boundary_divergence_recut.is_some()
@@ -5342,10 +5356,13 @@ fn apply_once(
         || (loaded.meta.soft_refresh_pending && !signed_prefix_hold)
         || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired)
         // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
-        // that rewrites the prefix anyway is a rebuild like any other: queued work is applied
-        // on it, and blocks before the kept signed thinking stay untouched
-        // (`active_thinking_prefix_edit_ids`).
-        || (!req.is_subagent && protected_signed_prefix && prefix_rewrite_unavoidable);
+        // whose head cannot be replayed, or whose provider cache already expired, is a full
+        // cache write like any other: queued work is applied on it, to blocks after the kept
+        // signed thinking only (`active_thinking_prefix_edit_ids`). On the expired pass the
+        // head itself still replays (`signed_head_frozen`).
+        || (protected_signed_prefix
+            && (head_rebuild_forced
+                || (!req.is_subagent && scheduler_outcome.idle_ttl_fired)));
     // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
     // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
     // held subagent pass also replays its previous bytes.
@@ -5396,7 +5413,10 @@ fn apply_once(
                 || render_config_changed
                 || reconcile_hard_due
                 || hard_fold_prices_mutations
-                || cached_m1_missing_due,
+                || cached_m1_missing_due
+                // A lineage descent or discarded cache sections force a HARD even when the
+                // scheduler defers; queued work is selected so it lands in that bust.
+                || lineage_state.force_hard,
         );
     // Keep selection deferred when the producer gate blocks it.
     // An execute selection class still needs the separate ride permission above
@@ -5647,9 +5667,14 @@ fn apply_once(
         render_config_changed,
         hard_fold_requested,
         boundary_present,
-        reconcile_pending: loaded.core.reconcile_pending,
-        m1_revision_changed: current_m1_digest != applied_m1_revision
-            || loaded.meta.soft_refresh_pending
+        // A frozen signed head never takes a reconcile HARD (rule 5); the pass defers and
+        // keeps the flag (`step_defer` with the boundary absent) until the turn ends.
+        reconcile_pending: loaded.core.reconcile_pending
+            && !(signed_head_frozen && !boundary_present),
+        // A frozen signed head replays m1 too: its delta and an explicit refresh wait. The
+        // synthetic todo pair sits after the latest assistant, outside the head.
+        m1_revision_changed: (!signed_head_frozen
+            && (current_m1_digest != applied_m1_revision || loaded.meta.soft_refresh_pending))
             || todo_injection_pending,
         reductions_pending: reclaim_pending_now,
         // Todo state is deferred work, not an independent bust. It may join
@@ -5675,7 +5700,9 @@ fn apply_once(
         // Spend that one intentional rewrite now, so old blocks do not acquire tags
         // piecemeal during later defers. Ordinary late mints still wait for an
         // independent Soft pass selected by the scheduler.
-        plan = if surface_transition || subagent_execute_permitted {
+        // A held subagent's transition waits with everything else until the hold lifts:
+        // tagging old blocks would edit blocks before its kept signed thinking.
+        plan = if (surface_transition && !signed_prefix_hold) || subagent_execute_permitted {
             PassPlan::Soft
         } else {
             PassPlan::Defer
@@ -5699,9 +5726,9 @@ fn apply_once(
         ttl_expired: scheduler_outcome.idle_ttl_fired,
         coverage_fold_due: system_absorb_hard_due,
         reconcile_hard_due,
-        coverage_delta: compartment_seq_changed_since_meta,
-        m1_delta: current_m1_digest != applied_m1_revision,
-        explicit_flush: loaded.meta.soft_refresh_pending,
+        coverage_delta: compartment_seq_changed_since_meta && !signed_head_frozen,
+        m1_delta: current_m1_digest != applied_m1_revision && !signed_head_frozen,
+        explicit_flush: loaded.meta.soft_refresh_pending && !signed_head_frozen,
         reductions_pending: reclaim_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
@@ -5836,7 +5863,11 @@ fn apply_once(
     );
     timings.ingress_meta = elapsed_ms(ingress_meta_started_at);
     meta.cc_u1_active = cc_u1_active;
-    meta.tagging_surface_active = tagging_surface_requested;
+    // A held subagent keeps its tag-surface transition pending (see the plan override above),
+    // so the release pass still sees it and spends it as one rewrite.
+    if !(req.is_subagent && signed_prefix_hold && surface_transition) {
+        meta.tagging_surface_active = tagging_surface_requested;
+    }
     if cc_u1_active {
         meta.last_serializer_profile = req.serializer_profile.clone();
     }
@@ -6058,7 +6089,8 @@ fn apply_once(
             .is_none_or(|date| *date == loaded.meta.guidance_date)
         && !releases_native_reasoning_keep
         && !applies_held_system_strip;
-    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved {
+    // A frozen signed head did not refresh m1, so an explicit flush stays pending for it.
+    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved && !signed_head_frozen {
         meta.soft_refresh_pending = false;
     }
     if is_bust_pass {
@@ -6431,6 +6463,29 @@ fn apply_once(
 
                 meta.project_memory_epoch_pending = false;
                 meta.m1_pending_since_ms = None;
+            }
+            PassPlan::Soft if signed_head_frozen => {
+                // A frozen signed head: m0/m1 replay unchanged (no m1 recompose, no coverage
+                // advance, no pressure refold), and only the tail units this pass priced are
+                // added. The m1 delta and coverage stay pending for the first pass after the
+                // turn.
+                let mut rendered = new_reduction_units(
+                    &core,
+                    &selected_reductions,
+                    &live,
+                    loaded.meta.coverage_ordinal,
+                    suppress_bootstrap_reduction_tag_overlay,
+                );
+                rendered.extend(new_strip_units.clone());
+                rendered.extend(new_caveman_units.clone());
+                core.step(PassInput {
+                    proposed: Some(mc_core::Action::Soft),
+                    boundary_present: boundary_token,
+                    rendered_units: rendered,
+                    new_boundary_id: None,
+                    queued: Vec::new(),
+                    run_started: false,
+                });
             }
             PassPlan::Soft => {
                 meta.memory_disabled = !ctx.memory_enabled;

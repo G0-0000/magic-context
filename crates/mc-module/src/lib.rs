@@ -27247,6 +27247,19 @@ mod tests {
             json!({"info":{"id":"a0","role":"assistant"},"parts":[{"type":"text","text":"first answer"}]}),
         ];
         for pass in 0..5 {
+            if pass >= 3 {
+                // The fixture is one open Anthropic turn with signed thinking on a
+                // prefix-bound model, so the render-identity change below waits for the turn
+                // to end (the m0/m1 head is frozen while that thinking is kept). A missing m1
+                // cannot be replayed, so it prices these passes as HARDs instead.
+                for store in [&store, &reference_store] {
+                    let mut loaded = store.load("ses").unwrap();
+                    loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+                    store
+                        .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                }
+            }
             if pass == 4 {
                 for (store, project) in [(&store, &project), (&reference_store, &reference_project)]
                 {
@@ -27473,6 +27486,13 @@ mod tests {
             .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
         let mut priced_request = make_request(&native);
         priced_request["render_config"] = json!("independent-priced-config-change");
+        // A render-identity change inside the open signed turn waits for the turn to end, so a
+        // missing m1 (which cannot be replayed) prices this pass instead.
+        let mut loaded = store.load("ses").unwrap();
+        loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
         let priced = call_transform_request(&handler, priced_request).await;
         assert_eq!(priced["action"], "HARD");
         // step-0 belongs to the active Anthropic turn (no real user message follows
@@ -27574,6 +27594,13 @@ mod tests {
         }
         let mut priced_request = make_request(&native, "claude-fable-5-1");
         priced_request["render_config"] = json!("independent-priced-config-change");
+        // A render-identity change inside the open signed turn waits for the turn to end, so a
+        // missing m1 (which cannot be replayed) prices this pass instead.
+        let mut loaded = store.load("ses").unwrap();
+        loaded.core.frozen_units.retain(|unit| unit.key != "m1");
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
         let priced = call_transform_request(&handler, priced_request).await;
         assert_eq!(priced["action"], "HARD");
         let target = priced["native_messages"]

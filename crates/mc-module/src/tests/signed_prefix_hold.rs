@@ -232,10 +232,20 @@ fn signed_prefix_hold_keeps_subagent_execute_drops_pending() {
     assert!(signed_hold_pending(&s, session).is_empty());
 }
 
-/// Pressure relief inside the held turn. The force episode and the 95% emergency let queued
-/// drops ride on their own, so the held-back inputs are checked separately: a pending
-/// project-memory marker must get its HARD here instead of waiting for the next user turn.
-/// The late drop lands; the early one, before the kept signed thinking, stays withheld.
+/// The synthetic m0/m1 head of a serve (and any synthetic todo pair).
+fn signed_hold_head(response: &TransformResponse) -> Vec<Vec<u8>> {
+    response
+        .messages()
+        .iter()
+        .filter(|message| message.meta.synthetic)
+        .map(|message| serde_json::to_vec(message).unwrap())
+        .collect()
+}
+
+/// Pressure relief inside the open turn. The late drop lands and the serve shrinks; the
+/// early one, before the kept signed thinking, stays withheld. The m0/m1 head replays byte
+/// for byte while that signed thinking is still served, so a pending project-memory marker
+/// (a HARD fold trigger) waits for the next user turn, which then takes it.
 fn check_signed_hold_relief(session: &str, used: u64, recovery_armed: bool) {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
@@ -253,11 +263,25 @@ fn check_signed_hold_relief(session: &str, used: u64, recovery_armed: bool) {
         relieved.action
     );
     assert_eq!(
-        relieved.action, "HARD",
-        "{session}: the marker HARD is not held"
+        relieved.action, "SOFT",
+        "{session}: {:?}",
+        relieved.materialize_reason
+    );
+    assert_eq!(signed_hold_head(&relieved), signed_hold_head(&baseline));
+    assert!(
+        signed_hold_bytes(&relieved).len() < signed_hold_bytes(&baseline).len(),
+        "{session}: the drop shrinks the serve"
+    );
+    assert!(s.load(session).unwrap().meta.project_memory_epoch_pending);
+
+    request.emergency_recovery_armed = false;
+    signed_hold_next_user(&mut request);
+    let released = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(
+        released.action, "HARD",
+        "{session}: the marker lands after the turn"
     );
     assert!(!s.load(session).unwrap().meta.project_memory_epoch_pending);
-    assert_ne!(signed_hold_bytes(&relieved), signed_hold_bytes(&baseline));
 }
 
 /// 86% is at or above the force band (85% for the 65% execute threshold).
@@ -277,6 +301,36 @@ fn signed_prefix_hold_yields_to_the_95_percent_emergency() {
 #[test]
 fn signed_prefix_hold_yields_to_an_armed_overflow_recovery() {
     check_signed_hold_relief("signed-hold-recovery", 30_000, true);
+}
+
+/// The same armed recovery for a subagent, whose only permission to apply a queued drop is
+/// a scheduler decision that the hold would otherwise withhold.
+#[test]
+fn signed_prefix_hold_subagent_yields_to_an_armed_overflow_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    let session = "signed-hold-subagent-recovery";
+    signed_hold_compartments(&s, session);
+    let subagent = |used: u64, armed: bool| {
+        let mut request = signed_hold_request(session, used);
+        request.is_subagent = true;
+        request.emergency_recovery_armed = armed;
+        request
+    };
+    transform(&s, &subagent(20_000, false), &ctx).unwrap();
+    s.append_pending_agent_drops(session, &[SIGNED_HOLD_LATE_TARGET.to_string()], 1)
+        .unwrap();
+    let held = transform(&s, &subagent(30_000, false), &ctx).unwrap();
+    assert_eq!(held.action, "SOFT+");
+    assert_eq!(signed_hold_pending(&s, session).len(), 1);
+    let relieved = transform(&s, &subagent(30_000, true), &ctx).unwrap();
+    assert!(
+        signed_hold_pending(&s, session).is_empty(),
+        "{} {:?}",
+        relieved.action,
+        relieved.materialize_reason
+    );
 }
 
 /// A pass that must rewrite the prefix anyway also applies the queued drops, except the one
@@ -377,13 +431,31 @@ fn signed_prefix_hold_lineage_descent_carries_queued_drops() {
     );
 }
 
+/// An expired provider cache does not let the head change: the cached m0/m1 pair can still
+/// be replayed, and re-rendering it would invalidate the turn's kept signed thinking. The
+/// pass is a full cache write anyway, so the late drop rides it; the head replays unchanged,
+/// and the early drop (before the kept signed thinking) waits.
 #[test]
-fn signed_prefix_hold_idle_expiry_carries_queued_drops() {
-    check_signed_hold_rides_unavoidable_rewrite("signed-hold-idle", |_, ctx| {
-        // The last response landed well over the 5m cache TTL ago.
-        ctx.observed_last_response_at_ms = Some(1_000);
-        ctx.now_ms = 1_000 + 10 * 60_000;
-    });
+fn signed_prefix_hold_idle_expiry_replays_the_head_and_carries_queued_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let session = "signed-hold-idle";
+    let baseline = signed_hold_baseline(&s, session, 20_000);
+    signed_hold_queue_both(&s, session);
+    let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    // The last response landed well over the 5m cache TTL ago.
+    ctx.observed_last_response_at_ms = Some(1_000);
+    ctx.now_ms = 1_000 + 10 * 60_000;
+    let expired = transform(&s, &signed_hold_request(session, 20_000), &ctx).unwrap();
+    assert_eq!(
+        signed_hold_pending(&s, session),
+        BTreeSet::from([SIGNED_HOLD_EARLY_TARGET.to_string()]),
+        "the late drop rides the expired pass ({} {:?})",
+        expired.action,
+        expired.materialize_reason
+    );
+    assert_eq!(expired.action, "SOFT");
+    assert_eq!(signed_hold_head(&expired), signed_hold_head(&baseline));
 }
 
 #[test]
@@ -562,4 +634,87 @@ fn signed_prefix_hold_leaves_unheld_sessions_byte_identical() {
         actual[0][..64]
     );
     assert_eq!(actual, golden, "digests: {actual:#?}");
+}
+
+/// A render-identity change inside the open turn would re-render m0/m1 under the kept signed
+/// thinking, so it waits like any other head rebuild; the first pass after the turn takes it
+/// as a HARD and carries the queued work.
+#[test]
+fn signed_prefix_hold_render_identity_change_waits_for_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    let session = "signed-hold-render-identity";
+    let baseline = signed_hold_baseline(&s, session, 66_000);
+    signed_hold_queue_both(&s, session);
+    let mut request = signed_hold_request(session, 66_000);
+    request.render_config = "cfg1".to_string();
+    let held = transform(&s, &request, &ctx).unwrap();
+    assert_signed_hold_deferred(&held, &baseline, &s, session, 2);
+
+    signed_hold_next_user(&mut request);
+    let released = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(released.action, "HARD");
+    assert_eq!(released.materialize_reason.as_deref(), Some("epoch_change"));
+    assert!(signed_hold_pending(&s, session).is_empty());
+}
+
+/// A reconcile pending with its boundary absent from the live array (a revert removed it)
+/// asks for a reconcile HARD (classify rule 5). Inside the open turn that would re-render
+/// m0/m1 under the kept signed thinking, so the pass defers and keeps the reconcile flag; the
+/// first pass after the turn takes the HARD and carries the queued work.
+#[test]
+fn signed_prefix_hold_reconcile_hard_waits_for_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    let session = "signed-hold-reconcile";
+    let baseline = signed_hold_baseline(&s, session, 66_000);
+    signed_hold_queue_both(&s, session);
+    // Stand in for the revert: the stored boundary names a block no longer in the request.
+    let mut loaded = s.load(session).unwrap();
+    loaded.core.boundary_id = "reverted#0".to_string();
+    loaded.core.reconcile_pending = true;
+    s.commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+        .unwrap();
+    let mut request = signed_hold_request(session, 66_000);
+    for _ in 0..2 {
+        let held = transform(&s, &request, &ctx).unwrap();
+        assert_signed_hold_deferred(&held, &baseline, &s, session, 2);
+        assert!(s.load(session).unwrap().core.reconcile_pending);
+    }
+
+    signed_hold_next_user(&mut request);
+    let released = transform(&s, &request, &ctx).unwrap();
+    // The stand-in boundary also reads as a boundary divergence, whose recut names this HARD.
+    assert_eq!(released.action, "HARD", "{:?}", released.materialize_reason);
+    assert!(signed_hold_pending(&s, session).is_empty());
+}
+
+/// Turning the tag surface on would tag a held subagent's old blocks, before its kept signed
+/// thinking, so the transition waits until the hold lifts and is then spent as one rewrite.
+#[test]
+fn signed_prefix_hold_subagent_tag_surface_transition_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    let session = "signed-hold-subagent-surface";
+    signed_hold_compartments(&s, session);
+    let subagent = |used: u64, tools: bool| {
+        let mut request = signed_hold_request(session, used);
+        request.is_subagent = true;
+        request.tool_present = tools;
+        request
+    };
+    transform(&s, &subagent(20_000, false), &ctx).unwrap();
+    let baseline = transform(&s, &subagent(66_000, false), &ctx).unwrap();
+    assert_eq!(baseline.action, "SOFT+");
+    for _ in 0..2 {
+        let held = transform(&s, &subagent(66_000, true), &ctx).unwrap();
+        assert_signed_hold_deferred(&held, &baseline, &s, session, 0);
+        assert!(!s.load(session).unwrap().meta.tagging_surface_active);
+    }
+    let released = transform(&s, &subagent(86_000, true), &ctx).unwrap();
+    assert_eq!(released.action, "SOFT");
+    assert!(s.load(session).unwrap().meta.tagging_surface_active);
 }
