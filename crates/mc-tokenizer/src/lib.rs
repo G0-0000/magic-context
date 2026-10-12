@@ -254,8 +254,11 @@ fn count_render_piece(
     count
 }
 
-/// The uncached count of one piece: before a `\n\n## ` heading (`continued`) the
-/// sentinel `#` keeps the whitespace rule's end-of-input lookahead from firing.
+/// The uncached count of one piece. A piece followed by a `\n\n## ` heading
+/// (`continued`) is counted with a sentinel `#` appended, minus that one token, so its
+/// trailing newlines split as they do mid-text: the pre-tokenizer's `\s+(?!\S)` rule
+/// treats whitespace at end of input differently. Piece counts then sum to the
+/// whole text's count.
 fn count_piece(piece: &str, continued: bool) -> usize {
     #[cfg(test)]
     RENDER_PIECE_TOKENIZATIONS.with(|count| count.set(count.get() + 1));

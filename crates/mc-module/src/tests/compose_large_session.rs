@@ -9,8 +9,10 @@
 //!   per-pass stage timings at a chosen scale.
 //! - `large_session_compose_differential` replays a seeded randomized sequence of
 //!   fold, SOFT and defer passes and requires every pass's served m0/m1 bytes to
-//!   match the digests recorded from the implementation before the optimization
-//!   (`testdata/compose-large-session-golden.txt`).
+//!   match the digests in `testdata/compose-large-session-golden.txt`. Those were
+//!   recorded from the composer that re-read compartments and re-tokenized the
+//!   history on every fold; the faster paths must serve exactly the same bytes,
+//!   because any change to m0/m1 busts the provider's cached prefix.
 
 use super::tests::{item, memory_input, pctx, req, store};
 use super::*;
@@ -785,9 +787,9 @@ pub(super) fn differential_run(
 
 /// The served m0/m1 bytes of every pass in four seeded randomized runs (240
 /// randomized passes after each run's materializing pass: folds, SOFT refreshes and
-/// defers over indexed and host-resolved
-/// compartment rows) must equal the digests recorded from the implementation
-/// before the large-session optimizations. Regenerate the file only for an
+/// defers over indexed and host-resolved compartment rows) must equal the digests in
+/// `testdata/compose-large-session-golden.txt`, so a performance change cannot alter
+/// rendered output (see the module comment). Regenerate the file only for an
 /// intentional render change: `MC_COMPOSE_GOLDEN_WRITE=1 cargo test -p mc-module
 /// --lib large_session_compose_differential`.
 #[test]
@@ -866,8 +868,9 @@ fn scrambled_blocks(rng: &mut Rng, count: usize) -> Vec<FlatBlock> {
     blocks
 }
 
-/// The publication-floor walk as it was before it stopped early: tokenize every
-/// non-system block, then walk the per-ordinal totals newest first.
+/// Reference publication-floor walk that never stops early: tokenize every
+/// non-system block, then walk the per-ordinal totals newest first. The tests
+/// compare the early-stopping `protected_tail_floor_ordinal` against it.
 fn protected_tail_floor_ordinal_reference(
     live: &[&FlatBlock],
     context_limit: f64,

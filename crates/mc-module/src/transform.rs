@@ -6418,8 +6418,9 @@ fn apply_once(
                     .frozen_units
                     .iter()
                     .find(|unit| unit.key == "m0")
-                    // Most of m0 is the rendered history, whose paragraphs the fold left
-                    // in the history render cache; the count equals estimate_tokens.
+                    // Most of m0 is rendered history whose paragraphs the last HARD fold's
+                    // compose already counted into the history render cache. This returns
+                    // the same count as estimate_tokens on the payload, mostly from cache.
                     .map(|unit| mc_tokenizer::estimate_history_render_tokens(&unit.frozen_payload))
                     .unwrap_or(0);
                 let m1_has_content = m1.body != M1_PLACEHOLDER;
@@ -9737,7 +9738,8 @@ fn prune_covered_red_units(
 }
 
 /// Each live block id's ordinal, built once per HARD rebuild and shared by the unit
-/// survival checks. A repeated id keeps its last ordinal, as each check's own map did.
+/// survival checks. If an id repeats, the later block's ordinal overwrites the
+/// earlier one, the same result the per-check maps gave.
 fn live_ordinals_by_id<'a>(live: &[&'a FlatBlock]) -> HashMap<&'a str, u64> {
     live.iter()
         .map(|block| (block.id(), block.ordinal()))
