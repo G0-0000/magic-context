@@ -128,6 +128,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
+import { tagIdentityRevisionKey } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
 import {
 	findPiTagIdentityConflict,
 	getPiMessageTagCandidates,
@@ -2880,7 +2881,10 @@ const piToolGuardFallbackStatements = new WeakMap<
 >();
 const piToolGuardCallIds = new WeakMap<
 	ContextDatabase,
-	Map<string, { version: number; ids: Set<string> }>
+	Map<
+		string,
+		{ version: number; identityRevision: string | null; ids: Set<string> }
+	>
 >();
 function fallbackPiToolCallIds(
 	db: ContextDatabase,
@@ -2889,19 +2893,27 @@ function fallbackPiToolCallIds(
 	let statement = piToolGuardVersionStatements.get(db);
 	if (!statement) {
 		statement = db.prepare(
-			"SELECT tags_version AS version FROM session_meta WHERE session_id = ?",
+			`SELECT COALESCE((SELECT tags_version FROM session_meta WHERE session_id = ?), 0) AS version,
+			(SELECT value FROM schema_migrations_meta WHERE key = ?) AS identity_revision`,
 		);
 		piToolGuardVersionStatements.set(db, statement);
 	}
-	const version =
-		(statement.get(sessionId) as { version: number } | undefined)?.version ?? 0;
+	const stamp = statement.get(sessionId, tagIdentityRevisionKey(sessionId)) as
+		| { version: number; identity_revision?: string | null }
+		| undefined;
+	const version = stamp?.version ?? 0;
+	const identityRevision = stamp?.identity_revision ?? null;
 	let sessions = piToolGuardCallIds.get(db);
 	if (!sessions) {
 		sessions = new Map();
 		piToolGuardCallIds.set(db, sessions);
 	}
 	const cached = sessions.get(sessionId);
-	if (cached?.version === version) return cached.ids;
+	if (
+		cached?.version === version &&
+		cached.identityRevision === identityRevision
+	)
+		return cached.ids;
 	let fallbackStatement = piToolGuardFallbackStatements.get(db);
 	if (!fallbackStatement) {
 		fallbackStatement = db.prepare(
@@ -2916,7 +2928,7 @@ function fallbackPiToolCallIds(
 	);
 	if (!sessions.has(sessionId) && sessions.size >= MAX_TRACKED_SESSIONS)
 		sessions.delete(sessions.keys().next().value as string);
-	sessions.set(sessionId, { version, ids });
+	sessions.set(sessionId, { version, identityRevision, ids });
 	return ids;
 }
 

@@ -15,6 +15,7 @@ interface IdentityInput {
 /** Uses LKG's exact detached-field validation; only the changed suffix is indexed. */
 export function createPiFallbackIndex() {
 	const prior: IdentityInput[] = [];
+	let priorHadDuplicateIds = false;
 	const byHeader = new Map<string, Set<IdentityInput>>();
 	const positions = new Map<string, number>();
 	const owners = new Map<string, Set<string>>();
@@ -60,11 +61,16 @@ export function createPiFallbackIndex() {
 				// Unflattenable inputs must never reuse a prior fingerprint.
 				inputs.push({ id, fields: fields ?? [Symbol()] });
 			}
-			let prefix = exactReusablePrefix(inputs, prior);
+			let prefix = priorHadDuplicateIds
+				? 0
+				: exactReusablePrefix(inputs, prior);
 			if (duplicate) {
 				prefix = 0;
 				selected.clear();
 			}
+			// A deleted duplicate may share memberships with a retained prefix row.
+			// Rebuild when leaving that state instead of deleting the survivor's aliases.
+			priorHadDuplicateIds = duplicate;
 			for (let index = 0; index < prefix; index++) {
 				const old = prior[index];
 				if (old && !args.reusable?.has(old.id)) {

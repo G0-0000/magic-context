@@ -106,3 +106,70 @@ Each control used the staged live implementation as its restore point, recorded 
 * Blessing every LKG input as an exact reusable prefix reddened only `LKG own-slot digest reuse stops at a same-id same-length input rewrite`; the append-only digest-reuse control remained green.
 * Rebuilding the fallback index from zero on every pass reddened only `fallback index rebuilds only appended messages at 13,800 entries`; context_edit/reorder/deletion/settlement parity remained green. This proves the append work-bound check is not vacuous.
 * After restoring all five mutations, the focused five-file gate passed **50 tests, 459 assertions**, with Pi typecheck and lint green again (TypeScript 5.9.3, Biome 2.5.1). The repository's frozen-lockfile test install checked 1,013 installs across 1,254 packages without changes.
+
+## Independent-review repairs and lifecycle completion
+
+The independent review at `533ec3a007` (reviewing `873ee682`) was cherry-picked. Its report remains historical evidence; its reproduction file moved into the normal Pi suite as `packages/pi-plugin/src/append-cache-review-regressions.test.ts`.
+
+### Correctness changes
+
+* Full-row revisions now survive reusable `clearSession` calls. Deleting tags advances the counter; clearing/recreating the same UUID never restarts it. Snapshot comparisons use exact inequality, including a lower externally restored stamp, not a greater-than check.
+* A connection-only **before-insert conflict observer** probes the three actual tag uniqueness constraints: primary ID, session/tag number, and owned-tool composite key. It stamps displaced sessions before `REPLACE` can silently delete rows with recursive triggers disabled. The same selected rows feed the local old-number journal. This explicitly fixes the **local REPLACE journal defect inherited from master**, not just the new foreign invalidation hole. Neither SQLite's global recursive-trigger mode nor the durable schema was changed. Conflict/upsert/ignored-insert stamps are conservative and transactional.
+* The observer also advances displaced sessions' existing `tags_version`. Consumer review found the warm assignment map, fallback-call-ID set and inert-whitespace projection depended on that signal. Tests now cover warm taggers at unchanged floors, actual reassignment to persisted rows, cache refresh and unchanged wire rejection of missing whitespace rows.
+* Consumer review additionally reproduced clear/recreate aliases in those version-based caches and in the owner summary after an explicit-primary-ID reimport. **Identity revision keys are now retained and advanced on reusable clears**, rather than deleted. Tagger and fallback signatures pair that epoch with `tags_version`; whitespace caching includes the loaded identity epoch. Ordinary status/drop-mode UPDATE selectivity for the owner summary is unchanged, and plain fresh allocations do not alter the identity epoch, preserving the existing own-write fast path.
+* Hygiene reconstructs canonical last-row-wins attribution on its first transition into duplicate keys, including a lower-number newcomer competing with an unchanged higher row. The fallback index remembers prior duplicate IDs and rebuilds when leaving that state, retaining surviving owners/positions.
+* **Permanent deletion differs from reusable reset.** The host `session.deleted` handler and durable cleanup retries explicitly retire counters; the authoritative OpenCode orphan sweep does likewise. Reusable clears retain a producing-harness marker in the existing KV table, so epoch-only sessions remain discoverable without treating Pi/OMP sessions as OpenCode orphans. Retirement retains both counters while another harness has live context rows or its own marker. Pi switch/shutdown remains in-memory cleanup, not permanent deletion. Pi/OMP and OpenCode 2 sweeps remain parked according to the existing host-authority rules.
+
+The identity-revision deletion test was updated deliberately: a reusable/partial clear must advance its value, while confirmed final deletion still removes it. The clear-session transaction test now verifies every owned table is deleted and every executed write occurs inside the one transaction, rather than relying on a fragile prepared-statement count. These are explained contract changes, not silent reversals of the old claims.
+
+### Expanded differential and served-byte oracle
+
+The permanent randomized test compares literal snapshot JSON to an authoritative full reload after **15,000 operations** over three deterministic seeds, four initialized connections and three sessions, including transactional reads and commit/rollback. The expanded operation mix executed **1,653 clear operations, 812 recreations and 846 REPLACE operations** (including operations later rolled back). Dedicated cases cover all replacement constraints simultaneously, recursive-trigger OFF/ON settings, multiple displaced sessions, exact-ID import, repeat/lower stamps and surviving harnesses.
+
+The final independent-handler oracle compares archived master `0f8f341c` against the repaired implementation with **13,930 messages, 99,931 tags and 4,604,108 served bytes**. It passed **77 literal-JSON + 77 wire-hash + 77 behavioral-tag comparisons**, including same-ID extension rewrite, revert, context_edit removal, revert after the edit and compaction contraction. Sixty-five warmed append samples exclude initial warm-up, hidden-tag catch-up and the final five real-change controls.
+
+| Final oracle stage | Archived base median / p90 (ms) | Repaired median / p90 (ms) |
+|---|---:|---:|
+| Total | 463.638 / 527.017 | **299.873 / 324.159** |
+| Tag snapshot | 103.177 / 113.624 | **2.703 / 3.004** |
+| Fallback identity/adoption | 8.640 / 11.115 | 11.337 / 12.437 |
+| Channel accounting | 98.117 / 126.139 | **57.954 / 61.900** |
+| Post-transform | 104.804 / 133.944 | **64.161 / 67.836** |
+| LKG capture | 36.336 / 48.076 | 34.324 / 44.510 |
+
+This latest fixture has a different payload size/schedule from the initial timing table above; do not mix their percentiles. The final whole-hook median improves 35.3%, p90 38.5% against its own independent base. Exact validation and output construction remain linear as documented earlier; this is not a claim of an append-only host protocol.
+
+### Isolation, limits and final gates
+
+All runtime execution remained on Linux with 8 requested vCPUs. The isolation probe's PID **9** listed only `context.db`, WAL and SHM beneath `/motor-home/tmp/magic-context/pi-append-review-fixes/run.ARL3ii/review-lsof-JrXRbH/`; all six requested environment roots were under the surrounding throwaway root. Roots, raw wire files and generated runners were removed. No live store/configuration or macOS host was accessed. `lsof` warned about inaccessible tracefs, and Bun printed an internal directory-mismatch warning after the oracle completed; the oracle exited zero after all explicit comparisons.
+
+The uninitialized/older-writer compatibility limit remains **by explicit task-owner decision**. The former raw-writer red probe is now named `known limit: uninitialized foreign writes stay stale until a recognized session change or reopen`; it verifies staleness, recognized-change refresh and an unconditional full load on reopening. Writable CLI doctor/dashboard handles are not themselves proof of current tag writes: the independent inventory found their ordinary paths do not currently mutate legacy tags. Concrete unsupported tag writers are raw clients and older same-schema Pi/OpenCode versions.
+
+Final authoritative gates: Bun **1.4.2**, TypeScript **5.9.3**, Biome **2.5.1**.
+
+* Root typecheck and report-asset typecheck passed. Root lint passed on 1,376 plugin / 305 Pi / 138 CLI / 6 retina files; existing warnings/infos remain.
+* Root build passed: seven bundler invocations; TUI checked nine files with no changes.
+* Pi suite: **1,994 passed, 28 skipped, zero failed**; 2,022 tests across 205 files.
+* Plugin suite: **7,694 passed, 27 skipped, one failed**; 7,722 tests across 779 files. The sole failure remains the independently reproduced baseline offline Node-WASM fixture (`onnxruntime-web/webgpu` cannot be resolved from its throwaway wrapper). The earlier embedding timing flake and unrelated writer timing flake did not recur in the final run.
+* Frozen-lockfile install again checked 1,013 installs / 1,254 packages with no changes.
+
+### Review-repair mutation evidence
+
+Every mutant used a staged live restore point, a non-empty `git diff --stat` during mutation, `git checkout -- <path> && touch <path>` restoration, and an empty unstaged diff afterward. Each selected final control reddened only the named regression and retained its positive companion:
+
+* Full-row tombstone reset → foreign clear/recreate regression.
+* Missing old-session full revision → foreign REPLACE move; same-session foreign renumber remained green.
+* Missing old-number journal keys, with local counts still mirrored → inherited local REPLACE renumber; foreign renumber remained green.
+* Missing canonical duplicate transition rebuild → hygiene lower-number duplicate regression.
+* Ignoring prior duplicated IDs → fallback survivor membership regression.
+* Greater-than-only revision comparison → lower-restored-stamp regression.
+* Missing both old-session consumer signals → warm tagger assignment, cached fallback IDs and cached whitespace refresh, in separate sole-red runs.
+* Missing replacement identity stamp → count/primary-ID-preserving owner rekey regression.
+* Missing retained-identity comparison → warm tagger clear/recreate regression and fallback clear/recreate regression, in separate runs.
+* Missing loaded-identity whitespace comparison → recreated §7 whitespace replay regression.
+* Resetting the identity tombstone → explicit-ID owner reimport regression.
+* Missing terminal retirement → permanent deletion cleanup regression.
+* Missing marker discovery → epoch-only orphan discovery regression.
+* Missing surviving-harness marker fence → cross-harness epoch retention regression.
+
+Two initial probes were non-vacuous only after refinement: a wire-only whitespace assertion stayed green because existing row-existence validation suppressed missing digits; the final test also observes cache refresh. A same-process owner probe stayed green because JS write-generation tracking masked the missing foreign stamp; the final probe uses an initialized native SQLite connection that bypasses those JS hooks, and it reddens when the stamp is removed. Both initial undefended runs and the subsequent same-target red controls are disclosed in the delivery evidence.

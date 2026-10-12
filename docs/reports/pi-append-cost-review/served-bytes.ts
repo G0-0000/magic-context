@@ -74,6 +74,10 @@ try {
 				"--pi087",
 				"--external-writes",
 				"--lingering-fallback",
+				"--historical-tags",
+				"86000",
+				"--historical-tags-after-messages",
+				"13800",
 				"--wire-output",
 				join(root, label),
 				"--output",
@@ -93,6 +97,10 @@ try {
 		77,
 		"the base oracle must run the same 77 passes",
 	);
+	assert.ok(
+		reports[0].passes.at(-6).tagRows >= 99000,
+		"the append oracle must retain the large hidden-tag history",
+	);
 	for (let i = 0; i < reports[0].passes.length; i++) {
 		assert.equal(
 			readFileSync(join(root, `head-${i + 1}.json`), "utf8"),
@@ -110,12 +118,67 @@ try {
 			`wire SHA256 pass ${i + 1}`,
 		);
 	}
+	// Exclude the six warm-up checkpoints and the hidden-tag catch-up append.
+	// The last five passes are rewrite/revert/context-edit/compaction controls,
+	// not append timing samples.
+	const stages = [
+		"total",
+		"fallbackIdentityAndAdoption",
+		"getTagsBySessionSnapshot",
+		"channelNudgeAccounting",
+		"postTransformPhase",
+		"lkgCapture",
+	];
+	type WarmPass = {
+		inputMessages: number;
+		stages: { stage: string; elapsedMs: number }[];
+	};
+	const appendRuns: WarmPass[][] = reports.map((report) =>
+		report.passes
+			.slice(0, -5)
+			.filter((pass: WarmPass) => pass.inputMessages > 13802),
+	);
+	const percentile = (values: number[], fraction: number) => {
+		values.sort((left, right) => left - right);
+		const value = values[Math.ceil(values.length * fraction) - 1];
+		if (value === undefined)
+			throw new Error("append timing samples are missing");
+		return Number(value.toFixed(3));
+	};
+	const timings = Object.fromEntries(
+		stages.map((stage) => [
+			stage,
+			Object.fromEntries(
+				appendRuns.map((passes, index) => {
+					const values = passes.map((pass: WarmPass) =>
+						pass.stages
+							.filter((sample) => sample.stage === stage)
+							.reduce((sum, sample) => sum + sample.elapsedMs, 0),
+					);
+					assert.ok(
+						values.length > 0 && values.some((value) => value > 0),
+						`${stage} timing must execute`,
+					);
+					return [
+						index ? "base" : "head",
+						{
+							medianMs: percentile([...values], 0.5),
+							p90Ms: percentile([...values], 0.9),
+						},
+					];
+				}),
+			),
+		]),
+	);
 	console.log(
 		JSON.stringify({
 			passes: reports[0].passes.length,
 			literalJsonComparisons: reports[0].passes.length,
+			wireHashComparisons: reports[0].passes.length,
 			tagRowsComparisons: reports[0].passes.length,
 			appendMessages: 13930,
+			appendSamples: appendRuns[0].length,
+			timings,
 			extraCases: [
 				"same-ID extension rewrite",
 				"revert",

@@ -475,7 +475,7 @@ describe("tag identity revision rows on session deletion", async () => {
                 .get(tagIdentityRevisionKey(sessionId)) as { value: string } | null
         )?.value ?? null;
 
-    it("removes the session's revision row with its tags, and keeps it while another harness's tags remain", async () => {
+    it("removes permanent tombstones but advances epochs while another harness's tags remain", async () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
@@ -488,9 +488,9 @@ describe("tag identity revision rows on session deletion", async () => {
                 SESSION,
             );
             expect(revisionOf(db, SESSION)).toBe("2");
-            // Only the opencode harness's rows go; the pi row keeps the revision.
+            // Only the opencode rows go; the surviving pi row retains an advanced epoch.
             expect(deleteSessionScopedRows(db, [SESSION], "opencode")).toBe(1);
-            expect(revisionOf(db, SESSION)).toBe("2");
+            expect(revisionOf(db, SESSION)).toBe("3");
             expect(deleteSessionScopedRows(db, [SESSION])).toBe(1);
             expect(revisionOf(db, SESSION)).toBeNull();
         } finally {

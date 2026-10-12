@@ -1,5 +1,6 @@
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { tagIdentityRevisionKey } from "./storage-tag-identity-revision";
 import {
     adoptNullOwnerToolTag,
     backfillTagTokenCounts,
@@ -166,13 +167,17 @@ export interface Tagger {
     initFromDb(sessionId: string, db: Database, floor?: number): void;
     /** Returns the database tag version recorded when this session's map was last loaded. */
     getLoadedTagsVersion?(sessionId: string, db: Database): number | undefined;
+    /** Retained identity epoch paired with the loaded version; session clears can restart tags_version. */
+    getLoadedTagIdentityRevision?(sessionId: string, db: Database): string | null | undefined;
     cleanup(sessionId: string): void;
     /** Present on the production tagger; optional keeps lightweight test doubles source-compatible. */
     getHeapStats?(): TaggerHeapStats;
 }
 
 const GET_COUNTER_SQL = `SELECT counter FROM session_meta WHERE session_id = ?`;
-const GET_TAGS_VERSION_SQL = `SELECT tags_version FROM session_meta WHERE session_id = ?`;
+const GET_TAGS_VERSION_SQL = `SELECT
+    (SELECT tags_version FROM session_meta WHERE session_id = ?) AS tags_version,
+    (SELECT value FROM schema_migrations_meta WHERE key = ?) AS identity_revision`;
 // Layer C: pull tool_owner_message_id and type so we can compose the
 // in-memory key correctly. NULL-owner tool rows are intentionally NOT
 // placed in the in-memory map; the lazy-adoption DB path discovers them
@@ -188,8 +193,8 @@ const GET_ASSIGNMENTS_SCOPED_SQL =
 
 /**
  * Session-local change signal for the `initFromDb` cache. Triggers advance it
- * only when a tag identity changes, so writes for the other active sessions in
- * a shared database cannot evict this session's in-memory assignment map.
+ * for changes to this session only. The retained identity epoch prevents an
+ * assignment cache hit when clear/recreate restarts the physical version.
  */
 const probeTagsVersionStatements = new WeakMap<Database, PreparedStatement>();
 
@@ -222,6 +227,7 @@ interface AssignmentRow {
 interface LoadSignature {
     db: Database;
     tagsVersion: number;
+    identityRevision: string | null;
     /**
      * Live-wire load-scoping floor in effect for the cached map. A floor change
      * (compaction boundary advanced, or a revert lowered it) must force exactly
@@ -735,13 +741,17 @@ export function createTagger(): Tagger {
     }
 
     /** Read the current mapping version for one session. */
-    function probeSignature(sessionId: string, db: Database): { tagsVersion: number } {
-        const row = getProbeTagsVersionStatement(db).get(sessionId) as
-            | { tags_version: number }
-            | null
-            | undefined;
+    function probeSignature(
+        sessionId: string,
+        db: Database,
+    ): { tagsVersion: number; identityRevision: string | null } {
+        const row = getProbeTagsVersionStatement(db).get(
+            sessionId,
+            tagIdentityRevisionKey(sessionId),
+        ) as { tags_version: number; identity_revision?: string | null } | null | undefined;
         return {
             tagsVersion: row?.tags_version ?? 0,
+            identityRevision: row?.identity_revision ?? null,
         };
     }
 
@@ -781,6 +791,7 @@ export function createTagger(): Tagger {
             cached !== undefined &&
             cached.db === db &&
             cached.tagsVersion === probe.tagsVersion &&
+            cached.identityRevision === probe.identityRevision &&
             cached.floor === floor
         ) {
             return;
@@ -860,6 +871,7 @@ export function createTagger(): Tagger {
         heapHolder.loadSignatures.set(sessionId, {
             db,
             tagsVersion: probe.tagsVersion,
+            identityRevision: probe.identityRevision,
             floor,
         });
     }
@@ -867,6 +879,14 @@ export function createTagger(): Tagger {
     function getLoadedTagsVersion(sessionId: string, db: Database): number | undefined {
         const signature = heapHolder.loadSignatures.get(sessionId);
         return signature?.db === db ? signature.tagsVersion : undefined;
+    }
+
+    function getLoadedTagIdentityRevision(
+        sessionId: string,
+        db: Database,
+    ): string | null | undefined {
+        const signature = heapHolder.loadSignatures.get(sessionId);
+        return signature?.db === db ? signature.identityRevision : undefined;
     }
 
     function cleanup(sessionId: string): void {
@@ -918,6 +938,7 @@ export function createTagger(): Tagger {
         getCounter,
         initFromDb,
         getLoadedTagsVersion,
+        getLoadedTagIdentityRevision,
         cleanup,
         getHeapStats,
     };

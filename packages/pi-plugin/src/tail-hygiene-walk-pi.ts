@@ -381,6 +381,7 @@ function tagAttribution(input: PiTailHygieneWalkInput): PiTagAttribution {
 	let cached = cacheable
 		? tagAttributions.get(input.tagCacheKey as object)
 		: undefined;
+	const wasSimple = cached?.simple === true;
 	const added: TagEntry[] = [];
 	const removed: TagEntry[] = [];
 	if (cached) {
@@ -487,6 +488,11 @@ function tagAttribution(input: PiTailHygieneWalkInput): PiTagAttribution {
 		}
 		cached.boundsByOwner.set(owner, { min, max });
 	}
+	// A lower-number newcomer can collide with an unchanged higher-number key.
+	// The incremental insertion order is not canonical; rebuild on the first
+	// transition to duplicate keys so the last canonical row still wins.
+	if (wasSimple && !cached.simple)
+		cached = tagAttribution({ ...input, tagCacheKey: undefined });
 	cached.tags = input.tags;
 	if (cacheable) tagAttributions.set(input.tagCacheKey as object, cached);
 	return cached;

@@ -1,5 +1,7 @@
 # Independent correctness review: Pi incremental append work
 
+> Historical review of `873ee682`. Follow-up repairs, consumer-epoch guards and terminal cleanup are documented in [pi-session-local-append-cost.md](pi-session-local-append-cost.md). The reproductions now run permanently in `packages/pi-plugin/src/append-cache-review-regressions.test.ts`; the raw-writer case is explicitly a documented-limit test. The served-byte oracle now retains 86,000 hidden tags as well.
+
 ## Verdict and scope
 
 Reviewed **873ee68257a9075b4c09a386331d2519350b615b** against master **0f8f341c8c4b27df6bf9678e022250ef3a9b8ac4**, after reading `pi-session-local-append-cost.md`. This is a **report-only** delivery; no runtime, existing test, architecture, or structure file is changed. Reproduction assets live in `docs/reports/pi-append-cost-review/`, outside the package suites.
@@ -129,7 +131,7 @@ Linux **Bun 1.4.2**, **TypeScript 5.9.3**, **Biome 2.5.1**. Root scripts were ru
 * Final report reproduction file — **3 pass / 6 expected finding failures**, 47,221 assertions, 9 tests. The archived base's six snapshot-only probes give **5 pass / 1 fail**; the only failure is the inherited local `REPLACE` journal defect.
 * AFT scoped diagnostics for report assets were **partial**, because the root has no covering TypeScript dependency/formatter marker for the language server. The explicit report-asset TypeScript and Biome gates above are the authoritative checks; partial diagnostics are not counted as a clean result.
 
-The report reproduction file is intentionally not installed in a normal package test directory: the six failing assertions are evidence to fix, not product changes or rewrites of old contracts.
+At the reviewed commit the reproduction file was intentionally outside the normal package suite, because its six red assertions were evidence rather than fixes. The follow-up moved those assertions into the Pi suite and added the fixes plus an explicit compatibility-limit test.
 
 ## Mutation controls (all restored)
 
@@ -172,8 +174,9 @@ bun --version
 bun --tsconfig-override packages/pi-plugin/tsconfig.json \
   docs/reports/pi-append-cost-review/isolation.ts
 bun test --tsconfig-override packages/pi-plugin/tsconfig.json \
-  docs/reports/pi-append-cost-review/checks.test.ts --timeout 120000
-# The reproduction suite is expected to report the six failures named above.
+  packages/pi-plugin/src/append-cache-review-regressions.test.ts --timeout 120000
+# At the reviewed revision these assertions reported six findings. The current
+# permanent suite includes the repairs and the explicitly retained raw-writer limit.
 bun packages/pi-plugin/node_modules/typescript/bin/tsc \
   --project docs/reports/pi-append-cost-review/tsconfig.json
 packages/pi-plugin/node_modules/.bin/biome check docs/reports/pi-append-cost-review

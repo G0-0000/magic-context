@@ -1,4 +1,7 @@
-import { tagRevisionKey } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
+import {
+	TAG_INSERT_CONFLICT_ROWS,
+	tagRevisionKey,
+} from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
 import {
 	getTagsByNumbers,
 	getTagsBySession,
@@ -9,10 +12,14 @@ import type { Database } from "@magic-context/core/shared/sqlite";
 export function createPiTagSnapshotReader(db: Database) {
 	const existing = readers.get(db);
 	if (existing) return existing;
-	// A reloaded extension can inherit the connection's older TEMP triggers,
-	// which observed revisions but not changed numbers. Replace only those
-	// connection-local definitions. Journal inserts avoid duplicate keys rather
-	// than relying on OR IGNORE, which an outer write's conflict policy can override.
+	// Replace the pi_tag_insert/update/delete TEMP triggers when an extension
+	// reload keeps its SQLite connection: older definitions tracked only a
+	// revision, not the changed tag numbers needed to update cached rows.
+	// An outer write's conflict policy can override OR IGNORE inside a trigger,
+	// so journal inserts explicitly exclude keys already present.
+	// REPLACE's implicit deletes may skip DELETE triggers. Before insertion,
+	// record conflicting rows' old sessions/numbers and the same write counts
+	// as the shared revision observer.
 	db.exec(`
 		CREATE TEMP TABLE IF NOT EXISTS pi_tag_revision (revision INTEGER NOT NULL);
 		INSERT INTO pi_tag_revision SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM pi_tag_revision);
@@ -22,6 +29,18 @@ export function createPiTagSnapshotReader(db: Database) {
 		DROP TRIGGER IF EXISTS temp.pi_tag_insert;
 		DROP TRIGGER IF EXISTS temp.pi_tag_update;
 		DROP TRIGGER IF EXISTS temp.pi_tag_delete;
+		DROP TRIGGER IF EXISTS temp.pi_tag_insert_conflicts;
+		CREATE TEMP TRIGGER pi_tag_insert_conflicts BEFORE INSERT ON main.tags BEGIN
+			UPDATE pi_tag_revision SET revision = revision + (SELECT COUNT(*) FROM (${TAG_INSERT_CONFLICT_ROWS}));
+			INSERT INTO pi_tag_session_revision
+				SELECT session_id, COUNT(*) FROM (${TAG_INSERT_CONFLICT_ROWS}) GROUP BY session_id
+				ON CONFLICT(session_id) DO UPDATE SET revision = revision + excluded.revision;
+			INSERT INTO pi_tag_changes
+				SELECT session_id, tag_number FROM (${TAG_INSERT_CONFLICT_ROWS}) AS conflicts
+				WHERE EXISTS (SELECT 1 FROM pi_tag_watch WHERE session_id = conflicts.session_id)
+				AND NOT EXISTS (SELECT 1 FROM pi_tag_changes WHERE session_id = conflicts.session_id AND tag_number = conflicts.tag_number)
+				GROUP BY session_id, tag_number;
+		END;
 		CREATE TEMP TRIGGER IF NOT EXISTS pi_tag_insert AFTER INSERT ON main.tags BEGIN
 			UPDATE pi_tag_revision SET revision = revision + 1;
 			INSERT INTO pi_tag_session_revision VALUES (NEW.session_id, 1) ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
@@ -67,7 +86,7 @@ export function createPiTagSnapshotReader(db: Database) {
 		string,
 		{
 			revision: number;
-			dataVersion: number;
+			foreignRevision: number;
 			tags: ReturnType<typeof getTagsBySession>;
 		}
 	>();
@@ -87,10 +106,10 @@ export function createPiTagSnapshotReader(db: Database) {
 		// counters roll back with the rows; unrelated foreign commits do not matter.
 		const [local, external] = revisionReaders.get(db)?.(sessionId) ?? [0, 0];
 		let snapshot = cache.get(sessionId);
-		if (!snapshot || snapshot.dataVersion !== external) {
+		if (!snapshot || snapshot.foreignRevision !== external) {
 			snapshot = {
 				revision: local,
-				dataVersion: external,
+				foreignRevision: external,
 				tags: getTagsBySession(db, sessionId),
 			};
 			if (cache.size >= 100 && !cache.has(sessionId)) {
