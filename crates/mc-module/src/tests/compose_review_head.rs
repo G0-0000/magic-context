@@ -277,8 +277,12 @@ fn percentile(samples: &mut [f64], quantile: f64) -> f64 {
 /// sessions run passes on the same `McStore`. Two probe threads time a trivial read
 /// through each store connection mutex (`store.db` via `single_store_marker`,
 /// `context.db`'s reader via `load_compartment_boundaries` of an absent session);
-/// their latency is the lock wait any caller sees. Each measured pass also splits its
-/// wall time into on-CPU, run-queue and blocked time from Linux schedstat. Run in
+/// their latency is the lock wait any caller sees. A third probe times a 1 ms sleep
+/// and takes no lock: when it stalls too, the whole process was stalled (CPU quota
+/// throttling or memory pressure), not one mutex. Probes print every stall over
+/// 50 ms with its offset from the start, as do the measured passes, so stalls can be
+/// matched. Each measured pass also splits its wall time into on-CPU, run-queue and
+/// blocked time from Linux schedstat. Run in
 /// release on Linux:
 /// `MC_REVIEW_BACKGROUND=6 cargo test -p mc-module --release --lib
 /// store_lock_wait_under_background_sessions -- --ignored --nocapture`.
@@ -295,14 +299,23 @@ fn store_lock_wait_under_background_sessions() {
     fixture.history_budget_tokens = 98_000.0;
     fixture.run();
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let ready = std::sync::Barrier::new(background + 3);
+    let ready = std::sync::Barrier::new(background + 4);
+    let origin = Instant::now();
+    let offset_ms = |at: Instant| (at - origin).as_secs_f64() * 1000.0;
     let probe = |label: &'static str, read: &(dyn Fn() + Sync)| {
         ready.wait();
         let mut samples = Vec::new();
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             let started = Instant::now();
             read();
-            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            let latency = started.elapsed().as_secs_f64() * 1000.0;
+            if latency > 50.0 {
+                eprintln!(
+                    "stall {label} at_ms={:.0} latency_ms={latency:.1}",
+                    offset_ms(started)
+                );
+            }
+            samples.push(latency);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let count = samples.len();
@@ -323,6 +336,11 @@ fn store_lock_wait_under_background_sessions() {
         scope.spawn(move || {
             probe("store.db", &move || {
                 store_db.single_store_marker().unwrap();
+            })
+        });
+        scope.spawn(move || {
+            probe("no-lock-sleep-1ms", &|| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
             })
         });
         scope.spawn(move || {
@@ -362,7 +380,16 @@ fn store_lock_wait_under_background_sessions() {
                         } else if passes % 5 == 4 {
                             other.request_soft();
                         }
+                        let started = Instant::now();
                         let response = other.run();
+                        if let Some(timings) = response.timings.as_ref() {
+                            eprintln!(
+                                "background={index} pass at_ms={:.0} total_ms={:.1} store_commit_ms={:.1}",
+                                offset_ms(started),
+                                timings.total,
+                                timings.store_commit
+                            );
+                        }
                         commits.push(response.timings.as_ref().map_or(0.0, |t| t.store_commit));
                         passes += 1;
                     }
@@ -387,6 +414,7 @@ fn store_lock_wait_under_background_sessions() {
                 }
                 let before = thread_schedstat();
                 let started = Instant::now();
+                let at = offset_ms(started);
                 let response = fixture.run();
                 let wall = started.elapsed().as_secs_f64() * 1000.0;
                 let after = thread_schedstat();
@@ -399,7 +427,7 @@ fn store_lock_wait_under_background_sessions() {
                 };
                 let timings = response.timings.as_ref().unwrap();
                 eprintln!(
-                    "measured c{cycle}-{kind} decision={} wall_ms={wall:.1} cpu_ms={cpu:.1} runq_ms={runq:.1} blocked_ms={:.1} compose_m0m1={:.1} state_evolution={:.1} store_commit={:.1} total={:.1}",
+                    "measured c{cycle}-{kind} at_ms={at:.0} decision={} wall_ms={wall:.1} cpu_ms={cpu:.1} runq_ms={runq:.1} blocked_ms={:.1} compose_m0m1={:.1} state_evolution={:.1} store_commit={:.1} total={:.1}",
                     response.decision,
                     wall - cpu - runq,
                     timings.compose_m0m1,
