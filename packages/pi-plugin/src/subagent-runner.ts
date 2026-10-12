@@ -50,7 +50,7 @@ import type {
 	SubagentRunOptions,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
-import { logTemperatureDrop } from "@magic-context/core/shared/subagent-temperature";
+import { logTemperatureDecision } from "@magic-context/core/shared/subagent-temperature";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
@@ -1561,22 +1561,37 @@ export class PiSubagentRunner implements SubagentRunner {
 				}
 			}
 
-			const observeTemperatureDrop = (event: unknown): void => {
+			const observeTemperatureDecision = (event: unknown): void => {
 				if (!event || typeof event !== "object") return;
 				const notice = event as {
 					type?: string;
-					model?: string;
-					reason?: string;
+					model?: unknown;
+					supported?: unknown;
+					source?: unknown;
+					entry?: unknown;
 				};
 				if (
-					notice.type !== "mc_temperature_drop" ||
+					notice.type !== "mc_temperature" ||
 					typeof notice.model !== "string"
 				)
 					return;
-				if (notice.reason !== "no" && notice.reason !== "missing") return;
-				logTemperatureDrop(
+				if (
+					notice.source !== "host" &&
+					notice.source !== "catalog" &&
+					notice.source !== "none"
+				)
+					return;
+				if (notice.supported !== null && typeof notice.supported !== "boolean")
+					return;
+				logTemperatureDecision(
 					notice.model,
-					notice.reason === "no" ? false : undefined,
+					{
+						supported: notice.supported ?? undefined,
+						source: notice.source,
+						...(typeof notice.entry === "string"
+							? { entry: notice.entry }
+							: {}),
+					},
 					(message) =>
 						sessionLog(options.accountingSessionId ?? "pi-subagent", message),
 				);
@@ -1606,14 +1621,14 @@ export class PiSubagentRunner implements SubagentRunner {
 						settled ||
 						!(
 							line.startsWith('{"type":"mc_system_prompt"') ||
-							line.startsWith('{"type":"mc_temperature_drop"')
+							line.startsWith('{"type":"mc_temperature"')
 						)
 					)
 						continue;
 					const parsed = parsePiEventLine(line);
 					if (parsed.ok) {
 						telemetry.observe(parsed.event);
-						observeTemperatureDrop(parsed.event);
+						observeTemperatureDecision(parsed.event);
 					}
 				}
 				stderr += text;
@@ -1736,7 +1751,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					return;
 				}
 				const event = parsed.event;
-				observeTemperatureDrop(event);
+				observeTemperatureDecision(event);
 
 				if (typeof event !== "object" || event === null) return;
 				const e = event as {

@@ -1205,6 +1205,82 @@ describe("hidden completion temperature capabilities", () => {
         }
     });
 
+    test("OpenCode 2 falls back to the models.dev cache when its catalog rows carry no temperature field", async () => {
+        const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const { __temperatureTest } = await import("../shared/subagent-temperature");
+        const cacheRoot = join(tmpdir(), `mc-oc2-temperature-${crypto.randomUUID()}`);
+        mkdirSync(join(cacheRoot, "opencode"), { recursive: true });
+        writeFileSync(
+            join(cacheRoot, "opencode", "models.json"),
+            JSON.stringify({
+                google: { models: { "gemini-3.8-flash": { temperature: true } } },
+                openai: { models: { "gpt-6.1-sol": { temperature: false } } },
+            }),
+        );
+        const saved = {
+            XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+            OPENCODE_MODELS_PATH: process.env.OPENCODE_MODELS_PATH,
+        };
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        delete process.env.OPENCODE_MODELS_PATH;
+        __temperatureTest.reset();
+        const notes: string[] = [];
+        // OpenCode 2.0.22 model rows: capabilities hold tools and modalities only.
+        const row = (providerID: string, id: string) => ({
+            id,
+            providerID,
+            capabilities: { tools: true, input: ["text"], output: ["text"] },
+        });
+        const state = await setup("temperature-catalog", {
+            logs: notes,
+            modelCatalog: async () => [
+                row("google", "gemini-3.8-flash"),
+                row("google", "antigravity-gemini-3.8-flash"),
+                row("openai", "gpt-6.1-sol"),
+            ],
+        });
+        try {
+            const handle = await state.executor.open(run);
+            for (const [providerID, modelID] of [
+                ["google", "gemini-3.8-flash"],
+                ["google", "antigravity-gemini-3.8-flash"],
+                ["openai", "gpt-6.1-sol"],
+            ] as const) {
+                await state.executor.attempt(
+                    handle,
+                    request(modelID, { model: { providerID, modelID }, temperature: 0.1 }),
+                );
+            }
+            expect(state.requests.map((draft) => draft.options)).toEqual([
+                { temperature: 0.1 },
+                { temperature: 0.1 },
+                {},
+            ]);
+            expect(notes.filter((line) => line.includes("Subagent temperature"))).toEqual([
+                expect.stringContaining(
+                    "sent for google/gemini-3.8-flash: models.dev cache entry google/gemini-3.8-flash says yes",
+                ),
+                expect.stringContaining(
+                    "sent for google/antigravity-gemini-3.8-flash: models.dev cache entry google/gemini-3.8-flash says yes",
+                ),
+                expect.stringContaining(
+                    "omitted for openai/gpt-6.1-sol: models.dev cache entry openai/gpt-6.1-sol says no",
+                ),
+            ]);
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+            for (const [key, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+            __temperatureTest.reset();
+            rmSync(cacheRoot, { recursive: true, force: true });
+        }
+    });
+
     test("OpenCode 2 Codex-shaped provider receives no temperature and needs no retry or fallback", async () => {
         const state = await setup("temperature-codex");
         const prompt = state.host.prompt;

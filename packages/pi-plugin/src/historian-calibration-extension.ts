@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	subagentTemperature,
-	temperatureCapability,
-} from "@magic-context/core/shared/subagent-temperature";
+import { subagentTemperature } from "@magic-context/core/shared/subagent-temperature";
 import { readHostSystemPrompt } from "./host-system-prompt";
 import { promptFingerprint } from "./subagent-telemetry";
 
@@ -119,12 +116,18 @@ export default function historianCalibrationExtension(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
 		const model = ctx.model;
 		const key = `${model?.provider ?? "unknown"}/${model?.id ?? "unknown"}`;
-		const sampling = subagentTemperature(key, model, temperature, () => {
-			// Pi may redirect extension stdout to stderr; the parent accepts both.
-			process.stdout.write(
-				`${JSON.stringify({ type: "mc_temperature_drop", model: key, reason: temperatureCapability(model) === false ? "no" : "missing" })}\n`,
-			);
-		});
+		const sampling = subagentTemperature(
+			key,
+			model,
+			temperature,
+			(_message, decision) => {
+				// Pi may redirect extension stdout to stderr; the parent accepts both
+				// and writes the session log line from these fields.
+				process.stdout.write(
+					`${JSON.stringify({ type: "mc_temperature", model: key, supported: decision.supported ?? null, source: decision.source, ...(decision.entry ? { entry: decision.entry } : {}) })}\n`,
+				);
+			},
+		);
 		return calibrateHistorianProviderPayload(
 			sampling === undefined
 				? withoutProviderTemperature(event.payload)

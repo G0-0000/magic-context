@@ -4118,7 +4118,7 @@ describe("Pi dreamer prompt-token budget", () => {
 it.each([
 	"stdout",
 	"stderr",
-] as const)("forwards child temperature-drop diagnostics from %s once per model", async (channel) => {
+] as const)("forwards child temperature decisions from %s once per model", async (channel) => {
 	__temperatureTest.reset();
 	const logged = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
 	try {
@@ -4128,14 +4128,39 @@ it.each([
 			...baseOptions,
 			accountingSessionId: "sampling-session",
 		});
-		const notice = {
-			type: "mc_temperature_drop",
-			model: "openai-codex/gpt-6.1-sol",
-			reason: "missing",
-		};
+		const notices = [
+			{
+				type: "mc_temperature",
+				model: "openai-codex/gpt-6.1-sol",
+				supported: null,
+				source: "none",
+			},
+			{
+				type: "mc_temperature",
+				model: "openrouter/google/gemini-3.8-flash",
+				supported: true,
+				source: "catalog",
+				entry: "openrouter/google/gemini-3.8-flash",
+			},
+			// Malformed notices are ignored rather than logged.
+			{
+				type: "mc_temperature",
+				model: "x/y",
+				supported: "yes",
+				source: "host",
+			},
+			{
+				type: "mc_temperature",
+				model: "x/z",
+				supported: true,
+				source: "guess",
+			},
+		];
 		for (let count = 0; count < 2; count++) {
-			if (channel === "stdout") child.writeStdoutLine(notice);
-			else child.writeStderr(`${JSON.stringify(notice)}\n`);
+			for (const notice of notices) {
+				if (channel === "stdout") child.writeStdoutLine(notice);
+				else child.writeStderr(`${JSON.stringify(notice)}\n`);
+			}
 		}
 		child.writeStdoutLine(
 			agentEnd([
@@ -4148,13 +4173,17 @@ it.each([
 		);
 		child.emitClose(0);
 		expect((await result).ok).toBe(true);
-		const drops = logged.mock.calls.filter(([, message]) =>
-			String(message).startsWith("Subagent temperature dropped"),
+		const decisions = logged.mock.calls.filter(([, message]) =>
+			String(message).startsWith("Subagent temperature"),
 		);
-		expect(drops).toEqual([
+		expect(decisions).toEqual([
 			[
 				"sampling-session",
-				"Subagent temperature dropped for openai-codex/gpt-6.1-sol: metadata missing",
+				"Subagent temperature omitted for openai-codex/gpt-6.1-sol: no host or models.dev metadata",
+			],
+			[
+				"sampling-session",
+				"Subagent temperature sent for openrouter/google/gemini-3.8-flash: models.dev cache entry openrouter/google/gemini-3.8-flash says yes",
 			],
 		]);
 	} finally {
