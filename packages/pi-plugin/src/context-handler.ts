@@ -439,7 +439,11 @@ import {
 	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
-import { getPiTagSnapshotView } from "./tag-snapshot-pi";
+import {
+	getPiActiveTagSnapshotView,
+	getPiTagSnapshotView,
+	readPiFallbackTagRows,
+} from "./tag-snapshot-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
 	clearPiTailHygieneContentMemo,
@@ -460,6 +464,31 @@ import { createPiTranscript } from "./transcript-pi";
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
+
+/**
+ * Rows carrying `number` in a list sorted by tag number (legacy stores can
+ * hold more than one), found by binary search.
+ */
+function tagsWithNumber<T extends { tagNumber: number }>(
+	sorted: readonly T[],
+	number: number,
+): T[] {
+	let low = 0;
+	let high = sorted.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if ((sorted[middle]?.tagNumber ?? Number.POSITIVE_INFINITY) < number)
+			low = middle + 1;
+		else high = middle;
+	}
+	const rows: T[] = [];
+	for (let index = low; index < sorted.length; index += 1) {
+		const row = sorted[index];
+		if (row?.tagNumber !== number) break;
+		rows.push(row);
+	}
+	return rows;
+}
 
 function newestActiveTagNumbersByCount(
 	tags: readonly { status: string; tagNumber: number }[],
@@ -3544,9 +3573,20 @@ function adoptPiFallbackTags(
 	const revision = () => readPiAdoptionRevision(db);
 	const beforeDiscovery = revision();
 	// Discover candidates without blocking writers and prepare their target ids.
-	// The revision check below is authoritative: discovery may miss a sibling's
-	// newly committed row, or include one another connection already renamed.
-	const discovered = hasPersistedPiFallbackMessageTags(db, sessionId)
+	// The data_version/total_changes comparison inside the immediate transaction
+	// below is authoritative: discovery may miss a fallback row another
+	// connection just committed, or include one it already moved to a real id.
+	// Both existence probes query the tags table, so they see every writer. If
+	// no commit happened between beforeDiscovery and that transaction, their
+	// results still describe the table and are not re-run under the lock.
+	const discoveredMessageFallback = hasPersistedPiFallbackMessageTags(
+		db,
+		sessionId,
+	);
+	const discoveredToolOwnerFallback = ownerMap?.size
+		? hasPersistedPiFallbackToolOwnerTags(db, sessionId)
+		: false;
+	const discovered = discoveredMessageFallback
 		? readAdoptablePiFallbackFingerprints(db, sessionId, batches)
 		: new Set<string>();
 	const targetsFor = (fingerprints: Iterable<string>) =>
@@ -3647,6 +3687,11 @@ function adoptPiFallbackTags(
 
 	runImmediateTransaction(db, () => {
 		const admitted = revision();
+		// No commit from this or another connection since discovery.
+		const unchangedSinceDiscovery =
+			beforeDiscovery.external.data_version ===
+				admitted.external.data_version &&
+			beforeDiscovery.local.changes === admitted.local.changes;
 		const preflight = options.preflightRevision;
 		const rebuild = options.rebuildFingerprints;
 		const expanded = Boolean(
@@ -3661,18 +3706,19 @@ function adoptPiFallbackTags(
 			({ realIdsByFingerprint, fallbackIdsByFingerprint, batches } =
 				preparePiAdoptionFingerprints(rebuild()));
 		}
-		if (batches.length && hasPersistedPiFallbackMessageTags(db, sessionId)) {
+		if (
+			batches.length &&
+			(unchangedSinceDiscovery
+				? discoveredMessageFallback
+				: hasPersistedPiFallbackMessageTags(db, sessionId))
+		) {
 			// After writer admission the candidate set cannot gain rows from a
 			// sibling connection. Missing fingerprints need no per-message read;
 			// present ones still use the sequential, authoritative migration path.
 			// data_version detects other connections' commits; total_changes catches
 			// this connection's own writes. With BEGIN held, an unchanged revision
 			// makes discovery authoritative without repeating the large IN queries.
-			const unchanged =
-				!expanded &&
-				beforeDiscovery.external.data_version ===
-					admitted.external.data_version &&
-				beforeDiscovery.local.changes === admitted.local.changes;
+			const unchanged = !expanded && unchangedSinceDiscovery;
 			const adoptable = unchanged
 				? discovered
 				: readAdoptablePiFallbackFingerprints(db, sessionId, batches);
@@ -3784,7 +3830,12 @@ function adoptPiFallbackTags(
 			}
 		}
 
-		if (ownerMap && hasPersistedPiFallbackToolOwnerTags(db, sessionId)) {
+		if (
+			ownerMap &&
+			(unchangedSinceDiscovery
+				? discoveredToolOwnerFallback
+				: hasPersistedPiFallbackToolOwnerTags(db, sessionId))
+		) {
 			for (const row of findPiFallbackToolOwnerTags(db, sessionId)) {
 				const parsed = parsePiFallbackToolOwnerId(row.toolOwnerMessageId);
 				if (parsed?.role !== "assistant") continue;
@@ -5691,8 +5742,10 @@ export function registerPiContextHandler(
 						protectedTools: options.protectedTools,
 						pendingDropTagNumbers,
 						stableId,
+						// Only active rows can be protected; the active projection gives
+						// the same numbers without sorting every historical tag.
 						protectedToolTags: protectedToolTagNumbers(
-							tags,
+							result.channelBaselineSnapshot.activeTags,
 							options.protectedTools,
 						),
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -7373,6 +7426,8 @@ interface RunPipelineArgs {
 interface PiChannelBaselineSnapshot {
 	tagCacheKey?: object;
 	tags: ReturnType<typeof getTagsBySession>;
+	/** The rows of `tags` whose status is "active", in the same order. */
+	activeTags: readonly ReturnType<typeof getTagsBySession>[number][];
 	protectedTagNumbers: Set<number>;
 	pendingDropTagNumbers: Set<number>;
 }
@@ -7552,6 +7607,7 @@ async function runCompactionOffPipeline(
 		activeTags: [],
 		channelBaselineSnapshot: {
 			tags: [],
+			activeTags: [],
 			protectedTagNumbers: new Set(),
 			pendingDropTagNumbers: new Set(),
 		},
@@ -8141,10 +8197,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// text) and migrate any fallback-id tag onto the real id up front, so the
 	// message keeps its tag_number/§N§ instead of getting a fresh tag. No-op for
 	// OpenCode (this path is Pi-only) and for messages already on a real id.
+	// Sync the tag snapshot (and its cached fallback rows) before taking
+	// preflightRevision. Syncing deletes consumed rows from a TEMP change table;
+	// if that write came after preflightRevision, adoptPiFallbackTags would count
+	// it as a tag change since preflight and take its slower rebuild path.
+	const tTagSnapshotSync = performance.now();
+	readPiFallbackTagRows(args.db, args.sessionId);
+	logTransformTiming(args.sessionId, "tagSnapshotSync", tTagSnapshotSync);
 	const tFallbackIdentity = performance.now();
 	// This indexed preflight avoids rebuilding fingerprints for every old message.
-	// A negative result is rechecked by adoption after this map is complete, while
-	// tool-owner adoption performs its only existence probe at that later point.
+	// adoptPiFallbackTags rechecks a negative result with a table query after
+	// this map is complete; its tool-owner probe also runs only at that point.
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,
@@ -8748,7 +8811,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Load the canonical tag set once after pending operations. Heuristics use its
 	// active projection; Channel-1 baseline construction reuses the full set.
 	const allTagsForPass = getPiTagSnapshotView(args.db, args.sessionId);
-	const activeTags = allTagsForPass.filter((tag) => tag.status === "active");
+	// Same rows as filtering allTagsForPass by status, kept current from changed
+	// rows instead of walking every tag the session ever had.
+	const activeTags = getPiActiveTagSnapshotView(
+		args.db,
+		args.sessionId,
+		allTagsForPass,
+	);
 	logTransformTiming(
 		args.sessionId,
 		"getTagsBySessionSnapshot",
@@ -9776,7 +9845,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				protectionFloorResolution.floor,
 				activeCalibration.toolsRatio,
 			).protectedTagNumbers
-		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
+		: newestActiveTagNumbersByCount(activeTags, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete
 	// targets remain), and therefore retain the one correctness-required re-read.
@@ -9788,6 +9857,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const channelBaselineSnapshot: PiChannelBaselineSnapshot = {
 		tagCacheKey: fallbackCache.index,
 		tags: allTagsForPass,
+		activeTags,
 		protectedTagNumbers,
 		pendingDropTagNumbers: new Set(
 			channelPendingOps
@@ -9816,19 +9886,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	const servedTagNumbers = new Set(
-		allTagsForPass
-			.filter(
-				(tag) =>
-					targets.has(tag.tagNumber) &&
-					(tag.type === "message"
-						? ctxReduceCallable || tag.status !== "active"
-						: tag.type === "tool" &&
-							visibleCallIds.has(tag.messageId) &&
-							(ctxReduceCallable || tag.status !== "active")),
+	// Look up only this pass's target numbers in the tag-ordered snapshot, in
+	// ascending order, instead of filtering every tag the session ever had.
+	const servedTagNumbers = new Set<number>();
+	for (const number of [...targets.keys()].sort((a, b) => a - b)) {
+		for (const tag of tagsWithNumber(allTagsForPass, number)) {
+			if (
+				tag.type === "message"
+					? ctxReduceCallable || tag.status !== "active"
+					: tag.type === "tool" &&
+						visibleCallIds.has(tag.messageId) &&
+						(ctxReduceCallable || tag.status !== "active")
 			)
-			.map((tag) => tag.tagNumber),
-	);
+				servedTagNumbers.add(tag.tagNumber);
+		}
+	}
 	return {
 		messages: outputMessages,
 		identityRebuilt: identityRebuild,

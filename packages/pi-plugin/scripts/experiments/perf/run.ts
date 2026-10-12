@@ -68,6 +68,30 @@ interface RunnerOptions {
 	/** Seed hidden history after warm-up to keep cold tag allocation within the pass deadline. */
 	historicalTagsAfterMessages?: number;
 	toolResultRepeat?: number;
+	/**
+	 * Insert this many tags for another session after each seeded historical
+	 * tag. A shared context.db interleaves sessions' rows, so one session's tags
+	 * span many more pages than a freshly seeded contiguous run.
+	 */
+	foreignTagInterleave?: number;
+	/**
+	 * Seed historical tags as a long session holds them: two of every three are
+	 * tool tags (call ID plus owner message) and a third of all rows are dropped
+	 * rather than compacted. Without it every historical tag is a compacted
+	 * message tag.
+	 */
+	historicalMix: boolean;
+	/**
+	 * Seeded randomized schedule for differential runs: after the given points,
+	 * `chaosPasses` more passes append 0-3 messages each, and before each pass
+	 * the runner may queue a drop, force an execute (flush) pass, publish a
+	 * compartment (fold), switch the model, or write this session's tags from
+	 * a second connection. The same seed gives the same schedule on every tree.
+	 */
+	chaosSeed?: number;
+	chaosPasses: number;
+	/** Branch message entries hidden behind a Magic Context compaction entry. */
+	hiddenMessages?: number;
 }
 
 export interface PerfPassReport {
@@ -88,6 +112,8 @@ export interface PerfPassReport {
 	deferredDrainMs: number;
 	deferredDb: DatabaseTiming;
 	dbQueries: ReturnType<ReturnType<typeof createDatabaseTimer>["queries"]>;
+	/** Randomized events applied before this pass (`--chaos-seed`). */
+	chaos?: string[];
 }
 
 export interface PerfRunReport {
@@ -108,14 +134,37 @@ async function main(): Promise<void> {
 				messages: options.messages,
 				systemEntry: options.pi087,
 				toolResultRepeat: options.toolResultRepeat,
+				hiddenMessages: options.hiddenMessages,
 			});
-	const points =
-		options.points ??
-		buildPoints(
-			fixture.entries.filter((entry) => entry.type === "message").length,
-			options.step,
-		);
-	const passes = buildAccumulationPasses(fixture, points);
+	const totalMessages = fixture.entries.filter(
+		(entry) => entry.type === "message",
+	).length;
+	const chaos =
+		options.chaosSeed === undefined ? null : seededRandom(options.chaosSeed);
+	const points = options.points ?? buildPoints(totalMessages, options.step);
+	if (chaos) {
+		let point = points.at(-1) ?? 1;
+		for (let pass = 0; pass < options.chaosPasses; pass += 1) {
+			point = Math.min(totalMessages, point + chaos(4));
+			points.push(point);
+		}
+	}
+	const passes = chaos
+		? (() => {
+				// Repeated points are deliberate here (a pass with no new message).
+				const unique = buildAccumulationPasses(fixture, points);
+				const byCount = new Map(
+					unique.map((pass) => [pass.requestedMessages, pass]),
+				);
+				return points.map((point) => {
+					const pass = byCount.get(point);
+					if (!pass) throw new Error(`no pass for point ${point}`);
+					// A repeated point reuses the same pass object. That is safe: the
+					// pass loop below structuredClones pass.messages into each event.
+					return pass;
+				});
+			})()
+		: buildAccumulationPasses(fixture, points);
 	if (passes.length === 0)
 		throw new Error(`No message passes found in ${fixture.name}`);
 	const finalPass = passes.at(-1);
@@ -211,13 +260,45 @@ async function main(): Promise<void> {
 			   tag_number, harness, status, token_count)
 			 VALUES (?, ?, 'message', 400, 0, ?, 'pi', 'compacted', 100)`,
 		);
+		const insertMixed = rawDb.prepare(
+			`INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size,
+			   tag_number, harness, status, token_count, tool_name, tool_owner_message_id,
+			   input_byte_size, input_token_count)
+			 VALUES (?, ?, ?, ?, 0, ?, 'pi', ?, ?, ?, ?, ?, ?)`,
+		);
 		rawDb.exec("BEGIN");
+		const interleave = options.foreignTagInterleave ?? 0;
 		for (let index = 0; index < options.historicalTags; index += 1) {
-			insert.run(
-				fixture.sessionId,
-				`historical-entry-${index}:p0`,
-				firstNumber + index,
-			);
+			if (options.historicalMix) {
+				const tool = index % 3 !== 0;
+				const owner = `historical-entry-${Math.floor(index / 3)}`;
+				insertMixed.run(
+					fixture.sessionId,
+					tool ? `historical-call-${index}` : `${owner}:p0`,
+					tool ? "tool" : "message",
+					tool ? 4_000 : 400,
+					firstNumber + index,
+					index % 3 === 2 ? "dropped" : "compacted",
+					tool ? 1_000 : 100,
+					tool ? "read" : null,
+					tool ? owner : null,
+					tool ? 120 : null,
+					tool ? 30 : null,
+				);
+			} else {
+				insert.run(
+					fixture.sessionId,
+					`historical-entry-${index}:p0`,
+					firstNumber + index,
+				);
+			}
+			for (let foreign = 0; foreign < interleave; foreign += 1) {
+				insert.run(
+					`perf-foreign-session-${foreign}`,
+					`foreign-entry-${index}:p0`,
+					index + 1,
+				);
+			}
 		}
 		rawDb.exec("COMMIT");
 	};
@@ -296,8 +377,19 @@ async function main(): Promise<void> {
 					)
 					.run(fixture.sessionId, fixture.sessionId);
 			}
-			const usagePercentage =
-				options.lane === "historian-high"
+			const chaosOps = chaos
+				? applyChaos(chaos, {
+						index,
+						warmPasses: points.length - options.chaosPasses,
+						sessionId: fixture.sessionId,
+						rawDb,
+						externalDb,
+						branchEntries: pass.branchEntries,
+					})
+				: null;
+			const usagePercentage = chaosOps?.flush
+				? 96
+				: options.lane === "historian-high"
 					? 85
 					: options.lane === "historian-low"
 						? 25
@@ -309,6 +401,7 @@ async function main(): Promise<void> {
 				options.database ? dataDir : fixture.cwd,
 				pass.branchEntries,
 				usagePercentage,
+				chaosOps?.model,
 			);
 			const event = {
 				messages: structuredClone(
@@ -369,6 +462,7 @@ async function main(): Promise<void> {
 				deferredDrainMs,
 				deferredDb,
 				dbQueries: dbTimer.queries(),
+				chaos: chaosOps?.labels,
 			});
 			if (
 				options.historicalTagsAfterMessages &&
@@ -403,6 +497,7 @@ function fakeContext(
 	cwd: string,
 	branchEntries: readonly SessionEntry[],
 	usagePercentage: number,
+	modelId = "claude-sonnet-4-5",
 ): ExtensionContext {
 	const byId = new Map(branchEntries.map((entry) => [entry.id, entry]));
 	return {
@@ -412,7 +507,7 @@ function fakeContext(
 		ui: { notify: () => undefined },
 		model: {
 			provider: "anthropic",
-			id: "claude-sonnet-4-5",
+			id: modelId,
 			contextWindow: 400_000,
 		},
 		sessionManager: {
@@ -427,6 +522,133 @@ function fakeContext(
 			contextWindow: 400_000,
 		}),
 	} as unknown as ExtensionContext;
+}
+
+function seededRandom(seed: number): (limit: number) => number {
+	let state = seed >>> 0;
+	return (limit) => {
+		state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+		return state % limit;
+	};
+}
+
+interface ChaosDatabase {
+	prepare(sql: string): {
+		run(...args: unknown[]): unknown;
+		all(...args: unknown[]): unknown[];
+		get(...args: unknown[]): unknown;
+	};
+}
+
+let chaosModel = "claude-sonnet-4-5";
+let chaosFolds = 0;
+
+/**
+ * Apply this pass's randomized external events (see `chaosSeed`). Draws from
+ * the generator in a fixed order, so the baseline checkout and the checkout
+ * under test see identical events when run with the same seed.
+ */
+function applyChaos(
+	random: (limit: number) => number,
+	input: {
+		index: number;
+		warmPasses: number;
+		sessionId: string;
+		rawDb: ChaosDatabase;
+		externalDb: ChaosDatabase | null;
+		branchEntries: readonly SessionEntry[];
+	},
+): { flush: boolean; model: string; labels: string[] } {
+	const labels: string[] = [];
+	const roll = Array.from({ length: 5 }, () => random(100));
+	const pickNumber = random(1_000_000);
+	if (input.index < input.warmPasses)
+		return { flush: false, model: chaosModel, labels };
+	const active = input.rawDb
+		.prepare(
+			"SELECT tag_number AS n FROM tags WHERE session_id = ? AND status = 'active' ORDER BY tag_number",
+		)
+		.all(input.sessionId) as { n: number }[];
+	const anyTag = input.rawDb
+		.prepare(
+			"SELECT tag_number AS n FROM tags WHERE session_id = ? ORDER BY tag_number",
+		)
+		.all(input.sessionId) as { n: number }[];
+	if ((roll[0] ?? 100) < 20 && active.length > 0) {
+		// ctx_reduce queues a drop for an active tag on this process's connection.
+		const tag = active[pickNumber % active.length]?.n;
+		input.rawDb
+			.prepare(
+				"INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, 'pi')",
+			)
+			.run(input.sessionId, tag, 1_750_000_000_000 + input.index);
+		labels.push(`drop:${tag}`);
+	}
+	const flush = (roll[1] ?? 100) < 10;
+	if (flush) labels.push("flush");
+	if ((roll[2] ?? 100) < 6 && input.externalDb) {
+		// A compartment published by another process covers the next slice of
+		// the branch's messages, as a historian run does.
+		const messages = input.branchEntries.filter(
+			(entry) => entry.type === "message",
+		);
+		const end = Math.min(
+			messages.length - 40,
+			Math.floor(messages.length * 0.97) + chaosFolds * 10,
+		);
+		const start = chaosFolds === 0 ? 1 : end - 9;
+		const startEntry = messages[start - 1];
+		const endEntry = messages[end - 1];
+		if (startEntry && endEntry && end > start) {
+			input.externalDb
+				.prepare(
+					`INSERT INTO compartments (session_id, sequence, start_message, end_message,
+					   start_message_id, end_message_id, title, content, created_at, harness)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pi')`,
+				)
+				.run(
+					input.sessionId,
+					chaosFolds + 1,
+					start,
+					end,
+					startEntry.id,
+					endEntry.id,
+					`Synthetic fold ${chaosFolds + 1}`,
+					`Messages ${start}-${end} were summarized.`,
+					1_750_000_000_000 + input.index,
+				);
+			chaosFolds += 1;
+			labels.push(`fold:${start}-${end}`);
+		}
+	}
+	if ((roll[3] ?? 100) < 8) {
+		chaosModel =
+			chaosModel === "claude-sonnet-4-5"
+				? "claude-opus-4-1"
+				: "claude-sonnet-4-5";
+		labels.push(`model:${chaosModel}`);
+	}
+	if ((roll[4] ?? 100) < 8 && input.externalDb && active.length > 0) {
+		// Another process drops an active tag of this session directly.
+		const tag = active[(pickNumber >>> 3) % active.length]?.n;
+		input.externalDb
+			.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?",
+			)
+			.run(input.sessionId, tag);
+		labels.push(`foreign-drop:${tag}`);
+	} else if ((roll[4] ?? 100) < 25 && input.externalDb && anyTag.length > 0) {
+		// Another process rewrites one of this session's tags (size and status
+		// of an old row), so the cached snapshot must notice a foreign write.
+		const tag = anyTag[pickNumber % anyTag.length]?.n;
+		input.externalDb
+			.prepare(
+				"UPDATE tags SET byte_size = byte_size + 1, status = CASE status WHEN 'compacted' THEN 'dropped' ELSE status END WHERE session_id = ? AND tag_number = ?",
+			)
+			.run(input.sessionId, tag);
+		labels.push(`foreign:${tag}`);
+	}
+	return { flush, model: chaosModel, labels };
 }
 
 function readTagRows(
@@ -481,6 +703,8 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 		pi087: false,
 		lingeringFallback: false,
 		historicalTags: 0,
+		historicalMix: false,
+		chaosPasses: 0,
 	};
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
@@ -523,6 +747,20 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 			index += 1;
 		} else if (arg === "--tool-result-repeat" && value) {
 			options.toolResultRepeat = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--chaos-seed" && value) {
+			options.chaosSeed = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--chaos-passes" && value) {
+			options.chaosPasses = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--historical-mix") {
+			options.historicalMix = true;
+		} else if (arg === "--foreign-tag-interleave" && value) {
+			options.foreignTagInterleave = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--hidden-messages" && value) {
+			options.hiddenMessages = positiveInteger(value, arg);
 			index += 1;
 		} else if (arg === "--external-writes") {
 			options.externalWrites = true;
