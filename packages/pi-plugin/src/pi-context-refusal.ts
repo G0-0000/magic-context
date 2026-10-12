@@ -23,6 +23,7 @@ import { resolvePiHarnessKind } from "./pi-harness-kind";
 const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
 	"Magic Context could not safely prepare this turn; send your message again.";
+const MAX_UNSENDABLE_NONCES_PER_SESSION = 32;
 
 export class PiContextSupersededError extends Error {
 	constructor(
@@ -175,10 +176,12 @@ export function registerPiGuardedContext(
 		return counts;
 	};
 	const fenceEnabled = resolvePiHarnessKind() === "omp";
-	// A thrown hook leaves OMP holding its input array, not the newer managed
-	// result. Mark only that fallback so dispatch cannot borrow another receipt.
-	// Keep nonces across clean passes: retries of a refused body stay refused.
-	const unsendableNonces = new Set<string>();
+	// When this hook throws, OMP retains its original message array rather than
+	// a newer pass's prepared messages. Mark that unprepared array so it cannot
+	// use the newer pass's completion record. Each session retains its newest
+	// 32 nonces across successful context passes; receipt cleanup retires them too.
+	const unsendableNonces = new Map<string | object, Set<string>>();
+	receiptMaps.add(unsendableNonces);
 	const refuse = (
 		ctx: ExtensionContext,
 		budget: PiContextBudget,
@@ -281,21 +284,27 @@ export function registerPiGuardedContext(
 			// Every other session still requires a completed managed context pass,
 			// even when we do not recognize the provider's body format.
 			if (sideSessions.get(key)?.sides) return;
-			const serializedPayload = JSON.stringify(payload);
-			if (
-				serializedPayload &&
-				[...unsendableNonces].some((nonce) => serializedPayload.includes(nonce))
-			) {
-				// Do not abandon the latest pass: it belongs to a different request.
-				const budget = new PiContextBudget();
-				budget.stage = "provider dispatch";
-				refuse(
-					ctx,
-					budget,
-					"superseded context fallback is not a managed request",
-					() => true,
-				);
-				return;
+			const nonces = unsendableNonces.get(key);
+			// Most sessions have no superseded payloads. Do not serialize their
+			// potentially multi-megabyte conversation just to inspect an empty set.
+			if (nonces?.size) {
+				const serializedPayload = JSON.stringify(payload);
+				if (
+					serializedPayload &&
+					[...nonces].some((nonce) => serializedPayload.includes(nonce))
+				) {
+					// Preserve the replacement context pass's completion record: this
+					// refusal applies only to the older, marked request.
+					const budget = new PiContextBudget();
+					budget.stage = "provider dispatch";
+					refuse(
+						ctx,
+						budget,
+						"superseded context fallback is not a managed request",
+						() => true,
+					);
+					return;
+				}
 			}
 			// OMP also invokes this send hook for advisor agents. They review separate,
 			// formatted session updates rather than the main conversation, so they
@@ -448,7 +457,16 @@ export function registerPiGuardedContext(
 					!options.compactionOff?.(ctx)
 				) {
 					const nonce = crypto.randomUUID();
-					unsendableNonces.add(nonce);
+					let nonces = unsendableNonces.get(key);
+					if (!nonces) {
+						nonces = new Set();
+						unsendableNonces.set(key, nonces);
+					}
+					nonces.add(nonce);
+					if (nonces.size > MAX_UNSENDABLE_NONCES_PER_SESSION) {
+						const oldest = nonces.values().next().value;
+						if (oldest !== undefined) nonces.delete(oldest);
+					}
 					event.messages.push({
 						role: "user",
 						content: [

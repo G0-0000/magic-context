@@ -20,8 +20,9 @@ own input array:
 The nonce is a fresh `crypto.randomUUID()`, recorded only in the extension's
 memory. The OMP payload hook checks for those exact nonces before consulting
 any completion receipt. Refusal does not abandon the newer pass's receipt.
-The nonce remains unsendable after clean passes so an old payload cannot borrow
-a new receipt on retry. This is not a message-content heuristic: similar prose
+The newest 32 nonces per session remain unsendable across clean passes until
+that session's receipts are cleared, so a retained payload cannot borrow a new
+receipt on retry. This is not a message-content heuristic: similar prose
 or a truncated nonce is not refused. Pi, OMP side turns, sessions whose side-turn
 latch disabled the fence, and compaction-off sessions never receive a marker.
 
@@ -142,6 +143,74 @@ introduced a one-line diff, ran the same 9-test issue suite, and restored via
 The [mutation receipts](issue-668-mutation-checks.json) name each green and red
 test and preserve the applied/restored diff-stat pairs. No mutation remains in
 the delivered tree. The restored issue suite is green.
+
+## Send-hook cost and bounded retention
+
+The send hook now looks up the current session/operation key's nonce set first.
+With no retained nonce it does **not** call `JSON.stringify`, inspect the large
+conversation for markers, or allocate a nonce-search array. A different
+session's retained markers do not make this session serialize its request.
+The nonce map participates in `clearPiContextReceipt` alongside completion and
+lifecycle maps. Each session retains at most its newest **32** nonces, dropping
+the oldest on insertion. No durable format or host behavior was changed.
+
+**Known limit:** a retry carrying a nonce evicted by the 32-entry cap is no
+longer identifiable by this marker check and could pass using a later valid
+receipt. Clearing that session's receipts also retires its nonce history;
+without a fresh completed context pass the normal receipt check still refuses.
+
+The [dispatch benchmark](issue-668-dispatch-benchmark.json) compares the real
+registered send hooks from commit `850a28cbdef23a69b8ca8276cdff56ed7734f86f`
+and the revised source. Bun **1.4.2**, Linux x64, `runon: linux,4c`; the Anthropic-shaped
+payload is **5,246,098 bytes** (approximately 5 MiB), with 100 text messages.
+Each case warmed 100 calls and measured 1,000 calls, synchronously, without an
+HTTP provider. The payload's `toJSON` counts actual serializations; all four
+count controls passed over 4,400 calls. Timing includes the other unchanged
+receipt/advisor checks and timer overhead, not context preparation.
+
+| Retained nonces | Version | Mean per request | Median | p95 | Serializations including warmup |
+| --- | --- | --- | --- | --- | --- |
+| 0 | Before | 4.511797 ms | 4.488059 ms | 6.895780 ms | 1,100 |
+| 0 | After | 0.000537 ms | 0.000311 ms | 0.001342 ms | **0** |
+| 32 | Before | 8.702982 ms | 7.388563 ms | 13.784896 ms | 1,100 |
+| 32 | After | 9.999418 ms | 9.154671 ms | 15.871615 ms | 1,100 |
+
+The common nonce-free path removes approximately **4.51 ms per 5 MiB request**
+in this run. Sessions retaining markers still pay for one full serialization
+and up to 32 substring searches. The 32-nonce timings are not an improvement
+claim: these sequential samples use different random nonce values and include
+allocation/GC and host timing variance.
+
+The added tests cover no serialization (with a throwing `toJSON`), session
+isolation, oldest eviction with all 32 retained markers still refused, and
+receipt cleanup leaving another session's marker intact. The existing 668,
+663 and 667 expectations remain unchanged.
+
+Revised Linux verification (`linux,4c`): **40 pass, 0 fail, 239 assertions**
+across all four issue 668/663/667 test files. TypeScript 5.9.3 typecheck passed;
+Biome 2.5.1 checked 315 Pi source files with no errors and the same 49 existing
+warnings. The full-suite and real-host receipts above describe the original
+delivery; this narrow revision reran the requested issue suites rather than
+those broader gates.
+
+The [revised mutation receipts](issue-668-nonce-mutation-checks.json) record
+five Linux controls: dump detection, exact-nonce refusal, nonce-free
+serialization, newest-32 eviction, and receipt cleanup. Each produced only its
+named expected red test, with unaffected green tests named in the receipts.
+The exact-nonce and serialization runs used explicit test-name filters to
+isolate those properties; cap and cleanup were each tested against the full
+12-test issue 668 file. All mutations were restored to empty unstaged diffs
+before the final green issue-suite run.
+
+To reproduce the comparison, generate the historical module beside its relative
+dependencies, run the benchmark on Linux, then remove the generated module:
+
+```sh
+git show 850a28cbdef23a69b8ca8276cdff56ed7734f86f:packages/pi-plugin/src/pi-context-refusal.ts \
+  > packages/pi-plugin/src/issue-668-benchmark-before.ts
+bun docs/reports/probes/issue-668/dispatch-benchmark.ts
+rm packages/pi-plugin/src/issue-668-benchmark-before.ts
+```
 
 ## Reproduce
 

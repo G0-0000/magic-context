@@ -2,6 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as diagnostic from "./omp-diagnostic-context";
 import { isOmpDumpContextStack } from "./omp-diagnostic-context";
 import {
+	clearPiContextReceipt,
 	PiContextSupersededError,
 	registerPiGuardedContext,
 } from "./pi-context-refusal";
@@ -15,6 +16,8 @@ const dumpStack = `Error
 
 afterEach(() => {
 	__setPiHarnessKindForTesting(undefined);
+	clearPiContextReceipt("issue-668");
+	clearPiContextReceipt("issue-668-other");
 });
 
 function harness(
@@ -41,8 +44,16 @@ function harness(
 		ui: { notify: (...args: unknown[]) => notices.push(args) },
 		abort: () => aborts++,
 	};
-	const emit = (name: string, event: unknown = {}) =>
-		handlers.get(name)?.(event as never, ctx as never);
+	const emit = (name: string, event: unknown = {}, sessionId = "issue-668") =>
+		handlers.get(name)?.(
+			event as never,
+			(sessionId === "issue-668"
+				? ctx
+				: {
+						...ctx,
+						sessionManager: fakeContext(sessionId).sessionManager,
+					}) as never,
+		);
 	return {
 		emit,
 		entries,
@@ -223,6 +234,111 @@ test("issue 668: real conflict fallback and retries refuse without revoking the 
 	expect(JSON.stringify(h.entries.at(-1))).toContain(
 		"superseded context fallback is not a managed request",
 	);
+});
+
+function nonceHarness() {
+	return harness(async (event) => {
+		if (event.messages[0]?.content !== "managed")
+			throw new PiContextSupersededError("replaced pass");
+		return { messages: event.messages };
+	});
+}
+
+async function markedFallback(
+	h: ReturnType<typeof nonceHarness>,
+	index: number,
+	sessionId = "issue-668",
+) {
+	const messages = [userMessage(`replaced ${index}`, index)];
+	await expect(
+		Promise.resolve(h.emit("context", { messages }, sessionId)),
+	).rejects.toBeInstanceOf(PiContextSupersededError);
+	expect(messages).toHaveLength(2);
+	return messages;
+}
+
+test("issue 668: nonce-free sessions never serialize the provider payload", async () => {
+	const h = nonceHarness();
+	await h.emit("context", { messages: [userMessage("managed")] });
+	const payload = {
+		messages: [{ role: "user", content: "managed" }],
+		toJSON() {
+			throw new Error("nonce-free dispatch serialized the payload");
+		},
+	};
+	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
+	expect(h.aborts).toBe(0);
+	const other = await markedFallback(h, 1, "issue-668-other");
+	await h.emit(
+		"context",
+		{ messages: [userMessage("managed")] },
+		"issue-668-other",
+	);
+	// The other session's superseded-request nonce must not make this session
+	// serialize its payload.
+	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
+	expect(h.aborts).toBe(0);
+	h.emit("before_provider_request", { payload: { messages: other } });
+	expect(h.aborts).toBe(0);
+	h.emit(
+		"before_provider_request",
+		{ payload: { messages: other } },
+		"issue-668-other",
+	);
+	expect(h.aborts).toBe(1);
+});
+
+test("issue 668: each session retains exactly its newest 32 unsendable nonces", async () => {
+	const h = nonceHarness();
+	const raw = [];
+	for (let index = 0; index < 33; index++)
+		raw.push(await markedFallback(h, index));
+	const other = await markedFallback(h, 100, "issue-668-other");
+	await h.emit("context", { messages: [userMessage("managed")] });
+	h.emit("before_provider_request", { payload: { messages: raw[0] } });
+	expect(h.aborts).toBe(0);
+	for (const messages of raw.slice(1))
+		h.emit("before_provider_request", { payload: { messages } });
+	expect(h.aborts).toBe(32);
+	await h.emit(
+		"context",
+		{ messages: [userMessage("managed")] },
+		"issue-668-other",
+	);
+	h.emit(
+		"before_provider_request",
+		{ payload: { messages: other } },
+		"issue-668-other",
+	);
+	expect(h.aborts).toBe(33);
+});
+
+test("issue 668: receipt cleanup also clears only that session's nonces", async () => {
+	const h = nonceHarness();
+	const raw = await markedFallback(h, 1);
+	const other = await markedFallback(h, 2, "issue-668-other");
+	await h.emit(
+		"context",
+		{ messages: [userMessage("managed")] },
+		"issue-668-other",
+	);
+	clearPiContextReceipt("issue-668");
+	await h.emit("context", { messages: [userMessage("managed")] });
+	h.emit("before_provider_request", { payload: { messages: raw } });
+	expect(h.aborts).toBe(0);
+	const payload = {
+		toJSON() {
+			throw new Error("cleared session serialized the payload");
+		},
+	};
+	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
+	expect(h.aborts).toBe(0);
+	h.emit(
+		"before_provider_request",
+		{ payload: { messages: other } },
+		"issue-668-other",
+	);
+	expect(h.aborts).toBe(1);
 });
 
 for (const kind of [
