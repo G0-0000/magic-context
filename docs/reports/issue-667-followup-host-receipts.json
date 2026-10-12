@@ -1,0 +1,1238 @@
+{
+  "generatedBy": [
+    "docs/reports/probes/issue-667-review/host.ts",
+    "docs/reports/probes/issue-667/host.ts"
+  ],
+  "build": "packages/pi-plugin dist and guard bundle from the review follow-up commit e420907676",
+  "hostPackages": [
+    "@oh-my-pi/pi-coding-agent@18.7.0",
+    "@oh-my-pi/pi-coding-agent@18.8.6"
+  ],
+  "bun": "1.4.2",
+  "platform": "macOS arm64, loopback Anthropic-protocol mock",
+  "runs": [
+    {
+      "probe": "issue-667-review",
+      "evidence": "abort-before-dispatch-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "abort-before-dispatch",
+      "fullPlugin": false,
+      "pid": 46635,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791816964580,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "probe-abort-after-context",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "context 2",
+        "context-end 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-vWNJXo/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "abort-before-dispatch-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "abort-before-dispatch",
+      "fullPlugin": false,
+      "pid": 47077,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791816972663,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "probe-abort-after-context",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "context 2",
+        "context-end 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-aFbYiZ/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "abort-before-dispatch-plugin-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "abort-before-dispatch",
+      "fullPlugin": true,
+      "pid": 45889,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791816960561,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "probe-abort-after-context",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "agent_start 2",
+        "context 2",
+        "context-end 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-ClAceO/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "abort-before-dispatch-plugin-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "abort-before-dispatch",
+      "fullPlugin": true,
+      "pid": 46849,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791816968955,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission",
+        "[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "probe-abort-after-context",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "agent_start 2",
+        "context 2",
+        "context-end 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-sh6zhJ/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "late-start-end-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "late-start-end",
+      "fullPlugin": false,
+      "pid": 50102,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791816996234,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791816996379,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] agent_end attributed to an earlier run; keeping the latest context pass session=01a1309d-9481-7777-b9b8-1b49377844b8 stage=entry elapsed=1ms recovery=not attempted"
+      ],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_end 1",
+        "agent_start 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-iVsh9m/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "late-start-end-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "late-start-end",
+      "fullPlugin": false,
+      "pid": 51161,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817013389,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817013653,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] agent_end attributed to an earlier run; keeping the latest context pass session=01a1309d-d4ed-7511-b4c9-2114ad89a234 stage=entry elapsed=1ms recovery=not attempted"
+      ],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_end 1",
+        "agent_start 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-MrUPN4/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "late-start-end-plugin-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "late-start-end",
+      "fullPlugin": true,
+      "pid": 50238,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817000441,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817000763,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] agent_end attributed to an earlier run; keeping the latest context pass session=01a1309d-a3bb-7193-8e35-4208c4e18e22 stage=LKG/served publication elapsed=20ms recovery=not attempted"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "agent_start 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-f4x1CY/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "late-start-end-plugin-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "late-start-end",
+      "fullPlugin": true,
+      "pid": 51633,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817018012,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817018342,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": [
+        "[magic-context][pi] agent_end attributed to an earlier run; keeping the latest context pass session=01a1309d-e7c3-72dc-b042-81bbb6053484 stage=LKG/served publication elapsed=20ms recovery=not attempted"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_start 2",
+        "agent_start 2",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-6i2xrn/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "start-before-end-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "start-before-end",
+      "fullPlugin": false,
+      "pid": 50585,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791817004427,
+          "managed": true,
+          "first": true,
+          "second": false
+        }
+      ],
+      "refusals": [
+        "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+      ],
+      "aborts": 1,
+      "fenceLog": [],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_start 2",
+        "agent_end 1",
+        "before_provider_request",
+        "entry",
+        "abort",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-0c2P4M/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "start-before-end-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "start-before-end",
+      "fullPlugin": false,
+      "pid": 51757,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791817022031,
+          "managed": true,
+          "first": true,
+          "second": false
+        }
+      ],
+      "refusals": [
+        "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+      ],
+      "aborts": 1,
+      "fenceLog": [],
+      "order": [
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_start 2",
+        "agent_end 1",
+        "before_provider_request",
+        "entry",
+        "abort",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-UXEdnz/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "start-before-end-plugin-18.7.0.json",
+      "version": "omp/18.7.0",
+      "mode": "start-before-end",
+      "fullPlugin": true,
+      "pid": 50761,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791817008634,
+          "managed": true,
+          "first": true,
+          "second": false
+        }
+      ],
+      "refusals": [
+        "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+      ],
+      "aborts": 1,
+      "fenceLog": [
+        "[magic-context][01a1309d-c35a-7697-8525-7311bb78ba74] DISCARDED CONTEXT RESULT: queued Pi transform decision",
+        "[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_start 2",
+        "agent_start 2",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "before_provider_request",
+        "entry",
+        "abort",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-BW6sM1/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667-review",
+      "evidence": "start-before-end-plugin-18.8.6.json",
+      "version": "omp/18.8.6",
+      "mode": "start-before-end",
+      "fullPlugin": true,
+      "pid": 52191,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791817026959,
+          "managed": true,
+          "first": true,
+          "second": false
+        }
+      ],
+      "refusals": [
+        "Magic Context could not safely prepare this turn; send your message again. stage=provider dispatch elapsed=0ms recovery=no managed result; refused (no context pass ran for this operation)"
+      ],
+      "aborts": 1,
+      "fenceLog": [
+        "[magic-context][01a1309e-0ada-7419-b512-c6605899d50f] DISCARDED CONTEXT RESULT: queued Pi transform decision",
+        "[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture Pi context pass superseded before writer admission"
+      ],
+      "order": [
+        "agent_start 1",
+        "agent_start 1",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived 1",
+        "context 2",
+        "context-end 2",
+        "agent_start 2",
+        "agent_start 2",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "agent_end-arrived 1",
+        "agent_end 1",
+        "before_provider_request",
+        "entry",
+        "abort",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2",
+        "agent_end-arrived 2",
+        "agent_end 2"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667-review/omp-e2e-qaD8Ta/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "late-end-18.7.0-fixed.json",
+      "version": "omp/18.7.0",
+      "mode": "late-end",
+      "fullPlugin": false,
+      "pid": 52494,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817031182,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817031335,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-eFKSC1/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "late-end-18.8.6-fixed.json",
+      "version": "omp/18.8.6",
+      "mode": "late-end",
+      "fullPlugin": false,
+      "pid": 54018,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817035793,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817035997,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-Rx4stW/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "late-end-plugin-18.7.0-fixed.json",
+      "version": "omp/18.7.0",
+      "mode": "late-end",
+      "fullPlugin": true,
+      "pid": 53631,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817033669,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817033936,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "agent_start",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_start",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-IEyCsc/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "late-end-plugin-18.8.6-fixed.json",
+      "version": "omp/18.8.6",
+      "mode": "late-end",
+      "fullPlugin": true,
+      "pid": 54249,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q",
+      "requests": 2,
+      "wire": [
+        {
+          "receivedAt": 1791817038216,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817038458,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "agent_start",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_start",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-qcYK5Q/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "retry-18.7.0-fixed.json",
+      "version": "omp/18.7.0",
+      "mode": "retry",
+      "fullPlugin": false,
+      "pid": 54319,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF",
+      "requests": 12,
+      "wire": [
+        {
+          "receivedAt": 1791817040192,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817040574,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817041515,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817043151,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817046482,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817053390,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817061140,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817067785,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817074836,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817081867,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817088351,
+          "managed": true,
+          "first": true,
+          "second": false
+        },
+        {
+          "receivedAt": 1791817090536,
+          "managed": true,
+          "first": true,
+          "second": false
+        }
+      ],
+      "refusals": [],
+      "aborts": 0,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "context 1",
+        "context-end 1",
+        "before_provider_request",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "wire",
+        "agent_end-arrived willContinue=true",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-U0alUF/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    },
+    {
+      "probe": "issue-667",
+      "evidence": "slow-18.7.0-fixed.json",
+      "version": "omp/18.7.0",
+      "mode": "slow",
+      "fullPlugin": false,
+      "pid": 65185,
+      "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF",
+      "requests": 1,
+      "wire": [
+        {
+          "receivedAt": 1791817120440,
+          "managed": true,
+          "first": true,
+          "second": true
+        }
+      ],
+      "refusals": [
+        "Magic Context could not safely prepare this turn; send your message again. stage=entry elapsed=25007ms recovery=no managed result; refused (stage=entry elapsed=25003ms recovery=not attempted)"
+      ],
+      "aborts": 1,
+      "fenceLog": null,
+      "order": [
+        "agent_start",
+        "context 1",
+        "entry",
+        "abort",
+        "context-end 1",
+        "agent_end-arrived",
+        "agent_start",
+        "context 2",
+        "context-end 2",
+        "agent_end",
+        "before_provider_request",
+        "wire",
+        "agent_end-arrived",
+        "agent_end"
+      ],
+      "dbDescriptorPaths": [
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/agent.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/agent.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/agent.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/models.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/models.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/models.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/skill-descriptions.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/skill-descriptions.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/agent/skill-descriptions.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/cache/legacy-pi-extension-cache.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/cache/legacy-pi-extension-cache.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/.omp/cache/legacy-pi-extension-cache.db-wal",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/data/cortexkit/magic-context/context.db",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/data/cortexkit/magic-context/context.db-shm",
+        "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/issue-667/omp-e2e-4bI3vF/data/cortexkit/magic-context/context.db-wal"
+      ],
+      "dbDescriptorsAllUnderRoot": true
+    }
+  ]
+}

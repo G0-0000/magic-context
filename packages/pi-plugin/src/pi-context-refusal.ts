@@ -12,7 +12,11 @@ import {
 	isOmpSideContext,
 	isOmpUnmanagedCaptureRequest,
 } from "./omp-request-kind";
-import { PiContextBudget } from "./pi-context-budget";
+import {
+	PI_CONTEXT_BUDGET,
+	PiContextBudget,
+	PiContextDeadlineError,
+} from "./pi-context-budget";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
 const ENTRY_TYPE = "magic-context-turn-refused";
@@ -23,12 +27,20 @@ export class PiContextSupersededError extends Error {}
 
 interface Operation {
 	pass?: PiContextBudget;
+	// role:timestamp keys of the latest pass's input messages, captured before
+	// its handler ran. The handler rewrites the event's message array in place
+	// (synthetic history, todo and system messages OMP never holds), so only
+	// this snapshot can be compared with a late agent_end's messages (see
+	// endBelongsToEarlierRun). Undefined when the input could not be read.
+	inputKeys?: readonly string[];
+	// Whether the dispatch fence has already admitted a request for the latest pass.
+	dispatched: boolean;
 	started: boolean;
 	ready: boolean;
 	refused: boolean;
 	ended: boolean;
 }
-const receiptMaps = new Set<Map<string | object, Operation>>();
+const receiptMaps = new Set<Map<string | object, unknown>>();
 export function clearPiContextReceipt(sessionId: string): void {
 	for (const receipts of receiptMaps) receipts.delete(sessionId);
 }
@@ -37,6 +49,64 @@ function operationKey(ctx: ExtensionContext): string | object {
 	return (
 		ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager ?? "no-session"
 	);
+}
+
+function messageKey(message: unknown): string | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const { role, timestamp } = message as {
+		role?: unknown;
+		timestamp?: unknown;
+	};
+	return typeof role === "string" && typeof timestamp === "number"
+		? `${role}:${timestamp}`
+		: undefined;
+}
+
+/**
+ * OMP sends the extension `agent_end` notification detached, after its
+ * post-turn maintenance (retry backoff, compaction, session_stop hooks). The
+ * next run or scheduled continuation can therefore start, run its context
+ * pass, and even dispatch before the previous run's end reaches this hook.
+ * The event names no operation, so an end that arrives while the latest pass
+ * has not been dispatched yet is attributed from evidence:
+ * - `willContinue` says the agent continues, so a not-yet-dispatched pass is
+ *   the continuation's own pass (or will be replaced by it);
+ * - a pass whose input, as captured before its handler ran, holds a message
+ *   the ended run never had (OMP clones messages, so role + timestamp
+ *   identify them) was built for a later run.
+ * A pass that was already dispatched keeps the original behaviour: the end
+ * invalidates its receipt for any later request.
+ */
+function endBelongsToEarlierRun(operation: Operation, event: unknown): boolean {
+	if (!operation.pass || operation.dispatched) return false;
+	const end = event as { willContinue?: unknown; messages?: unknown };
+	if (end?.willContinue === true) return true;
+	if (!operation.inputKeys || !Array.isArray(end?.messages)) return false;
+	const ended = new Set<string>();
+	for (const message of end.messages) {
+		const key = messageKey(message);
+		if (key) ended.add(key);
+	}
+	if (ended.size === 0) return false;
+	return operation.inputKeys.some((key) => !ended.has(key));
+}
+
+function inputMessageKeys(event: {
+	readonly messages?: unknown;
+}): string[] | undefined {
+	try {
+		const messages = event.messages;
+		if (!Array.isArray(messages)) return undefined;
+		const keys: string[] = [];
+		for (const message of messages) {
+			const key = messageKey(message);
+			if (key) keys.push(key);
+		}
+		return keys;
+	} catch {
+		// An unreadable input cannot attribute an end; the end then applies.
+		return undefined;
+	}
 }
 
 /**
@@ -73,11 +143,29 @@ export function registerPiGuardedContext(
 	// after cache eviction or reload: OMP still erases side-request attribution.
 	// Only per-turn completion records are invalidated by cache cleanup.
 	const newOperation = (): Operation => ({
+		dispatched: false,
 		started: false,
 		ready: false,
 		refused: false,
 		ended: false,
 	});
+	// Lifecycle notifications seen per session. A run emits one agent_start and
+	// one agent_end, so ends catching up with starts means the start of the run
+	// that owns a misattributed pass has not been delivered yet.
+	const lifecycle = new Map<
+		string | object,
+		{ starts: number; ends: number }
+	>();
+	// Cache eviction and session cleanup reset the counts with the receipts.
+	receiptMaps.add(lifecycle);
+	const lifecycleCounts = (key: string | object) => {
+		let counts = lifecycle.get(key);
+		if (!counts) {
+			counts = { starts: 0, ends: 0 };
+			lifecycle.set(key, counts);
+		}
+		return counts;
+	};
 	const fenceEnabled = resolvePiHarnessKind() === "omp";
 	const refuse = (
 		ctx: ExtensionContext,
@@ -124,6 +212,7 @@ export function registerPiGuardedContext(
 	if (fenceEnabled) {
 		pi.on("agent_start", (_event, ctx) => {
 			const key = operationKey(ctx);
+			lifecycleCounts(key).starts++;
 			const pending = operations.get(key);
 			// OMP forwards lifecycle events asynchronously. A preceding extension
 			// can delay agent_start until this run's context pass has already finished.
@@ -135,8 +224,17 @@ export function registerPiGuardedContext(
 			active.started = true;
 			operations.set(key, active);
 		});
-		pi.on("agent_end", (_event, ctx) => {
+		pi.on("agent_end", (event, ctx) => {
 			const key = operationKey(ctx);
+			const lifecycleSeen = lifecycleCounts(key);
+			// An end without a delivered start (the extension loaded mid-run, or
+			// the counts were reset) must not leave ends ahead of starts: every
+			// later kept pass would then look unstarted and be adoptable by a
+			// new run's start.
+			lifecycleSeen.ends = Math.min(
+				lifecycleSeen.ends + 1,
+				lifecycleSeen.starts,
+			);
 			const counts = sideSessions.get(key);
 			if (counts)
 				log(
@@ -144,6 +242,16 @@ export function registerPiGuardedContext(
 				);
 			const operation = operations.get(key);
 			if (operation) {
+				if (endBelongsToEarlierRun(operation, event)) {
+					// The pass belongs to a run whose own start may still be in flight.
+					// Let that late start adopt the operation instead of erasing it.
+					if (lifecycleSeen.starts <= lifecycleSeen.ends)
+						operation.started = false;
+					log(
+						`[magic-context][pi] agent_end attributed to an earlier run; keeping the latest context pass session=${String(key)} ${operation.pass?.diagnostic() ?? ""}`,
+					);
+					return;
+				}
 				operation.ended = true;
 				operation.ready = false;
 			}
@@ -182,12 +290,32 @@ export function registerPiGuardedContext(
 					);
 				if (!active.pass)
 					throw new Error("no context pass ran for this operation");
+				// Judge this operation's latest pass from operation state only, not
+				// through the pass's assertOwner guard. That guard reports any lost
+				// ownership as a supersession, including an end it cannot attribute,
+				// and turned those into visible refusals of the current turn. A pass
+				// replaced by a newer one is never read here. An unfinished pass is
+				// not a receipt, and past PI_CONTEXT_BUDGET.outcomeMs it can no
+				// longer become one.
+				if (
+					!budget.completed &&
+					(budget.abandoned || budget.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
+				)
+					throw new PiContextDeadlineError(budget.diagnostic());
 				// A context result completed before the preparation deadline remains
-				// valid on provider retries. Ownership, refusal and turn end still apply.
-				budget.assertOwner();
-				if (!budget.completed) budget.assertOutcome();
-				if (!active.ready || active.refused || active.ended || budget.abandoned)
+				// valid on provider retries until refusal or the end of its own run.
+				if (active.ended)
+					throw new Error(
+						"the run that owned the latest context pass has ended; no managed result for this request",
+					);
+				if (
+					!budget.completed ||
+					!active.ready ||
+					active.refused ||
+					budget.abandoned
+				)
 					throw new Error("context pass ran without a managed context receipt");
+				active.dispatched = true;
 			} catch (error) {
 				active.refused = true;
 				budget.stage = "provider dispatch";
@@ -223,7 +351,13 @@ export function registerPiGuardedContext(
 		}
 		const active = operation;
 		active.pass = budget;
+		active.inputKeys = undefined;
+		active.dispatched = false;
 		active.ready = false;
+		// A refusal aborts the run it was raised in. A later pass on the same
+		// operation (its run's start or the previous end not delivered yet) is
+		// new work and earns its own receipt; the refused pass stays abandoned.
+		active.refused = false;
 		const isOwned = () =>
 			budget.sideTurn
 				? operations.get(key) === owner
@@ -236,14 +370,25 @@ export function registerPiGuardedContext(
 				);
 		};
 		try {
+			// Snapshot the input before the handler rewrites it in place. Reading
+			// here, not on the hook's unguarded prefix, keeps a throwing messages
+			// getter on the refusal path.
+			if (fenceEnabled && !budget.sideTurn)
+				active.inputKeys = inputMessageKeys(event);
 			// Share at most 250 ms of synchronous waiting for later turn writes,
 			// including autocommit statements. Initial session-meta admission uses
 			// the separate yielding writer budget shared with OpenCode.
 			// Do not rerun the handler: it may already have committed earlier writes.
-			const result = await withSqliteTransformPass(() =>
-				handler(event, ctx, budget),
+			// The outcome deadline covers the whole pass, including the foreground
+			// reservation that withSqliteTransformPass may wait on before the handler
+			// starts and any await the handler leaves unguarded. Work still running
+			// at the deadline is abandoned by the refusal below, so its guards stop
+			// further writes.
+			const result = await budget.waitMandatory(
+				Promise.resolve(
+					withSqliteTransformPass(() => handler(event, ctx, budget)),
+				),
 			);
-			budget.assertOutcome();
 			if (result?.messages) {
 				budget.completed = true;
 				active.ready = true;
