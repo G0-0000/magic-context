@@ -3,6 +3,7 @@ import * as embedding from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getAutoSearchHintDecisions } from "../../features/magic-context/storage-meta-persisted";
+import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -11,7 +12,11 @@ import {
     replayPrompt,
     replayScenarios,
 } from "./auto-search-replay.fixture";
-import { _resetAutoSearchCache, runAutoSearchHint } from "./auto-search-runner";
+import {
+    _resetAutoSearchCache,
+    clearAutoSearchForSession,
+    runAutoSearchHint,
+} from "./auto-search-runner";
 import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
 import * as searchModule from "./auto-search-worker-client";
 import { injectM0M1, materializeM0 } from "./inject-compartments";
@@ -36,6 +41,68 @@ function findUserPromptText(msg: MessageLike): string {
 }
 
 for (const host of ["opencode", "opencode2"] as const) {
+    test(`review exception CAS failure still freezes served omission ${host}`, async () => {
+        const fixture = createAutoSearchReplayFixture(host, "failed-omission-save");
+        const { sessionId, projectPath } = fixture;
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot(projectPath),
+        );
+        const search = spyOn(searchModule, "searchAutoHint")
+            .mockResolvedValue([replayHint])
+            .mockImplementationOnce(async () => {
+                throw new Error("transient search failure");
+            });
+        const options = {
+            enabled: true,
+            projectPath,
+            scoreThreshold: 0.6,
+            minPromptChars: 12,
+            memoryEnabled: true,
+            embeddingEnabled: false,
+        };
+        const invoke = async (database = fixture.db, id = "served") => {
+            const messages = [makeUserMsg(id, replayPrompt)];
+            const outcome = await runAutoSearchHint({ db: database, sessionId, messages, options });
+            return { bytes: JSON.stringify(messages[0]), outcome };
+        };
+        try {
+            fixture.db.exec(
+                `CREATE TRIGGER review_fail_cas BEFORE UPDATE OF auto_search_hint_decisions ON session_meta BEGIN SELECT RAISE(IGNORE); END;`,
+            );
+            const first = await invoke();
+            expect(first.outcome).toEqual({ ok: false, kind: "cas-exhaustion" });
+            expect(first.bytes).not.toContain("<ctx-search-hint>");
+            expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([]);
+            clearAutoSearchForSession(sessionId);
+            fixture.db.exec("DROP TRIGGER review_fail_cas");
+            fixture.reopen(true);
+            expect((await invoke()).bytes).toBe(first.bytes);
+            expect(search).toHaveBeenCalledTimes(1);
+            expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([
+                { messageId: "served", decision: "no-hint", reason: "error" },
+            ]);
+            expect(getUnpublishedAutoSearchNoHint(sessionId, "served")).toBeUndefined();
+            fixture.db.exec(
+                `CREATE TRIGGER review_fail_cas BEFORE UPDATE OF auto_search_hint_decisions ON session_meta BEGIN SELECT RAISE(IGNORE); END;`,
+            );
+            const failedHintSave = await invoke(fixture.db, "hint-save-failed");
+            expect(failedHintSave.bytes).not.toContain("<ctx-search-hint>");
+            expect((await invoke(fixture.db, "hint-save-failed")).bytes).toBe(failedHintSave.bytes);
+            expect(search).toHaveBeenCalledTimes(2);
+            expect(getUnpublishedAutoSearchNoHint(sessionId, "hint-save-failed")).toBe("error");
+            fixture.db.exec("DROP TRIGGER review_fail_cas");
+            expect((await invoke(fixture.db, "hint-save-failed")).bytes).toBe(failedHintSave.bytes);
+            expect(getUnpublishedAutoSearchNoHint(sessionId, "hint-save-failed")).toBeUndefined();
+            expect((await invoke(fixture.db, "new-user")).bytes).toContain(
+                "Independent search-only hint",
+            );
+            expect(search).toHaveBeenCalledTimes(3);
+        } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
+        }
+    });
     for (const scenario of replayScenarios) {
         test(`${host} search exception preserves served user bytes after ${scenario}`, async () => {
             const fixture = createAutoSearchReplayFixture(host, scenario);

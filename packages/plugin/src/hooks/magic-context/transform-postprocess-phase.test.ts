@@ -86,6 +86,7 @@ import {
     capturePrefixTrimSourceOrder,
     injectM0M1,
     type M0HardSignals,
+    materializeM0,
 } from "./inject-compartments";
 import * as noteNudger from "./note-nudger";
 import { createPassOutcome } from "./pass-outcome";
@@ -399,6 +400,101 @@ for (const host of ["opencode", "opencode2"] as const) {
                 expect(restored.userBytes).toBe(first.userBytes);
                 expect(restored.userBytes).not.toContain("Recomputed changed hint");
                 expect(fixture.search).toHaveBeenCalledTimes(2);
+            } finally {
+                fixture.close();
+            }
+        });
+
+        it("busting host flushes retirement staged by a prior cached cut", async () => {
+            const fixture = setup("staged-retirement");
+            try {
+                expect((await fixture.invoke("u1")).userBytes).toContain(
+                    "Independent search-only hint",
+                );
+                appendCompartments(fixture.db, fixture.sessionId, [
+                    {
+                        sequence: 0,
+                        startMessage: 0,
+                        endMessage: 0,
+                        startMessageId: "u1",
+                        endMessageId: "u1",
+                        title: "Covered",
+                        content: "Earlier question was answered.",
+                    },
+                ]);
+                materializeM0(fixture.renderOptions());
+                const live = ["u1", "u2"].map(
+                    (id) =>
+                        ({
+                            info: { id, role: "user" },
+                            parts: [{ type: "text", text: replayPrompt }],
+                        }) as MessageLike,
+                );
+                expect(
+                    injectM0M1({
+                        ...fixture.renderOptions(),
+                        messages: live,
+                        isCacheBustingPass: false,
+                    }).prefixTrimStatus,
+                ).toBe("applied");
+                expect(
+                    replayStorage
+                        .getAutoSearchHintDecisions(fixture.db, fixture.sessionId)
+                        .some((entry) => entry.messageId === "u1"),
+                ).toBe(true);
+                await fixture.invoke("u2", true);
+                expect(
+                    replayStorage
+                        .getAutoSearchHintDecisions(fixture.db, fixture.sessionId)
+                        .some((entry) => entry.messageId === "u1"),
+                ).toBe(false);
+            } finally {
+                fixture.close();
+            }
+        });
+
+        it("ordinary pass preserves visible user bytes at the omission cap boundary", async () => {
+            const fixture = setup("visible-cap-boundary");
+            const count = replayStorage.AUTO_SEARCH_DECISION_SOFT_LIMIT + 2;
+            const visibleIds = Array.from({ length: count }, (_, index) => `visible-${index}`);
+            const serve = async () => {
+                const messages = visibleIds.map(
+                    (id) =>
+                        ({
+                            info: { id, role: "user" },
+                            parts: [{ type: "text", text: replayPrompt }],
+                        }) as MessageLike,
+                );
+                await runPostTransformPhase(
+                    basePostTransformArgs(fixture.db, fixture.sessionId, messages),
+                );
+                return JSON.stringify(messages);
+            };
+            try {
+                for (const [index, messageId] of visibleIds.entries())
+                    replayStorage.appendAutoSearchHintDecision(
+                        fixture.db,
+                        fixture.sessionId,
+                        index === 0
+                            ? {
+                                  messageId,
+                                  decision: "hint",
+                                  text: "\n\n<ctx-search-hint>stable cap-boundary hint</ctx-search-hint>",
+                              }
+                            : { messageId, decision: "no-hint", reason: "error" },
+                    );
+                const first = await serve();
+                expect(first).toContain("stable cap-boundary hint");
+                const retired = replayStorage.flushAutoSearchHintDecisionRetirement(
+                    fixture.db,
+                    fixture.sessionId,
+                    new Set(visibleIds),
+                );
+                expect(await serve()).toBe(first);
+                expect(retired).toBe(0);
+                expect(
+                    replayStorage.getAutoSearchHintDecisions(fixture.db, fixture.sessionId),
+                ).toHaveLength(count);
             } finally {
                 fixture.close();
             }

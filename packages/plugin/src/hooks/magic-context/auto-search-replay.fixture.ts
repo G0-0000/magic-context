@@ -31,7 +31,7 @@ export function createAutoSearchReplayFixture(
     projectPath: string;
     directory: string;
     renderOptions(modelKey?: string): M0M1RenderOptions;
-    reopen(): void;
+    reopen(preserveProcessState?: boolean): void;
     close(): void;
 } {
     _resetHarnessForTesting();
@@ -74,10 +74,12 @@ export function createAutoSearchReplayFixture(
                 },
             };
         },
-        reopen() {
+        reopen(preserveProcessState = false) {
             db.close();
             clearInjectionCache(sessionId);
-            _resetAutoSearchCache();
+            // Reopening a handle is not a process restart; failed-save omissions
+            // must survive it when the caller keeps this process's state alive.
+            if (!preserveProcessState) _resetAutoSearchCache();
             db = new Database(databasePath);
         },
         close() {

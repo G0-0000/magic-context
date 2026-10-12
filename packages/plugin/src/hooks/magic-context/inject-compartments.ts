@@ -35,7 +35,7 @@ import {
     getProjectState,
     MEMORY_VISIBILITY_MUTATION_CATEGORY,
     persistCachedM0,
-    pruneAutoSearchHintDecisions,
+    queueAutoSearchHintDecisionRetirement,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
 import {
@@ -3828,7 +3828,14 @@ function trimToPreparedPrefix(
             // restoring raw history before this summary boundary requires a full rebuild
             // of the cached request prefix, so a new hint adds no extra cache miss.
             // A message hidden only by a branch switch must keep its saved decision.
-            pruneAutoSearchHintDecisions(options.db, options.sessionId, new Set(messageIds));
+            // Replaying a cached prefix must not write to SQLite. Record the covered
+            // IDs in memory; postprocessing flushes them only when the host permits
+            // a prefix rebuild, possibly on a later pass.
+            queueAutoSearchHintDecisionRetirement(
+                options.db,
+                options.sessionId,
+                new Set(messageIds),
+            );
         };
         const sourceOrder = options.prefixTrimSourceOrder;
         if (sourceOrder) {

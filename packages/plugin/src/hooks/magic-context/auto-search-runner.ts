@@ -31,6 +31,10 @@ import {
     type AutoSearchHintNoHintReason,
     getAutoSearchHintDecisions,
 } from "../../features/magic-context/storage-meta-persisted";
+import {
+    clearUnpublishedAutoSearchNoHints,
+    getUnpublishedAutoSearchNoHint,
+} from "../../shared/auto-search-lifecycle";
 import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
@@ -46,6 +50,7 @@ import {
     persistAutoSearchDecision,
     queueAutoSearchBackfill,
     queueAutoSearchRegistration,
+    retryUnpublishedAutoSearchNoHint,
     searchAutoHint,
 } from "./auto-search-worker-client";
 import type { CavemanWordRules } from "./caveman";
@@ -233,6 +238,9 @@ export async function runAutoSearchHint(args: {
         userMsgId,
         async (lifecycleSignal): Promise<AutoSearchOutcome> => {
             if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
+            if (retryUnpublishedAutoSearchNoHint(db, sessionId, userMsgId, startedAt)) {
+                return AUTO_SEARCH_OK;
+            }
             if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return AUTO_SEARCH_OK;
 
             const existing = getAutoSearchHintDecisions(db, sessionId);
@@ -439,6 +447,7 @@ export async function runAutoSearchHint(args: {
             }
         },
         () => {
+            if (getUnpublishedAutoSearchNoHint(sessionId, userMsgId) !== undefined) return;
             if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return;
             const decision = getAutoSearchHintDecisions(db, sessionId).find(
                 (entry) => entry.messageId === userMsgId,
@@ -452,6 +461,7 @@ export async function runAutoSearchHint(args: {
 /** Test hook — wipe the per-turn cache. */
 export function _resetAutoSearchCache(): void {
     clearAutoSearchTimeoutForSession();
+    clearUnpublishedAutoSearchNoHints();
 }
 
 /** Session cleanup hook — call on session.deleted. */

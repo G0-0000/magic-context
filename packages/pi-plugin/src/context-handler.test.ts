@@ -19,9 +19,12 @@ import {
 import { readEpochFloorSnapshot } from "@magic-context/core/features/magic-context/protection-window";
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
+	AUTO_SEARCH_DECISION_SOFT_LIMIT,
 	acquireWrapupInProgress,
 	addNote,
+	appendAutoSearchHintDecision,
 	appendNoteNudgeAnchor,
+	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
 	getChannel1NudgeState,
 	getHistorianFailureState,
@@ -104,7 +107,11 @@ import {
 	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
-import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
+import {
+	injectM0M1Pi,
+	materializeM0Pi,
+	mustMaterializePi,
+} from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
 import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
@@ -218,6 +225,98 @@ describe("pi auto-search served decisions", () => {
 			fixture.close();
 		}
 	});
+
+	it("busting host flushes retirement staged by a prior cached cut", async () => {
+		const fixture = setup("staged-retirement");
+		try {
+			expect(await fixture.invoke("u1")).toContain(
+				"Independent search-only hint",
+			);
+			appendCompartments(fixture.db, fixture.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 0,
+					endMessage: 0,
+					startMessageId: "u1",
+					endMessageId: "u1",
+					title: "Covered",
+					content: "Earlier question was answered.",
+				},
+			]);
+			const state = { sessionId: fixture.sessionId, injectDocs: false };
+			materializeM0Pi(state, fixture.db);
+			const live = [userMessage(replayPrompt, 1), userMessage(replayPrompt, 2)];
+			expect(
+				injectM0M1Pi(state, fixture.db, live, ["u1", "u2"], false)
+					.skippedVisibleMessages,
+			).toBe(1);
+			expect(
+				getAutoSearchHintDecisions(fixture.db, fixture.sessionId).some(
+					(entry) => entry.messageId === "u1",
+				),
+			).toBe(true);
+			await fixture.invoke("u2", true);
+			expect(
+				getAutoSearchHintDecisions(fixture.db, fixture.sessionId).some(
+					(entry) => entry.messageId === "u1",
+				),
+			).toBe(false);
+		} finally {
+			fixture.close();
+		}
+	});
+
+	it("ordinary pass preserves visible user bytes at the omission cap boundary", async () => {
+		const db = createTestDb();
+		const sessionId = "pi-visible-cap-boundary";
+		const visibleIds = Array.from(
+			{ length: AUTO_SEARCH_DECISION_SOFT_LIMIT + 2 },
+			(_, index) => `visible-${index}`,
+		);
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context");
+		if (!handler) throw new Error("context handler was not registered");
+		const serve = async () => {
+			const messages = visibleIds.map((_, index) =>
+				userMessage(replayPrompt, index + 1),
+			);
+			const result = (await handler(
+				{ messages } as never,
+				fakeContext(sessionId, process.cwd(), visibleIds, messages) as never,
+			)) as { messages?: typeof messages } | undefined;
+			return JSON.stringify(result?.messages ?? messages);
+		};
+		try {
+			for (const [index, messageId] of visibleIds.entries())
+				appendAutoSearchHintDecision(
+					db,
+					sessionId,
+					index === 0
+						? {
+								messageId,
+								decision: "hint",
+								text: "\n\n<ctx-search-hint>stable cap-boundary hint</ctx-search-hint>",
+							}
+						: { messageId, decision: "no-hint", reason: "error" },
+				);
+			const first = await serve();
+			expect(first).toContain("stable cap-boundary hint");
+			const retired = flushAutoSearchHintDecisionRetirement(
+				db,
+				sessionId,
+				new Set(visibleIds),
+			);
+			expect(await serve()).toBe(first);
+			expect(retired).toBe(0);
+			expect(getAutoSearchHintDecisions(db, sessionId)).toHaveLength(
+				visibleIds.length,
+			);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	}, 30000);
 });
 
 it("Pi spent drain budget prevents historian startup, preserves served bytes, and resumes asynchronously at reset", async () => {

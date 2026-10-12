@@ -74,10 +74,12 @@ import {
 	persistAutoSearchDecision,
 	queueAutoSearchBackfill,
 	queueAutoSearchRegistration,
+	retryUnpublishedAutoSearchNoHint,
 	searchAutoHint,
 } from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
 import type { CavemanWordRules } from "@magic-context/core/hooks/magic-context/caveman";
 import { hasMeaningfulUserText } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
@@ -313,6 +315,12 @@ export async function runAutoSearchHintForPi(args: {
 			async (lifecycleSignal): Promise<AgentMessage[]> => {
 				args.passGuard?.assert();
 				if (lifecycleSignal.aborted) return messages;
+				if (
+					retryUnpublishedAutoSearchNoHint(db, sessionId, userMsgId, startedAt)
+				) {
+					args.passGuard?.assert();
+					return messages;
+				}
 				if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return messages;
 
 				const existing =
@@ -548,6 +556,8 @@ export async function runAutoSearchHintForPi(args: {
 			},
 			() => {
 				args.passGuard?.assert();
+				if (getUnpublishedAutoSearchNoHint(sessionId, userMsgId) !== undefined)
+					return;
 				if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return;
 				const decision = getAutoSearchHintDecisions(db, sessionId).find(
 					(entry) => entry.messageId === userMsgId,

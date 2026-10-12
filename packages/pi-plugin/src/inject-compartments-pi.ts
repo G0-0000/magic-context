@@ -51,7 +51,7 @@ import {
 	getOrCreateSessionMeta,
 	getProjectState,
 	persistCachedM0,
-	pruneAutoSearchHintDecisions,
+	queueAutoSearchHintDecisionRetirement,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
 import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
@@ -886,7 +886,7 @@ export function trimPiMessagesToCachedBoundary(
 		compartments.some(
 			(c) => c.endMessageId === boundary && c.endBlockIndex != null,
 		),
-		(ids) => pruneAutoSearchHintDecisions(db, sessionId, ids),
+		(ids) => queueAutoSearchHintDecisionRetirement(db, sessionId, ids),
 	);
 }
 
@@ -2406,6 +2406,9 @@ function adoptCachedPiProjectIdentity(
 	db: ContextDatabase,
 	state: PiM0M1State,
 ): void {
+	// A fully cached prefix outside a project must not acquire a writer just to
+	// replace its NULL identity with another NULL identity during defer replay.
+	if (state.projectIdentity == null) return;
 	db.prepare(
 		"UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ? AND cached_m0_project_identity IS NULL",
 	).run(state.projectIdentity, state.sessionId);
@@ -2688,7 +2691,8 @@ function replayCompletePiPrefix(
 				compartments.some(
 					(c) => c.endMessageId === trimBoundaryId && c.endBlockIndex != null,
 				),
-				(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
+				(ids) =>
+					queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 			)
 		: 0;
 	const head: PiAgentMessage[] = [];
@@ -2755,7 +2759,8 @@ export function injectM0M1Pi(
 					false,
 					state.sessionId,
 					isPartialCompartmentEnd(db, state.sessionId, prepared.trimBoundaryId),
-					(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
+					(ids) =>
+						queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 				)
 			: 0;
 		const head = structuredClone(prepared.messages);
@@ -3068,7 +3073,8 @@ export function injectM0M1Pi(
 				false,
 				state.sessionId,
 				isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId),
-				(ids) => pruneAutoSearchHintDecisions(db, state.sessionId, ids),
+				(ids) =>
+					queueAutoSearchHintDecisionRetirement(db, state.sessionId, ids),
 			)
 		: 0;
 	const muralWire = m0.includes("<memory-mural>")

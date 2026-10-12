@@ -12,6 +12,7 @@ import {
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	appendAutoSearchHintDecision,
+	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
 	getCompartments,
 	getOrCreateSessionMeta,
@@ -39,6 +40,7 @@ import {
 	materializeM0Pi,
 	materializeM0PiWithRetry,
 	mustMaterializePi,
+	prepareCachedM0M1PiReplay,
 	renderM0Pi,
 	renderM1Pi,
 	trimPiMessagesToCachedBoundary,
@@ -132,6 +134,14 @@ it("pi applied compaction bounds auto-search blob across 20000 user messages", (
 			const result = injectM0M1Pi(state, db, live, entryIds);
 			expect(result.skippedVisibleMessages).toBe(window);
 			live = live.slice(-window);
+			// Match postprocessing when the host permits rebuilding the request prefix.
+			flushAutoSearchHintDecisionRetirement(
+				db,
+				sessionId,
+				new Set(
+					Array.from({ length: window }, (_, index) => id(cutoff + index + 1)),
+				),
+			);
 			const after = (readBlob.get(sessionId) as { blob: string }).blob;
 			expect(
 				JSON.parse(after).map(
@@ -193,6 +203,8 @@ it("pi cached boundary prunes decisions only after a complete prefix trim", () =
 		expect(
 			trimPiMessagesToCachedBoundary(db, sessionId, live, ["covered", "live"]),
 		).toBe(1);
+		expect(getAutoSearchHintDecisions(db, sessionId)).toEqual(before);
+		flushAutoSearchHintDecisionRetirement(db, sessionId, new Set(["live"]));
 		expect(
 			getAutoSearchHintDecisions(db, sessionId).map((entry) => entry.messageId),
 		).toEqual(["live", "hidden-branch"]);
@@ -200,6 +212,55 @@ it("pi cached boundary prunes decisions only after a complete prefix trim", () =
 		closeQuietly(db);
 	}
 });
+
+for (const prepared of [false, true]) {
+	it(`pi ${prepared ? "prepared" : "cached"} prefix defer writes nothing and defers decision retirement`, () => {
+		const db = createTestDb();
+		const sessionId = `pi-defer-read-only-${prepared}`;
+		const state = { sessionId, injectDocs: false };
+		const hint = {
+			messageId: "covered",
+			decision: "hint" as const,
+			text: "cached hint",
+		};
+		try {
+			appendAutoSearchHintDecision(db, sessionId, hint);
+			appendCompartments(db, sessionId, [
+				{
+					sequence: 0,
+					startMessage: 0,
+					endMessage: 0,
+					startMessageId: "covered",
+					endMessageId: "covered",
+					title: "Covered",
+					content: "Earlier question was answered.",
+				},
+			]);
+			const cached = materializeM0Pi(state, db);
+			const input = prepared
+				? { ...state, preparedPrefix: prepareCachedM0M1PiReplay(state, db) }
+				: state;
+			const live = [userMessage("covered", 1), userMessage("live", 2)];
+			db.exec("PRAGMA query_only=ON");
+			const before = db.prepare("SELECT total_changes() AS count").get();
+			const result = injectM0M1Pi(input, db, live, ["covered", "live"], false);
+			expect(result.skippedVisibleMessages).toBe(1);
+			expect(textOf(live[0])).toBe(cached.m0);
+			expect(textOf(live[1])).toBe(cached.m1);
+			expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(
+				before,
+			);
+			expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([hint]);
+			db.exec("PRAGMA query_only=OFF");
+			expect(
+				flushAutoSearchHintDecisionRetirement(db, sessionId, new Set(["live"])),
+			).toBe(1);
+			expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+}
 
 describe("Pi render-to-commit concurrency", () => {
 	for (const change of ["memory", "compartment"] as const) {

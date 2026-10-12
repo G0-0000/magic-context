@@ -17,6 +17,7 @@ import {
     captureChannel1PostReduceGraceBaseline,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
+    flushAutoSearchHintDecisionRetirement,
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
@@ -72,6 +73,7 @@ import {
 } from "../../features/magic-context/temporal-decisions";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
+import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -1196,7 +1198,10 @@ export function runRustModePostprocess(args: {
         appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
     }
     for (const decision of getAutoSearchHintDecisions(args.db, args.sessionId)) {
-        if (decision.decision === "hint") {
+        if (
+            decision.decision === "hint" &&
+            getUnpublishedAutoSearchNoHint(args.sessionId, decision.messageId) === undefined
+        ) {
             appendReminderToUserMessageById(args.messages, decision.messageId, decision.text);
         }
     }
@@ -3816,10 +3821,12 @@ export async function runPostTransformPhase(
             }
         }
         const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
+        flushAutoSearchHintDecisionRetirement(args.db, args.sessionId, visibleIds);
         // A branch switch can hide user messages that will later be served again.
         // Keep their saved search hints, including no-hint omissions. Only the actual
-        // prefix trim, after a history summary replaces those messages, may discard
-        // these records; today's visible IDs are not proof of deletion.
+        // prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
+        // may flush them to storage, while cached-prefix replay must not write them.
+        // Today's visible IDs are not proof of deletion.
         if (prunedAnchors > 0) {
             sessionLog(
                 args.sessionId,

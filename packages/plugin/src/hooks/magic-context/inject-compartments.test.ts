@@ -26,6 +26,7 @@ import { unifiedSearch } from "../../features/magic-context/search";
 import {
     appendAutoSearchHintDecision,
     bumpSessionFactsVersion,
+    flushAutoSearchHintDecisionRetirement,
     getAutoSearchHintDecisions,
     getOrCreateSessionMeta,
     queueM0Mutation,
@@ -76,6 +77,62 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 for (const host of ["opencode", "opencode2"] as const) {
+    it(`${host} cached prefix defer writes nothing and defers decision retirement`, () => {
+        _resetHarnessForTesting();
+        setHarness(host);
+        db = makeDb();
+        const hint = { messageId: "covered", decision: "hint" as const, text: "cached hint" };
+        appendAutoSearchHintDecision(db, SESSION_ID, hint);
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 0,
+                startMessage: 0,
+                endMessage: 0,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "Covered",
+                content: "Earlier question was answered.",
+            },
+        ]);
+        const options = {
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            injectDocs: false,
+        };
+        const cached = materializeM0(options);
+        const live = ["covered", "live"].map(
+            (id) =>
+                ({
+                    info: { id, role: "user" },
+                    parts: [{ type: "text", text: id }],
+                }) as MessageLike,
+        );
+        try {
+            db.exec("PRAGMA query_only=ON");
+            const before = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+            const result = injectM0M1({
+                ...options,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                isCacheBustingPass: false,
+            });
+            expect(result.prefixTrimStatus).toBe("applied");
+            expect(result.m0Bytes).toEqual(cached.m0Bytes);
+            expect(result.m1Text).toBe(cached.m1Text);
+            expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual([hint]);
+            db.exec("PRAGMA query_only=OFF");
+            expect(flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["live"]))).toBe(
+                1,
+            );
+            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual([]);
+        } finally {
+            db.exec("PRAGMA query_only=OFF");
+            clearInjectionCache(SESSION_ID);
+            _resetHarnessForTesting();
+        }
+    });
     it(`${host} applied compaction bounds auto-search blob across 20000 user messages`, () => {
         _resetHarnessForTesting();
         setHarness(host);
@@ -144,6 +201,12 @@ for (const host of ["opencode", "opencode2"] as const) {
                 });
                 expect(result.prefixTrimStatus).toBe("applied");
                 live = live.filter((message) => typeof message.info.id === "string");
+                // Match postprocessing when the host permits rebuilding the request prefix.
+                flushAutoSearchHintDecisionRetirement(
+                    db,
+                    SESSION_ID,
+                    new Set(live.map((message) => message.info.id as string)),
+                );
                 expect(live).toHaveLength(window);
                 const after = (readBlob.get(SESSION_ID) as { blob: string }).blob;
                 expect(
@@ -862,6 +925,7 @@ describe("prepared prefix source-order trimming", () => {
         });
         expect(result.prefixTrimStatus).toBe("applied");
         expect(live.map((entry) => entry.info.id)).toEqual([undefined, "partial", "after"]);
+        flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["partial", "after"]));
         expect(getAutoSearchHintDecisions(db, SESSION_ID).map((entry) => entry.messageId)).toEqual([
             "partial",
             "after",
@@ -889,6 +953,8 @@ describe("prepared prefix source-order trimming", () => {
             prefixTrimSourceOrder: capturePrefixTrimSourceOrder(source),
         });
         expect(result.prefixTrimStatus).toBe("refused");
+        // A later branch switch must not delete these records: the failed trim proved nothing.
+        flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["later-branch"]));
         expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual(before);
     });
 

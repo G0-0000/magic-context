@@ -16,11 +16,16 @@ import {
     type AutoSearchHintDecision,
     appendAutoSearchHintDecision,
 } from "../../features/magic-context/storage-meta-persisted";
-import { registerAutoSearchWork } from "../../shared/auto-search-lifecycle";
+import {
+    forgetUnpublishedAutoSearchNoHint,
+    getUnpublishedAutoSearchNoHint,
+    registerAutoSearchWork,
+    rememberUnpublishedAutoSearchNoHint,
+} from "../../shared/auto-search-lifecycle";
 import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
-import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
+import { assertTransformWrite, type Database, getSqliteDatabasePath } from "../../shared/sqlite";
 import { AUTO_SEARCH_TIMEOUT_MS, autoSearchDeadlineUnixMs } from "./auto-search-deadline";
 
 const pendingRegistrations = new WeakMap<Database, Set<string>>();
@@ -108,7 +113,54 @@ export function persistAutoSearchDecision(
     startedAt: number,
 ): ReturnType<typeof appendAutoSearchHintDecision> | null {
     if (performance.now() - startedAt >= AUTO_SEARCH_TIMEOUT_MS) return null;
-    return appendAutoSearchHintDecision(db, sessionId, decision);
+    let outcome: ReturnType<typeof appendAutoSearchHintDecision>;
+    try {
+        outcome = appendAutoSearchHintDecision(db, sessionId, decision);
+    } catch (error) {
+        assertTransformWrite();
+        rememberUnpublishedAutoSearchNoHint(
+            sessionId,
+            decision.messageId,
+            decision.decision === "no-hint" ? decision.reason : "error",
+        );
+        throw error;
+    }
+    if (!outcome.ok) {
+        assertTransformWrite();
+        rememberUnpublishedAutoSearchNoHint(
+            sessionId,
+            decision.messageId,
+            decision.decision === "no-hint" ? decision.reason : "error",
+        );
+    } else if (outcome.decision.decision === "no-hint") {
+        forgetUnpublishedAutoSearchNoHint(sessionId, decision.messageId);
+    }
+    return outcome;
+}
+
+/** Retry saving a served no-hint decision before a recovered search can change its bytes. */
+export function retryUnpublishedAutoSearchNoHint(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    startedAt: number,
+): boolean {
+    const reason = getUnpublishedAutoSearchNoHint(sessionId, messageId);
+    if (reason === undefined) return false;
+    try {
+        persistAutoSearchDecision(
+            db,
+            sessionId,
+            { messageId, decision: "no-hint", reason },
+            startedAt,
+        );
+    } catch (error) {
+        assertTransformWrite();
+        log(
+            `[auto-search] frozen omission save still failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+    return true;
 }
 
 export interface AutoSearchWorkerInput {

@@ -14,6 +14,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/auto-search-replay.fixture";
 import { autoSearchTestSnapshot } from "@magic-context/core/hooks/magic-context/auto-search-snapshot.fixture";
 import * as searchModule from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
+import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	clearAutoSearchForPiSession,
@@ -51,6 +52,71 @@ function memoryResult(
 		matchType: "fts",
 	};
 }
+
+it("review exception CAS failure still freezes served omission pi", async () => {
+	const fixture = createAutoSearchReplayFixture("pi", "failed-omission-save");
+	const { sessionId, projectPath } = fixture;
+	const snapshot = spyOn(
+		embeddingModule,
+		"getProjectEmbeddingSnapshot",
+	).mockReturnValue(autoSearchTestSnapshot(projectPath));
+	const search = spyOn(searchModule, "searchAutoHint")
+		.mockResolvedValue([replayHint])
+		.mockImplementationOnce(async () => {
+			throw new Error("transient search failure");
+		});
+	const invoke = async (database = fixture.db, id = "served") => {
+		const messages = [userMessage(replayPrompt, 1)];
+		await runAutoSearchHintForPi({
+			db: database,
+			sessionId,
+			messages,
+			entryIds: [id],
+			options: { ...baseOptions, projectPath },
+		});
+		return JSON.stringify(messages[0]);
+	};
+	try {
+		fixture.db.exec(
+			`CREATE TRIGGER review_fail_cas BEFORE UPDATE OF auto_search_hint_decisions ON session_meta BEGIN SELECT RAISE(IGNORE); END;`,
+		);
+		const first = await invoke();
+		expect(first).not.toContain("<ctx-search-hint>");
+		expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([]);
+		clearAutoSearchForPiSession(sessionId);
+		fixture.db.exec("DROP TRIGGER review_fail_cas");
+		fixture.reopen(true);
+		expect(await invoke()).toBe(first);
+		expect(search).toHaveBeenCalledTimes(1);
+		expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([
+			{ messageId: "served", decision: "no-hint", reason: "error" },
+		]);
+		expect(getUnpublishedAutoSearchNoHint(sessionId, "served")).toBeUndefined();
+		fixture.db.exec(
+			`CREATE TRIGGER review_fail_cas BEFORE UPDATE OF auto_search_hint_decisions ON session_meta BEGIN SELECT RAISE(IGNORE); END;`,
+		);
+		const failedHintSave = await invoke(fixture.db, "hint-save-failed");
+		expect(failedHintSave).not.toContain("<ctx-search-hint>");
+		expect(await invoke(fixture.db, "hint-save-failed")).toBe(failedHintSave);
+		expect(search).toHaveBeenCalledTimes(2);
+		expect(getUnpublishedAutoSearchNoHint(sessionId, "hint-save-failed")).toBe(
+			"error",
+		);
+		fixture.db.exec("DROP TRIGGER review_fail_cas");
+		expect(await invoke(fixture.db, "hint-save-failed")).toBe(failedHintSave);
+		expect(
+			getUnpublishedAutoSearchNoHint(sessionId, "hint-save-failed"),
+		).toBeUndefined();
+		expect(await invoke(fixture.db, "new-user")).toContain(
+			"Independent search-only hint",
+		);
+		expect(search).toHaveBeenCalledTimes(3);
+	} finally {
+		search.mockRestore();
+		snapshot.mockRestore();
+		fixture.close();
+	}
+});
 
 for (const scenario of replayScenarios) {
 	it(`pi search exception preserves served user bytes after ${scenario}`, async () => {
