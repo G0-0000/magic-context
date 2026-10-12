@@ -13,7 +13,7 @@
 set -euo pipefail
 base=${1:-62fa1e27}
 out=${2:-${TMPDIR:-/tmp}/issue-665-r2-differential}
-root=$(git rev-parse --show-toplevel)
+root=${R2_ROOT:-$(git rev-parse --show-toplevel)}
 here=$(cd "$(dirname "$0")" && pwd)
 files=(
 	packages/pi-plugin/src/context-handler.ts

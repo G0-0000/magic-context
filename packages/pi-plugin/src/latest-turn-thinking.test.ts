@@ -1009,7 +1009,7 @@ for (const trigger of ["wall", "final fit"] as const)
 		}, 30_000);
 	}
 
-test("Pi projected transcript gaps cannot drop an earlier target in front of kept thinking", async () => {
+test("Pi empty message shells do not relax signed-prefix target protection", async () => {
 	const db = createTestDb();
 	const sessionId = "pi-projected-thinking-boundary";
 	getOrCreateSessionMeta(db, sessionId);

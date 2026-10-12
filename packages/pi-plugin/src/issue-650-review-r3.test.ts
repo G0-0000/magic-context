@@ -607,7 +607,11 @@ test("held unproven tool repair waits for a permitted prefix rebuild", () => {
 	}
 });
 
-for (const proof of ["replayable LKG", "missing LKG"] as const) {
+for (const proof of [
+	"replayable LKG",
+	"missing LKG",
+	"unpriceable LKG",
+] as const) {
 	test(`carried identity repair with ${proof} preserves the hold or pays one declared bust`, async () => {
 		const db = createTestDb();
 		const id = session(`carried-${proof}`);
@@ -734,6 +738,8 @@ for (const proof of ["replayable LKG", "missing LKG"] as const) {
 			expect(rows(db, id)).toEqual([{ tag_number: 154 }]);
 			if (proof === "missing LKG")
 				dropSlot(id, "test-missing-carried-repair-proof");
+			if (proof === "unpriceable LKG")
+				Object.assign(fake.pi, { getAllTools: () => undefined });
 			source.push(
 				assistantMessage("NEW RAW TAIL", 22, {
 					provider: "anthropic",
@@ -775,6 +781,7 @@ for (const proof of ["replayable LKG", "missing LKG"] as const) {
 					ids.push("next");
 					expect(resultText(await serve())).toContain("§154§");
 				} else {
+					expect(JSON.stringify(first)).not.toContain("thinkingSignature");
 					expect(resultText(first)).toContain("§154§");
 					expect(resultText(first)).not.toContain("§8§");
 				}
