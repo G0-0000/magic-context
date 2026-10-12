@@ -1298,7 +1298,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     // clearSession's session_meta DELETE wipes it automatically — no
                     // separate CAS-clear needed here.
                     removeCompactionMarkerForSession(deps.db, sessionId);
-                    clearSession(deps.db, sessionId, deps.rustSessionCleanup === true);
+                    clearSession(deps.db, sessionId, deps.rustSessionCleanup === true, true);
                 }
             } catch (error) {
                 sessionLog(sessionId, "event session.deleted persistence failed:", error);

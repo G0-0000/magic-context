@@ -6,8 +6,8 @@ import type { Database } from "@magic-context/core/shared/sqlite";
 import { readPiTagSnapshotRevision } from "./tag-snapshot-pi";
 
 interface ProbeSnapshot {
-	local: number;
-	external: number;
+	local: string;
+	external: string;
 	message?: boolean;
 	tool?: boolean;
 }
@@ -18,7 +18,7 @@ function probe(
 	sessionId: string,
 	kind: "message" | "tool",
 ): boolean {
-	const revision = readPiTagSnapshotRevision(db);
+	const revision = readPiTagSnapshotRevision(db, sessionId);
 	const read = () =>
 		kind === "message"
 			? readMessageTags(db, sessionId)

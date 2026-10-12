@@ -1000,23 +1000,56 @@ export function createPiLkgCoordinator(
 						.slice(reusablePrefix)
 						.map((input) => signatureForFields(input.fields)),
 				];
-				const incremental = incrementalLkgContentDigests(
-					plan.inputs.map((input, index) => ({
-						id: input.id,
-						signature: inputContentSignatures[index] ?? "",
-						fields: input.fields,
-					})),
-					reusePrior
+				// Exact field validation above proves the prefix of our own accepted
+				// slot. A foreign/reloaded slot still needs the ordinary id/signature
+				// check, and legacy digest formats must never cross into a new slot.
+				const verifiedOwnPrefix =
+					reusePrior &&
+					digestPrior === state.acceptedSlot &&
+					reusePrior.slot.inputIdSeq.length === reusePrior.signatures.length &&
+					reusePrior.signatures.length ===
+						reusePrior.slot.inputContentDigests.length;
+				let digestPrefix = 0;
+				if (verifiedOwnPrefix && reusePrior) {
+					while (
+						digestPrefix < reusablePrefix &&
+						!isLegacyLkgDigest(
+							reusePrior.slot.inputContentDigests[digestPrefix] ?? "",
+						)
+					)
+						digestPrefix++;
+				}
+				const incremental =
+					verifiedOwnPrefix && reusePrior
 						? {
-								ids: reusePrior.slot.inputIdSeq.slice(0, reusablePrefix),
-								signatures: reusePrior.signatures.slice(0, reusablePrefix),
-								digests: reusePrior.slot.inputContentDigests.slice(
-									0,
-									reusablePrefix,
-								),
+								reusedPrefix: digestPrefix,
+								digests: [
+									...reusePrior.slot.inputContentDigests.slice(0, digestPrefix),
+									...plan.inputs
+										.slice(digestPrefix)
+										.map((input) => lkgContentDigestFromFields(input.fields)),
+								],
 							}
-						: undefined,
-				);
+						: incrementalLkgContentDigests(
+								plan.inputs.map((input, index) => ({
+									id: input.id,
+									signature: inputContentSignatures[index] ?? "",
+									fields: input.fields,
+								})),
+								reusePrior
+									? {
+											ids: reusePrior.slot.inputIdSeq.slice(0, reusablePrefix),
+											signatures: reusePrior.signatures.slice(
+												0,
+												reusablePrefix,
+											),
+											digests: reusePrior.slot.inputContentDigests.slice(
+												0,
+												reusablePrefix,
+											),
+										}
+									: undefined,
+							);
 				reusedPrefix = incremental.reusedPrefix;
 				if (
 					!args.publishServedNumbers &&

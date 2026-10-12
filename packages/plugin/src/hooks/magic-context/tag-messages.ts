@@ -56,7 +56,15 @@ const TOOL_OWNER_CACHE_KEY_SEP = "\x00";
 type InertWhitespaceTag = ReturnType<typeof getInertWhitespaceAssistantTags>[number];
 const inertWhitespaceCache = new WeakMap<
     ContextDatabase,
-    Map<string, { tagsVersion: number; ownersKey: string; tags: InertWhitespaceTag[] }>
+    Map<
+        string,
+        {
+            tagsVersion: number;
+            identityRevision: string | null | undefined;
+            ownersKey: string;
+            tags: InertWhitespaceTag[];
+        }
+    >
 >();
 
 function getCachedInertWhitespaceAssistantTags(
@@ -70,6 +78,7 @@ function getCachedInertWhitespaceAssistantTags(
     );
     const ownersKey = JSON.stringify(messageIds);
     const tagsVersion = tagger.getLoadedTagsVersion?.(sessionId, db);
+    const identityRevision = tagger.getLoadedTagIdentityRevision?.(sessionId, db);
     if (tagsVersion === undefined)
         return getInertWhitespaceAssistantTags(db, sessionId, messageIds);
 
@@ -79,10 +88,15 @@ function getCachedInertWhitespaceAssistantTags(
         inertWhitespaceCache.set(db, bySession);
     }
     const cached = bySession.get(sessionId);
-    if (cached?.tagsVersion === tagsVersion && cached.ownersKey === ownersKey) return cached.tags;
+    if (
+        cached?.tagsVersion === tagsVersion &&
+        cached.identityRevision === identityRevision &&
+        cached.ownersKey === ownersKey
+    )
+        return cached.tags;
 
     const tags = getInertWhitespaceAssistantTags(db, sessionId, messageIds);
-    bySession.set(sessionId, { tagsVersion, ownersKey, tags });
+    bySession.set(sessionId, { tagsVersion, identityRevision, ownersKey, tags });
     return tags;
 }
 
