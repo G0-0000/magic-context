@@ -7,6 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { findPiTagIdentityConflict } from "@magic-context/core/features/magic-context/storage-tags";
 import { log } from "@magic-context/core/shared/logger";
 import { withSqliteTransformPass } from "@magic-context/core/shared/sqlite";
+import { isOmpDumpContext } from "./omp-diagnostic-context";
 import {
 	isOmpAdvisorRequest,
 	isOmpSideContext,
@@ -22,6 +23,7 @@ import { resolvePiHarnessKind } from "./pi-harness-kind";
 const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
 	"Magic Context could not safely prepare this turn; send your message again.";
+const MAX_UNSENDABLE_NONCES_PER_SESSION = 32;
 
 export class PiContextSupersededError extends Error {
 	constructor(
@@ -174,6 +176,12 @@ export function registerPiGuardedContext(
 		return counts;
 	};
 	const fenceEnabled = resolvePiHarnessKind() === "omp";
+	// When this hook throws, OMP retains its original message array rather than
+	// a newer pass's prepared messages. Mark that unprepared array so it cannot
+	// use the newer pass's completion record. Each session retains its newest
+	// 32 nonces across successful context passes; receipt cleanup retires them too.
+	const unsendableNonces = new Map<string | object, Set<string>>();
+	receiptMaps.add(unsendableNonces);
 	const refuse = (
 		ctx: ExtensionContext,
 		budget: PiContextBudget,
@@ -268,11 +276,7 @@ export function registerPiGuardedContext(
 		// No awaits, DB access or payload hashing are allowed in this backstop.
 		pi.on("before_provider_request", (event, ctx) => {
 			if (options.compactionOff?.(ctx)) return;
-			// Advisors inherit the payload hook, but review formatted copies of
-			// new messages in their own agent. They neither consume nor grant the
-			// receipt that authorizes the main conversation's managed messages.
 			const payload = (event as { payload?: unknown }).payload;
-			if (isOmpAdvisorRequest(payload)) return;
 			const key = operationKey(ctx);
 			// OMP erases the ephemeral request's attribution before this hook. Its
 			// abort API is session-wide, so after seeing OMP's attributed reminder
@@ -280,6 +284,32 @@ export function registerPiGuardedContext(
 			// Every other session still requires a completed managed context pass,
 			// even when we do not recognize the provider's body format.
 			if (sideSessions.get(key)?.sides) return;
+			const nonces = unsendableNonces.get(key);
+			// Most sessions have no superseded payloads. Do not serialize their
+			// potentially multi-megabyte conversation just to inspect an empty set.
+			if (nonces?.size) {
+				const serializedPayload = JSON.stringify(payload);
+				if (
+					serializedPayload &&
+					[...nonces].some((nonce) => serializedPayload.includes(nonce))
+				) {
+					// Preserve the replacement context pass's completion record: this
+					// refusal applies only to the older, marked request.
+					const budget = new PiContextBudget();
+					budget.stage = "provider dispatch";
+					refuse(
+						ctx,
+						budget,
+						"superseded context fallback is not a managed request",
+						() => true,
+					);
+					return;
+				}
+			}
+			// OMP also invokes this send hook for advisor agents. They review separate,
+			// formatted session updates rather than the main conversation, so they
+			// neither need nor establish a completed main-context pass.
+			if (isOmpAdvisorRequest(payload)) return;
 			let operation = operations.get(key);
 			if (!operation) {
 				operation = newOperation();
@@ -342,6 +372,9 @@ export function registerPiGuardedContext(
 		(entry) => new Text(entry.data?.message ?? RETRY_MESSAGE, 0, 0),
 	);
 	pi.on("context", async (event, ctx) => {
+		// A dump is a read-only snapshot, not a provider preparation. In particular,
+		// do not allocate an operation, claim a generation, or enter SQLite here.
+		if (fenceEnabled && isOmpDumpContext()) return { messages: event.messages };
 		const budget = new PiContextBudget();
 		budget.sideTurn = fenceEnabled && isOmpSideContext(event);
 		const key = operationKey(ctx);
@@ -417,6 +450,34 @@ export function registerPiGuardedContext(
 			// A newer pass owns this session now. Calling its session-wide abort
 			// API from the abandoned hook would cancel the replacement turn.
 			if (error instanceof PiContextSupersededError || !isCurrent()) {
+				if (
+					fenceEnabled &&
+					!budget.sideTurn &&
+					!sideSessions.get(key)?.sides &&
+					!options.compactionOff?.(ctx)
+				) {
+					const nonce = crypto.randomUUID();
+					let nonces = unsendableNonces.get(key);
+					if (!nonces) {
+						nonces = new Set();
+						unsendableNonces.set(key, nonces);
+					}
+					nonces.add(nonce);
+					if (nonces.size > MAX_UNSENDABLE_NONCES_PER_SESSION) {
+						const oldest = nonces.values().next().value;
+						if (oldest !== undefined) nonces.delete(oldest);
+					}
+					event.messages.push({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: `Magic Context did not prepare this request for the current turn. ${nonce}`,
+							},
+						],
+						timestamp: Date.now(),
+					});
+				}
 				log(
 					`[magic-context][pi] DISCARDED CONTEXT RESULT ${budget.diagnostic()}`,
 					error,
