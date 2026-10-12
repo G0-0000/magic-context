@@ -24,7 +24,9 @@ export type CacheBustDivergenceClass =
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
-    | "unaccounted_rewrite";
+    | "unaccounted_rewrite"
+    | "provider_short_read_after_reclaim"
+    | "double_bust_after_reclaim";
 
 export interface AnalyzedCacheRequest {
     session: string;
@@ -37,6 +39,12 @@ export interface AnalyzedCacheRequest {
     analyzerCmd: string;
     /** Render-identity components the matched pass reported as changed, when it logged them. */
     identityDelta?: string[];
+    /**
+     * The class the request would carry on its own, kept when a bust right after
+     * a reclaim bust was relabelled `double_bust_after_reclaim` or
+     * `provider_short_read_after_reclaim`, so the alert still names what happened.
+     */
+    cause?: CacheBustDivergenceClass;
 }
 
 export interface CacheBustSessionAnalysis {
@@ -105,6 +113,12 @@ export interface CacheBustAttributionInput {
     currentModel?: string;
     /** The meter read short while the reusable byte prefix was unchanged. */
     providerShortReadWithIdenticalPrefix?: boolean;
+    /**
+     * Class of the request just before this one, when that request was also a
+     * bust. A bust right after a reclaim bust means one threshold crossing was
+     * paid twice; see classifyBustAfterReclaim.
+     */
+    previousBustClass?: CacheBustDivergenceClass;
     /** The only normalized wire change is a shorter tail, not a rewrite. */
     tailShrink?: boolean;
     /** Current raw OpenCode message count divided by the preceding pass count. */
@@ -257,6 +271,16 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         accounted: false,
         rule: "matched pass has no accounted attribution",
     },
+    {
+        divergenceClass: "provider_short_read_after_reclaim",
+        accounted: false,
+        rule: "overrides provider_short_read_identical_bytes on the request right after a reclaim bust: its bytes extend the reclaim request unchanged, yet the provider did not serve the prefix that request wrote, so one threshold crossing was billed twice; provider-side, not a Magic Context rewrite",
+    },
+    {
+        divergenceClass: "double_bust_after_reclaim",
+        accounted: false,
+        rule: "overrides any other accounted class on the request right after a reclaim bust; one threshold crossing must cost one bust, and the wake names the overridden class as its cause",
+    },
 ] as const;
 
 const ACCOUNTED_CLASSES = new Set(
@@ -267,6 +291,39 @@ const TAIL_SHRINK_REWRITE_NOISE_TOKENS = 64;
 
 export function isUnaccountedCacheBustClass(divergenceClass: string): boolean {
     return !ACCOUNTED_CLASSES.has(divergenceClass as CacheBustDivergenceClass);
+}
+
+/**
+ * Classes that are not a meaningful second rewrite: missing usage, a tail that
+ * only got shorter, or a small system-row shift (see the rule table).
+ */
+const NOT_A_SECOND_REWRITE = new Set<string>([
+    "usage_missing",
+    "tail_shrink_no_rewrite",
+    "system_row_shift",
+]);
+
+/** A bust Magic Context caused on purpose and accounted for: a reclaim, fold, or flush. */
+export function isReclaimBustClass(divergenceClass: string | undefined): boolean {
+    return divergenceClass?.startsWith("accounted_") === true;
+}
+
+/**
+ * Class for a bust that directly follows another bust. One threshold crossing
+ * must cost one bust, so a second bust right after a reclaim always alerts,
+ * even when its own class is accounted. A request whose bytes merely extend the
+ * reclaim request is named as the provider's doing; any other accounted class
+ * becomes `double_bust_after_reclaim`. Unaccounted classes already alert under
+ * their own name and are kept.
+ */
+export function classifyBustAfterReclaim(
+    previousBustClass: string | undefined,
+    own: CacheBustDivergenceClass,
+): CacheBustDivergenceClass {
+    if (!isReclaimBustClass(previousBustClass)) return own;
+    if (own === "provider_short_read_identical_bytes") return "provider_short_read_after_reclaim";
+    if (isUnaccountedCacheBustClass(own) || NOT_A_SECOND_REWRITE.has(own)) return own;
+    return "double_bust_after_reclaim";
 }
 
 export function nearestCacheBustDecision(
@@ -307,6 +364,11 @@ export function nearestCacheBustDecision(
 }
 
 export function classifyCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
+    return classifyBustAfterReclaim(input.previousBustClass, classifyOwnCacheBust(input));
+}
+
+/** The request's class judged on its own, ignoring the request before it. */
+function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDivergenceClass {
     // No transform pass can explain a short provider read when the reusable bytes
     // are unchanged, so this case is settled before joining any pass row.
     if (input.providerShortReadWithIdenticalPrefix) return "provider_short_read_identical_bytes";

@@ -70,9 +70,21 @@ export class PiContextBudget {
 	// A returned managed result can be attributed to the next assistant, even
 	// after a new pass takes ownership. An unfinished or refused result cannot.
 	// The resolving pass supplies its own owner guard around the queued write.
+	//
+	// The outcome deadline fences only a pass that is still running. A completed
+	// pass already finished inside it (waitMandatory checks the deadline after
+	// the handler returns), and its row is written later, when the next pass
+	// names the assistant that answered. Measuring elapsed time then would
+	// measure when the next pass started, and dropped the row of every reclaim
+	// whose next turn began 25 s or more after it. A refused dispatch marks the
+	// pass abandoned, so a completed result whose request never went out still
+	// records nothing.
 	assertDecisionPublication = (): void => {
 		if (!this.completed) this.assertOwner();
-		if (this.abandoned || this.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
+		if (
+			this.abandoned ||
+			(!this.completed && this.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
+		)
 			throw new PiContextDeadlineError(this.diagnostic());
 	};
 	diagnostic(): string {

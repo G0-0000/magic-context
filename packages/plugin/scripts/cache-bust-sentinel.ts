@@ -27,6 +27,8 @@ import { Database } from "bun:sqlite";
  * | unaccounted_double_bust | no | matched otherwise-unattributed pass repeats the previous divergence offset |
  * | unaccounted_tail_rewrite | no | matched otherwise-unattributed pass rewrites the previous request tail |
  * | unaccounted_rewrite | no | matched pass has no accounted attribution |
+ * | provider_short_read_after_reclaim | no | overrides provider_short_read_identical_bytes right after a reclaim bust: the bytes extend the reclaim request, but the provider did not serve its prefix (provider-side; one crossing billed twice) |
+ * | double_bust_after_reclaim | no | overrides any other accounted class right after a reclaim bust; the wake names the overridden class as cause |
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
  * launchd/cron or for a manual pass. --send is the only switch that opens subc;
@@ -49,7 +51,9 @@ import { analyzeOpenCodeCacheBustSession } from "./analyze-cache-busts";
 import {
     type AnalyzedCacheRequest,
     type CacheBustDecisionAttribution,
+    type CacheBustDivergenceClass,
     type CacheBustSessionAnalysis,
+    classifyBustAfterReclaim,
     isUnaccountedCacheBustClass,
 } from "./cache-bust-attribution";
 
@@ -116,6 +120,8 @@ export interface CacheBustEvent {
         analyzer_cmd: string;
         /** Render-identity components the matched pass changed, when it logged them. */
         identity_delta?: string[];
+        /** For a bust right after a reclaim: the class the request had on its own. */
+        cause?: string;
     };
 }
 
@@ -152,12 +158,20 @@ export interface CacheBustTransport {
 interface OpenBustWindowState {
     startMs: number;
     lastBustMs: number;
+    /**
+     * Class of the newest bust in the window. A bust in the next run that
+     * continues the window is judged against it, because that earlier row is no
+     * longer among the rows the next run analyzes.
+     */
+    lastBustClass?: string;
 }
 
 interface SessionWatermarkState {
     lastAnalyzedRequestTimestampMs: number;
     openWindow?: OpenBustWindowState;
     scanCursor?: string;
+    /** When a run last analyzed this session; orders sessions so none is starved. */
+    lastScannedAtMs?: number;
 }
 
 interface SentWindowState {
@@ -271,12 +285,22 @@ export function loadSentinelState(path: string): CacheBustSentinelState {
         const open = recordValue(row?.openWindow);
         const startMs = finiteNonnegative(open?.startMs);
         const lastBustMs = finiteNonnegative(open?.lastBustMs);
+        const lastBustClass =
+            typeof open?.lastBustClass === "string" ? open.lastBustClass : undefined;
+        const lastScannedAtMs = finiteNonnegative(row?.lastScannedAtMs);
         state.sessions[sessionId] = {
             lastAnalyzedRequestTimestampMs: highWater,
             ...(open && startMs !== undefined && lastBustMs !== undefined
-                ? { openWindow: { startMs, lastBustMs } }
+                ? {
+                      openWindow: {
+                          startMs,
+                          lastBustMs,
+                          ...(lastBustClass ? { lastBustClass } : {}),
+                      },
+                  }
                 : {}),
             ...(typeof row?.scanCursor === "string" ? { scanCursor: row.scanCursor } : {}),
+            ...(lastScannedAtMs !== undefined ? { lastScannedAtMs } : {}),
         };
     }
     for (const [key, raw] of Object.entries(windows)) {
@@ -789,7 +813,9 @@ export function groupBustWindows(
           }
         : undefined;
     let previousWasBust = Boolean(seed);
-    for (const request of ordered) {
+    let previousBustClass: string | undefined = seed?.lastBustClass;
+    for (const original of ordered) {
+        let request = original;
         if (request.divergenceClass === "usage_missing") {
             // When the newest request is still in flight, do not start or continue
             // a window; keep its watermark at the most recent request that reported usage.
@@ -813,6 +839,15 @@ export function groupBustWindows(
             previousWasBust &&
             request.timestampMs - current.lastBustMs <= BUST_WINDOW_MS
         ) {
+            // A bust right after a reclaim bust alerts even when its own class is
+            // accounted: one threshold crossing must cost one bust. An analyzer
+            // that already judged the pair returns the relabelled class, which
+            // this leaves unchanged.
+            const own = request.divergenceClass as CacheBustDivergenceClass;
+            const relabelled = classifyBustAfterReclaim(previousBustClass, own);
+            if (relabelled !== own) {
+                request = { ...request, divergenceClass: relabelled, cause: request.cause ?? own };
+            }
             current.rows.push(request);
             current.lastBustMs = request.timestampMs;
         } else {
@@ -825,6 +860,7 @@ export function groupBustWindows(
             };
         }
         previousWasBust = true;
+        previousBustClass = request.divergenceClass;
     }
     if (current?.rows.length) windows.push(current);
     return windows;
@@ -855,7 +891,9 @@ export function eventForWindow(
         isUnaccountedCacheBustClass(row.divergenceClass as string),
     );
     if (unaccounted.length === 0) return null;
-    const representative = unaccounted[0];
+    // A second bust right after a reclaim is the more specific finding than the
+    // reclaim it follows, so it speaks for the window and names its cause.
+    const representative = unaccounted.find((row) => row.cause) ?? unaccounted[0];
     const divergenceClass = representative.divergenceClass as string;
     const key = windowKey(window.sessionId, window.startMs);
     const prior = state.windows[key];
@@ -886,6 +924,7 @@ export function eventForWindow(
             ...(representative.identityDelta?.length
                 ? { identity_delta: representative.identityDelta }
                 : {}),
+            ...(representative.cause ? { cause: representative.cause } : {}),
         },
     };
     state.windows[key] = {
@@ -909,7 +948,7 @@ export function agentDeliverRequest(
             from_agent: fromAgent,
             from_session_id: SENTINEL_FROM_SESSION_ID,
             from_harness: SENTINEL_FROM_HARNESS,
-            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
+            content: `${event.session_id}: cache bust detected in directory ${event.directory} at ${event.payload.at}; rewritten_tokens=${event.payload.rewritten_tokens}; divergence_class=${event.payload.divergence_class}; first_divergence=${event.payload.first_divergence}${event.payload.identity_delta ? `; identity_delta=${event.payload.identity_delta.join(",")}` : ""}${event.payload.cause ? `; cause=${event.payload.cause}` : ""}; analyzer_cmd=${event.payload.analyzer_cmd}`,
             one_way: true,
         },
         urgency: "high",
@@ -1088,11 +1127,40 @@ function updateOpenWindowState(
         .reverse()
         .find((candidate) => candidate.rows.some((row) => row.timestampMs === latest.timestampMs));
     if (window) {
+        const lastBustClass = window.rows.at(-1)?.divergenceClass;
         sessionState.openWindow = {
             startMs: window.startMs,
             lastBustMs: window.lastBustMs,
+            ...(lastBustClass ? { lastBustClass } : {}),
         };
     }
+}
+
+/**
+ * Order a run's sessions so that the run budget cannot starve one of them.
+ *
+ * A run stops at its deadline, and one large Pi session can take the whole
+ * budget. The database returns sessions in a fixed order, so the same session
+ * used to win every run and a session behind it was never analyzed: on
+ * 2026-10-12 one Pi session's watermark stayed at 01:35:52Z for 14 hours, and
+ * its busts were never seen. Sessions with activity since their last scan come
+ * first, then the one scanned longest ago, then the most recently active.
+ */
+export function orderSessionsForScan(
+    sessions: readonly ActiveCacheBustSession[],
+    state: CacheBustSentinelState,
+): ActiveCacheBustSession[] {
+    const lastScanned = (session: ActiveCacheBustSession): number =>
+        state.sessions[session.sessionId]?.lastScannedAtMs ?? 0;
+    const hasNewActivity = (session: ActiveCacheBustSession): boolean =>
+        session.activityMs > lastScanned(session);
+    return [...sessions].sort(
+        (left, right) =>
+            Number(hasNewActivity(right)) - Number(hasNewActivity(left)) ||
+            lastScanned(left) - lastScanned(right) ||
+            right.activityMs - left.activityMs ||
+            left.sessionId.localeCompare(right.sessionId),
+    );
 }
 
 export async function runSentinelOnce(
@@ -1106,7 +1174,7 @@ export async function runSentinelOnce(
     const stderr = deps.stderr ?? console.error;
     const state = loadSentinelState(options.stateFile);
     const listSessions = deps.listActiveSessions ?? enumerateActiveSessions;
-    const sessions = listSessions(state, nowMs, options);
+    const sessions = orderSessionsForScan(listSessions(state, nowMs, options), state);
     const counters = emptyCounters();
     counters.sessions = sessions.length;
     stderr(JSON.stringify({ kind: "cache_bust_sentinel_start", at: new Date(nowMs).toISOString() }));
@@ -1148,6 +1216,7 @@ export async function runSentinelOnce(
             const sessionState: SessionWatermarkState = priorSession ?? {
                 lastAnalyzedRequestTimestampMs: sinceExclusiveMs,
             };
+            sessionState.lastScannedAtMs = nowMs;
             const windows = groupBustWindows(requests, sessionState.openWindow);
             counters.bustWindows += windows.length;
             for (const window of windows) {

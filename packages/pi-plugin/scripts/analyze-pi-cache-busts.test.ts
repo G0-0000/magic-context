@@ -9,11 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { normalizeRequestBody } from "../../plugin/scripts/cache-bust-body-sources";
 import {
 	capturePiServedArray,
 	flushPiServedArrayLedger,
 } from "../src/served-array-ledger";
-import { __test } from "./analyze-pi-cache-busts";
+import { __test, analyzePiCacheBustSession } from "./analyze-pi-cache-busts";
 
 const temporaryDirectories: string[] = [];
 
@@ -195,6 +196,9 @@ describe("Pi cache-bust analyzer body attribution", () => {
 		expect(run.exitCode).toBe(0);
 		const output = run.stdout.toString();
 		expect(output).toContain("Bodies:  2");
+		// Checked-in fixture files carry git checkout times, which match no pass,
+		// so the analyzer falls back to pairing bodies by file number.
+		expect(output).toContain("Body join: by file number");
 		expect(output).toContain(
 			'message[1] role=user parts=[input_text(13)] text="pi body after"',
 		);
@@ -652,5 +656,242 @@ describe("Pi cache-bust analyzer context.db join and attribution", () => {
 		const output = run.stdout.toString();
 		expect(output).toContain("no_mc_pass_row");
 		expect(output).not.toContain("accounted_drop_applied");
+	});
+});
+
+describe("Pi cache-bust analyzer reclaim pair", () => {
+	// Shape of 2026-10-12 15:27:37–15:29:12Z on session 019e8905: the capture
+	// extension's file counter ran one ahead of the ledger sequence, the 15:28:51
+	// reclaim rewrote m[1] and trimmed the tail, and the 15:29:12 request only
+	// appended to it while openai-codex read just the instructions+tools prefix.
+	const base = Date.parse("2026-10-12T15:27:37.292Z");
+	const reclaim = Date.parse("2026-10-12T15:28:51.740Z");
+	const next = Date.parse("2026-10-12T15:29:12.681Z");
+	const item = (role: string, text: string) => ({
+		role,
+		content: [
+			{ type: role === "assistant" ? "output_text" : "input_text", text },
+		],
+	});
+	const m0 = item("user", "<project-docs>stable m[0]</project-docs>");
+	const oldM1 = item(
+		"user",
+		"<session-history-since>…I made no file changes.</session-history-since>",
+	);
+	const newM1 = item(
+		"user",
+		"<session-history-since>## 38073-38120 · Built and verified</session-history-since>",
+	);
+	const covered = [
+		item("user", "§1§ covered"),
+		item("assistant", "§2§ covered answer"),
+	];
+	const tail = [item("user", "§3§ keep going"), item("assistant", "§4§ going")];
+	const appended = [
+		item("user", "§5§ next"),
+		item("assistant", "§6§ next answer"),
+	];
+	const bodyInputs = {
+		unrecorded: [m0, oldM1, ...covered],
+		base: [m0, oldM1, ...covered, ...tail],
+		reclaim: [m0, newM1, ...tail],
+		next: [m0, newM1, ...tail, ...appended],
+	};
+
+	function writeBody(
+		directory: string,
+		number: number,
+		input: unknown[],
+		writtenAt: number,
+	): void {
+		const path = join(directory, `${String(number).padStart(4, "0")}-req.json`);
+		writeFileSync(
+			path,
+			JSON.stringify({
+				model: "gpt-6.1-sol",
+				instructions: "same instructions",
+				input,
+			}),
+		);
+		utimesSync(path, new Date(writtenAt), new Date(writtenAt));
+	}
+
+	function fixture(sessionId: string) {
+		const sessionRoot = temporaryDirectory("pi-reclaim-pair-session-");
+		const storageDir = temporaryDirectory("pi-reclaim-pair-ledger-");
+		const bodiesDir = temporaryDirectory("pi-reclaim-pair-bodies-");
+		writeJsonl(sessionRoot, "--project--", "reclaim.jsonl", [
+			{ type: "session", id: sessionId, cwd: "/unused/by-override" },
+			assistant("a-base", new Date(base + 2_000).toISOString(), {
+				input: 473,
+				cacheRead: 279_760,
+				cacheWrite: 0,
+			}),
+			assistant("a-reclaim", new Date(reclaim + 2_000).toISOString(), {
+				input: 173_485,
+				cacheRead: 24_448,
+				cacheWrite: 0,
+			}),
+			assistant("a-next", new Date(next + 2_000).toISOString(), {
+				input: 174_344,
+				cacheRead: 24_448,
+				cacheWrite: 0,
+			}),
+		]);
+		// The ledger records each pass's served array; the reclaim pass's array is
+		// shorter than the base pass's because it trimmed the covered turn.
+		capturePiServedArray(sessionId, bodyInputs.base, {
+			storageDir,
+			now: new Date(base),
+		});
+		capturePiServedArray(sessionId, bodyInputs.reclaim, {
+			storageDir,
+			now: new Date(reclaim),
+		});
+		capturePiServedArray(sessionId, bodyInputs.next, {
+			storageDir,
+			now: new Date(next),
+		});
+		flushPiServedArrayLedger();
+		// File numbers run one ahead of ledger sequences 1-3 because of one
+		// request the ledger never recorded, written long before the first pass.
+		writeBody(bodiesDir, 1, bodyInputs.unrecorded, base - 60_000);
+		writeBody(bodiesDir, 2, bodyInputs.base, base + 14);
+		writeBody(bodiesDir, 3, bodyInputs.reclaim, reclaim + 9);
+		writeBody(bodiesDir, 4, bodyInputs.next, next + 21);
+		return { sessionRoot, storageDir, bodiesDir };
+	}
+
+	test("joins each pass to the body written right after it, not to the same file number", async () => {
+		const sessionId = "pi-reclaim-pair-join";
+		const paths = fixture(sessionId);
+
+		const analysis = await analyzePiCacheBustSession({
+			sessionId,
+			piDir: paths.sessionRoot,
+			ompDir: paths.sessionRoot,
+			ledgerDir: paths.storageDir,
+			bodiesDir: paths.bodiesDir,
+			decisions: [],
+		});
+
+		const [reclaimRow, nextRow] = analysis.requests.slice(1);
+		// The reclaim itself rewrote m[1] (normalized message[2]: message[0] is
+		// the instructions), so it is not a provider short read.
+		expect(reclaimRow).toMatchObject({ verdict: "BUST" });
+		expect(reclaimRow?.firstDivergence).toContain("message[2] role=user");
+		expect(reclaimRow?.firstDivergence).toContain("38073-38120");
+		expect(reclaimRow?.divergenceClass).not.toBe(
+			"provider_short_read_identical_bytes",
+		);
+		// The next request only appended to the reclaim request, so its short read
+		// is the provider's, not a prompt rewrite.
+		expect(nextRow?.firstDivergence).toContain("§5§ next");
+		expect(nextRow?.divergenceClass).toBe(
+			"provider_short_read_identical_bytes",
+		);
+	});
+
+	test("names the pure append right after a recorded reclaim as a provider short read after reclaim", async () => {
+		const sessionId = "pi-reclaim-pair-decision";
+		const paths = fixture(sessionId);
+
+		const analysis = await analyzePiCacheBustSession({
+			sessionId,
+			piDir: paths.sessionRoot,
+			ompDir: paths.sessionRoot,
+			ledgerDir: paths.storageDir,
+			bodiesDir: paths.bodiesDir,
+			// The transform_decisions row Pi writes for a completed reclaim pass; it is
+			// what lets the analyzer recognise the first bust as a reclaim.
+			decisions: [
+				{
+					timestampMs: reclaim - 3_000,
+					messageId: "a-reclaim",
+					decision: "execute",
+					materialized: false,
+					materializeReason: null,
+					emergency: false,
+					droppedTokens: 80_000,
+					droppedCount: 98,
+					inputTokens: 281_591,
+					flush: false,
+					source: "context.db.transform_decisions",
+				},
+			],
+		});
+
+		expect(
+			analysis.requests.slice(1).map((row) => [row.divergenceClass, row.cause]),
+		).toEqual([
+			["accounted_drop_applied", undefined],
+			[
+				"provider_short_read_after_reclaim",
+				"provider_short_read_identical_bytes",
+			],
+		]);
+	});
+
+	test("ignores a body pair that reads as a pure append when the ledger shows a shorter served array", () => {
+		const record = (
+			sequence: number,
+			messageCount: number,
+			passTs: number,
+		) => ({
+			version: 1 as const,
+			session_id: "contradiction",
+			pass_ts: new Date(passTs).toISOString(),
+			sequence,
+			message_count: messageCount,
+			sha256: String(sequence),
+			previous_sha256: null,
+			first_divergence_message_index: sequence === 1 ? null : 0,
+			block_vector_start: 0,
+			block_vectors: [],
+		});
+		const usage = (timestamp: number, cacheRead: number, input: number) => ({
+			timestamp,
+			createdAt: new Date(timestamp).toISOString(),
+			line: timestamp,
+			ordinal: timestamp,
+			messageId: String(timestamp),
+			input,
+			cacheRead,
+			cacheWrite: 0,
+			total: input + cacheRead,
+		});
+		const body = (sequence: number, input: unknown[]) => ({
+			sequence,
+			path: `${sequence}-req.json`,
+			writtenAtMs: 0,
+			messages: normalizeRequestBody({ instructions: "same", input }, "openai")
+				.messages,
+		});
+		const previous = {
+			ledger: record(1, 845, base),
+			usage: usage(base + 1_000, 279_760, 473),
+			intervening: [],
+		};
+		const current = {
+			ledger: record(2, 589, reclaim),
+			usage: usage(reclaim + 1_000, 24_448, 173_485),
+			intervening: [],
+		};
+		// Bodies from the two requests before these passes, as a file-number join
+		// would pair them: they read as a pure append although the ledger shrank.
+		const bodies = new Map([
+			[__test.passBodyKey(previous.ledger), body(1, bodyInputs.unrecorded)],
+			[__test.passBodyKey(current.ledger), body(2, bodyInputs.base)],
+		]);
+
+		const rows = __test.analyzeJoinedPasses([previous, current], { bodies });
+
+		expect(rows[1].verdict).toBe("BUST");
+		expect(rows[1].divergenceClass).not.toBe(
+			"provider_short_read_identical_bytes",
+		);
+		expect(rows[1].attribution).toContain(
+			"request bodies contradict the ledger",
+		);
 	});
 });
