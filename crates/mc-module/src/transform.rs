@@ -7122,9 +7122,17 @@ fn apply_once(
                 &cleared_mids,
             ));
         }
+        // A set, not a scan per message: keep_mids can hold every reasoning assistant
+        // above the last served ordinal, and long sessions carry tens of thousands of
+        // frozen units.
+        let mut existing_keeps = core
+            .frozen_units
+            .iter()
+            .filter_map(|unit| unit.key.strip_prefix("strip:native_reasoning_keep:"))
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
         for mid in keep_mids {
-            let key = format!("strip:native_reasoning_keep:{mid}");
-            if !core.frozen_units.iter().any(|unit| unit.key == key) {
+            if existing_keeps.insert(mid.clone()) {
                 core.frozen_units
                     .push(strip_unit("native_reasoning_keep", &mid, ""));
             }
