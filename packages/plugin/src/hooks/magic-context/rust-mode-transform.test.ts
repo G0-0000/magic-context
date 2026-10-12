@@ -9931,6 +9931,11 @@ describe("proactive thinking strip on a released frozen replay", () => {
             );
             expect(hasReasoning(served, "a2")).toBe(false);
             expect(hasReasoning(served, "a3")).toBe(false);
+            expect(transformDecisionTest.getPending(session.sessionId)).toMatchObject({
+                decision: "defer",
+                materialized: false,
+                lkgFrozenReleaseReason: "lkg_anthropic_reasoning_run_invalid",
+            });
         } finally {
             logSpy.mockRestore();
         }

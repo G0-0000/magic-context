@@ -2618,6 +2618,7 @@ export function createRustModeTransform(
         let requestInputTokens = 0;
         let decision = "error";
         let materializeReason = "none";
+        let frozenReleaseReason: string | null = null;
         let schedulerDecision: string | undefined;
         let responseCommitted: boolean | undefined;
         let responsePrefixBustPermitted: boolean | undefined;
@@ -2948,6 +2949,8 @@ export function createRustModeTransform(
                     materializeReason: materializeReason === "none" ? null : materializeReason,
                     inputTokens: requestInputTokens,
                     tsMs: passObservedAtMs,
+                    lkgFrozenReleaseReason:
+                        applied && served ? (frozenReleaseReason ?? undefined) : undefined,
                 });
             }
         };
@@ -4182,7 +4185,6 @@ export function createRustModeTransform(
             );
             let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
             let frozenHealthyPassesAfterApply: number | null = null;
-            let frozenReleaseReason: string | null = null;
             const applyStartedAt = performance.now();
             try {
                 // Validate and postprocess the module result before touching the caller-owned

@@ -22,6 +22,7 @@ import { Database } from "bun:sqlite";
  * | accounted_soft_m1_execute | yes | matched canonical execute pass refreshes m1 |
  * | usage_missing | yes | provider cache read and direct input are both 0 or usage is absent; in-flight/unmetered pass is never a bust baseline |
  * | provider_full_miss | yes | provider cache read is exactly 0 with prevTotal ≥ 10,000; ordinary short reads stay unaccounted; show wire model prev → cur when it changes |
+ * | accounted_lkg_frozen_release | yes | matched pass records why it stopped serving the frozen last-known-good request in materialize_reason |
  * | unaccounted_defer_pass | no | matched canonical defer pass, including a tiny mid-history first_render seam, diverges |
  * | accounted_provider_system_prompt_change | yes | matched non-defer pass has a user-visible provider change |
  * | unaccounted_double_bust | no | matched otherwise-unattributed pass repeats the previous divergence offset |
@@ -542,14 +543,37 @@ export function loadSessionDecisions(
             "last_received_at_ms",
         );
         if (timestampMs === undefined) return undefined;
-        const materializeReason =
-            stringField(
-                row,
-                "materialize_reason",
-                "materialization_reason",
-                "fold_reason",
-                "hard_reason",
-            ) ?? null;
+        const persistedMaterializeReason = stringField(
+            row,
+            "materialize_reason",
+            "materialization_reason",
+            "fold_reason",
+            "hard_reason",
+        );
+        const releaseMarkerPrefix = "lkg_frozen_release:";
+        const releaseAndMaterializeReasons = persistedMaterializeReason?.startsWith(
+            releaseMarkerPrefix,
+        )
+            ? persistedMaterializeReason.slice(releaseMarkerPrefix.length)
+            : "";
+        const hasLkgFrozenRelease = persistedMaterializeReason?.startsWith(
+            releaseMarkerPrefix,
+        ) ?? false;
+        const materializeReasonSeparator = releaseAndMaterializeReasons.indexOf(
+            ";materialize_reason=",
+        );
+        const lkgFrozenReleaseReason = hasLkgFrozenRelease
+            ? (materializeReasonSeparator < 0
+                  ? releaseAndMaterializeReasons
+                  : releaseAndMaterializeReasons.slice(0, materializeReasonSeparator)) || undefined
+            : undefined;
+        const materializeReason = hasLkgFrozenRelease
+            ? materializeReasonSeparator < 0
+                ? null
+                : releaseAndMaterializeReasons.slice(
+                      materializeReasonSeparator + ";materialize_reason=".length,
+                  ) || null
+            : persistedMaterializeReason ?? null;
         const appliedDrops = numberField(
             row,
             "applied_drop_count",
@@ -567,6 +591,7 @@ export function loadSessionDecisions(
             canonicalDecision: stringField(row, "canonical_decision"),
             deferReason: stringField(row, "defer_reason") ?? null,
             appliedRide: stringField(row, "applied_ride", "reclaim_ride"),
+            lkgFrozenReleaseReason,
             materialized:
                 booleanField(row, "materialized", "m0_materialized", "fold_applied") ||
                 materializeReason !== null,
@@ -692,6 +717,7 @@ export function loadSessionDecisions(
             prior.canonicalDecision ??= record.canonicalDecision;
             prior.deferReason ??= record.deferReason;
             prior.appliedRide ??= record.appliedRide;
+            prior.lkgFrozenReleaseReason ??= record.lkgFrozenReleaseReason;
             prior.materialized ||= record.materialized;
             prior.materializeReason ??= record.materializeReason;
             prior.emergency ||= record.emergency;

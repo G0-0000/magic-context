@@ -153,6 +153,32 @@ describe("cache-bust attribution contract", () => {
         }
     });
 
+    test("accounts a released frozen replay before the defer rule", () => {
+        const classified = classifyCacheBust({
+            divergenceIndex: 2,
+            previousMessageCount: 10,
+            decision: decision({
+                decision: "defer",
+                canonicalDecision: "defer",
+                lkgFrozenReleaseReason: "lkg_unsafe_seam",
+            }),
+        });
+
+        expect(classified).toBe("accounted_lkg_frozen_release");
+        expect(isUnaccountedCacheBustClass(classified)).toBe(false);
+    });
+
+    test("a defer bust without a frozen release remains unaccounted", () => {
+        const classified = classifyCacheBust({
+            divergenceIndex: 2,
+            previousMessageCount: 10,
+            decision: decision({ decision: "defer", canonicalDecision: "defer" }),
+        });
+
+        expect(classified).toBe("unaccounted_defer_pass");
+        expect(isUnaccountedCacheBustClass(classified)).toBe(true);
+    });
+
     test("a mural-only epoch is self-inflicted unless an external epoch independently explains it", () => {
         const classify = (externalEpoch: boolean): CacheBustDivergenceClass =>
             classifyCacheBust({
@@ -712,7 +738,9 @@ describe("MC decision store joins", () => {
             );
             INSERT INTO transform_decisions VALUES
                 ('ses_sentinel', 'opencode', 'msg-fold', 10000, 'defer', 1,
-                 'system_hash', 0, 0, 4, 100000);
+                 'system_hash', 0, 0, 4, 100000),
+                ('ses_sentinel', 'opencode', 'msg-release', 30000, 'defer', 0,
+                 'lkg_frozen_release:lkg_unsafe_seam', 0, 0, 0, 100000);
         `);
         context.close(false);
         const store = new Database(storePath);
@@ -745,6 +773,12 @@ describe("MC decision store joins", () => {
         });
 
         expect(nearestCacheBustDecision(loaded, 10_100)?.materializeReason).toBe("system_hash");
+        expect(nearestCacheBustDecision(loaded, 30_100)).toMatchObject({
+            decision: "defer",
+            materialized: false,
+            materializeReason: null,
+            lkgFrozenReleaseReason: "lkg_unsafe_seam",
+        });
         expect(nearestCacheBustDecision(loaded, 20_100)).toMatchObject({
             canonicalDecision: "execute",
             droppedCount: 2,

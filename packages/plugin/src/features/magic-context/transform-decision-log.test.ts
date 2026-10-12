@@ -91,6 +91,42 @@ describe("transform_decisions retention cap", () => {
             bustedThisPass: false,
         });
     });
+    it("stores a frozen LKG release in the existing materialize_reason column", () => {
+        writeRustTransformDecision({
+            sessionId: "ses-1",
+            decision: "SOFT+",
+            materializeReason: null,
+            inputTokens: 100,
+            tsMs: 123,
+            lkgFrozenReleaseReason: "lkg_unsafe_seam",
+        });
+        const pending = __test.getPending("ses-1");
+        expect(pending).toMatchObject({
+            decision: "defer",
+            materialized: false,
+            lkgFrozenReleaseReason: "lkg_unsafe_seam",
+        });
+        if (!pending) throw new Error("released frozen pass was not staged");
+
+        __test.writeRow(dbPath, {
+            ...pending,
+            sessionId: "ses-1",
+            harness: "opencode",
+            messageId: "released-pass",
+        });
+        expect(
+            db
+                .prepare(
+                    "SELECT decision, materialized, materialize_reason FROM transform_decisions WHERE message_id = 'released-pass'",
+                )
+                .get(),
+        ).toEqual({
+            decision: "defer",
+            materialized: 0,
+            materialize_reason: "lkg_frozen_release:lkg_unsafe_seam",
+        });
+    });
+
     // The prune SQL is cap-agnostic (`LIMIT ?`), so we inject a tiny cap to
     // exercise it with a handful of rows. Writing the real 2000+ cap opened
     // that many fresh DB connections in a loop and timed out under CI load.

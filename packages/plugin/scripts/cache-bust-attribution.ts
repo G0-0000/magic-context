@@ -21,6 +21,7 @@ export type CacheBustDivergenceClass =
     | "tail_shrink_no_rewrite"
     | "self_inflicted_epoch"
     | "unfaulted_epoch"
+    | "accounted_lkg_frozen_release"
     | "unaccounted_defer_pass"
     | "unaccounted_double_bust"
     | "unaccounted_tail_rewrite"
@@ -66,6 +67,8 @@ export interface CacheBustDecisionAttribution {
      * scheduler decision alone does not say.
      */
     appliedRide?: string;
+    /** The reason a frozen last-known-good replay was no longer served. */
+    lkgFrozenReleaseReason?: string;
     materialized: boolean;
     materializeReason: string | null;
     emergency: boolean;
@@ -245,6 +248,11 @@ export const CACHE_BUST_RULE_TABLE: readonly CacheBustRule[] = [
         divergenceClass: "unfaulted_epoch",
         accounted: false,
         rule: "epoch_change has no restart/deploy/config epoch and the adapter log shows no module fault, full-array retry, fallback serve, or adapter restart in the preceding 60 s; the wake names identity_delta",
+    },
+    {
+        divergenceClass: "accounted_lkg_frozen_release",
+        accounted: true,
+        rule: "matched pass records why it stopped serving the frozen last-known-good request in materialize_reason",
     },
     {
         divergenceClass: "unaccounted_defer_pass",
@@ -427,6 +435,7 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
         input.divergenceIndex < Math.max(0, input.previousMessageCount - 2);
     if (decision.flush || materializeReason === "explicit_flush") return "accounted_ctx_flush";
     if (decision.emergency && decision.droppedCount > 0) return "accounted_force_band";
+    if (decision.lkgFrozenReleaseReason) return "accounted_lkg_frozen_release";
     if (isTinyFirstRenderDefer && (usageMissing || providerFullMiss)) {
         return usageMissing ? "usage_missing" : "provider_full_miss";
     }

@@ -140,6 +140,15 @@
         "input": { "precedingDisruption": null }
     },
     {
+        "class": "accounted_lkg_frozen_release",
+        "decision": {
+            "decision": "defer",
+            "canonicalDecision": "defer",
+            "lkgFrozenReleaseReason": "lkg_unsafe_seam"
+        },
+        "input": {}
+    },
+    {
         "class": "unaccounted_defer_pass",
         "decision": { "decision": "defer", "canonicalDecision": "defer" },
         "input": {}
