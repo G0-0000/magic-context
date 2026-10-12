@@ -482,6 +482,45 @@ describe("historian host runner", () => {
         expect(error.message).toContain("provider refused");
     });
 
+    it("sends each chain model's configured variant, for the head model and its fallback", async () => {
+        const lane = new FakeClaimLane();
+        lane.queue({
+            runId: "run-a",
+            sessionId: "ses-a",
+            modelChain: ["anthropic/claude-sonnet-5-5", "prov/fallback"],
+        });
+        const { executor, script } = scriptedExecutor();
+        const bodies: Array<{ model?: unknown; variant?: unknown }> = [];
+        let attempts = 0;
+        executor.attempt = async (_handle, request) => {
+            bodies.push({ model: request.body?.model, variant: request.body?.variant });
+            attempts += 1;
+            // The head model fails so the fallback is attempted too.
+            if (attempts === 1) throw new Error("provider refused");
+        };
+        const variants: Record<string, string> = {
+            "anthropic/claude-sonnet-5-5": "medium",
+            "prov/fallback": "high",
+        };
+        const { runner } = runnerOver(lane, {
+            executors: new Map([["ses-a", executor]]),
+            resolveVariant: (model) => variants[model],
+        });
+
+        await runner.pump("ses-a");
+        for (let i = 0; i < 40 && bodies.length < 2; i += 1) await Bun.sleep(5);
+        script.settle({ text: "<compartments>fold</compartments>" });
+        await settle();
+
+        expect(bodies).toEqual([
+            {
+                model: { providerID: "anthropic", modelID: "claude-sonnet-5-5" },
+                variant: "medium",
+            },
+            { model: { providerID: "prov", modelID: "fallback" }, variant: "high" },
+        ]);
+    });
+
     it("gives each model the host's historian_timeout_ms, not the whole await budget", async () => {
         const lane = new FakeClaimLane();
         lane.queue({ runId: "run-a", sessionId: "ses-a", modelChain: ["prov/only"] });
