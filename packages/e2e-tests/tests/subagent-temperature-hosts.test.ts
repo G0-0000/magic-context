@@ -2,8 +2,8 @@
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HostHarness } from "../src/host-harness";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
@@ -11,6 +11,7 @@ import type { CapturedRequest } from "../src/mock-provider/server";
 import { OpenCode2TestHarness } from "../src/opencode2-harness";
 import type { PiMockModel } from "../src/pi-runner/spawn";
 import { createScenarioHarness, forEachHost, type ScenarioHarness } from "../src/scenario-hosts";
+import { cleanupE2ETempDir, createE2ETempDir } from "../src/temp-dir";
 
 /**
  * The historian's configured temperature reaches a model only when model metadata
@@ -196,15 +197,15 @@ forEachHost(import.meta.url, "historian temperature follows model metadata", (ho
     const savedLogPath = process.env.MAGIC_CONTEXT_LOG_PATH;
 
     beforeAll(() => {
-        scratch = mkdtempSync(join(tmpdir(), "mc-temperature-hosts-"));
+        scratch = createE2ETempDir("mc-temperature-hosts-");
         catalog = process.env.MC_E2E_MODELS_CATALOG ?? FIXTURE_CATALOG;
     });
 
     afterAll(() => {
         if (savedLogPath === undefined) delete process.env.MAGIC_CONTEXT_LOG_PATH;
         else process.env.MAGIC_CONTEXT_LOG_PATH = savedLogPath;
-        if (process.env.MC_E2E_KEEP === "1") console.error(`[e2e] kept temperature logs: ${scratch}`);
-        else rmSync(scratch, { recursive: true, force: true });
+        // Honours MC_E2E_KEEP=1, which keeps the per-case plugin logs for inspection.
+        cleanupE2ETempDir(scratch);
     });
 
     for (const testCase of cases) {

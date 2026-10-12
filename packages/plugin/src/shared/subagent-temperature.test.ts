@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { modelsDevCatalogPath } from "./models-dev-temperature";
@@ -9,9 +9,10 @@ import {
     resolveTemperatureCapability,
     subagentTemperature,
 } from "./subagent-temperature";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "./test-temp-dir";
 
 // Every test reads a catalog it wrote itself, never the machine's OpenCode cache.
-const cacheRoot = mkdtempSync(join(tmpdir(), "mc-temperature-catalog-"));
+const cacheRoot = createTestTempDirFromPath(join(tmpdir(), "mc-temperature-catalog-"));
 const savedEnv = {
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
     OPENCODE_MODELS_PATH: process.env.OPENCODE_MODELS_PATH,
@@ -59,7 +60,7 @@ afterAll(() => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
     }
-    rmSync(cacheRoot, { recursive: true, force: true });
+    cleanupTestTempDir(cacheRoot);
 });
 
 describe("subagent sampling metadata", () => {

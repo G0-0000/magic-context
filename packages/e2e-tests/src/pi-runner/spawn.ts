@@ -129,7 +129,7 @@ export interface PiRunnerOptions {
    * to it, while the session keeps the default model. `api` is Pi's wire format.
    */
   historianModel?: PiMockModel;
-  /** models.dev catalogue copied into the throwaway host cache. */
+  /** Path of a models.dev catalogue to copy into this run's private cache directory, where Pi children read it. */
   modelsCatalog?: string;
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;

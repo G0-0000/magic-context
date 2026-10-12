@@ -383,7 +383,8 @@ it("Pi and OMP Gemini Flash get the historian temperature from the models.dev ca
 	await withCalibrationHook(
 		"0.1",
 		(hook, notices) => {
-			// Shapes Pi's registry and the Antigravity extension actually register: no temperature field.
+			// Model shapes as Pi's registry and the Antigravity extension register them: they carry no
+			// temperature field, so the models.dev cache must decide.
 			for (const model of [
 				{
 					provider: "openrouter",

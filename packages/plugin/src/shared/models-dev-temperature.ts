@@ -84,7 +84,10 @@ export function catalogCandidates(providerID: string, modelID: string): string[]
     return candidates;
 }
 
-/** Exact provider and model id match only; anything else returns undefined. */
+/**
+ * Look `provider/model` up in the cached catalogue, trying only the exact spellings from
+ * `catalogCandidates`. A malformed reference, a missing catalogue or no entry returns undefined.
+ */
 export function catalogTemperature(model: string): CatalogTemperature | undefined {
     const slash = model.indexOf("/");
     if (slash <= 0 || slash === model.length - 1) return undefined;

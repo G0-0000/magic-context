@@ -1303,7 +1303,8 @@ describe("hidden completion temperature capabilities", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         delete process.env.OPENCODE_MODELS_PATH;
         __temperatureTest.reset();
-        // OpenCode 2.0.22 rows: no temperature field, so the cached catalogue decides.
+        // OpenCode 2.0.22 rows carry no temperature field, so the cached catalogue decides for
+        // google and openai; the mock row states its flag, so host metadata decides for it.
         const rows = [
             { id: "gemini-3.8-flash", providerID: "google", capabilities: { tools: true } },
             { id: "gpt-6.1-sol", providerID: "openai", capabilities: { tools: true } },

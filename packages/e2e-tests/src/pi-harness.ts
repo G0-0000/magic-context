@@ -783,7 +783,8 @@ export class PiTestHarness implements PiHostHarness {
       const model = pinned
         ? `${pinned.provider}/${pinned.id}`
         : this.host === "omp" ? "mock/mock-model" : "anthropic/claude-haiku-4-5";
-      // The invocation ledger may record a Pi provider alias under its canonical id.
+      // The invocation ledger records a Pi provider alias such as google-antigravity under
+      // its shared-config spelling (google), so either spelling counts as the pinned model.
       assertHistorianMockRouting(this.contextDb(), this.harnessId, model, [
         piModelRefToCanonical(model),
       ]);
