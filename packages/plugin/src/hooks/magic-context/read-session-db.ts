@@ -11,6 +11,7 @@ import {
 } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { forgetRawSessionOrdinalWatermark, forgetRawSessionSummaryRows } from "./read-session-raw";
 
 interface RawCountRow {
     count?: number;
@@ -279,6 +280,10 @@ function pendingMessageParts(sessionId: string, messageId: string): Map<string, 
 export function observeOpenCodeTurnEvent(type: string, properties: unknown): void {
     const props = asRecord(properties);
     if (!props) return;
+    if (type === "message.removed" && typeof props.sessionID === "string")
+        forgetRawSessionOrdinalWatermark(props.sessionID);
+    if (type === "session.deleted" && typeof props.sessionID === "string")
+        forgetRawSessionSummaryRows(props.sessionID);
 
     if (type === "message.part.updated") {
         const part = asRecord(props.part);

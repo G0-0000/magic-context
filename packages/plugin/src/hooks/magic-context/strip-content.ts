@@ -9,6 +9,7 @@ import {
     makeSentinel,
     makeWholeMessageSentinel,
     modelAcceptsEmptyContent,
+    neutralizeWholeMessage,
 } from "./sentinel";
 import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -57,7 +58,9 @@ function isSystemInjectedText(text: string): boolean {
  * length so proxy providers that hash message-array structure see a stable
  * prefix. For Anthropic/Bedrock, the provider's upstream filter drops
  * empty-content messages on the wire anyway — same effective behavior, no
- * mid-pipeline array mutation.
+ * mid-pipeline array mutation. An OpenCode 2 `system` row on canonical
+ * Anthropic is left with no parts instead and omitted when the payload goes
+ * back to the host (see `wholeMessageNeutralizationRemoves`).
  */
 export function stripSystemInjectedMessages(
     messages: MessageLike[],
@@ -117,8 +120,7 @@ export function stripSystemInjectedMessages(
 
         if (hasContentPart && allContentIsSystemInjection) {
             onFirstApplication?.(msg, 0);
-            msg.parts.length = 0;
-            msg.parts.push(makeWholeMessageSentinel(providerID));
+            neutralizeWholeMessage(msg, providerID);
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
@@ -171,7 +173,8 @@ const METADATA_PART_TYPES = new Set([
  * length so proxy providers that hash message-array structure see a stable
  * prefix. For Anthropic/Bedrock, OpenCode's upstream filter drops empty
  * content messages on the wire — same effective behavior, no mid-pipeline
- * array mutation.
+ * array mutation. An OpenCode 2 `system` row on canonical Anthropic is left
+ * with no parts instead (see `wholeMessageNeutralizationRemoves`).
  *
  * Returns both count and sentineled IDs so callers can persist-and-replay.
  */
@@ -237,8 +240,7 @@ export function stripDroppedPlaceholderMessages(
 
         if (hasContentPart && !hasNonDroppedContent) {
             onFirstApplication?.(msg, 0);
-            msg.parts.length = 0;
-            msg.parts.push(makeWholeMessageSentinel(providerID));
+            neutralizeWholeMessage(msg, providerID);
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }

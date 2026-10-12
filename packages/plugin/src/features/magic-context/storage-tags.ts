@@ -764,15 +764,19 @@ interface TagOwnerRow {
 }
 
 /**
- * Per-session digest of the `tags` columns the reasoning budget reads. A
- * transform pass used to read every tag of the session for it, twice; this is
- * kept per connection and extended with the rows appended since the last read.
+ * Cached message ownership and reasoning-token estimates for one session.
+ * An owner is the message that a tag belongs to; prose ratios scale its stored
+ * reasoning count to the session's calibrated token estimate. The cache is kept
+ * per connection and extended with tags appended since the last read.
  *
- * It is rebuilt from scratch when a statement that can change or delete an
- * existing tag ran in this process (the generation from
- * `getTagIdentityWriteGeneration` moved), or when a prose ratio it has not
- * folded yet is asked for. Status, drop-mode and size writes never move that
- * generation, so they never rebuild it.
+ * The identity-write generation is a single process-wide counter that moves
+ * whenever any session's tag ownership or reasoning data is rewritten in this
+ * process. It only says "something may have changed somewhere", so it never
+ * invalidates this session's cache by itself: it triggers the cheap revision
+ * and shape check described below. Only an actual change to this session's
+ * existing ownership/reasoning data, a deletion, or a previously uncached prose
+ * ratio requires a worker rebuild. Status, drop-mode and size writes do not
+ * affect this digest.
  *
  * A commit by another connection (`data_version` moved) is checked against the
  * session's shape first: the number of its tags and its highest tag id, read
@@ -799,8 +803,8 @@ interface TagOwnerRow {
  * count and highest id still fit an append.
  *
  * Inside an open transaction it is neither used nor stored, since uncommitted
- * rows can still roll back. File-store callers defer cold reads; the worker
- * performs builds and foreign-commit shape counts on a read snapshot.
+ * rows can still roll back. File-store callers defer cold reads; warm foreign
+ * commits use bounded appended rows and index-only shape checks in a read snapshot.
  */
 export interface TagOwnerSummary {
     dataVersion: number;
@@ -1120,22 +1124,24 @@ function readTagOwnerSummary(
     const cached = inTransaction ? undefined : sessions.get(sessionId);
     if (
         cached &&
-        cached.generation === generation &&
+        (cached.generation === generation ||
+            cached.identityRevision === readTagIdentityRevision(db, sessionId)) &&
         // A rebuilt or altered table can keep the session's count and highest id.
         cached.schemaVersion === schemaVersion &&
         (proseRatio === undefined || cached.reasoningEstimatesByRatio.has(proseRatio))
     ) {
         let rows: TagOwnerRow[] | null;
-        const globalLastRowId = (
+        let globalLastRowId = (
             db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM tags").get() as { id: number }
         ).id;
         if (
             offThreadOnly &&
-            (cached.dataVersion !== dataVersion ||
-                globalLastRowId - cached.globalLastRowId > TAG_OWNER_PAGE_LIMIT)
+            (globalLastRowId - cached.globalLastRowId > TAG_OWNER_PAGE_LIMIT ||
+                (cached.dataVersion !== dataVersion &&
+                    cached.unownedToolRows.size > TAG_OWNER_PAGE_LIMIT))
         )
             throw new TagOwnerSummaryNotReady();
-        if (cached.dataVersion === dataVersion) {
+        if (cached.dataVersion === dataVersion && cached.generation === generation) {
             // Only this connection wrote, and only appends. `+session_id` keeps
             // SQLite on the rowid range, so this reads the rows appended since,
             // in any session.
@@ -1153,7 +1159,38 @@ function readTagOwnerSummary(
                 }
             }
         } else {
-            rows = appendedSinceForeignCommit(db, sessionId, cached);
+            // The count, revision and appended rows must describe one commit.
+            // Unrelated context writes are not owner-digest invalidations.
+            if (offThreadOnly) db.exec("BEGIN");
+            try {
+                globalLastRowId = (
+                    db.prepare("SELECT COALESCE(MAX(id),0) AS id FROM tags").get() as { id: number }
+                ).id;
+                if (
+                    offThreadOnly &&
+                    globalLastRowId - cached.globalLastRowId > TAG_OWNER_PAGE_LIMIT
+                )
+                    throw new TagOwnerSummaryNotReady();
+                rows = appendedSinceForeignCommit(db, sessionId, cached);
+                const adopted = rows ? adoptedSinceForeignCommit(db, cached) : [];
+                if (
+                    !rows ||
+                    rows.length > TAG_OWNER_PAGE_LIMIT ||
+                    adopted.length > TAG_OWNER_PAGE_LIMIT
+                ) {
+                    if (offThreadOnly) throw new TagOwnerSummaryNotReady();
+                } else if (offThreadOnly) {
+                    tagOwnerRowsRead += rows.length + adopted.length;
+                    for (const row of rows) foldTagOwnerRow(cached, row);
+                    for (const row of adopted) foldTagOwnerRow(cached, row, false);
+                    cached.dataVersion = dataVersion;
+                    cached.generation = generation;
+                    cached.globalLastRowId = globalLastRowId;
+                    return cached;
+                }
+            } finally {
+                if (offThreadOnly) db.exec("ROLLBACK");
+            }
         }
         if (rows) {
             const adopted =
@@ -1168,6 +1205,7 @@ function readTagOwnerSummary(
             for (const row of rows) foldTagOwnerRow(cached, row);
             for (const row of adopted) foldTagOwnerRow(cached, row, false);
             cached.dataVersion = dataVersion;
+            cached.generation = generation;
             cached.globalLastRowId = globalLastRowId;
             return cached;
         }

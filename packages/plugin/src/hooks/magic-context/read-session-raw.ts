@@ -1142,28 +1142,98 @@ function survivingAnchor(db: Database, set: SummaryCandidates): RowAnchor | null
 
 /**
  * A worker snapshot of summary candidates, global rowid anchors and exact ranks.
- * Candidates can seed another worker after appends or anchor reuse. Checkpoints
- * can serve only while the original serving stamp is unchanged; a later commit
- * requires the worker to rebuild them before a large prefix lookup can answer.
+ * Checkpoints are durable prefix ranks: new messages extend the last anchor,
+ * and a revert truncates to the newest surviving checkpoint. Message identities
+ * and ordering are immutable outside tail deletion in the OpenCode store.
  */
 export interface RawSessionSummaryScan {
     anchors: Array<{ rowid: number; id: string }>;
     ids: string[];
     /** Rows of the session whose JSON the scan read. */
     sessionRows: number;
-    checkpoints?: Array<OrdinalKey & { ordinal: number }>;
+    checkpoints?: Array<OrdinalKey & { ordinal: number; storedCount?: number }>;
     total?: number;
 }
 
-const ordinalCheckpoints = new WeakMap<
-    Database,
-    Map<string, { stamp: StoreStamp; epoch: number; scan: RawSessionSummaryScan }>
->();
+interface OrdinalCheckpointState {
+    epoch: number;
+    scan: RawSessionSummaryScan;
+}
+const ordinalCheckpoints = new WeakMap<Database, Map<string, OrdinalCheckpointState>>();
 const ordinalSummarySeeds = new WeakMap<
     Database,
     Map<string, { epoch: number; scan: RawSessionSummaryScan }>
 >();
 const ORDINAL_LOOKUP_LIMIT = 512;
+
+function currentOrdinalCheckpoints(
+    db: Database,
+    sessionId: string,
+): OrdinalCheckpointState | undefined {
+    const cached = ordinalCheckpoints.get(db)?.get(sessionId);
+    if (!cached) return undefined;
+    return withReadSnapshot(db, () => {
+        if (!extendOrdinalCheckpoints(db, sessionId, cached.scan, ORDINAL_LOOKUP_LIMIT))
+            return undefined;
+        cached.epoch = getRawSessionSummaryEpoch(sessionId);
+        return cached;
+    });
+}
+
+/** Retain prefix ranks across commits; OpenCode reverts remove only a suffix. */
+function extendOrdinalCheckpoints(
+    db: Database,
+    sessionId: string,
+    scan: RawSessionSummaryScan,
+    limit?: number,
+): boolean {
+    const points = scan.checkpoints ?? [];
+    const exists = (point: OrdinalKey) =>
+        Boolean(
+            db
+                .prepare("SELECT 1 FROM message WHERE id=? AND session_id=? AND time_created=?")
+                .get(point.id, sessionId, point.timeCreated),
+        );
+    // Binary search keeps the newest surviving page after a revert. At most one
+    // old page is replayed, rather than warming the entire surviving prefix.
+    if (points.length && !exists(points[points.length - 1])) {
+        let low = 0;
+        let high = points.length;
+        while (low < high) {
+            const middle = Math.floor((low + high) / 2);
+            if (exists(points[middle])) low = middle + 1;
+            else high = middle;
+        }
+        points.length = low;
+        scan.total = points.at(-1)?.ordinal ?? 0;
+        scan.sessionRows = points.at(-1)?.storedCount ?? 0;
+    }
+    const tail = points.at(-1);
+    const rows = db
+        .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message
+        WHERE session_id=?${tail ? " AND (time_created,id) > (?,?)" : ""}
+        ORDER BY time_created,id${limit === undefined ? "" : ` LIMIT ${limit + 1}`}`)
+        .all(sessionId, ...(tail ? [tail.timeCreated, tail.id] : [])) as Array<
+        OrdinalKey & { excluded: number }
+    >;
+    ordinalJsonRowsRead += rows.length;
+    if (limit !== undefined && rows.length > limit) return false;
+    let total = scan.total ?? 0;
+    // Only page boundaries and the current tail are retained, even after years
+    // of one-message appends. The previous partial-page tail is redundant.
+    if (rows.length && tail && (tail.storedCount ?? 0) % 256 !== 0) points.pop();
+    for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        if (row.excluded !== 1) total++;
+        const storedCount = scan.sessionRows + index + 1;
+        if (storedCount % 256 === 0 || index === rows.length - 1)
+            points.push({ id: row.id, timeCreated: row.timeCreated, ordinal: total, storedCount });
+    }
+    scan.checkpoints = points;
+    scan.sessionRows += rows.length;
+    scan.total = total;
+    return true;
+}
 
 export class RawOrdinalsNotReady extends Error {
     constructor() {
@@ -1171,16 +1241,13 @@ export class RawOrdinalsNotReady extends Error {
     }
 }
 
-/** Capture the serving handle's stamp before starting a worker; stamps are connection-local. */
-export function rawOrdinalStoreStamp(db: Database): StoreStamp | null {
-    return readStoreStamp(db);
-}
-
-/** Candidate discovery can be reused even when a later commit invalidated ranks. */
+/** Retained ranks seed a worker when more than one bounded page was appended. */
 export function rawOrdinalSummarySeed(
     db: Database,
     sessionId: string,
 ): RawSessionSummaryScan | undefined {
+    const retained = ordinalCheckpoints.get(db)?.get(sessionId);
+    if (retained) return retained.scan;
     const seed = ordinalSummarySeeds.get(db)?.get(sessionId);
     if (!seed || seed.epoch !== getRawSessionSummaryEpoch(sessionId)) return undefined;
     return {
@@ -1190,14 +1257,10 @@ export function rawOrdinalSummarySeed(
 }
 
 function boundedOrdinalPrefix(db: Database, sessionId: string, through: OrdinalKey | null): number {
-    const cached = ordinalCheckpoints.get(db)?.get(sessionId);
-    const usable =
-        cached &&
-        cached.epoch === getRawSessionSummaryEpoch(sessionId) &&
-        sameStoreStamp(cached.stamp, readStoreStamp(db));
-    if (usable && through === null) return cached.scan.total ?? 0;
+    const cached = currentOrdinalCheckpoints(db, sessionId);
+    if (cached && through === null) return cached.scan.total ?? 0;
     let floor: (OrdinalKey & { ordinal: number }) | undefined;
-    if (usable && through) {
+    if (cached && through) {
         const points = cached.scan.checkpoints ?? [];
         let low = 0;
         let high = points.length;
@@ -1235,6 +1298,10 @@ export function scanRawSessionSummaryRows(
     previous?: RawSessionSummaryScan,
 ): RawSessionSummaryScan {
     return withReadSnapshot(db, () => {
+        if (previous?.checkpoints) {
+            extendOrdinalCheckpoints(db, sessionId, previous);
+            return previous;
+        }
         if (previous) {
             const sessions = summaryCandidateSets.get(db) ?? new Map();
             sessions.set(sessionId, {
@@ -1275,13 +1342,18 @@ export function scanRawSessionSummaryRows(
             .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE session_id = ?
         ORDER BY time_created, id`)
             .all(sessionId) as Array<OrdinalKey & { excluded: number }>;
-        const checkpoints: Array<OrdinalKey & { ordinal: number }> = [];
+        const checkpoints: Array<OrdinalKey & { ordinal: number; storedCount: number }> = [];
         let total = 0;
         for (let index = 0; index < keys.length; index++) {
             const key = keys[index];
             if (key.excluded !== 1) total++;
             if (index % 256 === 255 || index === keys.length - 1)
-                checkpoints.push({ id: key.id, timeCreated: key.timeCreated, ordinal: total });
+                checkpoints.push({
+                    id: key.id,
+                    timeCreated: key.timeCreated,
+                    ordinal: total,
+                    storedCount: index + 1,
+                });
         }
         return { anchors, ids, sessionRows, checkpoints, total };
     });
@@ -1293,27 +1365,26 @@ export function getRawSessionSummaryEpoch(sessionId: string): number {
 }
 
 /**
- * Retain discovered candidates as a seed for later workers. File-store ranks
- * are installed only with the original serving stamp and current session epoch;
- * a stale scan must never certify a current rank. In-memory stores retain the
- * candidate-only compatibility path. Returns whether ranks can now be served.
+ * Retain discovered candidates and prefix ranks for incremental extension.
+ * Tail removals during a cold scan are repaired against the serving snapshot
+ * before ranks become ready. A later revert retains the same surviving prefix.
  */
 export function installRawSessionSummaryScan(
     db: Database,
     sessionId: string,
     scan: RawSessionSummaryScan,
     epoch: number,
-    stamp?: StoreStamp | null,
+    workerPrepared = false,
 ): boolean {
     if (epoch !== getRawSessionSummaryEpoch(sessionId)) return false;
     const seeds = ordinalSummarySeeds.get(db) ?? new Map();
     seeds.set(sessionId, { epoch, scan });
     ordinalSummarySeeds.set(db, seeds);
-    if (scan.checkpoints && stamp && sameStoreStamp(stamp, readStoreStamp(db))) {
+    if (scan.checkpoints && workerPrepared) {
         const counts = ordinalCheckpoints.get(db) ?? new Map();
-        counts.set(sessionId, { stamp, epoch, scan });
+        counts.set(sessionId, { epoch, scan });
         ordinalCheckpoints.set(db, counts);
-    } else if (stamp) return false;
+    } else if (getSqliteDatabasePath(db) && isMainThread) return false;
     if (isRawSessionSummaryWarm(db, sessionId)) return true;
     let sessions = summaryCandidateSets.get(db);
     if (!sessions) {
@@ -1325,18 +1396,13 @@ export function installRawSessionSummaryScan(
 }
 
 /**
- * File stores on the serving thread require rank checkpoints for the current
- * stamp and epoch. Workers and in-memory stores instead require candidates with
- * a surviving rowid anchor, so candidate discovery can be incremental.
+ * File-store reads need worker-built prefix ranks so host lookups read only a
+ * bounded suffix. Workers and memory stores can discover summary candidates
+ * directly, retaining them while their remembered rowid still names the same row.
  */
 export function isRawSessionSummaryWarm(db: Database, sessionId: string): boolean {
     if (isMainThread && getSqliteDatabasePath(db)) {
-        const counts = ordinalCheckpoints.get(db)?.get(sessionId);
-        return Boolean(
-            counts &&
-                counts.epoch === getRawSessionSummaryEpoch(sessionId) &&
-                sameStoreStamp(counts.stamp, readStoreStamp(db)),
-        );
+        return Boolean(currentOrdinalCheckpoints(db, sessionId));
     }
     const set = summaryCandidateSets.get(db)?.get(sessionId);
     if (!set || set.epoch !== getRawSessionSummaryEpoch(sessionId)) return false;

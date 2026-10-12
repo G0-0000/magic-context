@@ -1,4 +1,5 @@
 import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge";
+import { modelAcceptsEmptyContent } from "../../hooks/magic-context/sentinel";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
@@ -24,6 +25,51 @@ function rejectContentPart(message: MessageLike, part: Part, reason: string): vo
     const text = `v2 context omitted a content part the host would reject: type=${type} message=${String(message.info.id ?? "<head>")} reason=${reason}`;
     if (typeof message.info.sessionID === "string") sessionLog(message.info.sessionID, text);
     else log(text);
+}
+
+/** Sessions whose empty-text omission has been logged in this process. */
+const emptyTextOmissionLogged = new Set<string>();
+
+/**
+ * Put a cache hint taken from a removed part back on `content` where OpenCode
+ * 2's own cache policy marks a message: its last text part, or its last part
+ * when it has no text. A message that already carries a hint keeps it alone,
+ * so a removal never adds a breakpoint the host would not have had.
+ */
+function placeCacheHint(content: Part[], hint: unknown): void {
+    if (content.length === 0 || content.some((part) => part.cache !== undefined)) return;
+    let lastText = content.length - 1;
+    while (lastText >= 0 && content[lastText]?.type !== "text") lastText -= 1;
+    const index = lastText >= 0 ? lastText : content.length - 1;
+    content[index] = { ...content[index], cache: hint };
+}
+
+/**
+ * Final guard for canonical Anthropic: take every text part whose text is
+ * exactly empty out of `content`, and return how many it took. Anthropic
+ * rejects an empty text block with HTTP 400, and OpenCode 2 forwards one in a
+ * `system` row as is (see `wholeMessageNeutralizationRemoves` in
+ * hooks/magic-context/sentinel.ts, which keeps the pipeline from producing
+ * one). In user and assistant rows the host drops empty text itself, so
+ * taking it out here sends the same request. A cache hint on a removed part
+ * moves to this message, or to the previous rendered message when nothing is
+ * left here (`placeCacheHint`).
+ */
+function removeEmptyTextParts(content: Part[], rendered: V2Message[]): number {
+    let hint: unknown;
+    let removed = 0;
+    for (let index = content.length - 1; index >= 0; index -= 1) {
+        const part = content[index];
+        if (part?.type !== "text" || part.text !== "") continue;
+        if (hint === undefined) hint = part.cache;
+        content.splice(index, 1);
+        removed += 1;
+    }
+    if (hint !== undefined) {
+        const target = content.length > 0 ? content : rendered.at(-1)?.content;
+        if (target) placeCacheHint(target, hint);
+    }
+    return removed;
 }
 
 interface ToolBridge {
@@ -318,6 +364,11 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         commit() {
             let head = 0;
             const rendered: V2Message[] = [];
+            // Provider `anthropic` is the only one Magic Context gives empty-text
+            // placeholders (see `modelAcceptsEmptyContent`), so only it is guarded.
+            const emptyTextGuard = modelAcceptsEmptyContent(draft.model.providerID);
+            let omitted = 0;
+            let emptyTextParts = 0;
             for (const message of messages) {
                 const original =
                     originals.get(message) ??
@@ -460,7 +511,8 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                         else following.push({ ...bridge.resultMessage, content: [result] });
                     }
                 }
-                if (content.length || !original?.content.length) {
+                const guarded = emptyTextGuard ? removeEmptyTextParts(content, rendered) : 0;
+                if (content.length || (!original?.content.length && guarded === 0)) {
                     const value: V2Message = {
                         ...original,
                         id,
@@ -469,8 +521,18 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                     };
                     const existing = id ? existingHeads.get(id) : undefined;
                     rendered.push(existing ? Object.assign(existing, { content }) : value);
+                } else if (emptyTextGuard) {
+                    omitted += 1;
                 }
+                emptyTextParts += guarded;
                 rendered.push(...following);
+            }
+            if (omitted + emptyTextParts > 0 && !emptyTextOmissionLogged.has(draft.sessionID)) {
+                emptyTextOmissionLogged.add(draft.sessionID);
+                sessionLog(
+                    draft.sessionID,
+                    `v2 payload: left out ${omitted} emptied messages and ${emptyTextParts} empty text parts, because Anthropic rejects an empty text block (logged once per session)`,
+                );
             }
             draft.messages.splice(0, draft.messages.length, ...rendered);
         },

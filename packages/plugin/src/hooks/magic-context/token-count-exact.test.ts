@@ -84,20 +84,33 @@ describe("exact token counts", () => {
         expect(encodeTokensExactly(tokenizer, text)).toEqual(tokenizer.encode(text, "all"));
     });
 
-    it("counts 3 MB of base64 promptly", () => {
+    it("counts 3 MB of base64 in time linear in its length", () => {
         // Nearly every base64 piece is new, so the library's merge cache evicts on
         // almost every piece once full; its eviction walks past earlier deletions
-        // and 4 MB took about 17 s.
-        const random = rng(11);
-        const bytes = Buffer.alloc(2_400_000);
-        for (let index = 0; index < bytes.length; index += 1) {
-            bytes[index] = Math.floor(random() * 256);
-        }
-        const text = `data:image/png;base64,${bytes.toString("base64")}`;
-        const started = performance.now();
-        expect(estimateTokens(text)).toBeGreaterThan(1_000_000);
-        expect(performance.now() - started).toBeLessThan(6_000);
-    }, 30_000);
+        // and 4 MB took about 17 s. The check compares scaling rather than wall
+        // time, because a shared CI runner is several times slower than a laptop:
+        // ten times the input costs about 11x here, while the library's own path
+        // costs about 70x on the same pair.
+        const base64Image = (length: number, seed: number): string => {
+            const random = rng(seed);
+            const bytes = Buffer.alloc(length);
+            for (let index = 0; index < bytes.length; index += 1) {
+                bytes[index] = Math.floor(random() * 256);
+            }
+            return `data:image/png;base64,${bytes.toString("base64")}`;
+        };
+        const timed = (text: string): number => {
+            const started = performance.now();
+            estimateTokens(text);
+            return performance.now() - started;
+        };
+        // Warm the counter so the small sample doesn't carry first-call setup.
+        estimateTokens(base64Image(24_000, 5));
+        const small = Math.min(timed(base64Image(240_000, 3)), timed(base64Image(240_000, 7)));
+        const large = base64Image(2_400_000, 11);
+        expect(estimateTokens(large)).toBeGreaterThan(1_000_000);
+        expect(timed(large) / small).toBeLessThan(30);
+    }, 60_000);
 
     it("counts a 300,000-character unbroken run promptly", () => {
         // The library's merge takes about 0.75 s at 40,000 characters and grows

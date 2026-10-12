@@ -263,6 +263,10 @@ export interface OpenCode2SpawnOptions {
     /** Built plugin snapshot used before a same-store upgrade. */
     magicContextPlugin?: string;
 	probePlugin?: string;
+	/** Absolute path to a plugin loaded before Magic Context, so its session hooks
+	 * shape the draft Magic Context receives, the way another user plugin listed
+	 * ahead of it would. */
+	prePlugin?: string;
 	providerID?: string;
 	probeStandalone?: boolean;
 	defaultModelID?: string;
@@ -339,6 +343,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			JSON.stringify({
 				...options.extraConfig,
 				plugins: [
+					...(options.prePlugin ? [options.prePlugin] : []),
 					...(options.includeMagicContext === false ? [] : [options.magicContextPlugin ?? PLUGIN]),
 					...(options.probePlugin ? [options.probePlugin] : []),
 					SCHEMA_GUARD,

@@ -305,7 +305,7 @@ describe("tag owner summary after other connections' commits", async () => {
             other
                 .prepare("DELETE FROM tags WHERE session_id = ? AND tag_number = 1999")
                 .run(SESSION);
-            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 2 });
             await expectMatchesFullRead(db, 1);
             // Delete and append in one commit: the count alone would not move.
             other.transaction(() => {
@@ -318,7 +318,7 @@ describe("tag owner summary after other connections' commits", async () => {
                     )
                     .run(SESSION);
             })();
-            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 2 });
             await expectMatchesFullRead(db, 1);
             // A REPLACE removes the old row without a delete trigger.
             other
@@ -338,14 +338,14 @@ describe("tag owner summary after other connections' commits", async () => {
                     "UPDATE tags SET message_id = 'm-rekeyed' WHERE session_id = ? AND tag_number = 1000",
                 )
                 .run(SESSION);
-            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 2 });
             await expectMatchesFullRead(db, 1);
             other
                 .prepare(
                     "UPDATE tags SET reasoning_token_count = 5000 WHERE session_id = ? AND tag_number = 10",
                 )
                 .run(SESSION);
-            expect(await readCost(db)).toEqual({ rows: 0, checks: 1 });
+            expect(await readCost(db)).toEqual({ rows: 0, checks: 2 });
             await expectMatchesFullRead(db, 1);
         });
     });
@@ -391,7 +391,7 @@ describe("tag owner summary after other connections' commits", async () => {
         }
     });
 
-    it("checks the session's shape off-thread using the index alone", async () => {
+    it("checks a warm session's shape using only the covering index", async () => {
         await withForeignWriter(10, async (db, other) => {
             other.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ?").run(SESSION);
             const statements: string[] = [];
@@ -405,7 +405,7 @@ describe("tag owner summary after other connections' commits", async () => {
             } finally {
                 db.prepare = prepare;
             }
-            expect(statements.some((sql) => sql.includes("COUNT(*)"))).toBe(false);
+            expect(statements.some((sql) => sql.includes("COUNT(*)"))).toBe(true);
             const shape = TAG_OWNER_APPENDED_WITH_SHAPE_SQL;
             const plan = (
                 db
