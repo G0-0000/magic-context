@@ -999,8 +999,9 @@ fn signed_prefix_hold_tool_call_input_reset_pass_fits_or_refuses() {
     }
 }
 
-/// A subagent's signed tool loop at the wall, every large result before kept signed
-/// thinking: the subagent takes the same signed-thinking reset as a primary, through its
+/// A subagent's signed tool loop at 95% usage, with every large tool result sitting before
+/// the loop's newest kept signed thinking (so per-target protection keeps all of them):
+/// the subagent takes the same signed-thinking reset as a primary, through its
 /// reductions-only branch. The reset strips the loop's thinking, the queued drops land, the
 /// serve fits, and the next pass replays it.
 #[test]
@@ -1039,7 +1040,8 @@ fn signed_prefix_hold_subagent_signed_loop_at_the_wall_resets_and_fits() {
     assert_eq!(review_r3_reasoning_count(&reset), 0);
     assert!(review_r2_result_token_lower_bound(&reset) <= 100_000);
     assert!(review_pending(sim.s(), &sim.session).is_empty());
-    // Below the wall the next pass holds, replaying the persisted reset.
+    // At 20% usage the next pass is a Defer: it serves the reset pass's bytes again, with
+    // the thinking still removed by the persisted strip units.
     sim.used = 20_000;
     let replay = sim.run(false).unwrap();
     assert_eq!(replay.action, "SOFT+");

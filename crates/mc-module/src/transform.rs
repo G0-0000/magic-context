@@ -7753,8 +7753,9 @@ fn apply_once(
     if protected_signed_prefix
         && (force_band_active || scheduler_outcome.pass == scheduler::PassDecision::Emergency95)
         && hard_context_limit_tokens > 0.0
-        // The host proved this request's input over the window. A trusted count that fits
-        // needs no reset: the transform only removes from what the host measured.
+        // The host's trusted final-wire count for this request's input must itself be over
+        // the window. If that count fits, no reset is needed: the transform only removes
+        // content from what the host measured.
         && req.usage.as_ref().is_some_and(|usage| {
             usage.final_wire_trusted
                 && usage.final_wire_input_tokens as f64 > hard_context_limit_tokens

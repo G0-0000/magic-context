@@ -1288,8 +1288,9 @@ describe("a signed-thinking reset survives a crash and never ships over the wind
         const input = remap(fixture.input);
         s.setModuleOutput(() => remap(fixture.before.native_messages));
         await s.run(input, "SOFT+");
-        // The module's reset output still carries a prompt far over the 200k limit (about
-        // 1 MB of real words; the final-wire estimate's byte bound proves it over).
+        // The module's output on the reset pass still carries a prompt far over the 200k
+        // limit (about 1 MB of real words), so the host's final-wire estimate proves the whole
+        // request over the window even though no signed thinking is left to strip.
         const huge = "lorem ipsum dolor sit amet ".repeat(40_000);
         s.setModuleOutput(() =>
             remap(fixture.pressured.native_messages).map((message) =>

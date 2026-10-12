@@ -514,8 +514,10 @@ export interface RustModeTransformOptions {
     /** Override only to exercise raw-fallback estimator failures in tests. */
     rawFallbackEstimatorForTests?: typeof estimateFinalWireInputTokens;
     /**
-     * Test-only crash seam: runs on a pass serving a module signed-thinking reset, after
-     * the reset's strip fence is durable and before the previous LKG slot is invalidated.
+     * Test-only crash seam. Runs on a pass where the module reports `signed_thinking_reset`
+     * (it removed every signed thinking block), after the host has durably recorded those
+     * messages in its persisted thinking-strip set and before the previous last-known-good
+     * snapshot is dropped.
      */
     afterSignedThinkingResetFenceForTests?: (sessionId: string) => void;
     /** Override only to observe mural candidate resolution in tests. */
@@ -4149,13 +4151,17 @@ export function createRustModeTransform(
                     "rust transform wire invariant failed: SOFT+ cannot permit a prefix bust",
                 );
             }
-            // The module has durably removed every signed thinking block it serves. The
-            // previous LKG snapshot and the reactive recovery still hold that thinking, and
-            // neither is part of the module's commit. Before anything else on this pass can
-            // clear recovery, invalidate the snapshot or fall back to it, record the strip
-            // fence: every reasoning-bearing assistant of this input joins the persisted
-            // binding-mismatch set, which every LKG replay and every later host pass applies.
-            // Without it a crash here could replay thinking the module no longer serves.
+            // The module reports `signed_thinking_reset`: it has durably removed every signed
+            // thinking block it serves. Two pieces of host state still hold that thinking and
+            // are not part of the module's commit: the previous last-known-good (LKG) snapshot,
+            // replayed when the module cannot answer, and a reactive latest-thinking recovery,
+            // which restores the turn's original thinking. Before this pass can clear the
+            // recovery, drop the snapshot or fall back to it, record a strip fence: every
+            // reasoning-bearing assistant of this input joins the persisted thinking-strip set
+            // (the binding-mismatch ids). Every later host pass strips those messages, and an
+            // LKG snapshot taken before the reset no longer matches what its replay would serve,
+            // so it is not admitted. A crash after this point therefore never brings the
+            // removed thinking back. If the fence cannot be written, the pass is refused.
             const signedThinkingReset =
                 moduleDecisionBusts && response.signed_thinking_reset === true;
             if (signedThinkingReset) {
@@ -4497,7 +4503,6 @@ export function createRustModeTransform(
                     });
                     thinkingBindingRecovery = postprocess.thinkingBindingRecovery;
                     markerAt = postprocess.markerAt;
-
                     // A possibly committed host write with unfinished mirror/CAS
                     // work is not an admitted cut, even if fresh native output fits.
                     // Keep the durable fence until a supported recovery repairs it.
@@ -4552,8 +4557,9 @@ export function createRustModeTransform(
                                 resolveDecisionCalibration(model?.providerID, model?.modelID),
                             ),
                         ) ??
-                        // After a signed-thinking reset nothing more can be removed, so a
-                        // whole request still over the window is refused, not sent.
+                        // A signed-thinking reset pass already removed all signed thinking
+                        // and everything the module could reclaim, so nothing more can be
+                        // removed: a whole request still over the window is refused, not sent.
                         (signedThinkingReset
                             ? signedTurnContextRefusal(
                                   servedFinalWireEstimate,
@@ -4623,10 +4629,12 @@ export function createRustModeTransform(
                 );
                 let captureMode = "async";
                 if (capturePlan) state.lkgLastServedCaptureSequence = capturePlan.captureSequence;
-                // A served signed-thinking reset removed every signed block of the turn a
-                // provider rejection armed for restoration; its originals are bound to bytes
-                // that changed. End that recovery only once the stripped replacement is
-                // captured, so no surviving state can restore the turn's old thinking.
+                // After a provider rejected edits to the latest turn, reactive recovery restores
+                // that turn's original thinking on each pass. A served signed-thinking reset
+                // removed all of it because bytes before it changed, so there is nothing valid
+                // to restore. End the recovery only after the stripped replacement is saved as
+                // the new last-known-good snapshot, so no surviving state can restore the old
+                // thinking.
                 const endRecoveryAfterResetCapture = (): void => {
                     if (signedThinkingReset && thinkingRecovery.restore) {
                         endLatestThinkingRecoveryAfterReset(deps.db, sessionId);
