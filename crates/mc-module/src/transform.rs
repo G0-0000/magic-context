@@ -7475,7 +7475,10 @@ fn apply_once(
         .is_some_and(|usage| usage.final_wire_trusted)
         && hard_context_limit_tokens > 0.0
     {
-        let frozen_units = FrozenUnitLookup::Scan(&core.frozen_units);
+        // One lookup per protected tail result: a linear scan here multiplies the
+        // session's frozen-unit count (tens of thousands on long sessions) by the
+        // number of protected results, which took tens of seconds per pass.
+        let frozen_units = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
         let protected_result_tokens = tail_for_selection
             .iter()
             .filter(|item| {
