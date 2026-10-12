@@ -4,7 +4,8 @@ Scope: `master..8845bb45af`. The product change is `468a873aad`; `58b5f70d41` an
 `78ac924514` add the fixture and the golden, and `8845bb45af` the report. Master's
 Rust is identical to the merge base `dda49e3850`: master has since changed only
 TypeScript and the `crates/mc-module/gen/*.ts` scripts. This review changes no
-product code. It adds tests, a golden, and this report.
+product code. It adds tests, a golden, and this report. "Change N" below refers to
+fix N in `docs/reports/compose-m0m1-large-session.md`.
 
 ## Verdict
 
@@ -18,7 +19,7 @@ likeliest cause of the 2–3 s production folds is therefore only partly support
 
 | Severity | Finding |
 |---|---|
-| Medium (performance, not cache safety) | The store.db mutex is held for each other session's whole commit (130–210 ms at 150k live messages). A fold that overlaps one waits that long. Measured blocked time per pass: up to 207 ms with 2 full-array background sessions, up to 218 ms with 6 heavy ones, ≤ 30 ms with 6 marker-trimmed ones. The measurement did not reproduce a 2–3 s fold. |
+| Medium (performance, not cache safety) | The store.db mutex is held for the locked part of each other session's commit, whose total `store_commit` is 130–210 ms at 150k live messages. A fold that overlaps one waits that long. Measured blocked time per pass: up to 207 ms with 2 full-array background sessions, up to 218 ms with 6 heavy ones, ≤ 30 ms with 6 marker-trimmed ones. The measurement did not reproduce a 2–3 s fold. |
 | Low (performance) | The render cache's 32 MiB budget counts `2 × len + 128` per entry. Each tier stores two keys: its text, and its text plus `\n\n#` for the continued count. So the cache holds about 8 MiB of counted tier text in total. If a fold measures every tier of the 5.26 MB fixture, one session alone needs about 21 MiB; two such sessions in one process evict each other back to cold counting. Counts stay exact. |
 | Info | Change 4 is strictly more consistent than master. Master could fail a fold with a spurious `CoverageGap` when a publication landed between the guard's read and compose's read. Witness: `a_publication_between_reads_cannot_split_the_fold_snapshot`. |
 | Info | `compose_m0_with_compartments` trusts its caller to pass this pass's rows for `inputs.session_id`; nothing checks it. All four call sites do. |
