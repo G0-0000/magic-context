@@ -343,11 +343,6 @@ export function readPiTagSnapshotRevision(
 	return revisionReaders.get(db)?.(sessionId) ?? null;
 }
 
-/** Whether this connection already maintains tag snapshots (creating one writes TEMP tables). */
-export function hasPiTagSnapshotReader(db: Database): boolean {
-	return readers.has(db);
-}
-
 export function getPiTagSnapshot(db: Database, sessionId: string) {
 	let reader = readers.get(db);
 	if (!reader) {

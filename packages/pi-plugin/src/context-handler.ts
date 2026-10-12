@@ -288,10 +288,7 @@ import {
 import { runPiDebugAssertion } from "./debug-assertions-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
-import {
-	hasPiFallbackMessageTags,
-	hasPiFallbackToolOwnerTags,
-} from "./fallback-tag-probes-pi";
+import { hasPiFallbackMessageTags } from "./fallback-tag-probes-pi";
 import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
@@ -445,7 +442,6 @@ import { clearPiSystemPromptSession } from "./system-prompt";
 import {
 	getPiActiveTagSnapshotView,
 	getPiTagSnapshotView,
-	hasPiTagSnapshotReader,
 	readPiFallbackTagRows,
 } from "./tag-snapshot-pi";
 import {
@@ -2782,27 +2778,12 @@ function readPiFallbackFingerprintHeaders(
 	db: ContextDatabase,
 	sessionId: string,
 ): Set<string> | null {
-	// The tag snapshot keeps the session's fallback rows current; read them from
-	// the table only inside a transaction, where that cache is not consulted.
-	const cached = readPiFallbackTagRows(db, sessionId);
-	const rows = cached
-		? [
-				...new Set(
-					cached
-						.filter(
-							(row) => row.type === "message" && row.entry_fingerprint !== null,
-						)
-						.map((row) => row.entry_fingerprint),
-				),
-			].map((entry_fingerprint) => ({
-				entry_fingerprint: entry_fingerprint as string,
-			}))
-		: (db
-				.prepare(
-					`SELECT DISTINCT entry_fingerprint FROM tags WHERE session_id = ? AND type = 'message'
+	const rows = db
+		.prepare(
+			`SELECT DISTINCT entry_fingerprint FROM tags WHERE session_id = ? AND type = 'message'
 			 AND entry_fingerprint IS NOT NULL AND message_id LIKE 'pi-msg-%'`,
-				)
-				.all(sessionId) as { entry_fingerprint: string }[]);
+		)
+		.all(sessionId) as { entry_fingerprint: string }[];
 	const headers = new Set<string>();
 	for (const row of rows) {
 		let parsed: unknown;
@@ -2939,15 +2920,6 @@ function fallbackPiToolCallIds(
 	db: ContextDatabase,
 	sessionId: string,
 ): Set<string> {
-	// The tag snapshot keeps fallback rows current from changed tag numbers, so
-	// an appended tag does not force another LIKE scan of every tool tag.
-	const fallbackRows = readPiFallbackTagRows(db, sessionId);
-	if (fallbackRows)
-		return new Set(
-			fallbackRows
-				.filter((row) => row.type === "tool")
-				.map((row) => row.message_id as string),
-		);
 	let statement = piToolGuardVersionStatements.get(db);
 	if (!statement) {
 		statement = db.prepare(
@@ -3599,27 +3571,19 @@ function adoptPiFallbackTags(
 	if (!batches.length && !ownerMap?.size && !options.rebuildFingerprints)
 		return outcome;
 	const revision = () => readPiAdoptionRevision(db);
-	// Use the tag snapshot's fallback rows only on a connection that already
-	// keeps snapshots: creating one writes TEMP tables, which would count as a
-	// local change against the caller's preflight revision. Bring it up to date
-	// before beforeDiscovery for the same reason (consuming its change journal
-	// is a TEMP write).
-	const cachedProbes = hasPiTagSnapshotReader(db);
-	if (cachedProbes) readPiFallbackTagRows(db, sessionId);
 	const beforeDiscovery = revision();
 	// Discover candidates without blocking writers and prepare their target ids.
 	// The revision check below is authoritative: discovery may miss a sibling's
 	// newly committed row, or include one another connection already renamed.
-	// The existence probes are read after beforeDiscovery: if no commit lands
-	// before writer admission, they still describe the table then and need not
-	// be repeated under the writer.
-	const discoveredMessageFallback = cachedProbes
-		? hasPiFallbackMessageTags(db, sessionId)
-		: hasPersistedPiFallbackMessageTags(db, sessionId);
+	// Both existence probes query the table, so they see every writer. Read
+	// after beforeDiscovery, they still describe the table at writer admission
+	// when no commit landed in between, and are not repeated under the writer.
+	const discoveredMessageFallback = hasPersistedPiFallbackMessageTags(
+		db,
+		sessionId,
+	);
 	const discoveredToolOwnerFallback = ownerMap?.size
-		? cachedProbes
-			? hasPiFallbackToolOwnerTags(db, sessionId)
-			: hasPersistedPiFallbackToolOwnerTags(db, sessionId)
+		? hasPersistedPiFallbackToolOwnerTags(db, sessionId)
 		: false;
 	const discovered = discoveredMessageFallback
 		? readAdoptablePiFallbackFingerprints(db, sessionId, batches)
