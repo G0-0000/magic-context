@@ -7,6 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { findPiTagIdentityConflict } from "@magic-context/core/features/magic-context/storage-tags";
 import { log } from "@magic-context/core/shared/logger";
 import { withSqliteTransformPass } from "@magic-context/core/shared/sqlite";
+import { isOmpDumpContext } from "./omp-diagnostic-context";
 import {
 	isOmpAdvisorRequest,
 	isOmpSideContext,
@@ -174,6 +175,10 @@ export function registerPiGuardedContext(
 		return counts;
 	};
 	const fenceEnabled = resolvePiHarnessKind() === "omp";
+	// A thrown hook leaves OMP holding its input array, not the newer managed
+	// result. Mark only that fallback so dispatch cannot borrow another receipt.
+	// Keep nonces across clean passes: retries of a refused body stay refused.
+	const unsendableNonces = new Set<string>();
 	const refuse = (
 		ctx: ExtensionContext,
 		budget: PiContextBudget,
@@ -280,6 +285,22 @@ export function registerPiGuardedContext(
 			// Every other session still requires a completed managed context pass,
 			// even when we do not recognize the provider's body format.
 			if (sideSessions.get(key)?.sides) return;
+			const serializedPayload = JSON.stringify(payload);
+			if (
+				serializedPayload &&
+				[...unsendableNonces].some((nonce) => serializedPayload.includes(nonce))
+			) {
+				// Do not abandon the latest pass: it belongs to a different request.
+				const budget = new PiContextBudget();
+				budget.stage = "provider dispatch";
+				refuse(
+					ctx,
+					budget,
+					"superseded context fallback is not a managed request",
+					() => true,
+				);
+				return;
+			}
 			let operation = operations.get(key);
 			if (!operation) {
 				operation = newOperation();
@@ -342,6 +363,9 @@ export function registerPiGuardedContext(
 		(entry) => new Text(entry.data?.message ?? RETRY_MESSAGE, 0, 0),
 	);
 	pi.on("context", async (event, ctx) => {
+		// A dump is a read-only snapshot, not a provider preparation. In particular,
+		// do not allocate an operation, claim a generation, or enter SQLite here.
+		if (fenceEnabled && isOmpDumpContext()) return { messages: event.messages };
 		const budget = new PiContextBudget();
 		budget.sideTurn = fenceEnabled && isOmpSideContext(event);
 		const key = operationKey(ctx);
@@ -417,6 +441,23 @@ export function registerPiGuardedContext(
 			// A newer pass owns this session now. Calling its session-wide abort
 			// API from the abandoned hook would cancel the replacement turn.
 			if (error instanceof PiContextSupersededError || !isCurrent()) {
+				if (
+					fenceEnabled &&
+					!budget.sideTurn &&
+					!sideSessions.get(key)?.sides &&
+					!options.compactionOff?.(ctx)
+				) {
+					const nonce = crypto.randomUUID();
+					unsendableNonces.add(nonce);
+					event.messages.push({
+						role: "user",
+						content: [{
+							type: "text",
+							text: `Magic Context refused this request: it was not prepared for this turn. ${nonce}`,
+						}],
+						timestamp: Date.now(),
+					});
+				}
 				log(
 					`[magic-context][pi] DISCARDED CONTEXT RESULT ${budget.diagnostic()}`,
 					error,
