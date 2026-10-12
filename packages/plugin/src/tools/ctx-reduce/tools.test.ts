@@ -348,6 +348,34 @@ describe("createCtxReduceTools", () => {
             expect(getPendingOps(db, "ses-1").map((op) => op.tag_id)).toEqual([6, 8]);
         });
 
+        it("reads inert whitespace state only for the requested tags", async () => {
+            seedTags(
+                db,
+                Array.from({ length: 30 }, (_, index) => ({ id: index + 1, sessionId: "ses-1" })),
+            );
+            // Inert tags outside the request must neither be read nor change the answer.
+            for (const tag of [2, 7, 20, 25]) {
+                markWhitespaceAssistantTagInert(db, "ses-1", tag, `assistant-${tag}:p0`);
+            }
+            const statements: string[] = [];
+            const prepare = db.prepare.bind(db);
+            db.prepare = ((sql: string) => {
+                statements.push(sql);
+                return prepare(sql);
+            }) as typeof db.prepare;
+
+            const result = await tools.ctx_reduce.execute({ drop: "6-8" }, toolContext());
+
+            expect(result).toContain("drop §6§, §8§");
+            expect(result).toContain("§7§ is provider framing, nothing to reclaim");
+            expect(result).not.toContain("§2§");
+            expect(result).not.toContain("§20§");
+            const inertReads = statements.filter((sql) => sql.includes("entry_fingerprint LIKE"));
+            expect(inertReads.length).toBe(1);
+            // Bounded by the requested tag numbers, not a scan of every retired tag.
+            expect(inertReads[0]).toContain("tags.tag_number = wanted.value");
+        });
+
         it("skips duplicate drop requests", async () => {
             seedTags(db, [
                 { id: 10, sessionId: "ses-1" },

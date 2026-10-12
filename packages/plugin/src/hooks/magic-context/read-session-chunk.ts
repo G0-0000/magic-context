@@ -34,11 +34,13 @@ import {
     countRawSessionMessageOrdinalsFromDb,
     countStoredRawSessionMessagesFromDb,
     hasRawSessionMessageByIdFromDb,
+    type RawBoundaryEndpoint,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
     readRawSeedTailFromDb,
+    readRawSessionBoundaryEndpointsFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsForRangeFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
@@ -835,6 +837,23 @@ export function readRawSessionMessagePartsById(
     if (!openCodeDbExists()) return null;
     return withReadOnlySessionDb((db) =>
         readRawSessionMessagePartsByIdFromDb(db, sessionId, messageId, onQuery),
+    );
+}
+
+/**
+ * Facts compartment boundary resolution needs about each id, read from the
+ * OpenCode store in a bounded batch. Returns null when a raw-message provider
+ * serves the session; the caller then uses the provider-aware readers above.
+ */
+export function readRawSessionBoundaryEndpoints(
+    sessionId: string,
+    ids: readonly string[],
+    blockIds: readonly string[],
+): Map<string, RawBoundaryEndpoint | null> | null {
+    if (sessionProviders.get(sessionId)?.provider) return null;
+    if (!openCodeDbExists()) return new Map(ids.map((id) => [id, null]));
+    return withReadOnlySessionDb((db) =>
+        readRawSessionBoundaryEndpointsFromDb(db, sessionId, ids, blockIds),
     );
 }
 

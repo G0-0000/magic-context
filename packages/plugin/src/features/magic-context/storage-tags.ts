@@ -1601,7 +1601,9 @@ export function getInertWhitespaceAssistantTags(
 ): InertWhitespaceAssistantTag[] {
     if (messageIds) {
         // The fingerprint index lets the wire reader seek each visible owner instead
-        // of scanning every compacted tag. Keep the unscoped API for reduction tools.
+        // of scanning every compacted tag. The unscoped form below reads every
+        // retired tag in the session; ctx_reduce uses
+        // getInertWhitespaceAssistantTagsByNumbers instead.
         let statement = inertWhitespaceStatements.get(db);
         if (!statement) {
             // CROSS JOIN keeps the small owner list outside the fingerprint index
@@ -1645,6 +1647,50 @@ export function getInertWhitespaceAssistantTags(
         tagNumber: number;
         entryFingerprint: string;
     }>;
+    return rows.flatMap((row) => {
+        const contentId = row.entryFingerprint.slice(
+            WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX.length,
+        );
+        return contentId.length > 0 ? [{ tagNumber: row.tagNumber, contentId }] : [];
+    });
+}
+
+const inertWhitespaceByNumberStatements = new WeakMap<Database, PreparedStatement>();
+
+/**
+ * The inert whitespace tags among `tagNumbers`: the same rows, with the same
+ * predicate and content-id rule, as the unscoped
+ * {@link getInertWhitespaceAssistantTags}, restricted to the given numbers.
+ * Each number is a seek on the UNIQUE(session_id, tag_number) index, so the
+ * cost follows the request rather than the session's tag count, which runs to
+ * tens of thousands of retired rows on long sessions.
+ */
+export function getInertWhitespaceAssistantTagsByNumbers(
+    db: Database,
+    sessionId: string,
+    tagNumbers: readonly number[],
+): InertWhitespaceAssistantTag[] {
+    if (tagNumbers.length === 0) return [];
+    let statement = inertWhitespaceByNumberStatements.get(db);
+    if (!statement) {
+        // CROSS JOIN keeps the requested numbers outside the index seek.
+        statement = db.prepare(
+            `SELECT tags.tag_number AS tagNumber, tags.entry_fingerprint AS entryFingerprint
+             FROM json_each(?) AS wanted CROSS JOIN tags
+             WHERE tags.session_id = ?
+               AND tags.tag_number = wanted.value
+               AND tags.type = 'message'
+               AND tags.status = 'compacted'
+               AND tags.entry_fingerprint LIKE ?
+             ORDER BY tags.tag_number, tags.id`,
+        );
+        inertWhitespaceByNumberStatements.set(db, statement);
+    }
+    const rows = statement.all(
+        JSON.stringify([...new Set(tagNumbers)]),
+        sessionId,
+        `${WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX}%`,
+    ) as Array<{ tagNumber: number; entryFingerprint: string }>;
     return rows.flatMap((row) => {
         const contentId = row.entryFingerprint.slice(
             WHITESPACE_ASSISTANT_INERT_FINGERPRINT_PREFIX.length,

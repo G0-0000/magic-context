@@ -14,7 +14,7 @@ import {
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { getInertWhitespaceAssistantTags } from "../../features/magic-context/storage-tags";
+import { getInertWhitespaceAssistantTagsByNumbers } from "../../features/magic-context/storage-tags";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -245,8 +245,12 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     deps.protectedTools,
                 ),
             ]);
+            // Only membership of the requested tags is consulted below, so look
+            // up just those instead of every inert tag in the session.
             const inertWhitespaceTagNumbers = new Set(
-                getInertWhitespaceAssistantTags(deps.db, sessionId).map((tag) => tag.tagNumber),
+                getInertWhitespaceAssistantTagsByNumbers(deps.db, sessionId, dropIds).map(
+                    (tag) => tag.tagNumber,
+                ),
             );
             const inertDropIds = [
                 ...new Set(dropIds.filter((id) => inertWhitespaceTagNumbers.has(id))),
