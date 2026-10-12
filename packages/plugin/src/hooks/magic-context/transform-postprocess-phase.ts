@@ -1568,6 +1568,7 @@ interface RunPostTransformPhaseArgs {
      * knows a fallback directory that may belong to another project.
      */
     freezeM0M1?: boolean;
+    activeThinkingPrefixHold?: boolean;
     deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
@@ -2051,9 +2052,10 @@ export async function runPostTransformPhase(
         const tag = args.messageTagNumbers.get(message);
         if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
     }
-    const freezeM0M1 =
-        args.freezeM0M1 === true ||
+    const activeThinkingPrefixHold =
+        args.activeThinkingPrefixHold === true ||
         (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true);
+    const freezeM0M1 = args.freezeM0M1 === true || activeThinkingPrefixHold;
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
@@ -2269,7 +2271,7 @@ export async function runPostTransformPhase(
     // A retry after an aborted idle fold is still provider-cold even though its
     // persisted pair needs no second fold. Any newly queued work belongs on that
     // retry, not on the warm tool step after the provider finally answers.
-    const idleExpiryRebuild = !freezeM0M1 && args.m0M1?.hardSignals?.cacheExpired === true;
+    const idleExpiryRebuild = args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold: foldBustsServedPrefixThisPass || firstRenderBust || idleExpiryRebuild,
@@ -2286,12 +2288,17 @@ export async function runPostTransformPhase(
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
     };
-    // When signed thinking or an unresolved project directory holds the history
-    // rebuild, every other new prefix edit must wait too. Otherwise stripping old
-    // thinking would rewrite the cache without delivering the queued reductions.
-    // At the force threshold, pressure relief still takes priority over this hold.
+    // Unfinished prefix-bound thinking defers pending reductions and cleanup only
+    // while the provider cache is reusable. First render, idle expiry and pressure
+    // relief already cost a cache rebuild, so eligible edits add no second bust.
+    // The separate freezeM0M1 directory veto protects project injection only.
     const publishedWorkDrainAllowed =
-        !compactionOff && (!freezeM0M1 || emergencyDropEligible) && hasReclaimRide(rideSignals);
+        !compactionOff &&
+        (!activeThinkingPrefixHold ||
+            firstRenderBust ||
+            idleExpiryRebuild ||
+            emergencyDropEligible) &&
+        hasReclaimRide(rideSignals);
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
     const shouldRunHeuristics =
         publishedWorkDrainAllowed &&
@@ -2303,6 +2310,7 @@ export async function runPostTransformPhase(
             // without creating an independent prefix rewrite.
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
+            idleExpiryRebuild ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
@@ -2647,6 +2655,8 @@ export async function runPostTransformPhase(
             const emergencyRewriteAlreadyPriced =
                 pendingOpsDidMutate ||
                 foldBustsServedPrefixThisPass ||
+                firstRenderBust ||
+                idleExpiryRebuild ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
@@ -4218,6 +4228,7 @@ export async function runPostTransformPhase(
     }
     const prefixEditBesidesReasoningTrim =
         firstRenderBust ||
+        idleExpiryRebuild ||
         materializationRequested ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully ||

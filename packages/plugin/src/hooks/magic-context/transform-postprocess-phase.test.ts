@@ -12333,6 +12333,26 @@ describe("signed-prefix hold review", () => {
         }
     });
 
+    it("a held pass at the 85% force band still admits the shared drain", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "hold-review-force-band";
+        await runHeld(sessionId, { held: true, percentage: 20, execute: false, flush: new Set() });
+        for (const tag of oldTags(sessionId)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        const drain = spyOn(operations, "applyPendingOperations");
+        try {
+            await runHeld(sessionId, {
+                held: true,
+                percentage: 85,
+                execute: true,
+                flush: new Set([sessionId]),
+            });
+            expect(drain).toHaveBeenCalledTimes(1);
+        } finally {
+            drain.mockRestore();
+        }
+    });
+
     it("a randomized held tool loop serves one byte sequence, then one release applies the queue", async () => {
         // Small deterministic generator so a failure names a reproducible seed.
         let seed = 0x6650_0001;
@@ -12393,4 +12413,184 @@ describe("signed-prefix hold review", () => {
         expect(released.messages).not.toBe(baseline.messages);
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
     });
+});
+
+describe("signed-prefix riders on unavoidable busts", () => {
+    for (const cause of ["first render", "idle expiry"] as const) {
+        it(`held ${cause} admits safe riders without a second bust`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `held-priced-${cause}`;
+            const injection = {
+                projectPath: "git:held-priced",
+                projectDirectory: "/nonexistent",
+                memoryEnabled: false,
+                injectDocs: false,
+                historyBudgetTokens: 1000,
+            };
+            if (cause === "idle expiry")
+                injectM0M1({
+                    db,
+                    sessionId,
+                    state: getOrCreateSessionMeta(db, sessionId),
+                    ...injection,
+                    isCacheBustingPass: true,
+                });
+            insertTag(db, sessionId, "late-call", "tool", 4000, 1, 0, "bash");
+            queuePendingOp(db, sessionId, 1, "drop");
+            const pass = async (cold: boolean) => {
+                const late = makeToolMessage("late-tool");
+                const source: MessageLike[] = [
+                    {
+                        info: { id: "old-user", role: "user" },
+                        parts: [{ type: "text", text: "old task" }],
+                    },
+                    {
+                        info: { id: "old-thought", role: "assistant" },
+                        parts: [
+                            { type: "reasoning", text: "old signed thought" },
+                            { type: "text", text: "old answer" },
+                        ],
+                    },
+                    {
+                        info: { id: "active-user", role: "user" },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                    {
+                        info: { id: "active-thought", role: "assistant" },
+                        parts: [
+                            { type: "reasoning", text: "active signed thought" },
+                            { type: "text", text: "tool loop" },
+                        ],
+                    },
+                    late,
+                ];
+                const target = {
+                    ...makeDropTarget(late),
+                    mutationParts: [{ message: late, part: late.parts[0] }],
+                    dropReasoningParts: [],
+                };
+                const targets = new Map([[1, target]]);
+                const replayed = applyFlushedStatuses(sessionId, db, targets);
+                const result = await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, source, {
+                        activeThinkingTurn: true,
+                        activeThinkingPrefixHold: true,
+                        freezeM0M1: true,
+                        resolvedProviderID: "anthropic",
+                        resolvedModelID: "claude-opus-5-5",
+                        thinkingBindingRecoveryEnabledForModel: true,
+                        contextUsage: { percentage: 66, inputTokens: 66_000 },
+                        schedulerDecision: cold ? "execute" : "defer",
+                        tags: getActiveTagsBySession(db, sessionId),
+                        targets,
+                        protectedTools: { bash: 0 },
+                        didMutateFromFlushedStatuses: replayed,
+                        m0M1: {
+                            ...injection,
+                            hardSignals: {
+                                systemHash: "",
+                                modelKey: "anthropic/claude-opus-5-5",
+                                cacheExpired: cold && cause === "idle expiry",
+                                lastResponseTime: Date.now(),
+                            },
+                        },
+                    }),
+                );
+                return { messages: source, result };
+            };
+            const priced = await pass(true);
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
+                "dropped",
+            );
+            expect(priced.result.proactiveThinkingStrip?.messageIds).toEqual(["old-thought"]);
+            expect(
+                priced.messages.find((message) => message.info.id === "active-thought")?.parts[0],
+            ).toEqual({ type: "reasoning", text: "active signed thought" });
+            const replay = await pass(false);
+            expect(replay.result.proactiveThinkingStrip).toBeNull();
+            expect(replay.result.bustedThisPass).toBe(false);
+            expect(JSON.stringify(replay.messages)).toBe(JSON.stringify(priced.messages));
+        });
+    }
+});
+
+it("an already-cold held pass runs routine cleanup and strips older thinking even when every queued target is protected", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "held-cold-protected-only";
+    const injection = {
+        projectPath: "git:held-cold",
+        projectDirectory: "/nonexistent",
+        memoryEnabled: false,
+        injectDocs: false,
+        historyBudgetTokens: 1000,
+    };
+    injectM0M1({
+        db,
+        sessionId,
+        state: getOrCreateSessionMeta(db, sessionId),
+        ...injection,
+        isCacheBustingPass: true,
+    });
+    const old = makeToolMessage("old-tool");
+    old.parts.unshift({ type: "reasoning", text: "old signed thought" });
+    const active: MessageLike = {
+        info: { id: "active-thought", role: "assistant" },
+        parts: [{ type: "reasoning", text: "active signed thought" }],
+    };
+    const messages: MessageLike[] = [
+        old,
+        { info: { id: "active-user", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        active,
+    ];
+    insertTag(db, sessionId, "old-call", "tool", 4000, 1, 0, "bash");
+    queuePendingOp(db, sessionId, 1, "drop");
+    const target = {
+        ...makeDropTarget(old),
+        mutationParts: [{ message: old, part: old.parts[1] }],
+        dropReasoningParts: [],
+    };
+    const cleanup = spyOn(heuristicCleanup, "applyHeuristicCleanup");
+    try {
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                freezeM0M1: true,
+                activeThinkingPrefixHold: true,
+                activeThinkingTurn: true,
+                resolvedProviderID: "anthropic",
+                resolvedModelID: "claude-opus-5-5",
+                thinkingBindingRecoveryEnabledForModel: true,
+                contextUsage: { percentage: 66, inputTokens: 66000 },
+                schedulerDecision: "execute",
+                currentTurnId: "active-user",
+                lastHeuristicsTurnId: new Map([[sessionId, "active-user"]]),
+                targets: new Map([[1, target]]),
+                tags: getActiveTagsBySession(db, sessionId),
+                protectedTools: { bash: 0 },
+                messageTagNumbers: new Map([
+                    [old, 2],
+                    [active, 4],
+                ]),
+                keepReasoningTokens: 10000,
+                m0M1: {
+                    ...injection,
+                    hardSignals: {
+                        systemHash: "",
+                        modelKey: "",
+                        cacheExpired: true,
+                        lastResponseTime: 1,
+                    },
+                },
+            }),
+        );
+        expect(cleanup).toHaveBeenCalledTimes(1);
+        expect(cleanup.mock.calls[0]?.[4].routine).toBe(true);
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        expect(result.proactiveThinkingStrip?.messageIds).toEqual(["old-tool"]);
+        expect(active.parts).toEqual([{ type: "reasoning", text: "active signed thought" }]);
+    } finally {
+        cleanup.mockRestore();
+    }
 });

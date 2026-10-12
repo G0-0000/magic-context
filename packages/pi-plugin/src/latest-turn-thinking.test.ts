@@ -13,9 +13,11 @@ import {
 	getNoteNudgeAnchors,
 	getPersistedTodoSyntheticAnchor,
 	getThinkingBindingRecoveryTarget,
+	setPersistedTodoSyntheticAnchor,
 	THINKING_BINDING_STRIP_ORDER_END_MARKER,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
+import { buildSyntheticTodoPart } from "@magic-context/core/hooks/magic-context/todo-view";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import * as autoSearch from "./auto-search-pi";
 import {
@@ -25,6 +27,7 @@ import {
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 } from "./context-handler";
+import { injectM0M1Pi } from "./inject-compartments-pi";
 import {
 	applyPiProactiveThinkingStrip,
 	handlePiProviderFailure,
@@ -365,10 +368,15 @@ for (const lane of [
 			"active-two",
 		];
 		let tokens = 20_000;
-		const pass = async () => {
-			const messages = structuredClone(source);
+		const pass = async (warm = false) => {
+			const messages = structuredClone(warm ? source.slice(0, 1) : source);
 			const ctx = {
-				...fakeContext(sessionId, process.cwd(), ids, messages),
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					warm ? ids.slice(0, 1) : ids,
+					messages,
+				),
 				model: {
 					provider: "anthropic",
 					id: "claude-opus-5-5",
@@ -385,8 +393,12 @@ for (const lane of [
 				.messages;
 		};
 		try {
+			// Cache m[0]/m[1] before thinking starts, so these are warm-cache holds
+			// rather than the first-render exception that permits cleanup.
+			await pass(true);
 			await pass();
 			const baseline = JSON.stringify(await pass());
+			search.mockClear();
 			const oldTag = getTagsBySession(db, sessionId).find((tag) =>
 				tag.messageId.startsWith("old-answer"),
 			)!;
@@ -477,3 +489,279 @@ for (const lane of [
 		}
 	});
 }
+
+for (const cause of ["first render", "idle expiry"] as const) {
+	test(`Pi held ${cause} admits safe riders on the already-priced pass`, async () => {
+		const db = createTestDb();
+		const sessionId = `pi-held-priced-${cause}`;
+		getOrCreateSessionMeta(db, sessionId);
+		updateSessionMeta(db, sessionId, {
+			piStableIdScheme: 1,
+			lastResponseTime: Date.now(),
+			cacheTtl: "13h",
+		});
+		const fake = createFakePi();
+		const options: Parameters<typeof registerPiContextHandler>[1] = {
+			db,
+			tagger: createTagger(),
+			protectedTokens: 4000,
+			injection:
+				cause === "idle expiry"
+					? {
+							injectionBudgetTokens: 1000,
+							memoryEnabled: false,
+							injectDocs: false,
+						}
+					: undefined,
+			heuristics: { keepReasoningTokens: 10000 },
+			scheduler: { executeThresholdPercentage: 65 },
+		};
+		registerPiContextHandler(fake.pi as never, options);
+		const handler = fake.handlers.get("context")!;
+		const thought = (n: number) =>
+			assistantMessage(`answer ${n}`, n, {
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				content: [
+					{
+						type: "thinking",
+						thinking: `thought ${n}`,
+						thinkingSignature: `sig-${n}`,
+					},
+					{ type: "text", text: `answer ${n}` },
+				],
+			});
+		const source = [
+			userMessage("old task", 1),
+			thought(2),
+			userMessage("active task", 3),
+			thought(4),
+			assistantMessage("SAFE-LATE-CONTENT", 5, {
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+			}),
+		];
+		const ids = [
+			"old-user",
+			"old-answer",
+			"active-user",
+			"active-thought",
+			"late-answer",
+		];
+		const pass = async (warm = false) => {
+			const messages = structuredClone(warm ? source.slice(0, 1) : source);
+			const ctx = {
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					warm ? ids.slice(0, 1) : ids,
+					messages,
+				),
+				model: {
+					provider: "anthropic",
+					id: "claude-opus-5-5",
+					api: "anthropic-messages",
+					contextWindow: 100000,
+				},
+				getContextUsage: () => ({
+					tokens: 66000,
+					percent: 66,
+					contextWindow: 100000,
+				}),
+			};
+			return (
+				(await handler({ messages } as never, ctx as never)) as {
+					messages: unknown[];
+				}
+			).messages;
+		};
+		try {
+			if (cause === "idle expiry") await pass(true);
+			await pass();
+			const late = getTagsBySession(db, sessionId)
+				.filter((tag) => tag.type === "message")
+				.sort((a, b) => b.tagNumber - a.tagNumber)[0]!;
+			options.injection = {
+				injectionBudgetTokens: 1000,
+				memoryEnabled: false,
+				injectDocs: false,
+			};
+			if (cause === "idle expiry")
+				updateSessionMeta(db, sessionId, {
+					lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+				});
+			queuePendingOp(db, sessionId, late.tagNumber, "drop");
+			const priced = await pass();
+			expect(getPendingOps(db, sessionId)).toHaveLength(0);
+			expect(
+				getTagsBySession(db, sessionId).find(
+					(tag) => tag.tagNumber === late.tagNumber,
+				)?.status,
+			).toBe("dropped");
+			expect(JSON.stringify(priced)).not.toContain("SAFE-LATE-CONTENT");
+			expect(JSON.stringify(priced)).toContain('"thinkingSignature":"sig-4"');
+			expect([...getMergedReasoningStrippedIds(db, sessionId)]).toContain(
+				"binding_mismatch:old-answer",
+			);
+			updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
+			expect(JSON.stringify(await pass())).toBe(JSON.stringify(priced));
+		} finally {
+			clearContextHandlerSession(sessionId);
+			db.close();
+		}
+	});
+}
+
+test("unheld contended preflight replays todo and preserves sticky anchors and thinking", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-unheld-contended-riders";
+	getOrCreateSessionMeta(db, sessionId);
+	updateSessionMeta(db, sessionId, {
+		piStableIdScheme: 1,
+		lastResponseTime: Date.now(),
+		cacheTtl: "13h",
+		systemPromptHash: "before",
+	});
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTokens: 4000,
+		todowriteEnabled: true,
+		injection: {
+			injectionBudgetTokens: 1000,
+			memoryEnabled: false,
+			injectDocs: false,
+		},
+		heuristics: { keepReasoningTokens: 10000 },
+		scheduler: { executeThresholdPercentage: 65 },
+	});
+	const handler = fake.handlers.get("context")!;
+	const source = [
+		userMessage("old task", 1),
+		assistantMessage("old answer", 2, {
+			provider: "anthropic",
+			model: "claude-opus-5-5",
+			content: [
+				{
+					type: "thinking",
+					thinking: "old immutable thought",
+					thinkingSignature: "old-signature",
+				},
+				{ type: "text", text: "old answer" },
+			],
+		}),
+		userMessage("new task", 3),
+	];
+	const ids = ["old-user", "old-answer", "next-user"];
+	const pass = async (warm = false) => {
+		const messages = structuredClone(warm ? source.slice(0, 1) : source);
+		const ctx = {
+			...fakeContext(
+				sessionId,
+				process.cwd(),
+				warm ? ids.slice(0, 1) : ids,
+				messages,
+			),
+			model: {
+				provider: "anthropic",
+				id: "claude-opus-5-5",
+				api: "anthropic-messages",
+				contextWindow: 100000,
+			},
+			getContextUsage: () => ({
+				tokens: 20000,
+				percent: 20,
+				contextWindow: 100000,
+			}),
+		};
+		return (
+			(await handler({ messages } as never, ctx as never)) as {
+				messages: unknown[];
+			}
+		).messages;
+	};
+	let restoreInjection = () => {};
+	try {
+		await pass(true);
+		addMergedReasoningStrippedIds(db, sessionId, [
+			THINKING_BINDING_STRIP_ORDER_END_MARKER,
+		]);
+		const oldTodo = JSON.stringify([
+			{
+				id: "a",
+				content: "previous todo",
+				status: "pending",
+				priority: "medium",
+			},
+		]);
+		const newTodo = JSON.stringify([
+			{ id: "b", content: "new todo", status: "pending", priority: "medium" },
+		]);
+		const todoPart = buildSyntheticTodoPart(oldTodo)!;
+		setPersistedTodoSyntheticAnchor(
+			db,
+			sessionId,
+			todoPart.callID,
+			"pi-ts-2",
+			oldTodo,
+		);
+		updateSessionMeta(db, sessionId, { lastTodoState: oldTodo });
+		const baseline = JSON.stringify(await pass());
+		expect(baseline).toContain("previous todo");
+		expect(baseline).toContain("old-signature");
+		const anchor = getPersistedTodoSyntheticAnchor(db, sessionId);
+		appendNoteNudgeAnchor(
+			db,
+			sessionId,
+			"absent-user",
+			"retain this sticky decision",
+		);
+		updateSessionMeta(db, sessionId, {
+			lastTodoState: newTodo,
+			systemPromptHash: "after",
+		});
+		signalPiHistoryRefresh(sessionId);
+		let contended = false;
+		restoreInjection = __test.setInjectM0M1PiForTests((...args) => {
+			if (args[2].length > 0) return injectM0M1Pi(...args);
+			const exec = db.exec.bind(db);
+			const lock = spyOn(db, "exec").mockImplementation((sql) => {
+				if (sql === "BEGIN IMMEDIATE")
+					throw Object.assign(new Error("database is locked"), {
+						code: "SQLITE_BUSY",
+					});
+				return exec(sql);
+			});
+			try {
+				const result = injectM0M1Pi(...args);
+				contended ||= result.contentionExhausted;
+				return result;
+			} finally {
+				lock.mockRestore();
+			}
+		});
+		const replay = JSON.stringify(await pass());
+		expect(contended).toBe(true);
+		expect(replay).toBe(baseline);
+		expect(getPersistedTodoSyntheticAnchor(db, sessionId)).toEqual(anchor);
+		expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
+		expect(
+			[...getMergedReasoningStrippedIds(db, sessionId)].filter((id) =>
+				id.startsWith("binding_mismatch:"),
+			),
+		).toEqual([]);
+		restoreInjection();
+		restoreInjection = () => {};
+		const released = JSON.stringify(await pass());
+		expect(released).toContain("new todo");
+		expect(released).not.toContain("old-signature");
+		expect(getPersistedTodoSyntheticAnchor(db, sessionId)?.stateJson).toBe(
+			newTodo,
+		);
+		expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(0);
+	} finally {
+		restoreInjection();
+		clearContextHandlerSession(sessionId);
+		db.close();
+	}
+});

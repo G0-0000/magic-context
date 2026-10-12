@@ -1259,6 +1259,7 @@ export async function registerContext(context: V2Context) {
                 }
                 if (event.type === "session.deleted") {
                     deletedSessions.add(sessionID);
+                    transform?.clearSessionLogState(sessionID);
                     if (db) {
                         markSessionCleanupPending(db, sessionID);
                         clearSession(db, sessionID);

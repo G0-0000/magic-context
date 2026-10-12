@@ -699,7 +699,10 @@ const firstContextPassSeenBySession = new Set<string>();
 const contextPassGeneration = new Map<string, symbol>();
 
 class PiLkgAdmissionReplay extends Error {
-	constructor(readonly messages: unknown[]) {
+	constructor(
+		readonly messages: unknown[],
+		readonly recovery = "fitting LKG before writer retries",
+	) {
 		super("Saved request served before writer wait");
 	}
 }
@@ -5234,6 +5237,49 @@ export function registerPiContextHandler(
 					isSubagent: sessionMeta.isSubagent,
 					compactionOff: options.compactionOff === true,
 					injectionPassSnapshot: piM0M1PassSnapshot,
+					tryReplayHeldIdentityRebuild: () => {
+						const replay = lkgCoordinator.replay(
+							snapshot,
+							(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+						);
+						if (!replay.ok) {
+							sessionLog(
+								sessionId,
+								`Pi held identity rebuild: prior prefix unavailable (${replay.reason}); applying the declared rebuild`,
+							);
+							return;
+						}
+						try {
+							assertPiRawFallbackFits(
+								replay.messages,
+								rawFallbackLimit,
+								(line) => logPiLkgRecovery(sessionId, line),
+								undefined,
+								readPiLkgFitEnvelope(
+									ctx,
+									pi,
+									lkgModelKey,
+									sessionDecisionCalibration(options.db, sessionId),
+									toolWireSchema,
+								),
+								replay.measuredPrefix,
+							);
+						} catch (error) {
+							sessionLog(
+								sessionId,
+								`Pi held identity rebuild: prior prefix cannot fit (${String(error)}); applying the declared rebuild`,
+							);
+							return;
+						}
+						logPiLkgRecovery(
+							sessionId,
+							"Pi held identity rebuild: replaying the served prefix and retaining the pending repair",
+						);
+						throw new PiLkgAdmissionReplay(
+							replay.messages,
+							"held tag-identity rebuild: replaying the served prefix",
+						);
+					},
 				}),
 			);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -5587,6 +5633,7 @@ export function registerPiContextHandler(
 						cacheBustingPass:
 							result.prefixBustPermitted &&
 							(isCacheBusting ||
+								result.prefixRebuildAlreadyPriced ||
 								(result.executedWorkThisPass &&
 									(result.prefixEditBesidesReasoningTrim ||
 										hostEditBeforeNewestThinking))),
@@ -6042,7 +6089,7 @@ export function registerPiContextHandler(
 						assertCurrentPass: budget.assertOutcome,
 					});
 				budget.assertOutcome();
-				budget.recovery = "fitting LKG before writer retries";
+				budget.recovery = err.recovery;
 				return { messages: err.messages } as {
 					messages: typeof event.messages;
 				};
@@ -7172,6 +7219,7 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	tryReplayHeldIdentityRebuild?: () => void;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
 	assertCurrentPass?: () => void;
@@ -7325,6 +7373,8 @@ interface RunPipelineResult {
 	prefixBustPermitted: boolean;
 	/** False while a signed-prefix hold defers new host-side work. */
 	prefixMutationAllowed: boolean;
+	/** A missing or cold cache already costs a rebuild; further eligible edits add no extra bust. */
+	prefixRebuildAlreadyPriced: boolean;
 	identityRebuilt?: boolean;
 	messages: unknown[];
 	servedTagNumbers?: ReadonlySet<number>;
@@ -7480,6 +7530,7 @@ async function runCompactionOffPipeline(
 		messages: args.messages as unknown[],
 		prefixBustPermitted: false,
 		prefixMutationAllowed: false,
+		prefixRebuildAlreadyPriced: false,
 		heuristicsExecuted: false,
 		executedWorkThisPass: false,
 		historyInjected: false,
@@ -8020,7 +8071,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const rideSignals = {
 		subagentExecute:
 			args.sessionMeta.isSubagent && args.schedulerDecision === "execute",
-		hardFold: foldBustsServedPrefixThisPass || firstRenderBust,
+		hardFold:
+			foldBustsServedPrefixThisPass ||
+			firstRenderBust ||
+			piHardSignals?.cacheExpired === true,
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
 			(args.contextUsage.percentage >= 95 ||
@@ -8034,27 +8088,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
-	// While this prefix-bound model's signed thinking turn is unfinished, keep
-	// previously served bytes unchanged. At the force threshold, pressure relief
-	// still takes priority so the request can fit within the model's input limit.
-	const prefixMutationAllowed = !protectedSignedPrefix || emergencyDropEligible;
+	// An unfinished thinking turn holds new prefix edits only while the cache
+	// can still be reused. First render, idle expiry and pressure relief already
+	// lose that reuse; run eligible deferred work now instead of on a second bust.
+	let prefixMutationAllowed =
+		!protectedSignedPrefix ||
+		firstRenderBust ||
+		piHardSignals?.cacheExpired === true ||
+		emergencyDropEligible;
 	let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals);
-	if (args.temporalAwareness && isCacheBustingPass) {
-		temporalDecisions = freezeTemporalDecisions(
-			args.db,
-			args.sessionId,
-			temporalCandidates,
-		);
-		if (
-			injectPiTemporalMarkers(
-				args.messages,
-				temporalDecisions,
-				stableIdResolver,
-			) > 0
-		) {
-			recordFirstApplicationWireEdit(true);
-		}
-	}
 	let publishedWorkDrainAllowed = isCacheBustingPass;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
@@ -8069,7 +8111,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				sessionLog(args.sessionId, warning),
 		});
 	let protectionFloorResolution = resolveProtectionFloor();
-	const shouldRunHeuristics =
+	let shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		isCacheBustingPass &&
 		(rideSignals.publishedHistory ||
@@ -8080,8 +8122,22 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// reductions may ride it without causing an independent bust.
 			foldBustsServedPrefixThisPass ||
 			firstRenderBust ||
+			piHardSignals?.cacheExpired === true ||
 			rideSignals.subagentExecute ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
+	let unavoidableCarriedIdentityRebuild = false;
+	if (
+		!prefixMutationAllowed &&
+		readPiIdentityRebuilds(args.db, args.sessionId).length > 0
+	) {
+		// Try the last served prefix before tagging can expose new numbers that
+		// another writer committed to the database but never sent to the provider.
+		args.tryReplayHeldIdentityRebuild?.();
+		unavoidableCarriedIdentityRebuild = true;
+		prefixMutationAllowed = true;
+		args.tagger.cleanup(args.sessionId);
+		args.tagger.initFromDb(args.sessionId, args.db);
+	}
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes when ctx_reduce
 	// is callable. DB-side tag IDs still get created when prefixes are skipped
@@ -8150,11 +8206,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				: undefined,
 		},
 	);
-	const identityRebuild = identityAdoption.rebuilds.length > 0;
+	const identityRebuild =
+		unavoidableCarriedIdentityRebuild || identityAdoption.rebuilds.length > 0;
 	if (identityRebuild) {
+		if (!prefixMutationAllowed) {
+			// A pending repair can arrive after the entry check. Try the previously
+			// served numbers again, keeping its pending record when replay succeeds.
+			if (!unavoidableCarriedIdentityRebuild) {
+				args.tryReplayHeldIdentityRebuild?.();
+				args.tagger.cleanup(args.sessionId);
+				args.tagger.initFromDb(args.sessionId, args.db);
+			}
+			// Without a replayable prefix, guessing old numbers is unsafe and a
+			// refusal would repeat on every tool step. Pay for the declared rebuild
+			// once instead, and let eligible riders share that unavoidable bust.
+			prefixMutationAllowed = true;
+		}
 		args.schedulerDecision = "execute";
 		isCacheBustingPass = prefixMutationAllowed;
 		publishedWorkDrainAllowed = isCacheBustingPass;
+		shouldRunHeuristics = args.heuristics !== undefined;
 		if (piM0State && prefixMutationAllowed) {
 			clearM0M1PiCache(args.db, args.sessionId, PI_TAG_IDENTITY_REPAIR_REASON);
 			piM0State.preparedPrefix = undefined;
@@ -8165,6 +8236,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				compactionOff: false,
 			});
 		}
+	}
+	if (args.temporalAwareness && isCacheBustingPass) {
+		temporalDecisions = freezeTemporalDecisions(
+			args.db,
+			args.sessionId,
+			temporalCandidates,
+		);
+		if (
+			injectPiTemporalMarkers(
+				args.messages,
+				temporalDecisions,
+				stableIdResolver,
+			) > 0
+		)
+			recordFirstApplicationWireEdit(true);
 	}
 	logPiUnresolvedIdentities(args.sessionId, [
 		...guardPiToolAllocations(
@@ -8732,13 +8818,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		try {
 			const tHeuristic = performance.now();
 			const independentMutationBeforeHeuristics =
-				pendingOpsDidMutate || foldBustsServedPrefixThisPass;
-			// A queued drop or completed hard fold already changes provider-visible
-			// bytes on this pass. Rearm so accumulated candidates join that same cache
-			// rebuild instead of waiting for a new pressure period. Do not treat frozen
-			// status replay as a new mutation: Pi rebuilds raw messages every pass, so
-			// replay is expected restoration and must not authorize another emergency
-			// batch on every pass.
+				pendingOpsDidMutate ||
+				foldBustsServedPrefixThisPass ||
+				identityRebuild ||
+				firstRenderBust ||
+				piHardSignals?.cacheExpired === true;
+			// Applied work, new identity numbers or a missing/cold cache already
+			// cost a rebuild. Under force pressure, reset the saved emergency
+			// sample so accumulated cleanup joins this pass. Restoring previously
+			// served drops is not new work and must not start another batch.
 			if (
 				args.forceMaterialization === true &&
 				independentMutationBeforeHeuristics &&
@@ -9783,6 +9871,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		messages: outputMessages,
 		prefixBustPermitted: isCacheBustingPass,
 		prefixMutationAllowed,
+		prefixRebuildAlreadyPriced:
+			firstRenderBust || piHardSignals?.cacheExpired === true,
 		identityRebuilt: identityRebuild,
 		servedTagNumbers,
 		heuristicsExecuted,

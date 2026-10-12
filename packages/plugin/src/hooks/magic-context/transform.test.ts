@@ -5204,6 +5204,16 @@ for (const { modelID, prefixBound } of [
                 expect(
                     logs.mock.calls.filter((call) => String(call[1]).includes("m[0]/m[1] frozen:")),
                 ).toHaveLength(2);
+                await transform.clearRustSession(sessionId);
+                await pass();
+                expect(
+                    logs.mock.calls.filter((call) => String(call[1]).includes("m[0]/m[1] frozen:")),
+                ).toHaveLength(3);
+                transform.clearSessionLogState(sessionId);
+                await pass();
+                expect(
+                    logs.mock.calls.filter((call) => String(call[1]).includes("m[0]/m[1] frozen:")),
+                ).toHaveLength(4);
             }
         } finally {
             logs.mockRestore();

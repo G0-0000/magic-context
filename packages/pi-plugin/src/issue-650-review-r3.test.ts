@@ -3,6 +3,8 @@ import {
 	encodePiContentDecision,
 	PI_CONTENT_DECISION_LIMIT,
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
+import * as calibration from "@magic-context/core/features/magic-context/session-decision-calibration";
+import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import { saveSourceContent } from "@magic-context/core/features/magic-context/storage-source";
 import {
@@ -11,7 +13,11 @@ import {
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { __test as decisions } from "@magic-context/core/features/magic-context/transform-decision-log";
-import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import {
+	dropSlot,
+	getSlot,
+	resetLkgSlotsForTest,
+} from "@magic-context/core/hooks/magic-context/lkg-slot";
 import * as logger from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import {
@@ -19,15 +25,18 @@ import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
 } from "./context-handler";
+import * as injection from "./inject-compartments-pi";
 import {
 	piCachedMessageSurvivor,
 	piMessageEntryFingerprint,
 } from "./pi-message-identity";
+import * as identityRepair from "./pi-tag-identity-repair";
 import {
 	acknowledgePiIdentityRebuilds,
 	readPiIdentityRebuilds,
 	readPiIdentityRecurrences,
 } from "./pi-tag-identity-repair";
+import * as toolIdentity from "./pi-tool-identity";
 import { piCachedToolSurvivor } from "./pi-tool-identity";
 import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { piContentFallbackIds } from "./read-session-pi";
@@ -597,3 +606,190 @@ test("held unproven tool repair waits for a permitted prefix rebuild", () => {
 		db.close();
 	}
 });
+
+for (const proof of ["replayable LKG", "missing LKG"] as const) {
+	test(`carried identity repair with ${proof} preserves the hold or pays one declared bust`, async () => {
+		const db = createTestDb();
+		const id = session(`carried-${proof}`);
+		getOrCreateSessionMeta(db, id);
+		updateSessionMeta(db, id, {
+			piStableIdScheme: 1,
+			lastResponseTime: Date.now(),
+			cacheTtl: "13h",
+		});
+		insertTag(db, id, "call", "tool", 100, 8, 0, "codemode", 40, "real");
+		const call = assistantToolCall(
+			"call",
+			"codemode",
+			{ code: "console.log(1)" },
+			20,
+		);
+		Object.assign(call, {
+			provider: "anthropic",
+			model: "claude-opus-5-5",
+			api: "anthropic-messages",
+		});
+		(call.content as unknown[]).unshift({
+			type: "thinking",
+			thinking: "immutable thought",
+			thinkingSignature: "signed",
+		});
+		const source = [
+			userMessage("first", 1),
+			call,
+			toolResultMessage("call", "1", 21),
+		];
+		const ids = ["first", "real", "result"];
+		const fake = createFakePi();
+		Object.assign(fake.pi, {
+			getAllTools: () => [
+				{
+					name: "codemode",
+					description: "Run code",
+					parameters: {
+						type: "object",
+						properties: { code: { type: "string" } },
+					},
+				},
+			],
+			getActiveTools: () => ["codemode"],
+		});
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			tagger: createTagger(),
+			protectedTokens: 4000,
+			injection: {
+				injectionBudgetTokens: 1000,
+				memoryEnabled: false,
+				injectDocs: false,
+			},
+			heuristics: { keepReasoningTokens: 10000 },
+			scheduler: { executeThresholdPercentage: 65 },
+		});
+		const handler = fake.handlers.get("context")!;
+		const serve = async (warm = false) => {
+			const messages = structuredClone(warm ? source.slice(0, 1) : source);
+			const ctx = {
+				...fakeContext(
+					id,
+					process.cwd(),
+					warm ? ids.slice(0, 1) : ids,
+					messages,
+				),
+				getSystemPrompt: () => "Use codemode to run code for the current task.",
+				model: {
+					provider: "anthropic",
+					id: "claude-opus-5-5",
+					api: "anthropic-messages",
+					contextWindow: 100000,
+				},
+				getContextUsage: () => ({
+					tokens: 66000,
+					percent: 66,
+					contextWindow: 100000,
+				}),
+			};
+			return (
+				(await handler({ messages } as never, ctx as never)) as {
+					messages: unknown[];
+				}
+			).messages;
+		};
+		const resultText = (messages: unknown[]) =>
+			JSON.stringify(
+				messages.find(
+					(message) =>
+						(message as { toolCallId?: string }).toolCallId === "call",
+				),
+			);
+		try {
+			await serve(true);
+			const baseline = await serve();
+			expect(resultText(baseline)).toContain("§8§");
+			expect(getSlot(id)).toBeDefined();
+			// Simulate a writer without cached survivor proof committing tag 154
+			// in place of tag 8, without ever serving that new number to Pi.
+			insertTag(
+				db,
+				id,
+				"call",
+				"tool",
+				100,
+				154,
+				0,
+				"codemode",
+				40,
+				"pi-msg-1-20-assistant",
+			);
+			capturePiServedArray(id, baseline, { servedTagNumbers: [8, 154] });
+			const otherWriterProof = spyOn(
+				toolIdentity,
+				"piCachedToolSurvivor",
+			).mockReturnValue(undefined);
+			try {
+				expect(adopt(db, id).rebuilds).toHaveLength(1);
+			} finally {
+				otherWriterProof.mockRestore();
+			}
+			expect(rows(db, id)).toEqual([{ tag_number: 154 }]);
+			if (proof === "missing LKG")
+				dropSlot(id, "test-missing-carried-repair-proof");
+			source.push(
+				assistantMessage("NEW RAW TAIL", 22, {
+					provider: "anthropic",
+					model: "claude-opus-5-5",
+				}),
+			);
+			ids.push("tail");
+			const pairBefore = [
+				getOrCreateSessionMeta(db, id).cachedM0Bytes?.toString(),
+				getOrCreateSessionMeta(db, id).cachedM1Bytes?.toString(),
+			];
+			const ack = spyOn(identityRepair, "acknowledgePiIdentityRebuilds");
+			const clear = spyOn(injection, "clearM0M1PiCache");
+			const calibrate = spyOn(calibration, "sessionDecisionCalibration");
+			const logs = spyOn(logger, "sessionLog");
+			try {
+				const first = await serve();
+				const second = await serve();
+				expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+				const identityCalibration = () =>
+					calibrate.mock.calls.filter(
+						(args) => args[2]?.bustReason === "tag_identity_repair",
+					);
+				if (proof === "replayable LKG") {
+					expect(JSON.stringify(first.slice(0, baseline.length))).toBe(
+						JSON.stringify(baseline),
+					);
+					expect(resultText(first)).toContain("§8§");
+					expect(JSON.stringify(first)).toContain("NEW RAW TAIL");
+					expect(readPiIdentityRebuilds(db, id)).toHaveLength(1);
+					expect(ack).not.toHaveBeenCalled();
+					expect(clear).not.toHaveBeenCalled();
+					expect(identityCalibration()).toHaveLength(0);
+					expect([
+						getOrCreateSessionMeta(db, id).cachedM0Bytes?.toString(),
+						getOrCreateSessionMeta(db, id).cachedM1Bytes?.toString(),
+					]).toEqual(pairBefore);
+					source.push(userMessage("next real user", 23));
+					ids.push("next");
+					expect(resultText(await serve())).toContain("§154§");
+				} else {
+					expect(resultText(first)).toContain("§154§");
+					expect(resultText(first)).not.toContain("§8§");
+				}
+				expect(readPiIdentityRebuilds(db, id)).toHaveLength(0);
+				expect(ack).toHaveBeenCalledTimes(1);
+				expect(clear).toHaveBeenCalledTimes(1);
+				expect(identityCalibration()).toHaveLength(1);
+			} finally {
+				ack.mockRestore();
+				clear.mockRestore();
+				calibrate.mockRestore();
+				logs.mockRestore();
+			}
+		} finally {
+			db.close();
+		}
+	});
+}

@@ -3,12 +3,14 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import type { Scheduler } from "../../features/magic-context/scheduler";
+import { createScheduler, type Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
+    getPendingOps,
     getTagsBySession,
     openDatabase,
+    queuePendingOp,
     updateSessionMeta,
     updateTagStatus,
 } from "../../features/magic-context/storage";
@@ -435,6 +437,86 @@ describe("a pass that falls back to the launch directory", () => {
     function m0m1(messages: Message[]): string {
         return JSON.stringify(messages.filter((message) => message.info.syntheticHead === true));
     }
+
+    it("directory fallback freezes injection but drains an execute-threshold queued drop", async () => {
+        useTempDataHome("mc-directory-reclaim-");
+        const sessionDirectory = createTestTempDir("mc-reclaim-session-dir-").dir;
+        const launchDirectory = createTestTempDir("mc-reclaim-launch-dir-").dir;
+        tempDirs.push(sessionDirectory, launchDirectory);
+        const sessionId = "ses-directory-reclaim";
+        const db = openDatabase();
+        let hostDirectory: string | undefined = sessionDirectory;
+        const usage = new Map([
+            [sessionId, { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() }],
+        ]);
+        const flush = new Set<string>();
+        const transform = createTransform({
+            db,
+            tagger: createTagger(),
+            scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+            contextUsageMap: usage,
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: flush,
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 4000,
+            protectedTools: { read: 0 },
+            historianRunnable: false,
+            client: directoryClient(() => hostDirectory),
+            directory: launchDirectory,
+        });
+        const pass = async () => {
+            const messages = history(sessionId);
+            messages.splice(
+                messages.length - 1,
+                0,
+                ...[2, 3, 4].map((n) => ({
+                    info: { id: `new-tool-${n}`, role: "assistant", sessionID: sessionId },
+                    parts: [
+                        {
+                            type: "tool",
+                            callID: `new-call-${n}`,
+                            tool: "read",
+                            state: {
+                                status: "completed",
+                                input: { path: `${n}.ts` },
+                                output: `new output ${n}: ${BULKY}`,
+                            },
+                        },
+                    ],
+                })),
+            );
+            messages.at(-1)!.parts = [
+                { type: "text", text: "protected working tail ".repeat(6000) },
+            ];
+            await transform({}, { messages });
+            return messages;
+        };
+        const baseline = await pass();
+        const pair = m0m1(baseline);
+        const systemHash = getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash;
+        const tool = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool")!;
+        expect(tool.status).toBe("active");
+        queuePendingOp(db, sessionId, tool.tagNumber, "drop");
+        updateSessionMeta(db, sessionId, { systemPromptHash: "directory-lookup-held-hash" });
+        flush.add(sessionId);
+        hostDirectory = undefined;
+        usage.set(sessionId, {
+            usage: { percentage: 66, inputTokens: 132_000 },
+            updatedAt: Date.now(),
+        });
+        const reclaimed = await pass();
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === tool.tagNumber)?.status,
+        ).toBe("dropped");
+        expect(JSON.stringify(reclaimed.find((message) => message.info.id === "a1"))).not.toContain(
+            "BULKY-TOOL-OUTPUT",
+        );
+        expect(m0m1(reclaimed)).toBe(pair);
+        expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash).toBe(systemHash);
+        expect(flush.has(sessionId)).toBe(true);
+    }, 30_000);
 
     it("replays the frozen m[0]/m[1] when it would otherwise rebuild, and a resolved pass rebuilds", async () => {
         useTempDataHome("mc-degraded-directory-");
