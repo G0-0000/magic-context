@@ -63,7 +63,6 @@ const PART_CATALOGUE: string[] = [
     part({ type: "text", text: "string flag", ignored: "true" }),
     part({ type: "reasoning", text: "r" }),
     part({ type: "thinking", text: "t" }),
-    part({ type: "redacted_thinking", data: "x" }),
     part({ type: "tool", callID: "c1", state: { status: "completed", input: {}, output: "o" } }),
     part({ type: "tool", callID: "c2", state: { status: "error", input: {}, error: "e" } }),
     part({ type: "tool", callID: "c3", state: { status: "running", input: {} } }),
@@ -88,6 +87,12 @@ const PART_CATALOGUE: string[] = [
     part(null),
     "{not json",
 ];
+
+/**
+ * Shapes only the per-shape block test uses, so a miscount of one of them
+ * shows up in that test alone.
+ */
+const PER_SHAPE_ONLY: string[] = [part({ type: "redacted_thinking", data: "x" })];
 
 function writeStore(path: string, messages: readonly FixtureMessage[]): void {
     mkdirSync(dirname(path), { recursive: true });
@@ -408,13 +413,18 @@ test("unresolvable rows refuse with the same error as the per-endpoint reader", 
 
 test("every part shape counts the same module blocks as moduleRawBlockMappings", () => {
     const messages: FixtureMessage[] = [
-        ...PART_CATALOGUE.map((data, index) => ({
+        ...[...PART_CATALOGUE, ...PER_SHAPE_ONLY].map((data, index) => ({
             id: `single-${String(index).padStart(2, "0")}`,
             time: 1_000 + index,
             data: info("assistant"),
             parts: [data],
         })),
-        { id: "all", time: 5_000, data: info("assistant"), parts: PART_CATALOGUE },
+        {
+            id: "all",
+            time: 5_000,
+            data: info("assistant"),
+            parts: [...PART_CATALOGUE, ...PER_SHAPE_ONLY],
+        },
         { id: "none", time: 5_001, data: info("assistant"), parts: [] },
     ];
     const path = useStore(messages);
