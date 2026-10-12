@@ -4312,6 +4312,38 @@ fn terminal_wrapup_failure_summary(reason: &str, summary: &str, detail: &str) ->
     )
 }
 
+/// The historian model chain a `session.wrapup` request carries, resolved by the host
+/// from the current config. Optional: older hosts send none, and wrapup then uses the
+/// chain from the session's last completed transform.
+struct WrapupHistorianOverrides {
+    chain: Vec<String>,
+    limits: std::collections::BTreeMap<String, historian::HistorianModelLimits>,
+    variants: std::collections::BTreeMap<String, String>,
+}
+
+fn wrapup_historian_overrides(request: &Value) -> Result<Option<WrapupHistorianOverrides>, String> {
+    let Some(chain) = request.get("historian_model_chain") else {
+        return Ok(None);
+    };
+    let chain: Vec<String> = serde_json::from_value(chain.clone())
+        .map_err(|error| format!("session.wrapup historian_model_chain: {error}"))?;
+    let limits = match request.get("historian_model_limits") {
+        None => Default::default(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| format!("session.wrapup historian_model_limits: {error}"))?,
+    };
+    let variants = match request.get("historian_model_variants") {
+        None => Default::default(),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| format!("session.wrapup historian_model_variants: {error}"))?,
+    };
+    Ok(Some(WrapupHistorianOverrides {
+        chain,
+        limits,
+        variants,
+    }))
+}
+
 fn terminal_wrapup_failure_fields(summary: &str) -> Option<(String, String, String)> {
     let encoded = summary.strip_prefix(TERMINAL_WRAPUP_FAILURE_PREFIX)?;
     let value: Value = serde_json::from_str(encoded).ok()?;
@@ -9091,7 +9123,25 @@ impl McHandler {
                 );
             }
         };
-        let parsed = Arc::clone(&ready.request);
+        let parsed = match wrapup_historian_overrides(request) {
+            Ok(None) => Arc::clone(&ready.request),
+            // The snapshot's chain is whatever the last completed transform carried. A
+            // session whose passes have been failing keeps an old chain, so the host
+            // sends the chain resolved from the current config with the wrapup itself.
+            Ok(Some(overrides)) => {
+                let mut request = (*ready.request).clone();
+                request.historian_model_chain = Some(overrides.chain);
+                request.historian_model_limits = overrides.limits;
+                request.historian_model_variants = overrides.variants;
+                Arc::new(request)
+            }
+            Err(message) => {
+                return HandlerOutcome::Error {
+                    code: "bad_request".to_string(),
+                    message,
+                };
+            }
+        };
         let initial_snapshot = match store.load_historian_assembly_snapshot(&session_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {

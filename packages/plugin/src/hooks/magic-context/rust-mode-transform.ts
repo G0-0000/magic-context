@@ -1424,6 +1424,22 @@ export function applyNativeMessagesVerbatim(
     ]);
 }
 
+/**
+ * The historian chain fields a Rust-mode `session.wrapup` carries. The module would
+ * otherwise reuse the chain from the session's last completed transform, which stays
+ * stale while that session's passes are failing.
+ */
+export function rustHistorianChainFields(
+    models: Pick<TransformDeps, "historianModel" | "fallbackModels">,
+): Record<string, unknown> {
+    const chain = resolvedHistorianModelChain(models);
+    return {
+        historian_model_chain: chain,
+        historian_model_limits: resolvedHistorianModelLimits(chain),
+        historian_model_variants: resolvedHistorianModelVariants(models),
+    };
+}
+
 function resolvedHistorianModelChain(
     deps: Pick<TransformDeps, "historianModel" | "fallbackModels">,
 ): string[] {
