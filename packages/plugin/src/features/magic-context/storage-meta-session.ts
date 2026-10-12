@@ -1,5 +1,8 @@
 import { Buffer } from "node:buffer";
-import { cancelAutoSearchWork } from "../../shared/auto-search-lifecycle";
+import {
+    cancelAutoSearchWork,
+    clearUnpublishedAutoSearchNoHints,
+} from "../../shared/auto-search-lifecycle";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import {
@@ -334,5 +337,6 @@ export function clearSession(
                 .immediate(),
         ),
     );
+    clearUnpublishedAutoSearchNoHints(sessionId);
     logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

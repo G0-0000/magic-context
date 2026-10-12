@@ -114,6 +114,7 @@ import {
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
 	clearThinkingBindingRecoveryIf,
+	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
 	getEmergencyInputSample,
 	getNoteNudgeAnchors,
@@ -121,7 +122,6 @@ import {
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
-	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
@@ -241,6 +241,7 @@ import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
+import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
 import { getHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
@@ -10006,7 +10007,11 @@ function applyNoteNudges(args: {
 		args.postTransformSnapshot?.autoSearchDecisions ??
 		getAutoSearchHintDecisions(db, sessionId);
 	for (const decision of autoSearchDecisions) {
-		if (decision.decision === "hint") {
+		if (
+			decision.decision === "hint" &&
+			getUnpublishedAutoSearchNoHint(sessionId, decision.messageId) ===
+				undefined
+		) {
 			appendReminderToUserMessageByIdPi(
 				messages,
 				replayMessageIdByIndex,
@@ -10114,7 +10119,12 @@ function applyNoteNudges(args: {
 		const allResolved = messageIdByIndex.size === realMessageCount;
 		if (allResolved && visibleIds.size > 0) {
 			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
-			pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
+			flushAutoSearchHintDecisionRetirement(db, sessionId, visibleIds);
+			// A branch switch can hide user messages that will later be served again.
+			// Keep their saved search hints, including no-hint omissions. Only the actual
+			// prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
+			// may flush them to storage, while cached-prefix replay must not write them.
+			// Today's visible IDs are not proof of deletion.
 		}
 	}
 

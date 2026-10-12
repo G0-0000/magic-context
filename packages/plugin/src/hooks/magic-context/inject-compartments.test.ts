@@ -24,7 +24,10 @@ import type { Memory } from "../../features/magic-context/memory/types";
 import { __projectDocsHashTest } from "../../features/magic-context/project-docs-hash";
 import { unifiedSearch } from "../../features/magic-context/search";
 import {
+    appendAutoSearchHintDecision,
     bumpSessionFactsVersion,
+    flushAutoSearchHintDecisionRetirement,
+    getAutoSearchHintDecisions,
     getOrCreateSessionMeta,
     queueM0Mutation,
     queueMemoryMutation,
@@ -32,6 +35,7 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
+import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -71,6 +75,155 @@ let db: Database;
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+
+for (const host of ["opencode", "opencode2"] as const) {
+    it(`${host} cached prefix defer writes nothing and defers decision retirement`, () => {
+        _resetHarnessForTesting();
+        setHarness(host);
+        db = makeDb();
+        const hint = { messageId: "covered", decision: "hint" as const, text: "cached hint" };
+        appendAutoSearchHintDecision(db, SESSION_ID, hint);
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 0,
+                startMessage: 0,
+                endMessage: 0,
+                startMessageId: "covered",
+                endMessageId: "covered",
+                title: "Covered",
+                content: "Earlier question was answered.",
+            },
+        ]);
+        const options = {
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            injectDocs: false,
+        };
+        const cached = materializeM0(options);
+        const live = ["covered", "live"].map(
+            (id) =>
+                ({
+                    info: { id, role: "user" },
+                    parts: [{ type: "text", text: id }],
+                }) as MessageLike,
+        );
+        try {
+            db.exec("PRAGMA query_only=ON");
+            const before = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+            const result = injectM0M1({
+                ...options,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                isCacheBustingPass: false,
+            });
+            expect(result.prefixTrimStatus).toBe("applied");
+            expect(result.m0Bytes).toEqual(cached.m0Bytes);
+            expect(result.m1Text).toBe(cached.m1Text);
+            expect(db.prepare("SELECT total_changes() AS count").get()).toEqual(before);
+            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual([hint]);
+            db.exec("PRAGMA query_only=OFF");
+            expect(flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["live"]))).toBe(
+                1,
+            );
+            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual([]);
+        } finally {
+            db.exec("PRAGMA query_only=OFF");
+            clearInjectionCache(SESSION_ID);
+            _resetHarnessForTesting();
+        }
+    });
+    it(`${host} applied compaction bounds auto-search blob across 20000 user messages`, () => {
+        _resetHarnessForTesting();
+        setHarness(host);
+        db = makeDb();
+        let live: MessageLike[] = [];
+        const window = 100;
+        const total = 20000;
+        const id = (number: number) => `user-${number}`;
+        let maxEntries = 0;
+        let maxBytes = 0;
+        const readBlob = db.prepare(
+            "SELECT auto_search_hint_decisions AS blob FROM session_meta WHERE session_id = ?",
+        );
+        try {
+            for (let number = 1; number <= total; number++) {
+                live.push({
+                    info: { id: id(number), role: "user" },
+                    parts: [{ type: "text", text: `Question ${number}` }],
+                } as MessageLike);
+                expect(
+                    appendAutoSearchHintDecision(
+                        db,
+                        SESSION_ID,
+                        number % 3 === 0
+                            ? { messageId: id(number), decision: "hint", text: "h".repeat(512) }
+                            : {
+                                  messageId: id(number),
+                                  decision: "no-hint",
+                                  reason: number % 2 ? "error" : "timeout",
+                              },
+                    ),
+                ).toMatchObject({ ok: true, kind: "appended" });
+                if (number % window !== 0) continue;
+                const before = (readBlob.get(SESSION_ID) as { blob: string }).blob;
+                const count = JSON.parse(before).length;
+                expect(count).toBe(live.length);
+                expect(count).toBeLessThanOrEqual(window * 2);
+                maxEntries = Math.max(maxEntries, count);
+                maxBytes = Math.max(maxBytes, Buffer.byteLength(before));
+                if (number === window) continue;
+                const cutoff = number - window;
+                appendCompartments(db, SESSION_ID, [
+                    {
+                        sequence: number / window - 2,
+                        startMessage: cutoff - window,
+                        endMessage: cutoff - 1,
+                        startMessageId: id(cutoff - window + 1),
+                        endMessageId: id(cutoff),
+                        title: "Compacted questions",
+                        content: "Earlier questions were answered.",
+                    },
+                ]);
+                const options = {
+                    db,
+                    sessionId: SESSION_ID,
+                    state: getOrCreateSessionMeta(db, SESSION_ID),
+                    injectDocs: false,
+                };
+                materializeM0(options);
+                const result = injectM0M1({
+                    ...options,
+                    state: getOrCreateSessionMeta(db, SESSION_ID),
+                    messages: live,
+                    prefixTrimSourceOrder:
+                        host === "opencode2" ? capturePrefixTrimSourceOrder(live) : undefined,
+                });
+                expect(result.prefixTrimStatus).toBe("applied");
+                live = live.filter((message) => typeof message.info.id === "string");
+                // Match postprocessing when the host permits rebuilding the request prefix.
+                flushAutoSearchHintDecisionRetirement(
+                    db,
+                    SESSION_ID,
+                    new Set(live.map((message) => message.info.id as string)),
+                );
+                expect(live).toHaveLength(window);
+                const after = (readBlob.get(SESSION_ID) as { blob: string }).blob;
+                expect(
+                    JSON.parse(after).map((decision: { messageId: string }) => decision.messageId),
+                ).toEqual(Array.from({ length: window }, (_, index) => id(cutoff + index + 1)));
+                expect(Buffer.byteLength(after)).toBeLessThanOrEqual(window * 800);
+            }
+            expect(getAutoSearchHintDecisions(db, SESSION_ID)).toHaveLength(window);
+            console.log(
+                `AUTO_SEARCH_BOUNDED ${host} users=${total} live=${window} maxEntries=${maxEntries} maxBytes=${maxBytes}`,
+            );
+        } finally {
+            clearInjectionCache(SESSION_ID);
+            _resetHarnessForTesting();
+        }
+    }, 30000);
+}
 
 function makeDb(): Database {
     const d = new Database(":memory:");
@@ -734,6 +887,75 @@ describe("prepared prefix source-order trimming", () => {
             } as MessageLike,
         ],
         preparedTrimBoundaryId: boundary,
+    });
+
+    it("applied prefix pruning preserves the decision on a partially covered user boundary", () => {
+        db = makeDb();
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 0,
+                startMessage: 0,
+                endMessage: 1,
+                startMessageId: "before",
+                endMessageId: "partial",
+                endBlockIndex: 0,
+                title: "Partial turn",
+                content: "Only the first block was summarized.",
+            },
+        ]);
+        for (const messageId of ["before", "partial", "after", "hidden-branch"]) {
+            appendAutoSearchHintDecision(db, SESSION_ID, {
+                messageId,
+                decision: "no-hint",
+                reason: "error",
+            });
+        }
+        const live = [
+            message("before", "user"),
+            message("partial", "user"),
+            message("after", "user"),
+        ];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("partial"),
+            prefixTrimSourceOrder: capturePrefixTrimSourceOrder(live),
+        });
+        expect(result.prefixTrimStatus).toBe("applied");
+        expect(live.map((entry) => entry.info.id)).toEqual([undefined, "partial", "after"]);
+        flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["partial", "after"]));
+        expect(getAutoSearchHintDecisions(db, SESSION_ID).map((entry) => entry.messageId)).toEqual([
+            "partial",
+            "after",
+            "hidden-branch",
+        ]);
+    });
+
+    it("refused prefix trim does not prune auto-search decisions", () => {
+        db = makeDb();
+        for (const messageId of ["before", "missing-boundary", "after"]) {
+            appendAutoSearchHintDecision(db, SESSION_ID, {
+                messageId,
+                decision: "no-hint",
+                reason: "error",
+            });
+        }
+        const source = [message("before", "user"), message("after", "user")];
+        const before = getAutoSearchHintDecisions(db, SESSION_ID);
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: source,
+            preparedPrefix: preparedPrefix("missing-boundary"),
+            prefixTrimSourceOrder: capturePrefixTrimSourceOrder(source),
+        });
+        expect(result.prefixTrimStatus).toBe("refused");
+        // A later branch switch must not delete these records: the failed trim proved nothing.
+        flushAutoSearchHintDecisionRetirement(db, SESSION_ID, new Set(["later-branch"]));
+        expect(getAutoSearchHintDecisions(db, SESSION_ID)).toEqual(before);
     });
 
     it("trims surviving rows through a deleted assistant boundary without resurrecting it", () => {

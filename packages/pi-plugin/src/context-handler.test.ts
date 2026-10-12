@@ -19,9 +19,13 @@ import {
 import { readEpochFloorSnapshot } from "@magic-context/core/features/magic-context/protection-window";
 import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
+	AUTO_SEARCH_DECISION_SOFT_LIMIT,
 	acquireWrapupInProgress,
 	addNote,
+	appendAutoSearchHintDecision,
 	appendNoteNudgeAnchor,
+	flushAutoSearchHintDecisionRetirement,
+	getAutoSearchHintDecisions,
 	getChannel1NudgeState,
 	getHistorianFailureState,
 	getLastNudgeUndropped,
@@ -55,6 +59,11 @@ import {
 	setPersistedNoteNudgeTriggerMessageId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
+import {
+	createAutoSearchReplayFixture,
+	replayHint,
+	replayPrompt,
+} from "@magic-context/core/hooks/magic-context/auto-search-replay.fixture";
 import { autoSearchTestSnapshot } from "@magic-context/core/hooks/magic-context/auto-search-snapshot.fixture";
 import * as searchModule from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
@@ -98,7 +107,11 @@ import {
 	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
-import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
+import {
+	injectM0M1Pi,
+	materializeM0Pi,
+	mustMaterializePi,
+} from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
 import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
@@ -114,6 +127,197 @@ import {
 } from "./test-utils.test";
 import { createCtxReduceTool } from "./tools/ctx-reduce";
 import { createPiTranscript } from "./transcript-pi";
+
+describe("pi auto-search served decisions", () => {
+	function setup(label: string) {
+		const fixture = createAutoSearchReplayFixture("pi", label);
+		const snapshot = spyOn(
+			embeddingModule,
+			"getProjectEmbeddingSnapshot",
+		).mockImplementation(autoSearchTestSnapshot);
+		const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([
+			replayHint,
+		]);
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db: fixture.db,
+			protectedTags: 0,
+			injection: { injectionBudgetTokens: 8000, injectDocs: false },
+			autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+		});
+		const handler = fake.handlers.get("context");
+		if (!handler) throw new Error("context handler was not registered");
+		return {
+			...fixture,
+			search,
+			async invoke(id: string, busting = false) {
+				const messages = [userMessage(replayPrompt, 1)];
+				const ctx = {
+					...fakeContext(fixture.sessionId, fixture.directory, [id], messages),
+					model: {
+						provider: "anthropic",
+						id: busting ? "other" : "claude",
+						contextWindow: 128000,
+					},
+					getContextUsage: () => ({
+						tokens: busting ? 80000 : 20000,
+						percent: busting ? 80 : 20,
+						contextWindow: 128000,
+					}),
+				};
+				const result = (await handler({ messages } as never, ctx as never)) as
+					| { messages?: typeof messages }
+					| undefined;
+				const served = (result?.messages ?? messages).at(-1);
+				expect(served?.role).toBe("user");
+				return JSON.stringify(served);
+			},
+			close() {
+				search.mockRestore();
+				snapshot.mockRestore();
+				clearContextHandlerSession(fixture.sessionId);
+				fixture.close();
+			},
+		};
+	}
+
+	it("full host processor cannot retry a served search exception", async () => {
+		const fixture = setup("host-exception");
+		fixture.search.mockImplementationOnce(async () => {
+			throw new Error("transient host-search failure");
+		});
+		try {
+			const first = await fixture.invoke("u1");
+			expect(first).not.toContain("<ctx-search-hint>");
+			expect(fixture.search).toHaveBeenCalledTimes(1);
+			const second = await fixture.invoke("u1");
+			expect(second).toBe(first);
+			expect(fixture.search).toHaveBeenCalledTimes(1);
+		} finally {
+			fixture.close();
+		}
+	});
+
+	it("full host processor preserves a served hint when a truncated branch is restored", async () => {
+		const fixture = setup("host-restore");
+		try {
+			const first = await fixture.invoke("u1");
+			expect(first).toContain("Independent search-only hint");
+			await fixture.invoke("u2", true);
+			expect(
+				getOrCreateSessionMeta(fixture.db, fixture.sessionId).cachedM0ModelKey,
+			).toBe("anthropic/other");
+			const retained = getAutoSearchHintDecisions(
+				fixture.db,
+				fixture.sessionId,
+			);
+			expect(retained.some((decision) => decision.messageId === "u1")).toBe(
+				true,
+			);
+			fixture.search.mockResolvedValue([
+				{ ...replayHint, memoryId: 9001, content: "Recomputed changed hint" },
+			]);
+			const restored = await fixture.invoke("u1");
+			expect(restored).toBe(first);
+			expect(restored).not.toContain("Recomputed changed hint");
+			expect(fixture.search).toHaveBeenCalledTimes(2);
+		} finally {
+			fixture.close();
+		}
+	});
+
+	it("busting host flushes retirement staged by a prior cached cut", async () => {
+		const fixture = setup("staged-retirement");
+		try {
+			expect(await fixture.invoke("u1")).toContain(
+				"Independent search-only hint",
+			);
+			appendCompartments(fixture.db, fixture.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 0,
+					endMessage: 0,
+					startMessageId: "u1",
+					endMessageId: "u1",
+					title: "Covered",
+					content: "Earlier question was answered.",
+				},
+			]);
+			const state = { sessionId: fixture.sessionId, injectDocs: false };
+			materializeM0Pi(state, fixture.db);
+			const live = [userMessage(replayPrompt, 1), userMessage(replayPrompt, 2)];
+			expect(
+				injectM0M1Pi(state, fixture.db, live, ["u1", "u2"], false)
+					.skippedVisibleMessages,
+			).toBe(1);
+			expect(
+				getAutoSearchHintDecisions(fixture.db, fixture.sessionId).some(
+					(entry) => entry.messageId === "u1",
+				),
+			).toBe(true);
+			await fixture.invoke("u2", true);
+			expect(
+				getAutoSearchHintDecisions(fixture.db, fixture.sessionId).some(
+					(entry) => entry.messageId === "u1",
+				),
+			).toBe(false);
+		} finally {
+			fixture.close();
+		}
+	});
+
+	it("ordinary pass preserves visible user bytes at the omission cap boundary", async () => {
+		const db = createTestDb();
+		const sessionId = "pi-visible-cap-boundary";
+		const visibleIds = Array.from(
+			{ length: AUTO_SEARCH_DECISION_SOFT_LIMIT + 2 },
+			(_, index) => `visible-${index}`,
+		);
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
+		const handler = fake.handlers.get("context");
+		if (!handler) throw new Error("context handler was not registered");
+		const serve = async () => {
+			const messages = visibleIds.map((_, index) =>
+				userMessage(replayPrompt, index + 1),
+			);
+			const result = (await handler(
+				{ messages } as never,
+				fakeContext(sessionId, process.cwd(), visibleIds, messages) as never,
+			)) as { messages?: typeof messages } | undefined;
+			return JSON.stringify(result?.messages ?? messages);
+		};
+		try {
+			for (const [index, messageId] of visibleIds.entries())
+				appendAutoSearchHintDecision(
+					db,
+					sessionId,
+					index === 0
+						? {
+								messageId,
+								decision: "hint",
+								text: "\n\n<ctx-search-hint>stable cap-boundary hint</ctx-search-hint>",
+							}
+						: { messageId, decision: "no-hint", reason: "error" },
+				);
+			const first = await serve();
+			expect(first).toContain("stable cap-boundary hint");
+			const retired = flushAutoSearchHintDecisionRetirement(
+				db,
+				sessionId,
+				new Set(visibleIds),
+			);
+			expect(await serve()).toBe(first);
+			expect(retired).toBe(0);
+			expect(getAutoSearchHintDecisions(db, sessionId)).toHaveLength(
+				visibleIds.length,
+			);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	}, 30000);
+});
 
 it("Pi spent drain budget prevents historian startup, preserves served bytes, and resumes asynchronously at reset", async () => {
 	const db = createTestDb();

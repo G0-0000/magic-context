@@ -17,6 +17,7 @@ import {
     captureChannel1PostReduceGraceBaseline,
     clearPendingCompactionMarkerStateIf,
     clearPersistedTodoSyntheticAnchor,
+    flushAutoSearchHintDecisionRetirement,
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
@@ -28,7 +29,6 @@ import {
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
     type PendingCompactionMarker,
-    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     replacePendingCompactionMarkerStateIf,
     setPendingCompactionMarkerState,
@@ -73,6 +73,7 @@ import {
 } from "../../features/magic-context/temporal-decisions";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
+import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -1197,7 +1198,10 @@ export function runRustModePostprocess(args: {
         appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
     }
     for (const decision of getAutoSearchHintDecisions(args.db, args.sessionId)) {
-        if (decision.decision === "hint") {
+        if (
+            decision.decision === "hint" &&
+            getUnpublishedAutoSearchNoHint(args.sessionId, decision.messageId) === undefined
+        ) {
             appendReminderToUserMessageById(args.messages, decision.messageId, decision.text);
         }
     }
@@ -3817,11 +3821,16 @@ export async function runPostTransformPhase(
             }
         }
         const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
-        const prunedDecisions = pruneAutoSearchHintDecisions(args.db, args.sessionId, visibleIds);
-        if (prunedAnchors > 0 || prunedDecisions > 0) {
+        flushAutoSearchHintDecisionRetirement(args.db, args.sessionId, visibleIds);
+        // A branch switch can hide user messages that will later be served again.
+        // Keep their saved search hints, including no-hint omissions. Only the actual
+        // prefix trim records IDs covered by a summary; this prefix-rebuild opportunity
+        // may flush them to storage, while cached-prefix replay must not write them.
+        // Today's visible IDs are not proof of deletion.
+        if (prunedAnchors > 0) {
             sessionLog(
                 args.sessionId,
-                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s), ${prunedDecisions} auto-search decision(s)`,
+                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s)`,
             );
         }
     }
