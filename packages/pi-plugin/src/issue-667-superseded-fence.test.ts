@@ -88,7 +88,9 @@ test("issue 667: a previous run's late agent_end does not refuse the next run's 
 	h.dispatch();
 	expect(h.refusals).toEqual([]);
 	expect(h.aborts).toBe(0);
-	// The second run's own start, delivered late, adopts the operation.
+	// The second run's own agent_start, delivered late, adopts the operation
+	// holding the second run's completed pass instead of replacing it with an
+	// empty one, so a retried dispatch is still admitted.
 	h.emit("agent_start");
 	h.dispatch();
 	expect(h.refusals).toEqual([]);

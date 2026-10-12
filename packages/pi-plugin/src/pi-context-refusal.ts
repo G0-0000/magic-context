@@ -28,8 +28,10 @@ export class PiContextSupersededError extends Error {}
 interface Operation {
 	pass?: PiContextBudget;
 	// The latest pass's context event. Its messages are read only when a late
-	// agent_end must be attributed (see endBelongsToEarlierRun), never on the
-	// context hook's own unguarded stack.
+	// agent_end must be attributed to a run (see endBelongsToEarlierRun). The
+	// context hook stores the event without reading them: that code runs before
+	// the hook's try/refusal handling, so a throwing messages getter there would
+	// escape the hook instead of becoming a visible refusal.
 	input?: { readonly messages?: unknown };
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
@@ -269,11 +271,13 @@ export function registerPiGuardedContext(
 					);
 				if (!active.pass)
 					throw new Error("no context pass ran for this operation");
-				// Judge this operation's latest pass from operation state only. The
-				// pass's own ownership guard also fails for a replaced pass; a replaced
-				// pass is never read here, so it can never refuse the current turn.
-				// An unfinished pass is not a receipt, and past its outcome deadline
-				// it can no longer become one.
+				// Judge this operation's latest pass from operation state only, not
+				// through the pass's assertOwner guard. That guard reports any lost
+				// ownership as a supersession, including an end it cannot attribute,
+				// and turned those into visible refusals of the current turn. A pass
+				// replaced by a newer one is never read here. An unfinished pass is
+				// not a receipt, and past PI_CONTEXT_BUDGET.outcomeMs it can no
+				// longer become one.
 				if (
 					!budget.completed &&
 					(budget.abandoned || budget.elapsed() >= PI_CONTEXT_BUDGET.outcomeMs)
