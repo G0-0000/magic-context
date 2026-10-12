@@ -1696,6 +1696,13 @@ pub struct TransformResponse {
     /// (false) on every other pass and by older modules, which keeps the strip.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_trim_only: bool,
+    /// True on a pass that removed every signed thinking block it serves, the active turn's
+    /// included, because bytes before the turn's kept signed thinking changed (a rebuilt
+    /// m0/m1 head) or because only that removal lets the request fit the context window.
+    /// The removal is persisted and replayed by later passes; a host must not restore or
+    /// keep any signed thinking this pass removed. Omitted (false) on every other pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_thinking_reset: bool,
     /// Optional diagnostic timings. Omitted only by compatibility constructors and on old
     /// responses; normal module transform passes include this object.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1780,6 +1787,7 @@ impl TransformResponse {
             identity_delta: Vec::new(),
             first_divergence: None,
             reasoning_trim_only: false,
+            signed_thinking_reset: false,
             timings: None,
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -1821,6 +1829,7 @@ impl TransformResponse {
             identity_delta: Vec::new(),
             first_divergence: None,
             reasoning_trim_only: false,
+            signed_thinking_reset: false,
             timings: None,
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -2087,6 +2096,13 @@ struct Channel1Target {
 #[derive(Debug)]
 pub enum TransformError {
     ProtectedToolResultsOverLimit,
+    /// An open signed thinking turn on a prefix-bound model cannot fit the context window
+    /// even after every signed thinking block was stripped and the freed blocks reclaimed.
+    SignedTurnOverLimit,
+    /// Internal retry: this pass must strip every signed thinking block, either because the
+    /// m0/m1 head it serves changed under the turn's kept signed thinking, or because
+    /// thinking-prefix protection keeps the request over the context window.
+    SignedThinkingReset,
     Store(McStoreError),
     /// Anthropic cannot accept an assistant-terminal retry, and moving completed output
     /// below its own prompt would rewrite conversational causality.
@@ -2135,6 +2151,8 @@ pub enum TransformError {
 }
 
 pub const PROTECTED_TOOL_RESULTS_OVER_LIMIT_CODE: &str = "protected_tool_results_over_limit";
+pub const SIGNED_TURN_OVER_LIMIT_CODE: &str = "signed_turn_over_limit";
+pub const SIGNED_TURN_OVER_LIMIT_MESSAGE: &str = "This turn's context is larger than the model's context window even after all of its thinking and reclaimable tool output were removed, so it was not sent. Send a new message or start a new session to continue.";
 pub const PROTECTED_TOOL_RESULTS_OVER_LIMIT_MESSAGE: &str = "The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts.";
 
 impl std::fmt::Display for TransformError {
@@ -2142,6 +2160,10 @@ impl std::fmt::Display for TransformError {
         match self {
             TransformError::ProtectedToolResultsOverLimit => write!(f,
                 "{PROTECTED_TOOL_RESULTS_OVER_LIMIT_MESSAGE}"),
+            TransformError::SignedTurnOverLimit => write!(f, "{SIGNED_TURN_OVER_LIMIT_MESSAGE}"),
+            TransformError::SignedThinkingReset => {
+                write!(f, "signed thinking reset requires a stripped retry")
+            }
             TransformError::Store(e) => write!(f, "store: {e}"),
             TransformError::AssistantTerminalRetry => write!(
                 f,
@@ -2976,6 +2998,9 @@ fn apply_once_with_estimator_and_projection(
         .collect();
     let mut replay_legacy_treatment = legacy_req.is_some();
     let mut restore_attachments = false;
+    // Set once a pass proves it must strip every signed thinking block; it survives the
+    // other retries so the decision is not lost to a reload.
+    let mut reset_signed_thinking = false;
     profile_end!(perf_wrapper_prepare);
     loop {
         let mut boundary_divergence_detected = false;
@@ -3005,7 +3030,12 @@ fn apply_once_with_estimator_and_projection(
             &reclassified_on_bust,
             attachment_upgrade.as_ref(),
             attachment_replay.is_some(),
+            reset_signed_thinking,
         ) {
+            Err(TransformError::SignedThinkingReset) if !reset_signed_thinking => {
+                reset_signed_thinking = true;
+                continue;
+            }
             Err(TransformError::AttachmentProjectionBust) if attachment_replay.is_some() => {
                 restore_attachments = true;
                 continue;
@@ -4112,6 +4142,7 @@ fn apply_additive_only(
             ),
             first_divergence: None,
             reasoning_trim_only: false,
+            signed_thinking_reset: false,
             timings: Some(timings),
             boundary_id: String::new(),
             reconcile_pending: false,
@@ -4150,6 +4181,7 @@ fn apply_once(
     reclassified_on_bust: &BTreeSet<String>,
     attachment_upgrade: Option<&AttachmentProjectionUpgrade>,
     replay_attachments: bool,
+    reset_signed_thinking: bool,
 ) -> Result<TransformWithProjection, TransformError> {
     // Keep this span alive through local destruction, which the wall `total` omits.
     profile_start!(_perf_apply, "apply_once");
@@ -5020,9 +5052,10 @@ fn apply_once(
                 || (!active_legitimate_publication_window
                     && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT))
     });
-    if boundary_divergence_recut.is_some() && !active_legitimate_publication_window {
-        boundary_divergence_pending_count = 0;
-    }
+    // Applied below, once the signed-prefix hold is known: a held pass skips the recut and
+    // must keep the count, so the next pass that is not held recuts at once.
+    let recut_resets_pending_count =
+        boundary_divergence_recut.is_some() && !active_legitimate_publication_window;
     let current_m1_digest = m1_signal.revision;
     let compartment_seq_changed_since_meta = loaded.meta.initialized
         && m1_signal.max_compartment_seq != meta_coverage_compartment_seq(&loaded.meta);
@@ -5174,7 +5207,116 @@ fn apply_once(
     } else {
         false
     };
-    let pre_snapshot_inputs_changed = req.protected_tokens_effective.is_none()
+    // Signed-prefix hold. An unfinished Anthropic thinking turn on a prefix-bound model signs
+    // its thinking against the request prefix: a signed thinking block stays valid only while
+    // everything sent before it is unchanged (docs/reports/anthropic-thinking-binding.md),
+    // and re-rendering the synthetic m0/m1 head invalidates every signed block after it
+    // (HTTP 400 on strict-binding accounts). The provider also caches that prefix between the
+    // turn's tool steps, and the next real user message pays for a rewrite anyway. So inside
+    // such a turn two things are held, each decided once here, before `classify`:
+    // - The head freeze (`signed_head_frozen`): m0/m1 replay byte for byte for the whole open
+    //   turn, whatever the pressure or the cache's age. Every input that would re-render them
+    //   (HARD fold triggers, a render-identity change, a reconcile HARD, an m1 delta or
+    //   refresh) waits for the turn to end. Only a head that cannot be replayed at all is
+    //   rebuilt: no cached m0/m1 pair, a missing m1, a lineage descent or discarded cache
+    //   sections (both set lineage force_hard), a bootstrap-seed fold or a legacy baseline.
+    // - The drain hold (`signed_prefix_hold`): below the force band (usage at or above
+    //   `force_materialize_percentage`, 85% for a 65% execute threshold), outside the 95%
+    //   emergency (`PassDecision::Emergency95`), on a warm cache and with a replayable head,
+    //   nothing pays for a rewrite either: queued drops, selected reductions and flushes stay
+    //   persisted and the plan is a Defer (the previously served bytes, unchanged). Where the
+    //   drain hold is lifted, queued work is applied only to blocks after the turn's kept
+    //   signed thinking (`active_thinking_prefix_edit_ids`), and with the head still frozen.
+    // Each is the single permission its mutation paths read; none is vetoed separately.
+    let active_thinking_turn = active_anthropic_thinking_turn(req);
+    let protected_signed_prefix =
+        active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
+    // Signed-thinking reset. `reset_signed_thinking` is set on a retry of this pass, after
+    // a first attempt returned `TransformError::SignedThinkingReset` (see the head check
+    // after the plan and the fit check before the commit). The retry strips every signed
+    // reasoning block the request carries, the active turn's included: removing all thinking
+    // keeps the request valid when bytes before a signed block changed, while keeping any
+    // such block does not. Each removal is a `strip:reasoning_age:<mid>` frozen unit, which
+    // every later pass already replays. With no signed thinking left to protect,
+    // `active_thinking_prefix_edit_ids` protects nothing, so all queued work is applied on
+    // this same pass. A subagent takes the same units through its reductions-only branch.
+    let signed_thinking_reset_units: Vec<FrozenUnit> = if reset_signed_thinking {
+        let already_removed = loaded
+            .core
+            .frozen_units
+            .iter()
+            .filter_map(|unit| unit.key.strip_prefix("strip:reasoning_age:"))
+            .collect::<HashSet<_>>();
+        req.messages
+            .iter()
+            .filter(|message| {
+                message.ck.role == "assistant"
+                    && !message.ck.meta.synthetic
+                    && !message.mid.is_empty()
+                    && !already_removed.contains(message.mid.as_str())
+                    && message.ck.content.iter().any(is_reasoning_block)
+            })
+            .map(|message| strip_unit("reasoning_age", &message.mid, ""))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let signed_thinking_reset = reset_signed_thinking;
+    // The selection, caveman and strip planning below protect blocks before kept signed
+    // thinking; they read the frozen units with the reset's removals already in place, so
+    // they see that no signed thinking is kept.
+    let reset_planning_core;
+    let planning_core: &CoreState = if signed_thinking_reset_units.is_empty() {
+        &loaded.core
+    } else {
+        let mut core = loaded.core.clone();
+        core.frozen_units
+            .extend(signed_thinking_reset_units.iter().cloned());
+        reset_planning_core = core;
+        &reset_planning_core
+    };
+    let force_band_active = usage_percentage
+        >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
+            .force_materialize_percentage;
+    // Head rebuilds that happen whatever the hold decides, the same cases `independent_rebuild`
+    // counts for an unprotected session: no cached m0/m1 pair, a missing m1, or lineage
+    // force_hard (a new host conversation epoch, or discarded cache sections). Subagents never
+    // render m0/m1 and ignore a lineage descent.
+    let head_rebuild_forced = !req.is_subagent
+        && (!loaded.meta.initialized
+            || cached_m1_missing(&loaded.core)
+            || lineage_state.force_hard);
+    // `classify` also makes bootstrap-seed and legacy-baseline passes HARD whatever is queued:
+    // neither has an m0/m1 pair matching the stored coverage to replay.
+    let head_replay_impossible = head_rebuild_forced
+        || (!req.is_subagent
+            && (loaded.meta.bootstrap_seed_fold_pending || is_legacy_baseline(&loaded.core)));
+    let signed_head_frozen = protected_signed_prefix && !head_replay_impossible;
+    // The drain hold lifts when this pass relieves pressure (force band, Emergency95) or is a
+    // full provider-cache write anyway (an expired cache, discarded cache sections, a head
+    // that cannot be replayed): queued work is then applied in this same pass. For a primary
+    // with a replayable head, the head itself still replays unchanged.
+    let signed_drains_released = force_band_active
+        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
+        || scheduler_outcome.idle_ttl_fired
+        || cache_sections_discarded
+        || head_replay_impossible;
+    let signed_prefix_hold = protected_signed_prefix && !signed_drains_released;
+    // The inputs below would re-render m0/m1, so a frozen head vetoes them; each is derived
+    // from persisted state and fires on the first pass after the turn.
+    let render_config_changed = render_config_changed && !signed_head_frozen;
+    let reconcile_hard_due = reconcile_hard_due && !signed_head_frozen;
+    // A frozen head drops this pass's boundary-divergence recut and keeps
+    // boundary_divergence_pending_count instead of resetting it, so the recut still fires on
+    // the next pass whose head is not frozen.
+    let boundary_divergence_recut = boundary_divergence_recut.filter(|_| !signed_head_frozen);
+    if recut_resets_pending_count && !signed_head_frozen {
+        boundary_divergence_pending_count = 0;
+    }
+    // pre_snapshot_inputs_changed records every input it sees, so a pass with a frozen head
+    // must not call it: the change would be marked seen without the HARD fold it asks for.
+    let pre_snapshot_inputs_changed = !signed_head_frozen
+        && req.protected_tokens_effective.is_none()
         && loaded.meta.protected_tokens_effective.is_none()
         && crate::protection_window::pre_snapshot_inputs_changed(
             store.tag_cache_namespace(),
@@ -5203,20 +5345,21 @@ fn apply_once(
     // Reconcile (the boundary left the live array after a revert) and lineage descent (a new
     // host conversation epoch) are separate HARD inputs below; both serve a different
     // message array than the cached one, so they keep pricing too.
-    let hard_fold_requested = pre_snapshot_inputs_changed
-        || first_fold_due
-        || boundary_divergence_recut.is_some()
-        || idle_fold_due
-        || system_absorb_hard_due
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
+    // A frozen signed head requests none of the triggers listed in this expression. Each one
+    // is derived from persisted state (or, for pre_snapshot_inputs_changed, was not consumed
+    // above), so it fires on the first pass after the turn.
+    let hard_fold_requested = !signed_head_frozen
+        && (pre_snapshot_inputs_changed
+            || first_fold_due
+            || boundary_divergence_recut.is_some()
+            || idle_fold_due
+            || system_absorb_hard_due
+            || external_revision_changed
+            || project_memory_epoch_hard_due);
     // Historian activity is not a second gate: only independently priced work
     // below can authorize new provider-visible mutations.
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
-    let active_thinking_turn = active_anthropic_thinking_turn(req);
-    let protected_signed_prefix =
-        active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
     let prefix_materialization_enabled = !req.is_subagent && !protected_signed_prefix;
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
@@ -5283,9 +5426,6 @@ fn apply_once(
             req.session_id
         );
     }
-    let force_band_active = usage_percentage
-        >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
-            .force_materialize_percentage;
     let force_episode_available = force_band_active && !loaded.meta.has_prior_emergency_drop;
     // A rebuild that is not the emergency itself. It is the only thing that waives the
     // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
@@ -5300,12 +5440,25 @@ fn apply_once(
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != applied_m1_revision)))
-        || loaded.meta.soft_refresh_pending
-        || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired);
+        || (loaded.meta.soft_refresh_pending && !signed_prefix_hold)
+        || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired)
+        // An active signed turn keeps the optional m0/m1 rebuilds above disabled, but a pass
+        // whose head cannot be replayed, or whose provider cache already expired, is a full
+        // cache write like any other: queued work is applied on it, to blocks after the kept
+        // signed thinking only (`active_thinking_prefix_edit_ids`). On the expired pass the
+        // head itself still replays (`signed_head_frozen`).
+        || (protected_signed_prefix
+            && (head_rebuild_forced
+                || (!req.is_subagent && scheduler_outcome.idle_ttl_fired)));
+    // A subagent's only permission to apply queued drops and cleanup is a non-Defer scheduler
+    // decision. A signed-prefix hold withholds it exactly as a scheduler Defer would, so a
+    // held subagent pass also replays its previous bytes.
+    let subagent_execute_permitted =
+        !signed_prefix_hold && scheduler_outcome.pass != scheduler::PassDecision::Defer;
     let supersession_ride_available = independent_rebuild
         // Subagents cannot fold history. Execute is their one shared permission
         // for queued drops and automatic cleanup, not a request to change bytes.
-        || (req.is_subagent && scheduler_outcome.pass.canonical_decision() == "execute")
+        || (req.is_subagent && subagent_execute_permitted)
         || force_episode_available
             || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
     let pass_already_busting = supersession_ride_available;
@@ -5347,7 +5500,11 @@ fn apply_once(
                 || render_config_changed
                 || reconcile_hard_due
                 || hard_fold_prices_mutations
-                || cached_m1_missing_due,
+                || cached_m1_missing_due
+                // A lineage descent or discarded cache sections force a HARD even when the
+                // scheduler defers. Queued work is selected now so it is applied in that same
+                // cache rewrite instead of costing a second one later.
+                || lineage_state.force_hard,
         );
     // Keep selection deferred when the producer gate blocks it.
     // An execute selection class still needs the separate ride permission above
@@ -5415,7 +5572,7 @@ fn apply_once(
                 .map(|block| block.id.clone())
         })
         .collect::<HashSet<_>>();
-    exempt_message_protected_block_ids.extend(active_thinking_prefix_edit_ids(&loaded.core, req));
+    exempt_message_protected_block_ids.extend(active_thinking_prefix_edit_ids(planning_core, req));
     let mut protected_block_ids = tag_window_protected_block_ids
         .union(&exempt_message_protected_block_ids)
         .cloned()
@@ -5527,7 +5684,10 @@ fn apply_once(
     // It does not mean this request is already rewriting the cached prefix: pending m1
     // publications still need Execute or an independently authorized repair/force/flush.
     let independent_bust_opportunity = supersession_ride_available;
-    let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
+    // A selected reduction is pending work, not a permission: under a signed-prefix hold it
+    // does not open a rewrite and stays pending.
+    let bust_opportunity =
+        independent_bust_opportunity || (reductions_pending_now && !signed_prefix_hold);
     // Discover non-tool lanes before classification: a force batch containing only
     // text compression or strip work must not need a tool drop to open its own gate.
     let non_tool_bust_opportunity = bust_opportunity
@@ -5540,7 +5700,7 @@ fn apply_once(
         .max()
         .unwrap_or(0);
     let planned_caveman_units = new_caveman_units(
-        &loaded.core,
+        planning_core,
         req,
         CavemanTagState {
             rows: &tag_rows,
@@ -5564,8 +5724,8 @@ fn apply_once(
         &loaded.core,
         reasoning_scope,
     );
-    let planned_strip_units = new_frozen_strip_units(
-        &loaded.core,
+    let mut planned_strip_units = new_frozen_strip_units(
+        planning_core,
         req,
         &tag_numbers,
         planned_reasoning_cutoff,
@@ -5580,6 +5740,7 @@ fn apply_once(
         },
         &selection_outcome.protected_tool_block_ids,
     );
+    planned_strip_units.extend(signed_thinking_reset_units.iter().cloned());
     let reclaim_pending_now = reductions_pending_now
         || !planned_caveman_units.is_empty()
         || !planned_strip_units.is_empty()
@@ -5595,9 +5756,17 @@ fn apply_once(
         render_config_changed,
         hard_fold_requested,
         boundary_present,
-        reconcile_pending: loaded.core.reconcile_pending,
-        m1_revision_changed: current_m1_digest != applied_m1_revision
-            || loaded.meta.soft_refresh_pending
+        // A frozen signed head never takes the reconcile HARD that `classify` gives a pending
+        // reconcile whose boundary is absent. The pass defers instead (`step_defer` with the
+        // boundary absent), and reconcile_pending stays set until the turn ends.
+        reconcile_pending: loaded.core.reconcile_pending
+            && !(signed_head_frozen && !boundary_present),
+        // While the signed head is frozen, m1 replays unchanged too, so neither a changed m1
+        // digest nor a pending explicit refresh counts as an m1 change until the turn ends.
+        // Pending todo injection still counts: the synthetic todo pair is placed after the
+        // latest assistant message, outside the frozen head.
+        m1_revision_changed: (!signed_head_frozen
+            && (current_m1_digest != applied_m1_revision || loaded.meta.soft_refresh_pending))
             || todo_injection_pending,
         reductions_pending: reclaim_pending_now,
         // Todo state is deferred work, not an independent bust. It may join
@@ -5623,9 +5792,9 @@ fn apply_once(
         // Spend that one intentional rewrite now, so old blocks do not acquire tags
         // piecemeal during later defers. Ordinary late mints still wait for an
         // independent Soft pass selected by the scheduler.
-        plan = if surface_transition
-            || !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer)
-        {
+        // A subagent under the signed-prefix hold defers this transition until the hold lifts:
+        // tagging old blocks would edit content before its kept signed thinking.
+        plan = if (surface_transition && !signed_prefix_hold) || subagent_execute_permitted {
             PassPlan::Soft
         } else {
             PassPlan::Defer
@@ -5635,6 +5804,11 @@ fn apply_once(
     }
     if cache_sections_discarded {
         plan = PassPlan::Hard;
+    }
+    // A signed-thinking reset changes the served thinking by construction, so its strip
+    // units must be committed and served: it is never a Defer.
+    if signed_thinking_reset && matches!(plan, PassPlan::Defer) && !loaded.core.reconcile_pending {
+        plan = PassPlan::Soft;
     }
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
         plan,
@@ -5649,9 +5823,9 @@ fn apply_once(
         ttl_expired: scheduler_outcome.idle_ttl_fired,
         coverage_fold_due: system_absorb_hard_due,
         reconcile_hard_due,
-        coverage_delta: compartment_seq_changed_since_meta,
-        m1_delta: current_m1_digest != applied_m1_revision,
-        explicit_flush: loaded.meta.soft_refresh_pending,
+        coverage_delta: compartment_seq_changed_since_meta && !signed_head_frozen,
+        m1_delta: current_m1_digest != applied_m1_revision && !signed_head_frozen,
+        explicit_flush: loaded.meta.soft_refresh_pending && !signed_head_frozen,
         reductions_pending: reclaim_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
@@ -5786,7 +5960,11 @@ fn apply_once(
     );
     timings.ingress_meta = elapsed_ms(ingress_meta_started_at);
     meta.cc_u1_active = cc_u1_active;
-    meta.tagging_surface_active = tagging_surface_requested;
+    // A held subagent keeps its tag-surface transition pending (see the plan override above),
+    // so the release pass still sees it and spends it as one rewrite.
+    if !(req.is_subagent && signed_prefix_hold && surface_transition) {
+        meta.tagging_surface_active = tagging_surface_requested;
+    }
     if cc_u1_active {
         meta.last_serializer_profile = req.serializer_profile.clone();
     }
@@ -6008,7 +6186,9 @@ fn apply_once(
             .is_none_or(|date| *date == loaded.meta.guidance_date)
         && !releases_native_reasoning_keep
         && !applies_held_system_strip;
-    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved {
+    // Clear a pending explicit flush only when this pass refreshed m1. A frozen signed head
+    // replays m1 unchanged, so the flush stays pending for the first pass after the turn.
+    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved && !signed_head_frozen {
         meta.soft_refresh_pending = false;
     }
     if is_bust_pass {
@@ -6037,17 +6217,21 @@ fn apply_once(
     let mut committed_mural_hash = persisted_mural_hash;
 
     if req.is_subagent {
-        if !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
+        if subagent_execute_permitted || signed_thinking_reset {
+            let mut rendered_units = new_reduction_units(
+                &core,
+                &selected_reductions,
+                &live,
+                None,
+                suppress_bootstrap_reduction_tag_overlay,
+            );
+            // A subagent's only strip units: a signed-thinking reset's removals, which its
+            // output replays on every later pass like a primary's.
+            rendered_units.extend(signed_thinking_reset_units.iter().cloned());
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
                 boundary_present: boundary_token,
-                rendered_units: new_reduction_units(
-                    &core,
-                    &selected_reductions,
-                    &live,
-                    None,
-                    suppress_bootstrap_reduction_tag_overlay,
-                ),
+                rendered_units,
                 new_boundary_id: None,
                 queued: Vec::new(),
                 run_started: false,
@@ -6389,6 +6573,29 @@ fn apply_once(
 
                 meta.project_memory_epoch_pending = false;
                 meta.m1_pending_since_ms = None;
+            }
+            PassPlan::Soft if signed_head_frozen => {
+                // A frozen signed head: m0/m1 replay unchanged (no m1 recompose, no coverage
+                // advance, no pressure refold), and only the tail units this pass priced are
+                // added. The m1 delta and coverage stay pending for the first pass after the
+                // turn.
+                let mut rendered = new_reduction_units(
+                    &core,
+                    &selected_reductions,
+                    &live,
+                    loaded.meta.coverage_ordinal,
+                    suppress_bootstrap_reduction_tag_overlay,
+                );
+                rendered.extend(new_strip_units.clone());
+                rendered.extend(new_caveman_units.clone());
+                core.step(PassInput {
+                    proposed: Some(mc_core::Action::Soft),
+                    boundary_present: boundary_token,
+                    rendered_units: rendered,
+                    new_boundary_id: None,
+                    queued: Vec::new(),
+                    run_started: false,
+                });
             }
             PassPlan::Soft => {
                 meta.memory_disabled = !ctx.memory_enabled;
@@ -7533,6 +7740,62 @@ fn apply_once(
             return Err(TransformError::ProtectedToolResultsOverLimit);
         }
     }
+    // A head that could not be replayed was rebuilt inside an open signed turn. Every signed
+    // thinking block after it is bound to the head bytes last served, so compare the rebuilt
+    // head with the durable fingerprint of that serve (stored apart from the frozen cache,
+    // which may be the part that was lost). If they differ, or the last serve is unknown,
+    // retry as a signed-thinking reset, which strips them all and lands the queued work in
+    // this pass. An unknown last serve is a conservative repair, logged as such.
+    if protected_signed_prefix && !req.is_subagent && !signed_head_frozen && !signed_thinking_reset
+    {
+        let reason = if loaded.meta.served_output_fingerprint.is_empty() {
+            Some("unknown_prefix")
+        } else if served_head_fingerprint(&loaded.meta.served_output_fingerprint)
+            != served_head_fingerprint(&served_output_fingerprints(
+                &ck_messages,
+                &frame_block_stems,
+            ))
+        {
+            Some("head_changed")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            tracing::info!(
+                "mc-module: [{}] signed thinking reset reason={reason}",
+                req.session_id
+            );
+            return Err(TransformError::SignedThinkingReset);
+        }
+    }
+    // Fit or refuse inside an open signed turn near the context limit (the force band or the
+    // 95% emergency). Thinking-prefix protection keeps
+    // every block before the turn's kept signed thinking unchanged, so in a long signed tool
+    // loop the reclaimable output can all sit behind it and the request stays over the
+    // window. Stripping all signed thinking is valid under strict binding and lifts that
+    // protection, so such a pass is retried as a signed-thinking reset; if even the reset
+    // pass cannot fit, it is refused rather than sent. The served estimate is a lower bound
+    // on the request, and only trusted final-wire evidence of non-fit near the wall arms the
+    // check. Subagents take the same reset through their reductions-only branch.
+    if protected_signed_prefix
+        && (force_band_active || scheduler_outcome.pass == scheduler::PassDecision::Emergency95)
+        && hard_context_limit_tokens > 0.0
+        // The host's trusted final-wire count for this request's input must itself be over
+        // the window. If that count fits, no reset is needed: the transform only removes
+        // content from what the host measured.
+        && req.usage.as_ref().is_some_and(|usage| {
+            usage.final_wire_trusted
+                && usage.final_wire_input_tokens as f64 > hard_context_limit_tokens
+        })
+        && served_text_token_lower_bound(&ck_messages, estimate_tokens) as f64
+            > hard_context_limit_tokens
+    {
+        return Err(if signed_thinking_reset {
+            TransformError::SignedTurnOverLimit
+        } else {
+            TransformError::SignedThinkingReset
+        });
+    }
     let first_applied_command_ids =
         first_applied_pending_command_ids(&pending_agent_drops, &loaded.core, &core);
     let frozen_reductions_before = frozen_red_targets(&loaded.core);
@@ -7721,8 +7984,10 @@ fn apply_once(
             ),
             first_divergence,
             reasoning_trim_only: reasoning_trim_only_candidate
+                && !signed_thinking_reset
                 && !minted_reasoning_clear_units
                 && healed_trailing_blank_ids.is_empty(),
+            signed_thinking_reset: signed_thinking_reset && is_provider_prefix_mutation_pass,
             timings: Some(timings),
             boundary_id: core.boundary_id.clone(),
             reconcile_pending: core.reconcile_pending,
@@ -15245,6 +15510,50 @@ fn output_trailing_blank_decision(
     } else {
         None
     }
+}
+
+/// The served synthetic m0/m1 head blocks of an output fingerprint, in served order.
+fn served_head_fingerprint(fingerprints: &[ServedBlockFingerprint]) -> Vec<(&str, &str)> {
+    fingerprints
+        .iter()
+        .filter(|fingerprint| {
+            fingerprint
+                .block_id
+                .strip_prefix(M0_ID)
+                .or_else(|| fingerprint.block_id.strip_prefix(M1_ID))
+                .is_some_and(|rest| rest.starts_with('#'))
+        })
+        .map(|fingerprint| {
+            (
+                fingerprint.block_id.as_str(),
+                fingerprint.content_hash.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Estimated tokens of what the served messages carry: text, reasoning text, text tool
+/// output and serialized tool-call arguments. Envelopes, media, the system prompt and tool
+/// schemas are left out, so this is a lower bound on the provider request.
+fn served_text_token_lower_bound(
+    messages: &[ServedMessage],
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> usize {
+    messages
+        .iter()
+        .flat_map(|served| served.message.content.iter())
+        .map(|block| match &block.kind {
+            ck_wire::CkKind::Text { text } | ck_wire::CkKind::Reasoning { text, .. } => {
+                estimate_tokens(text)
+            }
+            ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
+                ck_wire::CkOutputKind::Text { text } => estimate_tokens(text),
+                _ => 0,
+            },
+            ck_wire::CkKind::ToolCall { input, .. } => estimate_tokens(&input.to_string()),
+            _ => 0,
+        })
+        .sum()
 }
 
 struct BuiltOutput {
@@ -30589,6 +30898,10 @@ pub(crate) mod tests {
 
     include!("transform/reasoning_clear_tests.rs");
     include!("transform/reasoning_clear_gate_tests.rs");
+    include!("tests/signed_prefix_hold.rs");
+    include!("tests/signed_prefix_hold_review.rs");
+    include!("tests/signed_prefix_hold_review_r2.rs");
+    include!("tests/signed_prefix_hold_review_r3.rs");
 
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {
