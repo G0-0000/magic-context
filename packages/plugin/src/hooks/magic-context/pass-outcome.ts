@@ -49,6 +49,7 @@ export const PASS_DEGRADATION_EFFECTS = {
     "auto-search-timeout": "served",
     "auto-search-search-failure": "served",
     "auto-search-cas-exhaustion": "served",
+    "auto-search-storage-busy": "served",
     // Persisted hints already replayed from the snapshot before the runner.
     // Failure to append an optional fresh-tail hint leaves managed history intact.
     "auto-search-internal-failure": "served",

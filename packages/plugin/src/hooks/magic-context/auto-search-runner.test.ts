@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as embedding from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import * as storageMeta from "../../features/magic-context/storage-meta-persisted";
 import { getAutoSearchHintDecisions } from "../../features/magic-context/storage-meta-persisted";
 import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { Database } from "../../shared/sqlite";
@@ -98,6 +99,60 @@ for (const host of ["opencode", "opencode2"] as const) {
             );
             expect(search).toHaveBeenCalledTimes(3);
         } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+            fixture.close();
+        }
+    });
+    test(`a busy store while saving the decision serves the turn plain instead of refusing it ${host}`, async () => {
+        const fixture = createAutoSearchReplayFixture(host, "busy-decision-save");
+        const { sessionId, projectPath } = fixture;
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot(projectPath),
+        );
+        const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([replayHint]);
+        const busy = Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        const append = spyOn(storageMeta, "appendAutoSearchHintDecision").mockImplementationOnce(
+            () => {
+                throw busy;
+            },
+        );
+        const options = {
+            enabled: true,
+            projectPath,
+            scoreThreshold: 0.6,
+            minPromptChars: 12,
+            memoryEnabled: true,
+            embeddingEnabled: false,
+        };
+        const invoke = async () => {
+            const messages = [makeUserMsg("busy", replayPrompt)];
+            const outcome = await runAutoSearchHint({
+                db: fixture.db,
+                sessionId,
+                messages,
+                options,
+            });
+            return { bytes: JSON.stringify(messages[0]), outcome };
+        };
+        try {
+            // Saving the auto-search decision hits a locked store. The pass still returns
+            // the message, without a hint, and remembers the omission for a later save.
+            const first = await invoke();
+            expect(first.outcome).toEqual({ ok: false, kind: "storage-busy" });
+            expect(first.bytes).not.toContain("<ctx-search-hint>");
+            expect(getUnpublishedAutoSearchNoHint(sessionId, "busy")).toBe("error");
+            // The next pass saves the served omission and keeps the bytes, even though
+            // search would now return a hint.
+            const second = await invoke();
+            expect(second.bytes).toBe(first.bytes);
+            expect(getUnpublishedAutoSearchNoHint(sessionId, "busy")).toBeUndefined();
+            expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([
+                { messageId: "busy", decision: "no-hint", reason: "error" },
+            ]);
+            expect(search).toHaveBeenCalledTimes(1);
+        } finally {
+            append.mockRestore();
             search.mockRestore();
             snapshot.mockRestore();
             fixture.close();

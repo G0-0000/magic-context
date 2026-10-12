@@ -60,7 +60,7 @@ import type { MessageLike } from "./transform-operations";
 
 export type AutoSearchOutcome =
     | { ok: true }
-    | { ok: false; kind: "timeout" | "search-failure" | "cas-exhaustion" };
+    | { ok: false; kind: "timeout" | "search-failure" | "cas-exhaustion" | "storage-busy" };
 
 const AUTO_SEARCH_OK: AutoSearchOutcome = { ok: true };
 
@@ -300,7 +300,11 @@ export async function runAutoSearchHint(args: {
                     void persistAutoSearchSkip(db, sessionId, userMsgId);
                     return { ok: false, kind: "timeout" };
                 }
-                if (!outcome.ok) return { ok: false, kind: "cas-exhaustion" };
+                if (!outcome.ok)
+                    return {
+                        ok: false,
+                        kind: outcome.kind === "storage-busy" ? "storage-busy" : "cas-exhaustion",
+                    };
                 if (outcome.kind === "already-present" && outcome.decision.decision === "hint") {
                     appendReminderToUserMessageById(messages, userMsgId, outcome.decision.text);
                 }
@@ -427,6 +431,7 @@ export async function runAutoSearchHint(args: {
                     return { ok: false, kind: "timeout" };
                 }
                 if (!outcome.ok) {
+                    if (outcome.kind === "storage-busy") return { ok: false, kind: "storage-busy" };
                     sessionLog(
                         sessionId,
                         `auto-search: CAS exhausted for ${userMsgId}; skipping wire append`,

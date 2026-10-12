@@ -130,7 +130,7 @@ export type NoteNudgeDeliveryOutcome =
 export type AppendAutoSearchHintOutcome =
     | { ok: true; kind: "appended"; decision: AutoSearchHintDecision }
     | { ok: true; kind: "already-present"; decision: AutoSearchHintDecision }
-    | { ok: false; kind: "cas-exhausted" };
+    | { ok: false; kind: "cas-exhausted" | "storage-busy" };
 
 export interface PersistedTodoSyntheticAnchor {
     callId: string;

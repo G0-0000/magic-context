@@ -61,6 +61,7 @@ describe("pass degradation sites", () => {
             "auto-search-cas-exhaustion",
             "auto-search-internal-failure",
             "auto-search-search-failure",
+            "auto-search-storage-busy",
             "auto-search-timeout",
             "compartment-trigger-failure",
             "invalid-cache-ttl-fallback",

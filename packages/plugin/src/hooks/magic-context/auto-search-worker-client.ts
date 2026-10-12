@@ -25,7 +25,12 @@ import {
 import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
-import { assertTransformWrite, type Database, getSqliteDatabasePath } from "../../shared/sqlite";
+import {
+    assertTransformWrite,
+    type Database,
+    getSqliteDatabasePath,
+    isTransientSqliteError,
+} from "../../shared/sqlite";
 import { AUTO_SEARCH_TIMEOUT_MS, autoSearchDeadlineUnixMs } from "./auto-search-deadline";
 
 const pendingRegistrations = new WeakMap<Database, Set<string>>();
@@ -123,7 +128,15 @@ export function persistAutoSearchDecision(
             decision.messageId,
             decision.decision === "no-hint" ? decision.reason : "error",
         );
-        throw error;
+        // A locked store must not refuse the turn over this bookkeeping write.
+        // The message is now remembered as served without a hint, so this pass
+        // serves it plain and a later pass retries the save before any search
+        // could add a hint to bytes the provider has already cached.
+        if (!isTransientSqliteError(error)) throw error;
+        log(
+            `[auto-search] decision save hit a busy store for session ${sessionId}; serving without a hint and retrying the save on a later pass: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { ok: false, kind: "storage-busy" };
     }
     if (!outcome.ok) {
         assertTransformWrite();
