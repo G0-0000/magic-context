@@ -75,6 +75,7 @@ import { isEditTool } from "./edit-marker";
 import { invalidateAutoEmbedSession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
+    ENGINE_BUSY_USER_MESSAGE,
     ENGINE_RECONNECTING_USER_MESSAGE,
 } from "./emergency-fail-closed";
 import {
@@ -221,6 +222,19 @@ class FrozenReplayOverProvenLimitRefusal extends Error {
 type FrozenFit = "under" | "over" | "unproven";
 
 export const RUST_FAILURE_PARK_THRESHOLD = 3;
+/**
+ * Error code for a transform whose final page the plugin stopped waiting for. The
+ * module keeps applying such a page after the plugin's deadline and may still commit
+ * it, so the pass may not fall back to raw history.
+ */
+export const TRANSFORM_FINAL_PAGE_ABANDONED_CODE = "transform_final_page_abandoned";
+/**
+ * Module error code for a transform refused because another transform of the same
+ * session is still pending there (its pages still arriving, or its final page still
+ * being applied). The plugin sends one transform per session at a time, so the pending
+ * one is a transform an earlier pass of this plugin stopped waiting for.
+ */
+const TRANSFORM_PAGE_IN_PROGRESS_CODE = "authority_transform_page_in_progress";
 export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
@@ -546,6 +560,17 @@ function moduleFailureCode(error: unknown): string | null {
 
 function isNonRetryableStateSyncFailure(error: unknown): boolean {
     return moduleFailureCode(error) === "state_sync_non_retryable";
+}
+
+/**
+ * True when a transform of this session that the plugin stopped waiting for may still
+ * be running in the module: either this pass gave up on its own final page, or the
+ * module refused this pass because such a transform is still pending there. Only the
+ * second proves the module is connected.
+ */
+function isModuleBusyWithAbandonedTransform(error: unknown): boolean {
+    const code = moduleFailureCode(error);
+    return code === TRANSFORM_FINAL_PAGE_ABANDONED_CODE || code === TRANSFORM_PAGE_IN_PROGRESS_CODE;
 }
 
 /**
@@ -1923,21 +1948,33 @@ export function createRustModeTransform(
                     "rust transform deadline: waiting up to 45000ms for identical final-page completion",
                 );
                 const completionDeadline = clock.now() + 45_000;
+                // Past this budget the plugin gives the final page up while the module
+                // may still be applying it and may still commit it. The error says so
+                // by code: the pass then must not send raw history, and the next pass's
+                // "in progress" refusal is known to be this page, not a module fault.
+                const abandoned = (cause: unknown) =>
+                    Object.assign(new Error(timeoutError.message, { cause }), {
+                        code: TRANSFORM_FINAL_PAGE_ABANDONED_CODE,
+                    });
                 for (;;) {
                     const remaining = completionDeadline - clock.now();
-                    if (remaining <= 0) throw timeoutError;
+                    if (remaining <= 0) throw abandoned(timeoutError);
                     try {
                         return await callModule(args, remaining, false);
                     } catch (retryError) {
-                        if (
-                            moduleFailureCode(retryError) !== "authority_transform_page_in_progress"
-                        )
+                        if (moduleFailureCode(retryError) !== TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+                            if (
+                                retryError instanceof Error &&
+                                /timed out|deadline/i.test(retryError.message)
+                            )
+                                throw abandoned(retryError);
                             throw retryError;
+                        }
                         // The original execution is still applying. Re-submit only
                         // its identical final page after yielding, until its cached
                         // committed result is available or this one budget expires.
                         const wait = Math.min(250, completionDeadline - clock.now());
-                        if (wait <= 0) throw timeoutError;
+                        if (wait <= 0) throw abandoned(retryError);
                         await new Promise<void>((resolve) => clock.setTimeout(resolve, wait));
                     }
                 }
@@ -2011,6 +2048,25 @@ export function createRustModeTransform(
     };
 
     const markFailure = (sessionId: string, state: RustSessionState, error: unknown): void => {
+        if (isModuleBusyWithAbandonedTransform(error)) {
+            // The module may still commit the abandoned transform, which moves the
+            // state a tail delta would build on, so the next pass sends complete arrays.
+            state.forceFullWire = true;
+        }
+        if (moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+            // The module answered: it is still applying a transform of this session that
+            // an earlier pass stopped waiting for. That is not a module failure, so it
+            // leaves consecutiveFailures (the parking counter) alone and shows no
+            // reconnecting notice. failureCount is only the lifetime tally of failed
+            // passes, which this pass still is.
+            state.failureCount += 1;
+            sessionLog(
+                sessionId,
+                "rust transform deferred; the module is still applying an earlier transform of this session; attempting LKG replay:",
+                error,
+            );
+            return;
+        }
         state.consecutiveFailures = isNonRetryableStateSyncFailure(error)
             ? Math.max(RUST_FAILURE_PARK_THRESHOLD, state.consecutiveFailures + 1)
             : state.consecutiveFailures + 1;
@@ -2646,6 +2702,18 @@ export function createRustModeTransform(
             // compaction is disabled; only a verified last-good replay may continue.
             if (moduleFailureCode(cause) === "transform_transport_interrupted") {
                 throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, { cause });
+            }
+            // A transform the module may still commit cannot authorize unmanaged history
+            // either. When the module itself refused this pass as busy it is connected,
+            // so the refusal says so; a page this pass gave up on may also mean the
+            // module stopped answering, which is the reconnecting case.
+            if (isModuleBusyWithAbandonedTransform(cause)) {
+                throw new EmergencyFailClosedError(
+                    moduleFailureCode(cause) === TRANSFORM_PAGE_IN_PROGRESS_CODE
+                        ? ENGINE_BUSY_USER_MESSAGE
+                        : ENGINE_RECONNECTING_USER_MESSAGE,
+                    { cause },
+                );
             }
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
                 throw new StorageBusyRefusalError(cause, "rust-mode-transform");
@@ -4844,6 +4912,14 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "mc_rust_emergency_refusal before_lkg");
                 markFailure(sessionId, state, error);
                 finishPass(false, false);
+                if (moduleFailureCode(error) === TRANSFORM_PAGE_IN_PROGRESS_CODE) {
+                    // The module answered that it is busy, so there is no reconnect to
+                    // wait for: the refusal names the real state and arms no reconnect
+                    // recovery.
+                    throw new EmergencyFailClosedError(ENGINE_BUSY_USER_MESSAGE, {
+                        cause: error,
+                    });
+                }
                 const refusedUser = newestUserMessage(messages);
                 const refusedUserMessageId = refusedUser ? messageIdOf(refusedUser) : null;
                 if (refusedUserMessageId) {

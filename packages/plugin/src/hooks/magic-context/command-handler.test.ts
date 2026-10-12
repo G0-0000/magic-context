@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { CANONICAL_DREAM_TASKS } from "../../features/magic-context/dreamer/task-registry";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { resolveHistorianModel } from "../../shared/model-resolution";
 import {
     __resetNotificationStateForTests,
     drainNotifications,
@@ -13,6 +14,7 @@ import type { StatusDetail } from "../../shared/rpc-types";
 import { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
+import { rustHistorianChainFields } from "./rust-mode-transform";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
@@ -1053,6 +1055,74 @@ describe("createMagicContextCommandHandler", () => {
                 expect.stringContaining("Wrapped up."),
                 {},
             );
+        });
+
+        it("sends the historian chain from the current config with each Rust wrapup", async () => {
+            const moduleCall = mock(
+                async (_args: { method: string; body: Record<string, unknown> }) => ({
+                    disposition: "completed",
+                    rounds: 1,
+                    summary: "Wrapped up.",
+                }),
+            );
+            // The config is read on every wrapup, as the hook does, so an edit made
+            // after the session's last completed transform still reaches the module.
+            let config: Record<string, unknown> = {
+                historian: { opencode: { model: "anthropic/claude-haiku-4-5" } },
+            };
+            const handler = createMagicContextCommandHandler({
+                db,
+                transformMode: "rust",
+                rustModeModuleClient: { call: moduleCall },
+                sendNotification: mock(async () => {}),
+                resolveRustHistorianChain: () => {
+                    const models = resolveHistorianModel(config, "opencode");
+                    return rustHistorianChainFields({
+                        historianModel: models.primary,
+                        fallbackModels: models.fallbacks,
+                    });
+                },
+            });
+            const wrapup = () =>
+                expectSentinel(
+                    handler["command.execute.before"](
+                        { command: "ctx-wrapup", sessionID: "ses-rust-chain", arguments: "" },
+                        makeOutput(""),
+                        {},
+                    ),
+                    "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
+                );
+
+            await wrapup();
+            config = {
+                historian: {
+                    opencode: {
+                        model: "anthropic/claude-sonnet-5-5",
+                        variant: "medium",
+                        fallback_models: ["google/gemini-3-flash"],
+                    },
+                },
+            };
+            await wrapup();
+
+            const bodies = moduleCall.mock.calls.map(([args]) => args.body);
+            expect(bodies).toHaveLength(2);
+            expect(bodies[0]?.historian_model_chain).toEqual(["anthropic/claude-haiku-4-5"]);
+            expect(bodies[0]?.historian_model_variants).toEqual({});
+            expect(bodies[1]?.historian_model_chain).toEqual([
+                "anthropic/claude-sonnet-5-5",
+                "google/gemini-3-flash",
+            ]);
+            expect(bodies[1]?.historian_model_variants).toEqual({
+                "anthropic/claude-sonnet-5-5": "medium",
+            });
+            expect(Object.keys(bodies[1]?.historian_model_limits as object)).toEqual([
+                "anthropic/claude-sonnet-5-5",
+                "google/gemini-3-flash",
+            ]);
+            // The chain rides beside the wrapup's own fields, which it never replaces.
+            expect(bodies[1]?.method).toBe("session.wrapup");
+            expect(bodies[1]?.session_id).toBe("ses-rust-chain");
         });
 
         it("refuses Rust partial recomp without touching either authority store", async () => {

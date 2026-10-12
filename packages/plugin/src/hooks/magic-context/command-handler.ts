@@ -845,6 +845,18 @@ export function createMagicContextCommandHandler(deps: {
                             },
                             MAX_WRAPUP_REQUEST_BUDGET_MS,
                         );
+                        if (
+                            value.disposition !== "completed" &&
+                            value.disposition !== "nothing_to_compact"
+                        ) {
+                            // The user sees one generic line for every retryable reason
+                            // (a transform still applying, a historian failure backoff, a
+                            // spent budget); the log keeps which one it was.
+                            sessionLog(
+                                sessionId,
+                                `ctx-wrapup not completed disposition=${String(value.disposition)} reason=${String(value.reason ?? "none")} summary=${JSON.stringify(value.summary ?? "")}`,
+                            );
+                        }
                         result = formatRustOperationMessage("wrapup", value);
                     } catch (error) {
                         sessionLog(

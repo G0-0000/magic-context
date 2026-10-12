@@ -9057,6 +9057,17 @@ impl McHandler {
                 }
             },
         };
+        // Validated with the other request fields, so a malformed chain is refused before
+        // the wrapup claims the session or reports a retryable state such as a backoff.
+        let historian_overrides = match wrapup_historian_overrides(request) {
+            Ok(overrides) => overrides,
+            Err(message) => {
+                return HandlerOutcome::Error {
+                    code: "bad_request".to_string(),
+                    message,
+                };
+            }
+        };
 
         // The module owns the only store writer, so a process-local per-session latch is
         // sufficient to prevent duplicate producer drives. Durable historian state still
@@ -9123,23 +9134,17 @@ impl McHandler {
                 );
             }
         };
-        let parsed = match wrapup_historian_overrides(request) {
-            Ok(None) => Arc::clone(&ready.request),
+        let parsed = match historian_overrides {
+            None => Arc::clone(&ready.request),
             // The snapshot's chain is whatever the last completed transform carried. A
             // session whose passes have been failing keeps an old chain, so the host
             // sends the chain resolved from the current config with the wrapup itself.
-            Ok(Some(overrides)) => {
+            Some(overrides) => {
                 let mut request = (*ready.request).clone();
                 request.historian_model_chain = Some(overrides.chain);
                 request.historian_model_limits = overrides.limits;
                 request.historian_model_variants = overrides.variants;
                 Arc::new(request)
-            }
-            Err(message) => {
-                return HandlerOutcome::Error {
-                    code: "bad_request".to_string(),
-                    message,
-                };
             }
         };
         let initial_snapshot = match store.load_historian_assembly_snapshot(&session_id) {
@@ -35792,6 +35797,97 @@ mod tests {
             "{response}"
         );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// The chain a wrapup request carries is the host's current config. It replaces the
+    /// chain cached from the session's last completed transform, which goes stale while
+    /// that session's passes keep failing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_wrapup_request_chain_overrides_the_snapshot_chain() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_snapshot(
+            &handler,
+            "ses",
+            wrapup_messages(80, 800),
+            200_000,
+            Some(vec!["test/stale-snapshot-model".to_string()]),
+        );
+        let response = tool_body(
+            handler
+                .dispatch_value(
+                    7,
+                    json!({
+                        "method": "session.wrapup",
+                        "v": 1,
+                        "session_id": "ses",
+                        "historian_model_chain": ["test/live-config-model", "test/live-fallback"],
+                        "historian_model_limits": {
+                            "test/live-config-model": { "context": 200_000 }
+                        },
+                        "historian_model_variants": { "test/live-config-model": "medium" }
+                    }),
+                )
+                .await,
+        );
+
+        assert_eq!(response["ok"], json!(true), "{response}");
+        assert_eq!(response["disposition"], json!("completed"), "{response}");
+        let models = producer.models.lock().expect("models mutex").clone();
+        assert!(!models.is_empty(), "the wrapup must reach the producer");
+        assert!(
+            models.iter().all(|model| model == "test/live-config-model"),
+            "every round runs on the request's head model, never the snapshot's: {models:?}"
+        );
+        let variants = producer.variants.lock().expect("variants mutex").clone();
+        assert_eq!(
+            variants.len(),
+            models.len(),
+            "every start names its variant: {variants:?}"
+        );
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant.as_deref() == Some("medium")),
+            "the request's variant rides with its model: {variants:?}"
+        );
+    }
+
+    /// A chain field of the wrong shape is a malformed request, not a reason to fall back
+    /// to the snapshot's chain.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_wrapup_malformed_request_chain_is_bad_request() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        cache_wrapup_messages(&handler, wrapup_messages(80, 800));
+        for (field, value) in [
+            ("historian_model_chain", json!("test/live-config-model")),
+            ("historian_model_chain", json!(["test/model", 7])),
+            ("historian_model_limits", json!(["not", "a", "map"])),
+            ("historian_model_variants", json!({ "test/model": 3 })),
+        ] {
+            let mut request = json!({
+                "method": "session.wrapup",
+                "v": 1,
+                "session_id": "ses",
+                "historian_model_chain": ["test/model"],
+            });
+            request[field] = value.clone();
+            match handler.dispatch_value(7, request).await {
+                HandlerOutcome::Error { code, message } => {
+                    assert_eq!(code, "bad_request", "{field}={value}: {message}");
+                    assert!(message.contains(field), "{field}={value}: {message}");
+                }
+                other => panic!("{field}={value} must be a bad request, got {other:?}"),
+            }
+        }
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(
+            !handler.wrapup_active("ses"),
+            "a refused request leaves no wrapup claim behind"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
