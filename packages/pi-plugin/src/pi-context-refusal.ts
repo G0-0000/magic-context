@@ -190,9 +190,7 @@ export function registerPiGuardedContext(
 		budget.abandoned = true;
 		budget.recovery =
 			budget.recovery === "not attempted"
-				? reason instanceof PiContextSupersededError
-					? "superseded context result; refused"
-					: "no managed result; refused"
+				? "no managed result; refused"
 				: budget.recovery;
 		const identityConflict = findPiTagIdentityConflict(reason);
 		const message = identityConflict
@@ -292,6 +290,7 @@ export function registerPiGuardedContext(
 			const capture = isOmpUnmanagedCaptureRequest(payload);
 			const budget =
 				(capture ? undefined : active.pass) ?? new PiContextBudget();
+			let refusalOrigin: "agent_end" | undefined;
 			try {
 				if (capture)
 					throw new Error(
@@ -313,10 +312,12 @@ export function registerPiGuardedContext(
 					throw new PiContextDeadlineError(budget.diagnostic());
 				// A context result completed before the preparation deadline remains
 				// valid on provider retries until refusal or the end of its own run.
-				if (active.ended)
+				if (active.ended) {
+					refusalOrigin = "agent_end";
 					throw new Error(
 						"the run that owned the latest context pass has ended; no managed result for this request",
 					);
+				}
 				if (
 					!budget.completed ||
 					!active.ready ||
@@ -329,10 +330,9 @@ export function registerPiGuardedContext(
 				active.refused = true;
 				// Report what invalidated the prepared result and the last preparation
 				// stage it reached, rather than blaming a writer lock during dispatch.
-				budget.stage =
-					error instanceof PiContextSupersededError
-						? `provider dispatch (origin=${error.origin}; context stage=${budget.stage})`
-						: "provider dispatch";
+				budget.stage = refusalOrigin
+					? `provider dispatch (origin=${refusalOrigin}; context stage=${budget.stage})`
+					: "provider dispatch";
 				refuse(ctx, budget, error, isCurrent);
 			}
 		});
