@@ -30507,6 +30507,7 @@ pub(crate) mod tests {
     include!("transform/reasoning_clear_tests.rs");
     include!("transform/reasoning_clear_gate_tests.rs");
     include!("tests/signed_prefix_hold.rs");
+    include!("tests/signed_prefix_hold_review.rs");
 
     #[test]
     fn reasoning_cutoff_batches_on_one_fold_and_survives_restart() {
