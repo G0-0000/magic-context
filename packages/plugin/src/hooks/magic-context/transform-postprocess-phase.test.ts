@@ -12232,3 +12232,165 @@ describe("active-thinking shared bust permission", () => {
         });
     }
 });
+
+// Signed-prefix hold invariants: the hold must never outrank
+// pressure relief at the absolute 95% wall, and a whole randomized tool loop of
+// held passes must serve one byte sequence until the next real user turn.
+describe("signed-prefix hold review", () => {
+    const heldSource = (): MessageLike[] =>
+        [
+            { info: { id: "old-user", role: "user" }, parts: [{ type: "text", text: "old task" }] },
+            {
+                info: { id: "old-answer", role: "assistant" },
+                parts: [
+                    { type: "reasoning", text: "old signed thought" },
+                    { type: "text", text: "Old answer about the important file. ".repeat(40) },
+                ],
+            },
+            {
+                info: { id: "old-followup", role: "assistant" },
+                parts: [{ type: "text", text: "Old follow-up about the directory. ".repeat(40) }],
+            },
+            {
+                info: { id: "active-user", role: "user" },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "active-answer", role: "assistant" },
+                parts: [
+                    { type: "reasoning", text: "active signed thought" },
+                    { type: "text", text: "Current answer about the important file. ".repeat(40) },
+                ],
+            },
+        ] as MessageLike[];
+
+    const runHeld = async (
+        sessionId: string,
+        options: {
+            held: boolean;
+            percentage: number;
+            execute: boolean;
+            flush: Set<string>;
+            deferred?: Set<string>;
+        },
+    ) => {
+        const messages = heldSource();
+        const tagger = createTagger();
+        tagger.initFromDb(sessionId, db);
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                tagger,
+                ...tagged,
+                tags: getActiveTagsBySession(db, sessionId),
+                freezeM0M1: options.held,
+                activeThinkingTurn: options.held,
+                resolvedProviderID: "anthropic",
+                resolvedModelID: "claude-opus-5-5",
+                thinkingBindingRecoveryEnabledForModel: true,
+                schedulerDecision: options.execute ? "execute" : "defer",
+                contextUsage: {
+                    percentage: options.percentage,
+                    inputTokens: options.percentage * 1000,
+                },
+                emergencyCeilingTokens: 65_000,
+                pendingMaterializationSessions: options.flush,
+                deferredMaterializationSessions: options.deferred ?? new Set(),
+                canConsumeDeferredLate: options.execute,
+                currentTurnId: options.held ? "active-user" : "next-user",
+            }),
+        );
+        return { messages: JSON.stringify(messages), result };
+    };
+
+    const oldTags = (sessionId: string) =>
+        getTagsBySession(db, sessionId).filter(
+            (row) =>
+                row.messageId.startsWith("old-answer") || row.messageId.startsWith("old-followup"),
+        );
+
+    it("a held pass at the 95% wall still admits the shared drain", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "hold-review-wall";
+        await runHeld(sessionId, { held: true, percentage: 20, execute: false, flush: new Set() });
+        for (const tag of oldTags(sessionId)) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        expect(getPendingOps(db, sessionId).length).toBeGreaterThan(0);
+        const drain = spyOn(operations, "applyPendingOperations");
+        try {
+            await runHeld(sessionId, {
+                held: true,
+                percentage: 96,
+                execute: true,
+                flush: new Set([sessionId]),
+            });
+            // At 95% or more the emergency ("force") reclaim permission lifts the
+            // hold, so the queued drain runs once. Individual drops may still be
+            // refused by per-target thinking protection, which is a separate gate.
+            expect(drain).toHaveBeenCalledTimes(1);
+        } finally {
+            drain.mockRestore();
+        }
+    });
+
+    it("a randomized held tool loop serves one byte sequence, then one release applies the queue", async () => {
+        // Small deterministic generator so a failure names a reproducible seed.
+        let seed = 0x6650_0001;
+        const random = () => {
+            seed = (seed * 1_103_515_245 + 12_345) >>> 0;
+            return seed / 0x1_0000_0000;
+        };
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "hold-review-loop";
+        const flush = new Set<string>();
+        const deferred = new Set<string>();
+        const baseline = await runHeld(sessionId, {
+            held: true,
+            percentage: 20,
+            execute: false,
+            flush,
+        });
+        const queueable = oldTags(sessionId).map((tag) => tag.tagNumber);
+        expect(queueable.length).toBeGreaterThan(0);
+        let queued = 0;
+        for (let step = 0; step < 24; step++) {
+            const roll = random();
+            if (roll < 0.3 && queued < queueable.length) {
+                queuePendingOp(db, sessionId, queueable[queued++]!, "drop");
+            } else if (roll < 0.45) {
+                flush.add(sessionId);
+            } else if (roll < 0.55) {
+                deferred.add(sessionId);
+            }
+            // Usage 20-83%: always below the 85% force band set by
+            // forceMaterializationPercentage, randomly crossing the 65% execute threshold.
+            const percentage = 20 + Math.floor(random() * 64);
+            const held = await runHeld(sessionId, {
+                held: true,
+                percentage,
+                execute: percentage >= 65,
+                flush,
+                deferred,
+            });
+            expect({ step, seed, bytes: held.messages }).toEqual({
+                step,
+                seed,
+                bytes: baseline.messages,
+            });
+            expect(held.result.proactiveThinkingStrip).toBeNull();
+            expect(getPendingOps(db, sessionId)).toHaveLength(queued);
+        }
+        while (queued < queueable.length)
+            queuePendingOp(db, sessionId, queueable[queued++]!, "drop");
+        flush.add(sessionId);
+        const released = await runHeld(sessionId, {
+            held: false,
+            percentage: 61,
+            execute: false,
+            flush,
+        });
+        expect(released.messages).not.toBe(baseline.messages);
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+    });
+});
