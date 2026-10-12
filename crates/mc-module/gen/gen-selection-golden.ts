@@ -1,3 +1,4 @@
+import "./quiet-live-log";
 /**
  * Generate the differential SELECTION golden for the Rust mc-module port.
  *
