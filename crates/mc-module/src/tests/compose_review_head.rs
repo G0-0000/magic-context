@@ -55,16 +55,12 @@ fn covered_ordinals_agree_with_the_scan_on_every_small_span_list() {
 /// one without overflow, and ordinals above `i64::MAX` are never covered.
 #[test]
 fn covered_ordinals_handle_the_integer_limits() {
-    let rows = [
-        (i64::MIN, -1),
-        (5, i64::MAX),
-        (i64::MAX, i64::MAX),
-        (1, 4),
-    ]
-    .map(|(start, end)| StoredCompartment {
-        start_message: start,
-        end_message: end,
-        ..Default::default()
+    let rows = [(i64::MIN, -1), (5, i64::MAX), (i64::MAX, i64::MAX), (1, 4)].map(|(start, end)| {
+        StoredCompartment {
+            start_message: start,
+            end_message: end,
+            ..Default::default()
+        }
     });
     let covered = CoveredOrdinals::new(&rows);
     for ordinal in [0, 1, 4, 5, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
@@ -187,7 +183,13 @@ fn a_publication_between_reads_cannot_split_the_fold_snapshot() {
         .collect::<Vec<_>>();
     store.replace_compartments(session, &rows).unwrap();
     let messages = (1..=200)
-        .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &format!("message {ordinal}")))
+        .map(|ordinal| {
+            item(
+                &format!("m{ordinal}"),
+                ordinal,
+                &format!("message {ordinal}"),
+            )
+        })
         .collect::<Vec<_>>();
     let projection = crate::ck_wire::project_messages(&messages).unwrap();
     let live = projection.blocks.iter().collect::<Vec<_>>();
@@ -206,11 +208,14 @@ fn a_publication_between_reads_cannot_split_the_fold_snapshot() {
         .map(|(_, end)| end);
     assert_eq!((guard_end, second_end), (Some(90), Some(99)));
     // The two-read fold: guard rows against the second read's coverage end.
-    let stray = first_uncovered_live_block(&guard_rows, &live, second_end)
-        .map(|block| block.ordinal());
+    let stray =
+        first_uncovered_live_block(&guard_rows, &live, second_end).map(|block| block.ordinal());
     assert_eq!(stray, Some(91), "the split snapshot reports a spurious gap");
     // The one-read fold: guard and compose share the rows.
-    assert_eq!(first_uncovered_live_block(&guard_rows, &live, guard_end).map(|b| b.ordinal()), None);
+    assert_eq!(
+        first_uncovered_live_block(&guard_rows, &live, guard_end).map(|b| b.ordinal()),
+        None
+    );
     let inputs = crate::m0_compose::M0ComposeInputs {
         session_id: session,
         project_path: "git:review-race",
@@ -260,7 +265,9 @@ fn env_usize(key: &str, default: usize) -> usize {
 /// the kernel does not expose it.
 fn thread_schedstat() -> Option<(u64, u64)> {
     let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
-    let mut fields = text.split_whitespace().map(|field| field.parse::<u64>().ok());
+    let mut fields = text
+        .split_whitespace()
+        .map(|field| field.parse::<u64>().ok());
     Some((fields.next()??, fields.next()??))
 }
 
@@ -274,10 +281,11 @@ fn percentile(samples: &mut [f64], quantile: f64) -> f64 {
 }
 
 /// Measures how long one long session's passes wait on the store while other
-/// sessions run passes on the same `McStore`. Two probe threads time a trivial read
-/// through each store connection mutex (`store.db` via `single_store_marker`,
-/// `context.db`'s reader via `load_compartment_boundaries` of an absent session);
-/// their latency is the lock wait any caller sees. A third probe times a 1 ms sleep
+/// sessions run passes on the same `McStore`. Two probe threads time trivial reads:
+/// `single_store_marker` takes only the `store.db` connection mutex;
+/// `load_compartment_boundaries` of an absent session takes `context.db`'s reader
+/// mutex and then, to overlay cached host coordinates, the `store.db` mutex as well.
+/// Their latency is the lock wait any caller sees. A third probe times a 1 ms sleep
 /// and takes no lock: when it stalls too, the whole process was stalled (CPU quota
 /// throttling or memory pressure), not one mutex. Probes print every stall over
 /// 50 ms with its offset from the start, as do the measured passes, so stalls can be

@@ -11,10 +11,11 @@
 //! old covered messages from its live array (the marker-trimmed shape), and then runs
 //! one defer, SOFT or fold pass.
 //!
-//! Every pass's decision, reason, coverage and the SHA-256 of the frozen m0 and m1
-//! payloads must equal `testdata/compose-review-differential-golden.txt`. That file is
-//! written by the build before the speed-ups (`MC_REVIEW_GOLDEN_WRITE=1`); the build
-//! after them must reproduce it byte for byte.
+//! Each pass yields one trace line: its actions, decision, reason, coverage and the
+//! SHA-256 of the frozen m0 and m1 payloads. A digest of every line must equal
+//! `testdata/compose-review-differential-golden.txt`. That file was written by the
+//! build before the speed-ups (`MC_REVIEW_GOLDEN_WRITE=1`); the build after them must
+//! reproduce it byte for byte.
 
 use super::tests::{item, memory_input, pctx, req, store};
 use super::*;
@@ -45,12 +46,62 @@ impl Rng {
 /// Words chosen to stress the token-count split: `#` runs, multi-byte letters, emoji
 /// with joiners, digits and contractions sit next to plain prose.
 const WORDS: &[&str] = &[
-    "the", "fold", "compartment", "historian", "boundary", "ordinal", "tail", "cache",
-    "prefix", "store", "session", "memory", "render", "budget", "tier", "decay", "anchor",
-    "coverage", "pass", "frozen", "unit", "marker", "publish", "token", "model", "and",
-    "but", "because", "then", "with", "into", "over", "per", "each", "can't", "we've",
-    "I'd", "#", "##", "m12#3", "a#b#0", "42", "007", "1,627", "3.2s", "v0.48.0", "café",
-    "naïve", "日本語", "🙂", "👩‍💻", "e\u{301}", "\u{a0}nbsp", "x>y", "<EOT>", "a&b",
+    "the",
+    "fold",
+    "compartment",
+    "historian",
+    "boundary",
+    "ordinal",
+    "tail",
+    "cache",
+    "prefix",
+    "store",
+    "session",
+    "memory",
+    "render",
+    "budget",
+    "tier",
+    "decay",
+    "anchor",
+    "coverage",
+    "pass",
+    "frozen",
+    "unit",
+    "marker",
+    "publish",
+    "token",
+    "model",
+    "and",
+    "but",
+    "because",
+    "then",
+    "with",
+    "into",
+    "over",
+    "per",
+    "each",
+    "can't",
+    "we've",
+    "I'd",
+    "#",
+    "##",
+    "m12#3",
+    "a#b#0",
+    "42",
+    "007",
+    "1,627",
+    "3.2s",
+    "v0.48.0",
+    "café",
+    "naïve",
+    "日本語",
+    "🙂",
+    "👩‍💻",
+    "e\u{301}",
+    "\u{a0}nbsp",
+    "x>y",
+    "<EOT>",
+    "a&b",
 ];
 
 fn words(rng: &mut Rng, count: usize) -> String {
@@ -499,7 +550,11 @@ fn world(index: u64, shapes: [(bool, bool); 3], history_budget: f64, rounds: usi
                     scope.spawn(move || {
                         if round == 0 {
                             // The first pass materializes the session, as on a real host.
-                            format!("- kind=cold model=0 live={} {}", session.messages.len(), session.run())
+                            format!(
+                                "- kind=cold model=0 live={} {}",
+                                session.messages.len(),
+                                session.run()
+                            )
                         } else {
                             session.step()
                         }
@@ -585,7 +640,10 @@ fn compose_review_differential() {
     assert!(count(" rescore ") >= 5, "too few rescores");
     assert_eq!(count("error="), 0, "a pass failed");
     for model in 0..MODELS.len() {
-        assert!(count(&format!("model={model} ")) >= 10, "model {model} rarely used");
+        assert!(
+            count(&format!("model={model} ")) >= 10,
+            "model {model} rarely used"
+        );
     }
     let distinct = |prefix: &str| {
         trace

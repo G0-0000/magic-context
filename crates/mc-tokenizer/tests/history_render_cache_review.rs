@@ -98,7 +98,10 @@ fn history_render_counts_equal_the_encoder_on_randomized_split_texts() {
 fn history_render_counts_are_exact_under_concurrent_threads() {
     let mut rng = Rng(0xc0c0);
     let texts: Vec<String> = (0..600).map(|_| text(&mut rng)).collect();
-    let expected: Vec<usize> = texts.iter().map(|text| encode_ordinary(text).len()).collect();
+    let expected: Vec<usize> = texts
+        .iter()
+        .map(|text| encode_ordinary(text).len())
+        .collect();
     std::thread::scope(|scope| {
         for worker in 0..8u64 {
             let (texts, expected) = (&texts, &expected);
