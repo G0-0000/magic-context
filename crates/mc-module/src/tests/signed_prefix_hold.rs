@@ -718,3 +718,67 @@ fn signed_prefix_hold_subagent_tag_surface_transition_waits() {
     assert_eq!(released.action, "SOFT");
     assert!(s.load(session).unwrap().meta.tagging_surface_active);
 }
+
+/// In the force band a queued drop after the kept signed thinking is applied, but the
+/// m0/m1 head replays unchanged: the historian publication waiting for m1 is not composed
+/// into it, and an explicit flush stays pending for its m1 refresh. The first pass after
+/// the turn publishes and clears the flush. (Uses the review driver's session fixture.)
+#[test]
+fn signed_prefix_hold_force_band_drains_without_touching_the_head() {
+    let (mut sim, held) = review_open_turn_with_publication("hold-force-drain");
+    let late = sim.tool_results.last().unwrap().clone();
+    sim.s()
+        .append_pending_agent_drops(&sim.session, std::slice::from_ref(&late), 1)
+        .unwrap();
+    review_edit_meta(sim.s(), &sim.session, |meta| {
+        meta.soft_refresh_pending = true
+    });
+    sim.used = 86_000;
+    let forced = sim.run(false).unwrap();
+    assert_eq!(forced.action, "SOFT", "{:?}", forced.materialize_reason);
+    assert!(review_pending(sim.s(), &sim.session).is_empty());
+    assert_eq!(review_head(&forced), review_head(&held));
+    assert!(!String::from_utf8(review_bytes(&forced))
+        .unwrap()
+        .contains("SUMMARY-2"));
+    assert!(
+        sim.s()
+            .load(&sim.session)
+            .unwrap()
+            .meta
+            .soft_refresh_pending
+    );
+
+    sim.user_turn();
+    sim.used = 66_000;
+    let released = sim.run(false).unwrap();
+    assert!(
+        matches!(released.action.as_str(), "SOFT" | "HARD"),
+        "{}",
+        released.action
+    );
+    assert!(String::from_utf8(review_bytes(&released))
+        .unwrap()
+        .contains("SUMMARY-2"));
+    assert!(
+        !sim.s()
+            .load(&sim.session)
+            .unwrap()
+            .meta
+            .soft_refresh_pending
+    );
+}
+
+/// An idle-expired pass with nothing queued and only an m1 delta waiting (a historian
+/// publication) does not rewrite anything: the delta waits with the frozen head, so the
+/// pass replays the previous serve.
+#[test]
+fn signed_prefix_hold_idle_expiry_with_only_an_m1_delta_replays() {
+    let (mut sim, held) = review_open_turn_with_publication("hold-idle-m1-delta");
+    let last_response = sim.ctx.now_ms + 1;
+    sim.ctx.observed_last_response_at_ms = Some(last_response);
+    sim.ctx.now_ms = last_response + 10 * 60_000;
+    let expired = sim.run(false).unwrap();
+    assert_eq!(expired.action, "SOFT+", "{:?}", expired.materialize_reason);
+    assert_eq!(review_bytes(&expired), review_bytes(&held));
+}
