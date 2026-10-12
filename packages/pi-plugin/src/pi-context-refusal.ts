@@ -319,6 +319,10 @@ export function registerPiGuardedContext(
 		active.input = event.messages;
 		active.dispatched = false;
 		active.ready = false;
+		// A refusal aborts the run it was raised in. A later pass on the same
+		// operation (its run's start or the previous end not delivered yet) is
+		// new work and earns its own receipt; the refused pass stays abandoned.
+		active.refused = false;
 		const isOwned = () =>
 			budget.sideTurn
 				? operations.get(key) === owner

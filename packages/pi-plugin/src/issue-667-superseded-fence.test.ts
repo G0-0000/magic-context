@@ -114,6 +114,36 @@ test("issue 667: a retried run's late willContinue agent_end does not refuse the
 	expect(h.aborts).toBe(0);
 });
 
+test("issue 667: a slow pass refused at dispatch does not refuse the newer pass that replaces it", async () => {
+	let finishSlow!: () => void;
+	const slowDone = new Promise<void>((resolve) => {
+		finishSlow = resolve;
+	});
+	let calls = 0;
+	const h = harness(async (event) => {
+		if (++calls === 1) await slowDone;
+		return { messages: event.messages as never };
+	});
+	const first = userMessage("slow prompt", 1);
+	h.emit("agent_start");
+	const slow = Promise.resolve(h.emit("context", { messages: [first] })).catch(
+		(error: Error) => error.message,
+	);
+	// OMP stopped waiting for the slow pass and dispatched its raw messages.
+	h.dispatch();
+	expect(h.aborts).toBe(1);
+	// The user resends before OMP delivers the aborted run's end.
+	const resent = userMessage("resent prompt", 3);
+	await h.emit("context", { messages: [first, resent] });
+	h.emit("agent_end", { messages: [first] });
+	h.dispatch();
+	finishSlow();
+	await slow;
+	h.dispatch();
+	expect(h.aborts).toBe(1);
+	expect(h.refusals).toHaveLength(1);
+});
+
 test("issue 667: a run's own end still invalidates its receipt", async () => {
 	const prompt = userMessage("only prompt", 1);
 	const dispatched = harness(managed);
