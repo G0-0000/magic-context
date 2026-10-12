@@ -40,22 +40,147 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "the", "module", "fold", "compartment", "historian", "boundary", "ordinal", "tail",
-    "cache", "prefix", "store", "session", "memory", "render", "budget", "tier", "decay",
-    "pressure", "anchor", "coverage", "transform", "pass", "frozen", "unit", "reduction",
-    "tag", "overlay", "marker", "publish", "replay", "served", "bytes", "digest", "hash",
-    "token", "estimate", "agent", "user", "asked", "fixed", "added", "removed", "renamed",
-    "refactored", "tested", "verified", "reviewed", "merged", "branch", "commit", "worktree",
-    "clippy", "cargo", "bun", "typecheck", "schema", "migration", "epoch", "lock", "writer",
-    "reader", "sqlite", "row", "column", "index", "query", "plan", "latency", "ms", "MB",
-    "error", "warning", "panic", "retry", "timeout", "deadline", "budget", "slack", "and",
-    "or", "but", "because", "so", "then", "after", "before", "while", "when", "with",
-    "without", "into", "from", "over", "under", "between", "across", "per", "each", "every",
-    "OpenCode", "Pi", "Rust", "TypeScript", "Anthropic", "provider", "model", "thinking",
-    "signature", "reasoning", "tool", "result", "call", "arc", "drop", "strip", "caveman",
-    "todo", "note", "nudge", "profile", "mural", "docs", "AGENTS.md", "config", "jsonc",
-    "path/to/file.rs", "crates/mc-module", "packages/plugin", "line", "42", "1,627", "3.2s",
-    "v0.48.0", "#593", "<tag>", "a&b", "x>y", "café", "naïve", "日本語", "🙂",
+    "the",
+    "module",
+    "fold",
+    "compartment",
+    "historian",
+    "boundary",
+    "ordinal",
+    "tail",
+    "cache",
+    "prefix",
+    "store",
+    "session",
+    "memory",
+    "render",
+    "budget",
+    "tier",
+    "decay",
+    "pressure",
+    "anchor",
+    "coverage",
+    "transform",
+    "pass",
+    "frozen",
+    "unit",
+    "reduction",
+    "tag",
+    "overlay",
+    "marker",
+    "publish",
+    "replay",
+    "served",
+    "bytes",
+    "digest",
+    "hash",
+    "token",
+    "estimate",
+    "agent",
+    "user",
+    "asked",
+    "fixed",
+    "added",
+    "removed",
+    "renamed",
+    "refactored",
+    "tested",
+    "verified",
+    "reviewed",
+    "merged",
+    "branch",
+    "commit",
+    "worktree",
+    "clippy",
+    "cargo",
+    "bun",
+    "typecheck",
+    "schema",
+    "migration",
+    "epoch",
+    "lock",
+    "writer",
+    "reader",
+    "sqlite",
+    "row",
+    "column",
+    "index",
+    "query",
+    "plan",
+    "latency",
+    "ms",
+    "MB",
+    "error",
+    "warning",
+    "panic",
+    "retry",
+    "timeout",
+    "deadline",
+    "budget",
+    "slack",
+    "and",
+    "or",
+    "but",
+    "because",
+    "so",
+    "then",
+    "after",
+    "before",
+    "while",
+    "when",
+    "with",
+    "without",
+    "into",
+    "from",
+    "over",
+    "under",
+    "between",
+    "across",
+    "per",
+    "each",
+    "every",
+    "OpenCode",
+    "Pi",
+    "Rust",
+    "TypeScript",
+    "Anthropic",
+    "provider",
+    "model",
+    "thinking",
+    "signature",
+    "reasoning",
+    "tool",
+    "result",
+    "call",
+    "arc",
+    "drop",
+    "strip",
+    "caveman",
+    "todo",
+    "note",
+    "nudge",
+    "profile",
+    "mural",
+    "docs",
+    "AGENTS.md",
+    "config",
+    "jsonc",
+    "path/to/file.rs",
+    "crates/mc-module",
+    "packages/plugin",
+    "line",
+    "42",
+    "1,627",
+    "3.2s",
+    "v0.48.0",
+    "#593",
+    "<tag>",
+    "a&b",
+    "x>y",
+    "café",
+    "naïve",
+    "日本語",
+    "🙂",
 ];
 
 fn words(rng: &mut Rng, count: usize) -> String {
@@ -171,8 +296,9 @@ pub(super) fn insert_memory(store: &McStore, rng: &mut Rng, now_ms: i64) {
 
 /// The fixture's session: a store, the compartment cursor and the live array.
 pub(super) struct LargeSession {
-    pub(super) _dir: tempfile::TempDir,
-    pub(super) store: McStore,
+    /// Shared with any other sessions driven against the same store.
+    pub(super) store: std::sync::Arc<McStore>,
+    pub(super) _dir: Option<tempfile::TempDir>,
     pub(super) session: String,
     pub(super) messages_per_compartment: u64,
     pub(super) next_sequence: i64,
@@ -199,7 +325,33 @@ impl LargeSession {
         host_resolved: bool,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
+        let store = std::sync::Arc::new(store(dir.path()));
+        Self::new_in(
+            store,
+            Some(dir),
+            seed,
+            compartments,
+            messages_per_compartment,
+            memories,
+            live_covered,
+            tail,
+            host_resolved,
+        )
+    }
+
+    /// [`Self::new`] for a session in an existing store.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_in(
+        store: std::sync::Arc<McStore>,
+        dir: Option<tempfile::TempDir>,
+        seed: u64,
+        compartments: usize,
+        messages_per_compartment: u64,
+        memories: usize,
+        live_covered: u64,
+        tail: u64,
+        host_resolved: bool,
+    ) -> Self {
         let mut rng = Rng::new(seed);
         let session = format!("ses_large_{seed}");
         let rows = (0..compartments)
@@ -289,8 +441,8 @@ impl LargeSession {
         let covered_end = compartments as u64 * messages_per_compartment;
         let first_live = covered_end.saturating_sub(live_covered) + 1;
         let mut fixture = Self {
-            _dir: dir,
             store,
+            _dir: dir,
             session,
             messages_per_compartment,
             next_sequence: compartments as i64 + 1,
@@ -356,7 +508,12 @@ impl LargeSession {
         let mut loaded = self.store.load(&self.session).unwrap();
         loaded.meta.soft_refresh_pending = true;
         self.store
-            .commit(&self.session, loaded.row_version, &loaded.core, &loaded.meta)
+            .commit(
+                &self.session,
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+            )
             .unwrap();
     }
 
@@ -470,26 +627,99 @@ fn large_session_compose_profile() {
         );
     };
     let timed = |fixture: &LargeSession| {
+        // With MC_COMPOSE_SPANS=1 the module's opt-in profiling spans are printed per pass
+        // (top 12 by wall time), which splits state_evolution into its parts.
+        let spans = std::env::var_os("MC_COMPOSE_SPANS").is_some();
+        if spans {
+            crate::per_pass_profile::begin_pass();
+        }
         let started = Instant::now();
         let response = fixture.run();
-        (response, started.elapsed().as_secs_f64() * 1000.0)
-    };
-    let (response, wall) = timed(&fixture);
-    print("cold", &fixture, &response, wall);
-    for cycle in 0..cycles {
-        fixture.append_messages(append);
-        for _ in 0..publish {
-            assert!(fixture.publish_compartment(200));
+        let wall = started.elapsed().as_secs_f64() * 1000.0;
+        if spans {
+            let mut costs = crate::per_pass_profile::end_pass()
+                .into_iter()
+                .collect::<Vec<_>>();
+            costs.sort_by(|a, b| b.1.wall_ms.total_cmp(&a.1.wall_ms));
+            let top = costs
+                .iter()
+                .take(12)
+                .map(|(name, cost)| format!("{name}:{:.1}", cost.wall_ms))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("large-session spans {top}");
         }
+        (response, wall)
+    };
+    // MC_COMPOSE_BACKGROUND=N drives N other sessions (MC_COMPOSE_BACKGROUND_COMPARTMENTS
+    // compartments each, default 600) through the same store on their own threads while
+    // the measured passes run, the way one module process serves several busy sessions.
+    let background = env_usize("MC_COMPOSE_BACKGROUND", 0);
+    let background_compartments = env_usize("MC_COMPOSE_BACKGROUND_COMPARTMENTS", 600);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let ready = std::sync::Barrier::new(background + 1);
+    std::thread::scope(|scope| {
+        let workers = (0..background)
+            .map(|index| {
+                let store = std::sync::Arc::clone(&fixture.store);
+                let (stop, ready) = (&stop, &ready);
+                scope.spawn(move || {
+                    let mut other = LargeSession::new_in(
+                        store,
+                        None,
+                        1_000 + index as u64,
+                        background_compartments,
+                        65,
+                        0,
+                        64,
+                        1_500,
+                        false,
+                    );
+                    other.run();
+                    ready.wait();
+                    let mut passes = 0usize;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        other.append_messages(10);
+                        if passes % 6 == 5 {
+                            other.publish_compartment(200);
+                        }
+                        if passes % 9 == 8 {
+                            other.request_fold();
+                        } else if passes % 5 == 4 {
+                            other.request_soft();
+                        }
+                        other.run();
+                        passes += 1;
+                    }
+                    passes
+                })
+            })
+            .collect::<Vec<_>>();
+        ready.wait();
         let (response, wall) = timed(&fixture);
-        print(&format!("c{cycle}-defer"), &fixture, &response, wall);
-        fixture.request_soft();
-        let (response, wall) = timed(&fixture);
-        print(&format!("c{cycle}-soft"), &fixture, &response, wall);
-        fixture.request_fold();
-        let (response, wall) = timed(&fixture);
-        print(&format!("c{cycle}-fold"), &fixture, &response, wall);
-    }
+        print("cold", &fixture, &response, wall);
+        for cycle in 0..cycles {
+            fixture.append_messages(append);
+            for _ in 0..publish {
+                assert!(fixture.publish_compartment(200));
+            }
+            let (response, wall) = timed(&fixture);
+            print(&format!("c{cycle}-defer"), &fixture, &response, wall);
+            fixture.request_soft();
+            let (response, wall) = timed(&fixture);
+            print(&format!("c{cycle}-soft"), &fixture, &response, wall);
+            fixture.request_fold();
+            let (response, wall) = timed(&fixture);
+            print(&format!("c{cycle}-fold"), &fixture, &response, wall);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for (index, worker) in workers.into_iter().enumerate() {
+            eprintln!(
+                "large-session background={index} passes={}",
+                worker.join().unwrap()
+            );
+        }
+    });
 }
 
 /// One seeded randomized run: each step may append live messages, publish
@@ -524,7 +754,11 @@ pub(super) fn differential_run(
                 fixture.publish_compartment(12);
             }
         } else if roll < 65 {
-            insert_memory(&fixture.store, &mut fixture.rng, NOW_MS - 1_000 + pass as i64);
+            insert_memory(
+                &fixture.store,
+                &mut fixture.rng,
+                NOW_MS - 1_000 + pass as i64,
+            );
         }
         let kind = match choices.below(10) {
             0..=3 => "defer",
@@ -596,8 +830,202 @@ fn large_session_compose_differential() {
     assert!(distinct("m1=") >= 8, "too few distinct m1 renders");
     for decision in ["decision=HARD", "decision=SOFT ", "decision=SOFT+"] {
         assert!(
-            expected.lines().filter(|line| line.contains(decision)).count() >= 20,
+            expected
+                .lines()
+                .filter(|line| line.contains(decision))
+                .count()
+                >= 20,
             "fewer than 20 {decision} passes"
+        );
+    }
+}
+
+/// Blocks for the helper equivalence tests: `count` single-text messages, then each
+/// block's ordinal, role and text are scrambled by `rng` (duplicate ordinals, system
+/// rows, descending runs) so the inputs are not the tidy shape the transform builds.
+fn scrambled_blocks(rng: &mut Rng, count: usize) -> Vec<FlatBlock> {
+    let messages = (0..count)
+        .map(|index| {
+            let size = 1 + rng.below(120) as usize;
+            let text = prose(rng, size);
+            item(&format!("b{index}"), index as u64 + 1, &text)
+        })
+        .collect::<Vec<_>>();
+    let projection = crate::ck_wire::project_messages(&messages).unwrap();
+    let mut blocks = projection.blocks;
+    let span = 1 + rng.below(count as u64 + 3);
+    for block in &mut blocks {
+        block.ordinal = 1 + rng.below(span);
+        if rng.below(7) == 0 {
+            block.role = "system".to_string();
+        }
+    }
+    if rng.below(2) == 0 {
+        blocks.sort_by_key(|block| block.ordinal);
+    }
+    blocks
+}
+
+/// The publication-floor walk as it was before it stopped early: tokenize every
+/// non-system block, then walk the per-ordinal totals newest first.
+fn protected_tail_floor_ordinal_reference(
+    live: &[&FlatBlock],
+    context_limit: f64,
+    execute_threshold_percentage: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> u64 {
+    let newest_live = live.iter().map(|block| block.ordinal).max().unwrap_or(0);
+    let target =
+        crate::boundary::derive_protected_tail_token_target(&crate::boundary::BoundaryContext {
+            context_limit,
+            execute_threshold_percentage,
+            ..Default::default()
+        });
+    let floor_tokens = target.effective_floor.ceil().max(1.0) as usize;
+    let mut tokens_by_ordinal = BTreeMap::<u64, usize>::new();
+    for block in live.iter().filter(|block| block.role != "system") {
+        let tokens = estimate_tokens(block.bytes.as_ref());
+        *tokens_by_ordinal.entry(block.ordinal).or_default() += tokens;
+    }
+    let mut accumulated = 0usize;
+    let mut floor_ordinal = newest_live;
+    for (ordinal, tokens) in tokens_by_ordinal.iter().rev() {
+        floor_ordinal = *ordinal;
+        accumulated = accumulated.saturating_add(*tokens);
+        if accumulated >= floor_tokens {
+            break;
+        }
+    }
+    floor_ordinal.max(1)
+}
+
+#[test]
+fn publication_floor_matches_the_full_walk_and_stops_at_the_floor() {
+    let mut rng = Rng::new(0xf100);
+    let mut stopped_early = 0;
+    for case in 0..400 {
+        let count = rng.below(60) as usize;
+        let blocks = scrambled_blocks(&mut rng, count);
+        let live = blocks.iter().collect::<Vec<_>>();
+        // Small context limits put the floor inside the array; large ones walk it all.
+        let context_limit = [800.0, 3_000.0, 20_000.0, 1_000_000.0][case % 4];
+        // A fixed per-block cost keeps the cases fast and makes the floor reachable.
+        let estimate = |text: &str| 40 + text.len() / 3;
+        let calls = std::cell::Cell::new(0usize);
+        let counted = |text: &str| {
+            calls.set(calls.get() + 1);
+            estimate(text)
+        };
+        assert_eq!(
+            protected_tail_floor_ordinal(&live, context_limit, 65.0, counted),
+            protected_tail_floor_ordinal_reference(&live, context_limit, 65.0, estimate),
+            "case {case}"
+        );
+        let non_system = live.iter().filter(|block| block.role != "system").count();
+        assert!(calls.get() <= non_system, "case {case}");
+        if calls.get() < non_system {
+            stopped_early += 1;
+        }
+    }
+    // The walk must stop before the oldest blocks in the cases whose floor it reaches.
+    assert!(
+        stopped_early >= 50,
+        "only {stopped_early} cases stopped early"
+    );
+}
+
+#[test]
+fn merged_coverage_ranges_match_the_per_compartment_scan() {
+    let mut rng = Rng::new(0xc0de);
+    for case in 0..400 {
+        let compartments = (0..rng.below(12))
+            .map(|sequence| {
+                let start = rng.below(80) as i64 - 5;
+                // Mostly ordered spans; some inverted, empty or overlapping ones.
+                let end = start + rng.below(20) as i64 - 3;
+                StoredCompartment {
+                    sequence: sequence as i64,
+                    start_message: start,
+                    end_message: end,
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+        let covered = CoveredOrdinals::new(&compartments);
+        for ordinal in 0..100u64 {
+            assert_eq!(
+                covered.contains(ordinal),
+                compartments
+                    .iter()
+                    .any(|compartment| stored_compartment_covers_ordinal(compartment, ordinal)),
+                "case {case} ordinal {ordinal}: {compartments:?}"
+            );
+        }
+        let count = rng.below(40) as usize;
+        let blocks = scrambled_blocks(&mut rng, count);
+        let live = blocks.iter().collect::<Vec<_>>();
+        let coverage = (rng.below(4) > 0).then(|| rng.below(90));
+        let reference = coverage.and_then(|coverage| {
+            live.iter()
+                .copied()
+                .filter(|block| block.role != "system" && block.ordinal() <= coverage)
+                .filter(|block| {
+                    !compartments.iter().any(|compartment| {
+                        stored_compartment_covers_ordinal(compartment, block.ordinal())
+                    })
+                })
+                .min_by_key(|block| block.ordinal())
+        });
+        assert_eq!(
+            first_uncovered_live_block(&compartments, &live, coverage).map(|block| &block.id),
+            reference.map(|block| &block.id),
+            "case {case}"
+        );
+    }
+}
+
+#[test]
+fn strip_survival_matches_the_formatted_block_id_set() {
+    let mut rng = Rng::new(0x5719);
+    for case in 0..300 {
+        let mut request = req("strip-survival", "cfg", Vec::new());
+        for index in 0..rng.below(8) {
+            let mid = ["m", "m#1", "a#", "x0", "m#01"][rng.below(5) as usize];
+            let mut message = item(&format!("{mid}{index}"), index + 1, "text");
+            if rng.below(3) == 0 {
+                message.mid = mid.to_string();
+            }
+            for _ in 0..rng.below(4) {
+                message.ck.content.push(message.ck.content[0].clone());
+            }
+            request.messages.push(message);
+        }
+        let mut core = CoreState::default();
+        for _ in 0..12 {
+            let target = match rng.below(9) {
+                0 => "m#1".to_string(),
+                1 => "m#01".to_string(),
+                2 => "m1#".to_string(),
+                3 => format!("m{}#{}", rng.below(8), rng.below(6)),
+                4 => format!("m#1{}#{}", rng.below(8), rng.below(6)),
+                5 => format!("a#{}#0{}", rng.below(8), rng.below(3)),
+                6 => format!("x0{}", rng.below(8)),
+                7 => format!("x0{}#+1", rng.below(8)),
+                _ => format!("m{}#18446744073709551616", rng.below(8)),
+            };
+            let kind = ["drop", "reasoning_age", "image"][rng.below(3) as usize];
+            core.frozen_units.push(FrozenUnit {
+                key: format!("strip:{kind}:{target}"),
+                kind: "strip".to_string(),
+                frozen_payload: String::new(),
+                durability_class: mc_core::DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            });
+        }
+        assert_eq!(
+            surviving_strip_units(&core, &request),
+            surviving_strip_units_reference(&core, &request),
+            "case {case}"
         );
     }
 }
