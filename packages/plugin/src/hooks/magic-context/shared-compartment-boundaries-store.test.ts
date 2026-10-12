@@ -182,7 +182,12 @@ function addCompartments(db: Database, rows: readonly Row[], firstSequence = 0):
     );
 }
 
-/** The resolver as it read the store before boundary batching, verbatim apart from its readers. */
+/**
+ * Reference copy of the earlier resolver, which read every endpoint with
+ * readRawSessionMessagePartsByIdFromDb and the whole ordinal map with
+ * readRawSessionMessageIdOrdinalsForRangeFromDb. Its logic is unchanged; only
+ * those two readers are called directly on a store connection.
+ */
 function legacyResolve(
     db: Database,
     store: Database,
@@ -322,7 +327,13 @@ function expectSameAsLegacy(db: Database, storePath: string): unknown {
     }
 }
 
-/** A session with every row kind the ordinal space and the servable check distinguish. */
+/**
+ * A session covering every row kind the resolver treats differently: other
+ * sessions' rows, finished and unfinished compaction summaries (which do or do
+ * not take an ordinal), numeric summary flags, malformed or non-object info
+ * (which take an ordinal but can never be a resolved endpoint), timestamp ties,
+ * and messages with no parts.
+ */
 function edgeCaseMessages(): FixtureMessage[] {
     let time = 1_760_000_000_000;
     const at = (step = 1000) => {
@@ -384,7 +395,9 @@ test("store-backed boundaries equal the per-endpoint reader across every row kin
     const db = contextDb();
     addCompartments(db, EDGE_ROWS);
     const outcome = expectSameAsLegacy(db, path) as { resolved?: ResolvedContextBoundary[] };
-    // The scenario must exercise healing and inferred IDs, not refuse early.
+    // Every row must resolve, so the comparison reaches the code that fills a
+    // missing endpoint from its neighbor and finds the message for an empty ID,
+    // instead of both versions throwing on the first row.
     expect(outcome.resolved).toHaveLength(EDGE_ROWS.length);
     expect(outcome.resolved?.[1]?.end_message_id).not.toBe("a2#0");
 });

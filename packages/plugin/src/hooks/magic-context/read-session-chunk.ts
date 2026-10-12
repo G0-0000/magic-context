@@ -841,8 +841,8 @@ export function readRawSessionMessagePartsById(
 }
 
 /**
- * Facts compartment boundary resolution needs about each id, read from the
- * OpenCode store in a bounded batch. Returns null when a raw-message provider
+ * The facts compartment boundary resolution needs about each id (see
+ * RawBoundaryEndpoint), read from the OpenCode store in a bounded batch. Returns null when a raw-message provider
  * serves the session; the caller then uses the provider-aware readers above.
  */
 export function readRawSessionBoundaryEndpoints(

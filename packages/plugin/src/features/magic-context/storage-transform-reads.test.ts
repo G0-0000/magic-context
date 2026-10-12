@@ -112,7 +112,8 @@ it("looks up inert tags by number with exactly the unscoped read's answer", () =
     }
     for (const tag of [3, 7, 11, 13, 22, 29])
         markWhitespaceAssistantTagInert(db, "by-number", tag, `m${tag}:p1`);
-    markWhitespaceAssistantTagInert(db, "by-number", 8, "m8:p1"); // tool row: never updated
+    // Tag 8 is a tool tag; marking only updates message tags, so it stays out.
+    markWhitespaceAssistantTagInert(db, "by-number", 8, "m8:p1");
     markWhitespaceAssistantTagInert(db, "by-number", 17, ""); // empty content id
     markWhitespaceAssistantTagInert(db, "other", 5, "m5:p1");
     db.prepare(

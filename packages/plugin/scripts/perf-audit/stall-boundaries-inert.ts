@@ -224,7 +224,9 @@ function writeContextStore(path: string, canonical: readonly string[]): Database
         db.prepare(
             "UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number > ? AND tag_number <= ?",
         ).run(SESSION, 60_000, 70_000);
-        // Legacy whitespace assistant tags, retired inert across the session.
+        // Whitespace-only assistant tags from older sessions are kept as inert
+        // compacted rows (see markWhitespaceAssistantTagInert); scatter a few
+        // hundred message tags across the session in that state.
         for (let tag = 4; tag <= TAGS; tag += 360) {
             if (tag % 3 === 0) continue;
             markWhitespaceAssistantTagInert(db, SESSION, tag, `${canonical[tag % canonical.length]}:p1`);

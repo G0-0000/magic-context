@@ -1946,7 +1946,9 @@ function readBoundaryEndpointRows(
         const rows = db.prepare(BOUNDARY_MESSAGE_SQL).all(sessionId, wanted) as RawMessageRow[];
         for (const id of ids) into.set(id, null);
         for (const row of rows) {
-            // The same acceptance as readRawSessionMessagePartsByIdFromDb.
+            // Skip rows readRawSessionMessagePartsByIdFromDb would return null for:
+            // non-text id or data, a non-numeric time_created, info that is not a
+            // JSON object, and finished compaction summaries.
             if (!isRawMessageRow(row) || typeof row.time_created !== "number") continue;
             const info = parseJsonRecord(row.data);
             if (!info || isRawCompactionSummaryInfo(info)) continue;
@@ -1976,10 +1978,13 @@ function readBoundaryEndpointRows(
 }
 
 /**
- * Boundary facts for a set of message ids in two statements, in place of a
- * full ordinal scan in JavaScript plus a part read per id. Ids in `blockIds`
- * also get `lastBlockIndex`. While the store is unchanged since an earlier
- * call, ids answered then are not read again.
+ * For each id, its ordinal and creation time, or null when it is not
+ * servable (see RawBoundaryEndpoint). Ids in `blockIds` also get
+ * `lastBlockIndex`, the index of the message's last module block. Message rows
+ * are read in two statements over just the requested ids, and block counts in
+ * one more, so no message JSON other than theirs reaches JavaScript. While the
+ * store is unchanged since an earlier call, ids answered then are not read
+ * again.
  */
 export function readRawSessionBoundaryEndpointsFromDb(
     db: Database,

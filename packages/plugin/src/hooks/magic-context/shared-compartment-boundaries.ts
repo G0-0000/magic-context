@@ -94,7 +94,9 @@ export function resolveSharedCompartmentBoundaries(
                 lastBlockIndex = moduleRawBlockMappings(raw).at(-1)?.blockIndex ?? 0;
         } else {
             let read = stored.get(rawId);
-            // IDs inferred from neighboring rows were not in the first batch.
+            // Read this ID alone when the batch above lacks it (an ID found from a
+            // neighboring row's ordinal for an empty endpoint) or lacks the last
+            // block a whole-message end needs.
             if (
                 read === undefined ||
                 (needsLastBlock && read && read.lastBlockIndex === undefined)
