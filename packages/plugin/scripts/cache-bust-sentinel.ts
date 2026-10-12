@@ -31,9 +31,10 @@ import { Database } from "bun:sqlite";
  * | double_bust_after_reclaim | no | overrides any other accounted class right after a reclaim bust; the wake names the overridden class as cause |
  *
  * By default the process stays alive and scans every 60 seconds. Use --once from
- * launchd/cron or for a manual pass. --send is the only switch that opens subc;
- * without it, each new event is printed as one JSON line. Sending delivers a
- * high-urgency registry peer message through prefrontal-core's agent.deliver op.
+ * launchd/cron or for a manual pass. Without --send, each new event is printed
+ * as one JSON line and nothing is sent. With --send, the sentinel connects to
+ * subc (the CortexKit module daemon) and asks the prefrontal-core module, which
+ * delivers agent messages, to send each event as a high-urgency peer message.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -1140,11 +1141,11 @@ function updateOpenWindowState(
  * Order a run's sessions so that the run budget cannot starve one of them.
  *
  * A run stops at its deadline, and one large Pi session can take the whole
- * budget. The database returns sessions in a fixed order, so the same session
- * used to win every run and a session behind it was never analyzed: on
- * 2026-10-12 one Pi session's watermark stayed at 01:35:52Z for 14 hours, and
- * its busts were never seen. Sessions with activity since their last scan come
- * first, then the one scanned longest ago, then the most recently active.
+ * budget. The database returns sessions in a fixed order, so in listed order
+ * the same session would be scanned first on every run, and a session listed
+ * after it could go unscanned indefinitely while its watermark never moved.
+ * Sessions with activity since their last scan come first, then the one scanned
+ * longest ago, then the most recently active.
  */
 export function orderSessionsForScan(
     sessions: readonly ActiveCacheBustSession[],

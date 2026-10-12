@@ -159,8 +159,9 @@ describe("Pi execute-threshold reclaim costs one bust", () => {
 			expect(appendCompaction).toHaveBeenCalledTimes(1);
 			expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
 
-			// ...and that one bust already carried both halves of the reclaim: the
-			// refreshed history head and the trim of the covered turn.
+			// A reclaim changes the prompt in two places: it refreshes the history
+			// head and trims the turn that history now covers. The single bust must
+			// carry both, or a second bust would follow to land the missing one.
 			const reclaimText = reclaimServed
 				.map((message) => textOf(message as never))
 				.join("\n");

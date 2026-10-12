@@ -88,7 +88,12 @@ export interface AnalysisRow {
 	attribution: string;
 	divergenceIndex: number;
 	divergenceClass?: CacheBustDivergenceClass;
-	/** The class the request had on its own, when a bust after a reclaim relabelled it. */
+	/**
+	 * Set only when this request is the bust right after a reclaim. The analyzer
+	 * then reports `divergenceClass` as an after-reclaim class (provider short
+	 * read or double bust), and `cause` keeps the class the request would have
+	 * had if no reclaim had come just before it.
+	 */
 	cause?: CacheBustDivergenceClass;
 	decision?: CacheBustDecisionAttribution;
 	previousModel?: string;
@@ -621,10 +626,13 @@ export function analyzeJoinedPasses(
 			previousBody && currentBody
 				? describeBodyPair(previousBody.messages, currentBody.messages)
 				: undefined;
-		// The ledger recorded a shorter served array than the request before:
-		// Magic Context rewrote the prompt, so the request cannot be a pure append.
-		// A body pair that says otherwise belongs to other requests, so neither the
-		// bodies nor a provider-side verdict drawn from them can be trusted.
+		// The ledger is Magic Context's own record of what it served. When it shows
+		// fewer messages than the previous pass, Magic Context dropped or folded
+		// something, so the request is not a pure append of the one before. If the
+		// matched bodies nevertheless read as a pure append (no divergence, or one
+		// only past the previous body's end), they were captured for different
+		// requests than these two passes. Discard them, so no body diff or
+		// provider-side verdict is drawn from the wrong pair.
 		const bodiesContradictLedger =
 			previousBody !== undefined &&
 			currentBody !== undefined &&
