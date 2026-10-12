@@ -439,7 +439,11 @@ import {
 	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
-import { getPiTagSnapshotView } from "./tag-snapshot-pi";
+import {
+	getPiActiveTagSnapshotView,
+	getPiTagSnapshotView,
+	readPiFallbackTagRows,
+} from "./tag-snapshot-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
 	clearPiTailHygieneContentMemo,
@@ -460,6 +464,31 @@ import { createPiTranscript } from "./transcript-pi";
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
+
+/**
+ * Rows carrying `number` in a list sorted by tag number (legacy stores can
+ * hold more than one), found by binary search.
+ */
+function tagsWithNumber<T extends { tagNumber: number }>(
+	sorted: readonly T[],
+	number: number,
+): T[] {
+	let low = 0;
+	let high = sorted.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if ((sorted[middle]?.tagNumber ?? Number.POSITIVE_INFINITY) < number)
+			low = middle + 1;
+		else high = middle;
+	}
+	const rows: T[] = [];
+	for (let index = low; index < sorted.length; index += 1) {
+		const row = sorted[index];
+		if (row?.tagNumber !== number) break;
+		rows.push(row);
+	}
+	return rows;
+}
 
 function newestActiveTagNumbersByCount(
 	tags: readonly { status: string; tagNumber: number }[],
@@ -2749,12 +2778,27 @@ function readPiFallbackFingerprintHeaders(
 	db: ContextDatabase,
 	sessionId: string,
 ): Set<string> | null {
-	const rows = db
-		.prepare(
-			`SELECT DISTINCT entry_fingerprint FROM tags WHERE session_id = ? AND type = 'message'
+	// The tag snapshot keeps the session's fallback rows current; read them from
+	// the table only inside a transaction, where that cache is not consulted.
+	const cached = readPiFallbackTagRows(db, sessionId);
+	const rows = cached
+		? [
+				...new Set(
+					cached
+						.filter(
+							(row) => row.type === "message" && row.entry_fingerprint !== null,
+						)
+						.map((row) => row.entry_fingerprint),
+				),
+			].map((entry_fingerprint) => ({
+				entry_fingerprint: entry_fingerprint as string,
+			}))
+		: (db
+				.prepare(
+					`SELECT DISTINCT entry_fingerprint FROM tags WHERE session_id = ? AND type = 'message'
 			 AND entry_fingerprint IS NOT NULL AND message_id LIKE 'pi-msg-%'`,
-		)
-		.all(sessionId) as { entry_fingerprint: string }[];
+				)
+				.all(sessionId) as { entry_fingerprint: string }[]);
 	const headers = new Set<string>();
 	for (const row of rows) {
 		let parsed: unknown;
@@ -2891,6 +2935,15 @@ function fallbackPiToolCallIds(
 	db: ContextDatabase,
 	sessionId: string,
 ): Set<string> {
+	// The tag snapshot keeps fallback rows current from changed tag numbers, so
+	// an appended tag does not force another LIKE scan of every tool tag.
+	const fallbackRows = readPiFallbackTagRows(db, sessionId);
+	if (fallbackRows)
+		return new Set(
+			fallbackRows
+				.filter((row) => row.type === "tool")
+				.map((row) => row.message_id as string),
+		);
 	let statement = piToolGuardVersionStatements.get(db);
 	if (!statement) {
 		statement = db.prepare(
@@ -5686,8 +5739,10 @@ export function registerPiContextHandler(
 						protectedTools: options.protectedTools,
 						pendingDropTagNumbers,
 						stableId,
+						// Only active rows can be protected; the active projection gives
+						// the same numbers without sorting every historical tag.
 						protectedToolTags: protectedToolTagNumbers(
-							tags,
+							result.channelBaselineSnapshot.activeTags,
 							options.protectedTools,
 						),
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -7368,6 +7423,8 @@ interface RunPipelineArgs {
 interface PiChannelBaselineSnapshot {
 	tagCacheKey?: object;
 	tags: ReturnType<typeof getTagsBySession>;
+	/** The rows of `tags` whose status is "active", in the same order. */
+	activeTags: readonly ReturnType<typeof getTagsBySession>[number][];
 	protectedTagNumbers: Set<number>;
 	pendingDropTagNumbers: Set<number>;
 }
@@ -7547,6 +7604,7 @@ async function runCompactionOffPipeline(
 		activeTags: [],
 		channelBaselineSnapshot: {
 			tags: [],
+			activeTags: [],
 			protectedTagNumbers: new Set(),
 			pendingDropTagNumbers: new Set(),
 		},
@@ -8743,7 +8801,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Load the canonical tag set once after pending operations. Heuristics use its
 	// active projection; Channel-1 baseline construction reuses the full set.
 	const allTagsForPass = getPiTagSnapshotView(args.db, args.sessionId);
-	const activeTags = allTagsForPass.filter((tag) => tag.status === "active");
+	// Same rows as filtering allTagsForPass by status, kept current from changed
+	// rows instead of walking every tag the session ever had.
+	const activeTags = getPiActiveTagSnapshotView(
+		args.db,
+		args.sessionId,
+		allTagsForPass,
+	);
 	logTransformTiming(
 		args.sessionId,
 		"getTagsBySessionSnapshot",
@@ -9771,7 +9835,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				protectionFloorResolution.floor,
 				activeCalibration.toolsRatio,
 			).protectedTagNumbers
-		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
+		: newestActiveTagNumbersByCount(activeTags, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete
 	// targets remain), and therefore retain the one correctness-required re-read.
@@ -9783,6 +9847,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const channelBaselineSnapshot: PiChannelBaselineSnapshot = {
 		tagCacheKey: fallbackCache.index,
 		tags: allTagsForPass,
+		activeTags,
 		protectedTagNumbers,
 		pendingDropTagNumbers: new Set(
 			channelPendingOps
@@ -9811,19 +9876,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	const servedTagNumbers = new Set(
-		allTagsForPass
-			.filter(
-				(tag) =>
-					targets.has(tag.tagNumber) &&
-					(tag.type === "message"
-						? ctxReduceCallable || tag.status !== "active"
-						: tag.type === "tool" &&
-							visibleCallIds.has(tag.messageId) &&
-							(ctxReduceCallable || tag.status !== "active")),
+	// Look up only this pass's target numbers in the tag-ordered snapshot, in
+	// ascending order, instead of filtering every tag the session ever had.
+	const servedTagNumbers = new Set<number>();
+	for (const number of [...targets.keys()].sort((a, b) => a - b)) {
+		for (const tag of tagsWithNumber(allTagsForPass, number)) {
+			if (
+				tag.type === "message"
+					? ctxReduceCallable || tag.status !== "active"
+					: tag.type === "tool" &&
+						visibleCallIds.has(tag.messageId) &&
+						(ctxReduceCallable || tag.status !== "active")
 			)
-			.map((tag) => tag.tagNumber),
-	);
+				servedTagNumbers.add(tag.tagNumber);
+		}
+	}
 	return {
 		messages: outputMessages,
 		identityRebuilt: identityRebuild,

@@ -1391,7 +1391,10 @@ function getAssignableTagNumberByMessageIdStatement(db: Database): PreparedState
     let stmt = getAssignableTagNumberByMessageIdStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT tag_number FROM tags
+            // Pin the owner index for the same reason as the statement above: a
+            // miss (every newly seen message) otherwise walks the whole session in
+            // tag order looking for a first match that does not exist.
+            `SELECT tag_number FROM tags INDEXED BY idx_tags_session_message_id
              WHERE session_id = ?
                AND message_id = ?
                AND NOT (

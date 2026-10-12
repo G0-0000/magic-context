@@ -86,26 +86,23 @@ export function createPiTagSnapshotReader(db: Database) {
 	);
 	const watch = db.prepare("INSERT OR IGNORE INTO pi_tag_watch VALUES (?)");
 	const unwatch = db.prepare("DELETE FROM pi_tag_watch WHERE session_id = ?");
-	const cache = new Map<
-		string,
-		{
-			revision: string;
-			foreignRevision: string;
-			tags: ReturnType<typeof getTagsBySession>;
-		}
-	>();
-	const read = (
-		sessionId: string,
-		borrowed = false,
-	): ReturnType<typeof getTagsBySession> => {
+	const cache = new Map<string, SnapshotEntry>();
+	const fallbackRows = db.prepare(
+		`SELECT ${FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ? AND ${FALLBACK_ROW_PREDICATE}`,
+	);
+	const fallbackRowsByNumbers = db.prepare(
+		`SELECT ${FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ?
+		 AND tag_number IN (SELECT value FROM json_each(?)) AND ${FALLBACK_ROW_PREDICATE}`,
+	);
+	/** Bring the cached entry up to date, or return null inside a transaction. */
+	const sync = (sessionId: string): SnapshotEntry | null => {
 		// Do not publish or consume journal entries inside a transaction: its
 		// rows may roll back while the in-memory snapshot cannot roll back.
 		const transaction = db as unknown as {
 			inTransaction?: boolean;
 			isTransaction?: boolean;
 		};
-		if (transaction.inTransaction || transaction.isTransaction)
-			return getTagsBySession(db, sessionId);
+		if (transaction.inTransaction || transaction.isTransaction) return null;
 		// Subtract this connection's writes from the shared session counter. Both
 		// counters roll back with the rows; unrelated foreign commits do not matter.
 		const [local, external] = revisionReaders.get(db)?.(sessionId) ?? [
@@ -114,10 +111,12 @@ export function createPiTagSnapshotReader(db: Database) {
 		];
 		let snapshot = cache.get(sessionId);
 		if (!snapshot || snapshot.foreignRevision !== external) {
+			const tags = getTagsBySession(db, sessionId);
 			snapshot = {
 				revision: local,
 				foreignRevision: external,
-				tags: getTagsBySession(db, sessionId),
+				tags,
+				active: tags.filter(isActive),
 			};
 			if (cache.size >= 100 && !cache.has(sessionId)) {
 				const oldest = cache.keys().next().value;
@@ -138,47 +137,142 @@ export function createPiTagSnapshotReader(db: Database) {
 				const dirty = new Set(numbers);
 				const replacements = getTagsByNumbers(db, sessionId, numbers);
 				for (const tag of replacements) Object.freeze(tag);
-				const highest = snapshot.tags.at(-1)?.tagNumber ?? -1;
-				if (numbers.every((number) => number > highest)) {
-					// Ordinary appends already have canonical order. Do not filter or
-					// merge the historical prefix just to add a few new rows.
-					snapshot.tags = [...snapshot.tags, ...replacements];
-				} else {
-					const unchanged = snapshot.tags.filter(
-						(tag) => !dirty.has(tag.tagNumber),
-					);
-					// Both inputs use the authoritative tag_number/id order, including
-					// duplicate tag numbers in legacy stores. Merge without re-sorting history.
-					const merged: typeof unchanged = [];
-					let index = 0;
-					for (const tag of unchanged) {
-						while (index < replacements.length) {
-							const next = replacements[index];
-							if (!next) break;
-							if (
-								next.tagNumber > tag.tagNumber ||
-								(next.tagNumber === tag.tagNumber &&
-									(next.id ?? 0) > (tag.id ?? 0))
-							)
-								break;
-							merged.push(next);
-							index += 1;
-						}
-						merged.push(tag);
-					}
-					merged.push(...replacements.slice(index));
-					snapshot.tags = merged;
+				snapshot.tags = mergeChangedRows(snapshot.tags, dirty, replacements);
+				// The active projection follows the same rows: only changed numbers
+				// can enter or leave it, so it is merged rather than refiltered.
+				snapshot.active = mergeChangedRows(
+					snapshot.active,
+					dirty,
+					replacements.filter(isActive),
+				);
+				if (!numbers.every(Number.isSafeInteger)) {
+					// A NULL tag number cannot be re-read by number; rescan on next use.
+					snapshot.fallback = undefined;
+				} else if (snapshot.fallback) {
+					// A changed number may have gained, lost or rewritten a fallback
+					// row. Re-read only those numbers with the same predicate.
+					snapshot.fallback = [
+						...snapshot.fallback.filter((row) => !dirty.has(row.tag_number)),
+						...(fallbackRowsByNumbers.all(
+							sessionId,
+							JSON.stringify(numbers),
+						) as PiFallbackTagRow[]),
+					];
 				}
 			}
 			snapshot.revision = local;
 		}
 		clearChanged.run(sessionId);
+		return snapshot;
+	};
+	const read = (
+		sessionId: string,
+		borrowed = false,
+	): ReturnType<typeof getTagsBySession> => {
+		const snapshot = sync(sessionId);
+		if (!snapshot) return getTagsBySession(db, sessionId);
 		// Heuristics can edit their working entries; never expose the cached objects.
 		return borrowed ? snapshot.tags : snapshot.tags.map((tag) => ({ ...tag }));
 	};
+	entryReaders.set(db, sync);
+	fallbackReaders.set(db, (sessionId) => {
+		const snapshot = sync(sessionId);
+		if (!snapshot) return null;
+		snapshot.fallback ??= fallbackRows.all(sessionId) as PiFallbackTagRow[];
+		return snapshot.fallback;
+	});
 	readers.set(db, read);
 	return read;
 }
+
+type SnapshotTag = ReturnType<typeof getTagsBySession>[number];
+
+/**
+ * A tag row that names an unsettled Pi id: a message tag stored under a
+ * `pi-msg-*` fallback message id, or a tool tag whose owner is one. Columns are
+ * raw SQL values, so callers apply exactly the filters their SQL used to.
+ */
+export interface PiFallbackTagRow {
+	id: number;
+	tag_number: number;
+	type: unknown;
+	message_id: unknown;
+	tool_owner_message_id: unknown;
+	entry_fingerprint: unknown;
+}
+
+// One predicate for every fallback probe. LIKE stays SQL's own operator (ASCII
+// case-insensitive), so these rows are exactly what the per-probe queries match.
+const FALLBACK_ROW_COLUMNS =
+	"id, tag_number, type, message_id, tool_owner_message_id, entry_fingerprint";
+const FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE 'pi-msg-%')
+	OR (type = 'tool' AND tool_owner_message_id LIKE 'pi-msg-%'))`;
+
+interface SnapshotEntry {
+	revision: string;
+	foreignRevision: string;
+	tags: SnapshotTag[];
+	/** `tags` rows whose status is "active", in the same order. */
+	active: SnapshotTag[];
+	/**
+	 * Fallback rows, loaded on first use after each full reload and then kept
+	 * current from the same changed-number journal as `tags`.
+	 */
+	fallback?: PiFallbackTagRow[];
+}
+
+const isActive = (tag: SnapshotTag) => tag.status === "active";
+
+/**
+ * Replace the rows of `dirty` tag numbers in canonical tag_number/id order.
+ * Both inputs use that order, including duplicate tag numbers in legacy stores.
+ */
+function mergeChangedRows(
+	rows: readonly SnapshotTag[],
+	dirty: ReadonlySet<number>,
+	replacements: readonly SnapshotTag[],
+): SnapshotTag[] {
+	const highest = rows.at(-1)?.tagNumber ?? -1;
+	let appendOnly = true;
+	for (const number of dirty) {
+		if (number <= highest) {
+			appendOnly = false;
+			break;
+		}
+	}
+	// Ordinary appends already have canonical order. Do not filter or merge the
+	// historical prefix just to add a few new rows.
+	if (appendOnly) return [...rows, ...replacements];
+	const unchanged = rows.filter((tag) => !dirty.has(tag.tagNumber));
+	const merged: SnapshotTag[] = [];
+	let index = 0;
+	for (const tag of unchanged) {
+		while (index < replacements.length) {
+			const next = replacements[index];
+			if (!next) break;
+			if (
+				next.tagNumber > tag.tagNumber ||
+				(next.tagNumber === tag.tagNumber && (next.id ?? 0) > (tag.id ?? 0))
+			)
+				break;
+			merged.push(next);
+			index += 1;
+		}
+		merged.push(tag);
+	}
+	merged.push(...replacements.slice(index));
+	return merged;
+}
+
+const entryReaders = new WeakMap<
+	Database,
+	(sessionId: string) => SnapshotEntry | null
+>();
+
+const fallbackReaders = new WeakMap<
+	Database,
+	(sessionId: string) => readonly PiFallbackTagRow[] | null
+>();
 
 const readers = new WeakMap<
 	Database,
@@ -211,4 +305,38 @@ export function getPiTagSnapshot(db: Database, sessionId: string) {
 /** Internal read-only projection. Changed rows get new objects; unchanged rows retain identity. */
 export function getPiTagSnapshotView(db: Database, sessionId: string) {
 	return createPiTagSnapshotReader(db)(sessionId, true);
+}
+
+/**
+ * Internal read-only projection of the rows whose status is "active", in tag
+ * order: the same rows as filtering `getPiTagSnapshotView`, maintained from
+ * changed rows instead of refiltering every tag of the session. Rows are the
+ * frozen cached objects. Inside a transaction it filters `uncachedTags` (the
+ * caller's own uncached read, so both lists share row objects) or a new read.
+ */
+export function getPiActiveTagSnapshotView(
+	db: Database,
+	sessionId: string,
+	uncachedTags?: readonly SnapshotTag[],
+): SnapshotTag[] {
+	createPiTagSnapshotReader(db);
+	const snapshot = entryReaders.get(db)?.(sessionId);
+	// Copy the array (not the frozen rows) so a caller that sorts or splices
+	// its list cannot reorder the cached projection.
+	if (snapshot) return snapshot.active.slice();
+	return (uncachedTags ?? getTagsBySession(db, sessionId)).filter(isActive);
+}
+
+/**
+ * Current fallback rows of a session (see PiFallbackTagRow), or null inside a
+ * transaction, where callers must query the table themselves. Rows are kept
+ * up to date from the changed-number journal, so a pass that only appends
+ * tags never rescans the session for `pi-msg-*` ids.
+ */
+export function readPiFallbackTagRows(
+	db: Database,
+	sessionId: string,
+): readonly PiFallbackTagRow[] | null {
+	createPiTagSnapshotReader(db);
+	return fallbackReaders.get(db)?.(sessionId) ?? null;
 }

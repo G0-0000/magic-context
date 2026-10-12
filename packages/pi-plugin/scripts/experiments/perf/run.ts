@@ -68,6 +68,21 @@ interface RunnerOptions {
 	/** Seed hidden history after warm-up to keep cold tag allocation within the pass deadline. */
 	historicalTagsAfterMessages?: number;
 	toolResultRepeat?: number;
+	/**
+	 * Insert this many tags for another session after each seeded historical
+	 * tag. A shared context.db interleaves sessions' rows, so one session's tags
+	 * span many more pages than a freshly seeded contiguous run.
+	 */
+	foreignTagInterleave?: number;
+	/**
+	 * Seed historical tags as a long session holds them: two of every three are
+	 * tool tags (call ID plus owner message) and a third of all rows are dropped
+	 * rather than compacted. Without it every historical tag is a compacted
+	 * message tag.
+	 */
+	historicalMix: boolean;
+	/** Branch message entries hidden behind a Magic Context compaction entry. */
+	hiddenMessages?: number;
 }
 
 export interface PerfPassReport {
@@ -108,6 +123,7 @@ async function main(): Promise<void> {
 				messages: options.messages,
 				systemEntry: options.pi087,
 				toolResultRepeat: options.toolResultRepeat,
+				hiddenMessages: options.hiddenMessages,
 			});
 	const points =
 		options.points ??
@@ -211,13 +227,45 @@ async function main(): Promise<void> {
 			   tag_number, harness, status, token_count)
 			 VALUES (?, ?, 'message', 400, 0, ?, 'pi', 'compacted', 100)`,
 		);
+		const insertMixed = rawDb.prepare(
+			`INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size,
+			   tag_number, harness, status, token_count, tool_name, tool_owner_message_id,
+			   input_byte_size, input_token_count)
+			 VALUES (?, ?, ?, ?, 0, ?, 'pi', ?, ?, ?, ?, ?, ?)`,
+		);
 		rawDb.exec("BEGIN");
+		const interleave = options.foreignTagInterleave ?? 0;
 		for (let index = 0; index < options.historicalTags; index += 1) {
-			insert.run(
-				fixture.sessionId,
-				`historical-entry-${index}:p0`,
-				firstNumber + index,
-			);
+			if (options.historicalMix) {
+				const tool = index % 3 !== 0;
+				const owner = `historical-entry-${Math.floor(index / 3)}`;
+				insertMixed.run(
+					fixture.sessionId,
+					tool ? `historical-call-${index}` : `${owner}:p0`,
+					tool ? "tool" : "message",
+					tool ? 4_000 : 400,
+					firstNumber + index,
+					index % 3 === 2 ? "dropped" : "compacted",
+					tool ? 1_000 : 100,
+					tool ? "read" : null,
+					tool ? owner : null,
+					tool ? 120 : null,
+					tool ? 30 : null,
+				);
+			} else {
+				insert.run(
+					fixture.sessionId,
+					`historical-entry-${index}:p0`,
+					firstNumber + index,
+				);
+			}
+			for (let foreign = 0; foreign < interleave; foreign += 1) {
+				insert.run(
+					`perf-foreign-session-${foreign}`,
+					`foreign-entry-${index}:p0`,
+					index + 1,
+				);
+			}
 		}
 		rawDb.exec("COMMIT");
 	};
@@ -481,6 +529,7 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 		pi087: false,
 		lingeringFallback: false,
 		historicalTags: 0,
+		historicalMix: false,
 	};
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
@@ -523,6 +572,14 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 			index += 1;
 		} else if (arg === "--tool-result-repeat" && value) {
 			options.toolResultRepeat = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--historical-mix") {
+			options.historicalMix = true;
+		} else if (arg === "--foreign-tag-interleave" && value) {
+			options.foreignTagInterleave = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--hidden-messages" && value) {
+			options.hiddenMessages = positiveInteger(value, arg);
 			index += 1;
 		} else if (arg === "--external-writes") {
 			options.externalWrites = true;
