@@ -87,6 +87,9 @@ mod perf_audit_identity;
 #[cfg(test)]
 #[path = "tests/perf_audit_metadata.rs"]
 pub(crate) mod perf_audit_metadata;
+#[cfg(test)]
+#[path = "tests/compose_large_session.rs"]
+mod compose_large_session;
 
 /// Max CAS retries before surfacing the conflict (the module is the single writer in
 /// the daemon case, so this rarely loops; the shared-store case re-loads and re-steps).
@@ -18260,7 +18263,7 @@ pub(crate) mod tests {
     }
     use serde_json::{json, Value};
 
-    fn store(dir: &std::path::Path) -> McStore {
+    pub(crate) fn store(dir: &std::path::Path) -> McStore {
         McStore::open_for_test(&StorageDescriptor {
             module_id: "magic-context-test".to_string(),
             storage_namespace: "mc_cache".to_string(),
@@ -18954,7 +18957,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
+    pub(crate) fn item(id: &str, ordinal: u64, bytes: &str) -> CkIngressMessage {
         CkIngressMessage {
             mid: id.to_string(),
             ordinal,
@@ -20153,7 +20156,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
+    pub(crate) fn req(session: &str, cfg: &str, messages: Vec<CkIngressMessage>) -> TransformRequest {
         TransformRequest {
             cache_ttl: None,
             effective_execute_threshold: None,
@@ -20360,7 +20363,7 @@ pub(crate) mod tests {
         request
     }
 
-    fn memory_input<'a>(
+    pub(crate) fn memory_input<'a>(
         project_path: &'a str,
         category: &'a str,
         content: &'a str,
@@ -20383,7 +20386,7 @@ pub(crate) mod tests {
     /// A producer context over a throwaway project dir (no docs on disk → empty docs
     /// block). `now_ms` is FIXED per test (never wall-clock) so the frozen expiry cutoff
     /// is deterministic.
-    fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
+    pub(crate) fn pctx<'a>(project: &'a str, dir: &'a str, now_ms: i64) -> ProducerContext<'a> {
         ProducerContext {
             project_path: project,
             note_project_path: project,
