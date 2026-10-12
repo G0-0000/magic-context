@@ -30,9 +30,10 @@ kept.
 | L2 | Low | OpenCode force-band ruling tests are not proven non-vacuous: two mutations that lift the freeze at ≥85% left them green | OC | test gap |
 | I1 | Info | Rust parity: the same four unavoidable terms and the same held m[0]/m[1] inputs, but three differences (see Parity) | all | — |
 
-The ruling you asked me to check explicitly. Inside a signed turn whose thinking
-is kept, an idle-expired pass replays m[0]/m[1] byte for byte, and the force
-band and the 95% emergency keep m[0]/m[1] frozen:
+The m[0]/m[1] ruling for all three hosts, checked explicitly: inside a signed
+turn whose thinking is still served, an idle-expired pass replays m[0]/m[1]
+byte for byte, and the force band (85%) and the 95% emergency may drain under
+per-target protection but keep m[0]/m[1] frozen.
 
 - **OpenCode 1 and 2: holds.** A held idle-expired pass replays the cached
   m[0]/m[1] pair. A held 86% or 96% pass also replays it. Evidence:
@@ -213,13 +214,15 @@ Witnesses:
 
 Fix direction: on a held pass, let riders ride only behind the last kept signed
 block, and keep the older-thinking strip held while active signed thinking is
-kept. Alternatively, follow the owner's busting-pass rule and strip every signed
-block, the active turn included, on passes that truly rewrite the prefix. Doing
+kept. Alternatively, follow the owner's busting-pass rule (`anthropic-thinking-binding.md`,
+"proactive strip on busting passes") and strip every signed block, the active
+turn included, on passes that truly rewrite the prefix. Doing
 both strip older and keep newer is the one combination strict binding rejects.
 
 ### H2 — Pi: a pending carried repair re-renders m[0]/m[1] when the hold lifts
 
-A held pass with a fitting LKG replays and leaves the repair pending. That part
+A held pass with a fitting last-known-good (LKG) prefix replays it and leaves
+the pending tag-identity repair in place. That part
 is correct. The next pass whose `prefixMutationAllowed` is true goes through
 `identityRebuild` → `clearM0M1PiCache` and `preparedPrefix = undefined`
 (`context-handler.ts:8229-8231`). Those passes are idle expiry
@@ -370,5 +373,10 @@ R2_SEEDS=665,664,650,1,2,3,7,8 R2_PASSES=150 R2_UNHELD_PASSES=320 \
   docs/reports/issue-665-hold-review-r2/differential.sh 62fa1e27 "$TMPDIR/r2"
 ```
 
-Set `BASE_SRC` to a directory holding the `62fa1e27` versions of the four files
-when the runner's checkout has no git objects.
+The four product files the differential swaps are
+`packages/pi-plugin/src/context-handler.ts`,
+`packages/plugin/src/hooks/magic-context/transform.ts`,
+`packages/plugin/src/hooks/magic-context/transform-postprocess-phase.ts` and
+`packages/plugin/src/v2/hooks/context.ts`. When the runner's checkout has no git
+objects, extract their `62fa1e27` versions locally (`git show 62fa1e27:<path>`)
+into a directory at the same relative paths and set `BASE_SRC` to it.

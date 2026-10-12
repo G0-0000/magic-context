@@ -131,7 +131,7 @@ function providerKey(message: unknown): string {
     });
 }
 
-/** Reasoning text -> provider-visible bytes before that reasoning part. */
+/** For each reasoning text, a hash of the provider-visible bytes in front of that part. */
 function signedPrefixes(messages: readonly unknown[]): Map<string, string> {
     const out = new Map<string, string>();
     const before: string[] = [];
@@ -336,7 +336,8 @@ export async function runOpenCodeHoldDriver(options: {
             if (random() < 0.15) {
                 userTurn();
                 events.push("user");
-                // Sometimes serve the new user message itself: an unheld release pass.
+                // Sometimes serve the new user message as the tail: the turn has no
+                // thinking yet, so this pass is not held and may apply queued work.
                 servedUserTail = random() < 0.4;
             }
             if (!servedUserTail) toolStep();

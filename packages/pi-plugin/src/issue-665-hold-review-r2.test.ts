@@ -135,7 +135,7 @@ function providerKey(message: unknown): string {
 	});
 }
 
-/** Signature -> provider-visible bytes before that signed block. */
+/** For each thinking signature, a hash of the provider-visible bytes in front of that block. */
 function signedPrefixes(messages: readonly unknown[]): Map<string, string> {
 	const out = new Map<string, string>();
 	const before: string[] = [];
@@ -361,7 +361,8 @@ export async function runPiHoldDriver(options: {
 				userTurn();
 				events.push("user");
 				refusalTurnOpen = false;
-				// Sometimes serve the new user message itself: an unheld release pass.
+				// Sometimes serve the new user message as the tail: the turn has no
+				// thinking yet, so this pass is not held and may apply queued work.
 				servedUserTail = random() < 0.4;
 			}
 			if (!servedUserTail) toolStep();
@@ -1000,9 +1001,11 @@ for (const withCarriedRepair of [false, true]) {
 				fixture.db.close();
 			}
 		};
-		// A carried repair still pending when the hold lifts clears and re-renders
-		// m[0]/m[1] under the kept thinking (see the r2 report); pinned as expected
-		// failures so the suite stays green while the defect is open.
+		// A tag-identity repair left pending by the held pass is applied as soon as
+		// the hold lifts (idle expiry, 85%, 95%): it clears and re-renders m[0]/m[1]
+		// in front of thinking that is still served, which strict prefix binding
+		// rejects. Pinned as expected failures so the suite stays green while the
+		// defect is open; R2_SHOW_FAILING=1 runs them as plain tests.
 		if (withCarriedRepair && !process.env.R2_SHOW_FAILING)
 			test.failing(name, body, 60_000);
 		else test(name, body, 60_000);
@@ -1016,7 +1019,7 @@ for (const withCarriedRepair of [false, true]) {
 // user turns.
 // Pinned as an expected failure: with the m[0]/m[1] clear failing, every pass
 // that tries the declared rebuild refuses, in the held turn and in each later
-// user turn (62fa1e27 refused none here). See the r2 report.
+// user turn (62fa1e27 refused none here).
 (process.env.R2_SHOW_FAILING ? test : test.failing)(
 	"Pi carried identity repair: a failing declared rebuild refuses at most one turn",
 	async () => {
