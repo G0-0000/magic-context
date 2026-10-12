@@ -697,6 +697,7 @@ export function createTransform(deps: TransformDeps) {
     const finalWireUsage = createFinalWireUsageTracker();
     const host = resolveTransformHostSeams(deps);
     const loadedSessions = new Set<string>();
+    const prefixHoldLogTurnIds = new Map<string, string | null>();
     // Sessions whose history was clearly over the model's window, with no
     // Magic Context state to send in its place, on a pass that could not bring
     // it under. Each later pass is checked again until one is served under the
@@ -1178,29 +1179,25 @@ export function createTransform(deps: TransformDeps) {
             activeThinkingModel?.providerID,
             activeThinkingModel?.modelID,
         );
+        const unresolvedDirectoryHold =
+            sessionDirectoryFellBack &&
+            sessionMeta.cachedM0Bytes != null &&
+            sessionMeta.cachedM1Bytes != null &&
+            (() => {
+                try {
+                    return hasRecordedSessionProjectIdentity(db, sessionId);
+                } catch {
+                    // Unknown: keep the frozen pair rather than risk a rebuild.
+                    return true;
+                }
+            })();
         let freezeM0M1 =
+            unresolvedDirectoryHold ||
             (activeThinkingTurn &&
                 isPrefixBoundThinkingModel(
                     activeThinkingModel?.providerID,
                     activeThinkingModel?.modelID,
-                )) ||
-            (sessionDirectoryFellBack &&
-                sessionMeta.cachedM0Bytes != null &&
-                sessionMeta.cachedM1Bytes != null &&
-                (() => {
-                    try {
-                        return hasRecordedSessionProjectIdentity(db, sessionId);
-                    } catch {
-                        // Unknown: keep the frozen pair rather than risk a rebuild.
-                        return true;
-                    }
-                })());
-        if (freezeM0M1) {
-            sessionLog(
-                sessionId,
-                "session directory unresolved; replaying the frozen m[0]/m[1] and deferring any rebuild",
-            );
-        }
+                ));
         const compartmentDirectory = sessionDirectory;
         const historianRunnable = deps.historianRunnable !== false;
         const canRunCompartments =
@@ -1562,6 +1559,23 @@ export function createTransform(deps: TransformDeps) {
         freezeM0M1 ||=
             activeThinkingTurn &&
             isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID);
+        if (freezeM0M1 && prefixHoldLogTurnIds.get(sessionId) !== currentTurnId) {
+            prefixHoldLogTurnIds.set(sessionId, currentTurnId);
+            const activeThinkingHold =
+                activeThinkingTurn &&
+                (isPrefixBoundThinkingModel(
+                    activeThinkingModel?.providerID,
+                    activeThinkingModel?.modelID,
+                ) ||
+                    isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID));
+            const reason = activeThinkingHold
+                ? "active thinking turn (prefix-bound model)"
+                : "session directory unresolved";
+            sessionLog(
+                sessionId,
+                `m[0]/m[1] frozen: ${reason}; replaying the frozen prefix and deferring any rebuild`,
+            );
+        }
         const canUseEmptySentinels = modelAcceptsEmptyContent(resolvedProviderID);
         const protectedThinkingMessages =
             activeThinkingTurn ||

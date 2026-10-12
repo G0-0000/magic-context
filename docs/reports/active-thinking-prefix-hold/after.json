@@ -1,0 +1,93 @@
+{
+  "hostVersion": "2.0.26",
+  "hostPid": 48314,
+  "root": "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm",
+  "openDatabases": [
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-wal",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-wal",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-wal"
+  ],
+  "hostDirectDatabases": [
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-wal",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-wal",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/cortexkit/magic-context/context.db-shm",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db",
+    "/private/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T/magic-context/bg_a50a6413bb418af2/runs/mc-opencode2-InV7Mm/XDG_DATA_HOME/opencode/opencode2.db-wal"
+  ],
+  "loopRequests": 4,
+  "loopPrefixChanges": 0,
+  "totalPrefixChanges": 1,
+  "queued": [
+    2,
+    5
+  ],
+  "pendingBeforeUser": [
+    {
+      "tag_id": 2
+    },
+    {
+      "tag_id": 5
+    }
+  ],
+  "pendingAfterUser": [],
+  "changes": [
+    {
+      "request": 2,
+      "changed": false,
+      "prefixHash": "900288a267c40cfbfd61218b3819314d2afc392171bc174bc510c67b90acfbe1"
+    },
+    {
+      "request": 3,
+      "changed": false,
+      "prefixHash": "b60d4d402b9357b66d78570a89fb0a247eb8d5e080ff6bdd34e3d1a2f4dc31e2"
+    },
+    {
+      "request": 4,
+      "changed": false,
+      "prefixHash": "c1c5a43ae26772d11c537c08b2ce0dda2fae3a8ef1785d1252986148e22f00aa"
+    },
+    {
+      "request": 5,
+      "changed": true,
+      "prefixHash": "0fe3005210bc9294381383f3b605d509044f8a0d89651ada75c62fd2f4849a7e"
+    }
+  ],
+  "observedDecisions": [
+    "[2026-10-12T08:58:01.458Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=0.0% inputTokens=0 cacheTtl=13h lastResponseTime=0 decision=defer",
+    "[2026-10-12T08:58:01.781Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops WILL APPLY — reason=m0_hard_fold (drain folded into executed m[0] bust, scheduler=defer), pendingOps=0, context=14.5%",
+    "[2026-10-12T08:58:01.788Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=true, reason=first_render)",
+    "[2026-10-12T08:58:02.212Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=10.1% inputTokens=10000 cacheTtl=13h lastResponseTime=1791795482178 decision=defer",
+    "[2026-10-12T08:58:02.215Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=10.1%",
+    "[2026-10-12T08:58:02.215Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "[2026-10-12T08:58:03.009Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=10.1% inputTokens=10000 cacheTtl=13h lastResponseTime=1791795482738 decision=defer",
+    "[2026-10-12T08:58:03.014Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=10.1%",
+    "[2026-10-12T08:58:03.015Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "[2026-10-12T08:58:03.588Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=10.1% inputTokens=10000 cacheTtl=13h lastResponseTime=1791795483083 decision=defer",
+    "[2026-10-12T08:58:03.589Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=0 context=10.1%",
+    "[2026-10-12T08:58:03.590Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "[2026-10-12T08:58:04.150Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=66.7% inputTokens=66000 cacheTtl=13h lastResponseTime=1791795483732 decision=execute",
+    "[2026-10-12T08:58:04.176Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false",
+    "[2026-10-12T08:58:04.176Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "[2026-10-12T08:58:05.391Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=66.7% inputTokens=66000 cacheTtl=13h lastResponseTime=1791795485022 decision=execute",
+    "[2026-10-12T08:58:05.396Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false",
+    "[2026-10-12T08:58:05.396Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)",
+    "[2026-10-12T08:58:05.665Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] transform scheduler: percentage=61.6% inputTokens=61000 cacheTtl=13h lastResponseTime=1791795485543 decision=defer",
+    "[2026-10-12T08:58:05.667Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] pending ops WILL APPLY — reason=explicit_flush, pendingOps=2, context=61.6%"
+  ],
+  "activeHoldLogs": [
+    "[2026-10-12T08:58:02.212Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] m[0]/m[1] frozen: active thinking turn (prefix-bound model); replaying the frozen prefix and deferring any rebuild",
+    "[2026-10-12T08:58:03.587Z] [magic-context][ses_ed0aae51bffenmc07F1d6D4k4o] m[0]/m[1] frozen: active thinking turn (prefix-bound model); replaying the frozen prefix and deferring any rebuild"
+  ]
+}

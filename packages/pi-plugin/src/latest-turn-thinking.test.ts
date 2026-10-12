@@ -1,26 +1,36 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
+	getTagsBySession,
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import {
 	addMergedReasoningStrippedIds,
+	appendNoteNudgeAnchor,
+	getMergedReasoningStrippedIds,
+	getNoteNudgeAnchors,
+	getPersistedTodoSyntheticAnchor,
 	getThinkingBindingRecoveryTarget,
 	THINKING_BINDING_STRIP_ORDER_END_MARKER,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import * as autoSearch from "./auto-search-pi";
 import {
+	__test,
 	clearContextHandlerSession,
 	registerPiContextHandler,
+	signalPiHistoryRefresh,
+	signalPiPendingMaterialization,
 } from "./context-handler";
 import {
 	applyPiProactiveThinkingStrip,
 	handlePiProviderFailure,
 } from "./provider-error-recovery-pi";
 import { clearOldReasoningPi } from "./reasoning-replay-pi";
+import * as placeholders from "./strip-placeholders-pi";
 import {
 	assistantMessage,
 	createFakePi,
@@ -280,6 +290,188 @@ for (const order of ["start", "end"] as const) {
 			expect(thinkingOf(next, "signed-2")).toBeUndefined();
 			expect(getThinkingBindingRecoveryTarget(db, sessionId) ?? "").toBe("");
 		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+}
+
+for (const lane of [
+	"pipeline",
+	"placeholders",
+	"auto search",
+	"sticky GC",
+	"history",
+	"synthetic todo",
+	"thinking strip",
+] as const) {
+	test(`Pi 66% signed-prefix hold denies ${lane} until the next user`, async () => {
+		const db = createTestDb();
+		const sessionId = `pi-execute-prefix-hold-${lane}`;
+		getOrCreateSessionMeta(db, sessionId);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			cacheTtl: "13h",
+		});
+		const fake = createFakePi();
+		const search = spyOn(
+			autoSearch,
+			"runAutoSearchHintForPi",
+		).mockImplementation(async (args) => args.messages);
+		const shells = spyOn(placeholders, "stripPiDroppedPlaceholderMessages");
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			tagger: createTagger(),
+			protectedTokens: 0,
+			heuristics: { clearReasoningAge: 1 },
+			injection: {
+				injectionBudgetTokens: 1000,
+				memoryEnabled: false,
+				injectDocs: false,
+			},
+			todowriteEnabled: true,
+			scheduler: { executeThresholdPercentage: 65 },
+			autoSearch: { enabled: true, minPromptChars: 1, scoreThreshold: 0 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: unknown[] }>;
+		const thought = (n: number) =>
+			assistantMessage(`answer ${n}`, n, {
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				content: [
+					{
+						type: "thinking",
+						thinking: `thought ${n}`,
+						thinkingSignature: `sig-${n}`,
+					},
+					{ type: "text", text: `answer ${n}` },
+				],
+			});
+		const source = [
+			userMessage("old task", 1),
+			thought(2),
+			userMessage("active task", 3),
+			thought(4),
+			thought(5),
+		];
+		const ids = [
+			"old-user",
+			"old-answer",
+			"active-user",
+			"active-one",
+			"active-two",
+		];
+		let tokens = 20_000;
+		const pass = async () => {
+			const messages = structuredClone(source);
+			const ctx = {
+				...fakeContext(sessionId, process.cwd(), ids, messages),
+				model: {
+					provider: "anthropic",
+					id: "claude-opus-5-5",
+					api: "anthropic-messages",
+					contextWindow: 100_000,
+				},
+				getContextUsage: () => ({
+					tokens,
+					percent: tokens / 1000,
+					contextWindow: 100_000,
+				}),
+			};
+			return (await handler({ messages: messages as never[] }, ctx as never))
+				.messages;
+		};
+		try {
+			await pass();
+			const baseline = JSON.stringify(await pass());
+			const oldTag = getTagsBySession(db, sessionId).find((tag) =>
+				tag.messageId.startsWith("old-answer"),
+			)!;
+			expect(oldTag).toBeDefined();
+			queuePendingOp(db, sessionId, oldTag.tagNumber, "drop");
+			updateSessionMeta(db, sessionId, {
+				lastTodoState: JSON.stringify([
+					{
+						id: "todo",
+						content: "Deferred task",
+						status: "pending",
+						priority: "medium",
+					},
+				]),
+			});
+			signalPiHistoryRefresh(sessionId);
+			signalPiPendingMaterialization(sessionId);
+			if (lane === "sticky GC")
+				expect(
+					appendNoteNudgeAnchor(
+						db,
+						sessionId,
+						"not-in-this-branch",
+						"preserve until a permitted bust",
+					),
+				).toBe(true);
+			tokens = 66_000;
+			shells.mockClear();
+			for (let n = 0; n < 2; n++) {
+				let gates: unknown;
+				const restoreObserver = __test.setMutationGateObserverForTests(
+					(snapshot) => {
+						gates = snapshot;
+					},
+				);
+				let held: unknown[];
+				try {
+					held = await pass();
+				} finally {
+					restoreObserver();
+				}
+				if (lane === "pipeline")
+					expect(gates).toMatchObject({
+						shouldApplyPendingOps: false,
+						shouldRunHeuristics: false,
+						shouldRunReasoningCleanup: false,
+					});
+				if (lane === "placeholders")
+					expect(shells.mock.calls.at(-1)?.[0]).toMatchObject({
+						isCacheBusting: false,
+						forceDiscovery: false,
+						canFirstApply: false,
+					});
+				if (lane === "auto search") expect(search).not.toHaveBeenCalled();
+				if (lane === "sticky GC")
+					expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
+				if (lane === "history")
+					expect(__test.variantRefreshStateForTests(sessionId).history).toBe(
+						true,
+					);
+				if (lane === "synthetic todo")
+					expect(getPersistedTodoSyntheticAnchor(db, sessionId)).toBeNull();
+				if (lane === "thinking strip")
+					expect(
+						[...getMergedReasoningStrippedIds(db, sessionId)].filter((id) =>
+							id.startsWith("binding_mismatch:"),
+						),
+					).toEqual([]);
+				expect(JSON.stringify(held)).toBe(baseline);
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+			}
+			source.push(userMessage("next user", 6));
+			ids.push("next-user");
+			tokens = 61_000;
+			const released = JSON.stringify(await pass());
+			expect(released).not.toBe(baseline);
+			expect(getPendingOps(db, sessionId)).toHaveLength(0);
+			expect(released).toContain("Deferred task");
+			expect(released).not.toContain('"thinkingSignature"');
+			if (lane === "auto search") expect(search).toHaveBeenCalled();
+			if (lane === "sticky GC")
+				expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(0);
+		} finally {
+			search.mockRestore();
+			shells.mockRestore();
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}

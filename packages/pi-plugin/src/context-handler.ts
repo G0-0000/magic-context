@@ -3156,6 +3156,7 @@ class PiIdentityRebuildUnrecorded extends Error {}
 
 interface AdoptPiFallbackTagsOptions {
 	allowUnprovenRebuild?: boolean;
+	deferUnprovenRebuild?: boolean;
 	messages?: readonly PiAgentMessage[];
 	resolveStableId?: (msg: unknown, index: number) => string | undefined;
 	hasFallbackMessageTags?: boolean;
@@ -3397,6 +3398,9 @@ function adoptPiFallbackTags(
 		const proven =
 			cached !== undefined ||
 			rows.filter((row) => served.has(row.tagNumber)).length === 1;
+		// Ambiguous identities need a prefix rewrite; leave them unmerged while
+		// signed thinking holds that rewrite for the next real user turn.
+		if (!proven && options.deferUnprovenRebuild) return null;
 		if (proven && options.allowUnprovenRebuild) {
 			// Even a byte-safe fold needs readable, writable identity decisions:
 			// an identity this session already serves unmerged (its repair was
@@ -5396,9 +5400,9 @@ export function registerPiContextHandler(
 						// Use the map produced after commits and splices because those operations
 						// can change the final message-reference to entry-ID mapping.
 						entryIdByRef: result.postCommitEntryIdByRef,
-						// Same signal OpenCode uses to gate sticky-anchor GC
-						// (isCacheBustingPass = history-refresh OR work executed).
-						isCacheBusting: isCacheBusting || result.executedWorkThisPass,
+						// Sticky-anchor GC shares the pipeline's permission, including
+						// its signed-prefix hold, rather than a refresh request alone.
+						isCacheBusting: result.prefixBustPermitted,
 						// These leading synthetic messages have no persisted entry IDs, so
 						// exclude them from the sticky-anchor GC denominator.
 						syntheticLeadingCount: result.syntheticLeadingCount,
@@ -5418,6 +5422,7 @@ export function registerPiContextHandler(
 			if (
 				options.autoSearch?.enabled &&
 				!options.compactionOff &&
+				result.prefixMutationAllowed &&
 				budget.remainingWork() > PI_CONTEXT_BUDGET.searchMs
 			) {
 				guardSqliteTransformPass({
@@ -5476,18 +5481,11 @@ export function registerPiContextHandler(
 			// the same pair from the persisted snapshot to keep wire bytes
 			// byte-identical (Anthropic prompt cache stability).
 			//
-			// Cache-busting gate parity: OpenCode uses
-			// `isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics`
-			// (transform-postprocess-phase.ts:273). Pi's `isCacheBusting`
-			// flag from the outer handler only covers history refresh
-			// (historian publication), so we OR it with
-			// `result.executedWorkThisPass` — pending-op materialization,
-			// heuristic cleanup, or reasoning clearing — to match
-			// OpenCode's broader "execute pass that actually mutated state"
-			// semantics.
+			// Reuse the pipeline's permission, including its signed-prefix hold;
+			// a pending history refresh alone cannot authorize a new todo pair.
 			//
-			// Subagents skip — they don't get synthetic injection in
-			// OpenCode either (see B7 `args.fullFeatureMode` gate).
+			// Subagents do not receive these synthetic todo reminders, matching
+			// OpenCode's primary-session-only policy.
 			const tTodoCapture = performance.now();
 			try {
 				const sessionMetaForTodo = sessionMeta;
@@ -5497,8 +5495,7 @@ export function registerPiContextHandler(
 					!sessionMetaForTodo.isSubagent &&
 					sessionMetaForTodo.lastTodoState !== ""
 				) {
-					const isCacheBustingForTodo =
-						isCacheBusting || result.executedWorkThisPass;
+					const isCacheBustingForTodo = result.prefixBustPermitted;
 					outputMessages = injectSyntheticTodowriteForPi({
 						db: options.db,
 						sessionId,
@@ -5580,22 +5577,19 @@ export function registerPiContextHandler(
 						entryIds: outputEntryIds,
 						provider: lkgProviderKey ?? undefined,
 						model: ctx.model?.id,
-						// Same permission as synthetic todo injection:
-						// executedWorkThisPass is true when the pipeline was allowed to
-						// bust the cache (a HARD fold included). bustedThisPass is not
-						// used as permission: it describes the earlier pipeline and cannot
-						// observe host-side reminder edits made after that pipeline.
+						// The pipeline's permission also governs host-side mutations;
+						// a requested history refresh cannot bypass a signed-prefix hold.
 						//
-						// A pass whose only edit is the oldest-prefix thinking clear
-						// keeps the newer blocks: Anthropic's "What counts as an edit"
-						// table lists "Remove `thinking` blocks from the start of the
-						// history" as valid. Any other edit, or one the pass cannot
-						// classify, still strips every block.
+						// Anthropic's preserved-thinking contract permits removing only
+						// the oldest thinking blocks without invalidating newer ones.
+						// Keep those newer blocks on a trim-only pass; other prefix edits,
+						// or edits the pass cannot classify, still require a full strip.
 						cacheBustingPass:
-							isCacheBusting ||
-							(result.executedWorkThisPass &&
-								(result.prefixEditBesidesReasoningTrim ||
-									hostEditBeforeNewestThinking)),
+							result.prefixBustPermitted &&
+							(isCacheBusting ||
+								(result.executedWorkThisPass &&
+									(result.prefixEditBesidesReasoningTrim ||
+										hostEditBeforeNewestThinking))),
 						report: (line) => sessionLog(sessionId, line),
 					});
 				} catch (err) {
@@ -7327,6 +7321,10 @@ interface PiChannelBaselineSnapshot {
 }
 
 interface RunPipelineResult {
+	/** Shared permission for first applications in the pipeline and host-side lanes. */
+	prefixBustPermitted: boolean;
+	/** False while a signed-prefix hold defers new host-side work. */
+	prefixMutationAllowed: boolean;
 	identityRebuilt?: boolean;
 	messages: unknown[];
 	servedTagNumbers?: ReadonlySet<number>;
@@ -7480,6 +7478,8 @@ async function runCompactionOffPipeline(
 	}
 	return {
 		messages: args.messages as unknown[],
+		prefixBustPermitted: false,
+		prefixMutationAllowed: false,
 		heuristicsExecuted: false,
 		executedWorkThisPass: false,
 		historyInjected: false,
@@ -8034,7 +8034,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
-	let isCacheBustingPass = hasReclaimRide(rideSignals);
+	// While this prefix-bound model's signed thinking turn is unfinished, keep
+	// previously served bytes unchanged. At the force threshold, pressure relief
+	// still takes priority so the request can fit within the model's input limit.
+	const prefixMutationAllowed = !protectedSignedPrefix || emergencyDropEligible;
+	let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals);
 	if (args.temporalAwareness && isCacheBustingPass) {
 		temporalDecisions = freezeTemporalDecisions(
 			args.db,
@@ -8121,6 +8125,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		entryFingerprintByMessageId,
 		{
 			allowUnprovenRebuild: true,
+			deferUnprovenRebuild: !prefixMutationAllowed,
 			messages: args.messages as PiAgentMessage[],
 			resolveStableId: stableIdResolver,
 			hasFallbackMessageTags,
@@ -8148,9 +8153,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const identityRebuild = identityAdoption.rebuilds.length > 0;
 	if (identityRebuild) {
 		args.schedulerDecision = "execute";
-		isCacheBustingPass = true;
-		publishedWorkDrainAllowed = true;
-		if (piM0State) {
+		isCacheBustingPass = prefixMutationAllowed;
+		publishedWorkDrainAllowed = isCacheBustingPass;
+		if (piM0State && prefixMutationAllowed) {
 			clearM0M1PiCache(args.db, args.sessionId, PI_TAG_IDENTITY_REPAIR_REASON);
 			piM0State.preparedPrefix = undefined;
 			piM0State.freezePrefixForPass = false;
@@ -9362,11 +9367,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// retries the rebuild. Deferred-history is NOT drained
 			// here; Pi-native compaction marker application happens at
 			// the end of runPipeline after materializing work succeeds.
-			if (args.isCacheBusting) {
+			if (args.isCacheBusting && prefixMutationAllowed) {
 				historyRefreshSessions.delete(args.sessionId);
 				historyWasConsumedThisPass = true;
 			}
-			if (deferredHistoryRefresh) {
+			if (deferredHistoryRefresh && prefixMutationAllowed) {
 				historyWasConsumedThisPass = true;
 			}
 			logTransformTiming(
@@ -9393,12 +9398,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// place. Subagent execute alone must not discover new splices that collapse
 		// a freshly dropped turn: tiny shells wait for a history refresh (or the
 		// stable-id cutover below). Frozen discoveries still replay every pass.
-		isCacheBusting: args.isCacheBusting,
+		isCacheBusting: args.isCacheBusting && prefixMutationAllowed,
 		stableIdByRef: postCommitStableIdByRef,
 		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
 		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
-		forceDiscovery: args.stableIdSchemeCutover === true,
+		forceDiscovery:
+			args.stableIdSchemeCutover === true && prefixMutationAllowed,
 		// Frozen ids whose message owns a tool call are forgotten only on a pass
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.
@@ -9775,6 +9781,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	);
 	return {
 		messages: outputMessages,
+		prefixBustPermitted: isCacheBustingPass,
+		prefixMutationAllowed,
 		identityRebuilt: identityRebuild,
 		servedTagNumbers,
 		heuristicsExecuted,

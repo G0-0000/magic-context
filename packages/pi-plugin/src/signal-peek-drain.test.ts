@@ -167,7 +167,9 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		const segment = code.slice(idx, idx + 2400);
 		// The drain must mention historyRefreshSessions.delete and isCacheBusting
 		expect(segment).toContain("historyRefreshSessions.delete(args.sessionId)");
-		expect(segment).toMatch(/if\s*\(\s*args\.isCacheBusting\s*\)/);
+		expect(segment).toMatch(
+			/if\s*\(\s*args\.isCacheBusting\s*&&\s*prefixMutationAllowed\s*\)/,
+		);
 	});
 
 	test("deferred publication drains only on a bust-opportunity gate", () => {
@@ -234,7 +236,7 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		const noteIdx = code.indexOf("applyNoteNudges(");
 		expect(pipelineIdx).toBeGreaterThan(0);
 		expect(noteIdx).toBeGreaterThan(pipelineIdx);
-		expect(code).toContain("isCacheBusting || result.executedWorkThisPass");
+		expect(code).toContain("isCacheBusting: result.prefixBustPermitted");
 	});
 });
 

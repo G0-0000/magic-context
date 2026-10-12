@@ -5077,6 +5077,7 @@ for (const { modelID, prefixBound } of [
         const pendingMaterializationSessions = new Set<string>();
         const transform = createTransform({
             db,
+            directory: makeTempDir("primary-thinking-hold-"),
             tagger: createTagger(),
             scheduler: createScheduler({ executeThresholdPercentage: 65 }),
             liveModelBySession: new Map([[sessionId, model]]),
@@ -5133,8 +5134,12 @@ for (const { modelID, prefixBound } of [
             );
         const status = (tag: number) =>
             getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag)?.status;
+        const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
         try {
+            // Cache m[0]/m[1] before signed thinking enters the tool loop.
+            await transform({}, { messages: structuredClone(raw.slice(0, 1)) });
             const baseline = await pass();
+            expect(getOrCreateSessionMeta(db, sessionId).cachedM0Bytes).not.toBeNull();
             const tools = getTagsBySession(db, sessionId)
                 .filter((t) => t.type === "tool")
                 .sort((a, b) => a.tagNumber - b.tagNumber);
@@ -5142,8 +5147,9 @@ for (const { modelID, prefixBound } of [
             const [oldTag, activeTag] = [tools[0]!.tagNumber, tools[1]!.tagNumber];
             queuePendingOp(db, sessionId, oldTag, "drop");
             queuePendingOp(db, sessionId, activeTag, "drop");
+            updateSessionMeta(db, sessionId, { systemPromptHash: "system-after-held-execute" });
             usage.set(sessionId, {
-                usage: { percentage: 76, inputTokens: 76_000 },
+                usage: { percentage: 66, inputTokens: 66_000 },
                 updatedAt: Date.now(),
                 hasUsageTokens: true,
             });
@@ -5153,10 +5159,16 @@ for (const { modelID, prefixBound } of [
             // Either way, the active turn's thinking reaches the provider unchanged.
             expect(activeThinking(executed)).toBe(activeThinking(baseline));
             if (prefixBound) {
-                // Any earlier output edit would invalidate the later signed blocks of
-                // the active turn on this model, so every queued drop waits. (The
-                // busting pass may still trim the oldest thinking gap-free, which
-                // leaves the active blocks valid; that existing behavior is unchanged.)
+                // At 66%, the unfinished thinking turn postpones every prefix edit,
+                // including old thinking removal, until the next real user request.
+                expect(JSON.stringify(executed)).toBe(JSON.stringify(baseline));
+                expect(JSON.stringify(await pass())).toBe(JSON.stringify(baseline));
+                const holds = logs.mock.calls.filter((call) =>
+                    String(call[1]).includes("m[0]/m[1] frozen:"),
+                );
+                expect(holds.map((call) => call[1])).toEqual([
+                    "m[0]/m[1] frozen: active thinking turn (prefix-bound model); replaying the frozen prefix and deferring any rebuild",
+                ]);
                 expect(JSON.stringify(executed)).toContain("OLD-SPENT");
                 expect(JSON.stringify(executed)).toContain("ACTIVE-SPENT");
                 expect(
@@ -5182,7 +5194,19 @@ for (const { modelID, prefixBound } of [
             expect(JSON.stringify(released)).not.toContain("OLD-SPENT");
             expect(JSON.stringify(released)).not.toContain("ACTIVE-SPENT");
             expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash).toBe(
+                "system-after-held-execute",
+            );
+            if (prefixBound) {
+                raw.push(step("next-turn-thinking", 6, "NEW"));
+                await pass();
+                await pass();
+                expect(
+                    logs.mock.calls.filter((call) => String(call[1]).includes("m[0]/m[1] frozen:")),
+                ).toHaveLength(2);
+            }
         } finally {
+            logs.mockRestore();
             closeQuietly(db);
         }
     });

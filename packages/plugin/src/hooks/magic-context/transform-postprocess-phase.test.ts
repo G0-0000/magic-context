@@ -73,6 +73,7 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
+import * as heuristicCleanup from "./heuristic-cleanup";
 import * as compartmentInjection from "./inject-compartments";
 import {
     capturePrefixTrimSourceOrder,
@@ -12114,5 +12115,120 @@ it("fold preparation retries rather than overwriting a changed legacy tool tag",
         ).toEqual({ status: "active", drop_mode: "full" });
     } finally {
         inject.mockRestore();
+    }
+});
+
+// Observe each named edit's admission or persisted decision, plus served bytes.
+// An unfinished thinking tool loop must retain queued work until new user text
+// starts another turn, even when usage crosses the execute threshold.
+describe("active-thinking shared bust permission", () => {
+    for (const lane of [
+        "pending drain",
+        "heuristics",
+        "caveman",
+        "age sweep",
+        "synthetic todo",
+        "thinking strip",
+    ] as const) {
+        it(`held execute denies ${lane}`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `hold-${lane}`;
+            const source = [
+                {
+                    info: { id: "old-user", role: "user" },
+                    parts: [{ type: "text", text: "old task" }],
+                },
+                {
+                    info: { id: "old-answer", role: "assistant" },
+                    parts: [
+                        { type: "reasoning", text: "old signed thought" },
+                        {
+                            type: "text",
+                            text: "The project is in the directory and it is the important file.".repeat(
+                                20,
+                            ),
+                        },
+                    ],
+                },
+                {
+                    info: { id: "active-user", role: "user" },
+                    parts: [{ type: "text", text: "continue" }],
+                },
+                {
+                    info: { id: "active-answer", role: "assistant" },
+                    parts: [
+                        { type: "reasoning", text: "active signed thought" },
+                        {
+                            type: "text",
+                            text: "The current task is in the directory and it is the important file.".repeat(
+                                20,
+                            ),
+                        },
+                    ],
+                },
+            ] as MessageLike[];
+            const pending = new Set([sessionId]);
+            const pass = async (execute: boolean) => {
+                const messages = structuredClone(source);
+                const tagger = createTagger();
+                tagger.initFromDb(sessionId, db);
+                const tagged = tagMessages(sessionId, messages, tagger, db);
+                const result = await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        tagger,
+                        ...tagged,
+                        tags: getActiveTagsBySession(db, sessionId),
+                        freezeM0M1: true,
+                        activeThinkingTurn: true,
+                        resolvedProviderID: "anthropic",
+                        resolvedModelID: "claude-opus-5-5",
+                        thinkingBindingRecoveryEnabledForModel: true,
+                        schedulerDecision: execute ? "execute" : "defer",
+                        contextUsage: { percentage: execute ? 66 : 20, inputTokens: 66_000 },
+                        pendingMaterializationSessions: execute ? pending : new Set(),
+                        cavemanTextCompression: { enabled: true, minChars: 10 },
+                        currentTurnId: "active-user",
+                    }),
+                );
+                return { messages, result };
+            };
+            const baseline = await pass(false);
+            const tag = getTagsBySession(db, sessionId).find((row) =>
+                row.messageId.startsWith("old-answer"),
+            )!;
+            expect(tag).toBeDefined();
+            queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+            updateSessionMeta(db, sessionId, {
+                lastTodoState: JSON.stringify([
+                    {
+                        id: "held-todo",
+                        content: "deferred todo",
+                        status: "pending",
+                        priority: "medium",
+                    },
+                ]),
+            });
+            const drain = spyOn(operations, "applyPendingOperations");
+            const cleanup = spyOn(heuristicCleanup, "applyHeuristicCleanup");
+            try {
+                const held = await pass(true);
+                if (lane === "pending drain") expect(drain).not.toHaveBeenCalled();
+                if (lane === "heuristics" || lane === "caveman")
+                    expect(cleanup).not.toHaveBeenCalled();
+                if (lane === "age sweep")
+                    expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
+                if (lane === "synthetic todo")
+                    expect(getPersistedTodoSyntheticAnchor(db, sessionId)).toBeNull();
+                if (lane === "thinking strip")
+                    expect(held.result.proactiveThinkingStrip).toBeNull();
+                expect(JSON.stringify(held.messages)).toBe(JSON.stringify(baseline.messages));
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+                expect(pending.has(sessionId)).toBe(true);
+            } finally {
+                drain.mockRestore();
+                cleanup.mockRestore();
+            }
+        });
     }
 });

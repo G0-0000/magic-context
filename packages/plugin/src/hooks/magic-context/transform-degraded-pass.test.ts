@@ -25,6 +25,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
+import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import * as autoSearchRunner from "./auto-search-runner";
@@ -482,12 +483,25 @@ describe("a pass that falls back to the launch directory", () => {
 
         // The host lookup fails: the launch directory is another project.
         hostDirectory = undefined;
-        const fallback = await pass();
-        expect(m0m1(fallback)).toBe(frozen);
-        expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash ?? "").toBe(
-            frozenSystemHash,
-        );
-        expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+        const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        try {
+            const fallback = await pass();
+            expect(m0m1(fallback)).toBe(frozen);
+            expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash ?? "").toBe(
+                frozenSystemHash,
+            );
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+            await pass();
+            expect(
+                logs.mock.calls
+                    .filter((call) => String(call[1]).includes("m[0]/m[1] frozen:"))
+                    .map((call) => call[1]),
+            ).toEqual([
+                "m[0]/m[1] frozen: session directory unresolved; replaying the frozen prefix and deferring any rebuild",
+            ]);
+        } finally {
+            logs.mockRestore();
+        }
 
         // The next resolved pass does the rebuild it was due.
         hostDirectory = sessionDirectory;

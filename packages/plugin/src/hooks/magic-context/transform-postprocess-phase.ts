@@ -2286,13 +2286,15 @@ export async function runPostTransformPhase(
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
     };
-    // A cache-bust opportunity is not permission to edit an unfinished signed
-    // turn. Retain pending drops until a real user message ends the tool loop.
-    const publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
+    // When signed thinking or an unresolved project directory holds the history
+    // rebuild, every other new prefix edit must wait too. Otherwise stripping old
+    // thinking would rewrite the cache without delivering the queued reductions.
+    // At the force threshold, pressure relief still takes priority over this hold.
+    const publishedWorkDrainAllowed =
+        !compactionOff && (!freezeM0M1 || emergencyDropEligible) && hasReclaimRide(rideSignals);
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
     const shouldRunHeuristics =
-        !compactionOff &&
-        hasReclaimRide(rideSignals) &&
+        publishedWorkDrainAllowed &&
         (rideSignals.publishedHistory ||
             materializationRequested ||
             forceMaterialization ||

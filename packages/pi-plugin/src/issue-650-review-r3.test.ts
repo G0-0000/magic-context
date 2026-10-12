@@ -97,9 +97,15 @@ function toolInput(): PiMessage[] {
 		userMessage("next", 22),
 	];
 }
-function adopt(db: Database, id: string, input = toolInput()) {
+function adopt(
+	db: Database,
+	id: string,
+	input = toolInput(),
+	deferUnprovenRebuild = false,
+) {
 	return __test.adoptPiFallbackTags(db, id, createTagger(), new Map(), {
 		allowUnprovenRebuild: true,
+		deferUnprovenRebuild,
 		messages: input,
 		resolveStableId: (_message: unknown, index: number) =>
 			["first", "real", "result", "next"][index],
@@ -574,4 +580,20 @@ test("review 650 r3 partner: removing an unrelated unsaved note does not change 
 test("review 650 r3 finding: removing the first identical unsaved note must not transfer its dropped tag to the second", async () => {
 	const result = await rewindUnsavedNotes(true);
 	expect(result.actual).toEqual(result.expected);
+});
+
+test("held unproven tool repair waits for a permitted prefix rebuild", () => {
+	const db = createTestDb();
+	const id = session("held-repair");
+	try {
+		seedTool(db, id);
+		for (let pass = 0; pass < 2; pass++) {
+			expect(adopt(db, id, toolInput(), true).rebuilds).toEqual([]);
+			expect(rows(db, id)).toEqual([{ tag_number: 8 }, { tag_number: 154 }]);
+		}
+		expect(adopt(db, id).rebuilds).toHaveLength(1);
+		expect(rows(db, id)).toEqual([{ tag_number: 154 }]);
+	} finally {
+		db.close();
+	}
 });

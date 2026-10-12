@@ -575,11 +575,11 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"let isCacheBustingPass = hasReclaimRide(rideSignals)",
+				"let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals)",
 			);
 			expect(src).toContain("if (identityRebuild) {");
 			expect(src).toContain(
-				'args.schedulerDecision = "execute"; isCacheBustingPass = true;',
+				'args.schedulerDecision = "execute"; isCacheBustingPass = prefixMutationAllowed;',
 			);
 			expect(src).toContain(
 				"const toolReclaimApplicationOpportunity = isCacheBustingPass",
@@ -8507,8 +8507,16 @@ describe("Pi proactive strip of invalidated thinking", () => {
 				}
 				return { messages, entryIds };
 			};
-			const pass = async (turns: number, percent: number) => {
+			const pass = async (
+				turns: number,
+				percent: number,
+				completed = false,
+			) => {
 				const { messages, entryIds } = build(turns);
+				if (completed) {
+					messages.push(userMessage(`request ${turns}`, turns * 2 + 1));
+					entryIds.push(`entry-u${turns}`);
+				}
 				const result = await handler({ messages: messages as never[] }, {
 					...fakeContext(sessionId, process.cwd(), entryIds, messages as never),
 					model: { provider: "anthropic", id: "claude-opus-5-5" },
@@ -8521,8 +8529,9 @@ describe("Pi proactive strip of invalidated thinking", () => {
 				return (result?.messages ?? messages) as unknown[];
 			};
 
-			// The first render busts and strips the two turns it serves.
-			await pass(2, 10);
+			// Price the initial strip after the two turns have ended, not inside
+			// a held thinking turn whose work would spill into the force pass.
+			await pass(2, 10, true);
 			// Eight newer turns arrive on defer passes and keep their thinking.
 			const served = await pass(10, 10);
 			expect(served.slice(4).map(liveThinking)).toEqual(
