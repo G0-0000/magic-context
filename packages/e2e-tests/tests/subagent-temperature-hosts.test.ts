@@ -117,7 +117,10 @@ function pluginLog(h: ScenarioHarness, logPath: string): string {
     return existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
 }
 
-async function triggerHistorian(h: HostHarness): Promise<CapturedRequest[]> {
+async function triggerHistorian(
+    h: HostHarness,
+): Promise<{ requests: CapturedRequest[]; trigger: string }> {
+    let trigger = "context pressure";
     h.mock.addMatcher((body) => {
         if (!JSON.stringify(body).includes(HISTORIAN_SYSTEM_MARKER)) return null;
         const range = findHistorianOrdinalRange(body);
@@ -143,7 +146,7 @@ async function triggerHistorian(h: HostHarness): Promise<CapturedRequest[]> {
     const quiet = { input_tokens: 500, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 };
     // The pressure event and the next transform pass can race the store's warm-up, so
     // a single spike does not always start the historian. Re-apply pressure until it does.
-    for (let attempt = 1; attempt <= 4 && !h.requests().some(isHistorianRequest); attempt++) {
+    for (let attempt = 1; attempt <= 2 && !h.requests().some(isHistorianRequest); attempt++) {
         h.mock.setDefault({ text: "big", usage: big });
         await h.sendPrompt(sessionId, `pressure trigger ${attempt}.`);
         // The trigger waits for an off-thread tag warm-up that restarts whenever the
@@ -160,8 +163,30 @@ async function triggerHistorian(h: HostHarness): Promise<CapturedRequest[]> {
             // Try another pressure round.
         }
     }
+    // OpenCode 1's pressure trigger also waits on that warm-up and can starve on a busy
+    // machine. Its /ctx-wrapup command runs the same historian agent on demand.
+    if (!h.requests().some(isHistorianRequest) && h.host === "opencode" && h.serverUrl) {
+        trigger = "ctx-wrapup";
+        const response = await fetch(`${h.serverUrl}/session/${sessionId}/command`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+                messageID: `msg_${crypto.randomUUID().replaceAll("-", "")}`,
+                command: "ctx-wrapup",
+                arguments: "",
+                agent: "build",
+                model: "mock-anthropic/mock-sonnet",
+                parts: [],
+            }),
+        });
+        expect(response.ok).toBe(true);
+        await h.waitFor(() => h.requests().some(isHistorianRequest), {
+            timeoutMs: 60_000,
+            label: "wrapup historian request reached the mock",
+        });
+    }
     expect(h.requests().some(isHistorianRequest)).toBe(true);
-    return h.requests().filter(isHistorianRequest);
+    return { requests: h.requests().filter(isHistorianRequest), trigger };
 }
 
 forEachHost(import.meta.url, "historian temperature follows model metadata", (host) => {
@@ -215,13 +240,14 @@ forEachHost(import.meta.url, "historian temperature follows model metadata", (ho
                     ...(piModel ? { historianModel: piModel } : {}),
                 });
                 try {
-                    const requests = await triggerHistorian(h);
+                    const { requests, trigger } = await triggerHistorian(h);
                     const isolation = assertNoLiveStoreOpen();
                     const temperatures = requests.map((request) =>
                         "temperature" in request.body ? request.body.temperature : "absent",
                     );
-                    // Every case configures a historian temperature, so each host logs one
-                    // decision for the model; the plugin flushes its log asynchronously.
+                    // Every case configures a historian temperature, so the plugin logs one
+                    // decision per model wherever a temperature reaches it; the log flushes
+                    // asynchronously.
                     const decisionLine = () =>
                         pluginLog(h, logPath)
                             .split("\n")
@@ -233,6 +259,7 @@ forEachHost(import.meta.url, "historian temperature follows model metadata", (ho
                         `[temperature-evidence] ${JSON.stringify({
                             host,
                             model: historian ?? `${piModel?.provider}/${piModel?.id}`,
+                            trigger,
                             historianRequests: requests.length,
                             temperatures,
                             decision: decision?.replace(/^.*?(Subagent temperature)/, "$1") ?? null,
@@ -241,9 +268,17 @@ forEachHost(import.meta.url, "historian temperature follows model metadata", (ho
                     );
                     expect(requests.length).toBeGreaterThan(0);
                     expect(temperatures).toEqual(requests.map(() => testCase.expected ?? "absent"));
-                    expect(decision).toContain(
-                        testCase.expected === undefined ? "Subagent temperature omitted" : "Subagent temperature sent",
-                    );
+                    if (host === "opencode" && testCase.expected === undefined) {
+                        // OpenCode 1 itself leaves agent temperature out of chat.params for a
+                        // model whose metadata says no, so there is nothing left to decide.
+                        expect(decision ?? "").not.toContain("Subagent temperature sent");
+                    } else {
+                        expect(decision).toContain(
+                            testCase.expected === undefined
+                                ? "Subagent temperature omitted"
+                                : "Subagent temperature sent",
+                        );
+                    }
                 } finally {
                     await h.dispose();
                 }
