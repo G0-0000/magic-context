@@ -4036,6 +4036,11 @@ export function registerPiContextHandler(
 		ctx,
 		budget,
 	) => {
+		// The guarded wrapper may start this handler late, after waiting for the
+		// foreground SQLite reservation. If the pass was replaced, ended or ran
+		// out of time meanwhile, stop before claiming the session's pass
+		// generation: claiming it would mark a newer pass as superseded.
+		budget.assertOutcome();
 		const passSessionId = ctx.sessionManager
 			? resolveSessionId(ctx)
 			: undefined;
