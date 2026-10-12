@@ -205,7 +205,9 @@ With the pre-fix `pi-context-refusal.ts` and `context-handler.ts` restored, test
 
 * The Pi typecheck and the probe typecheck pass.
 * `bun run lint` checks 308 files with existing warnings only.
-* The full Pi suite gives 1,887 pass / 28 skip / 146 fail across 2,061 tests. The **identical** run with the pre-fix sources gives 1,881 pass / 28 skip / 146 fail across 2,055 tests, and the two failure-name sets are equal. Those 146 failures come from that runner's environment, for example `git rev-list --max-parents=0 HEAD` failing, and are not caused by this change. The final commit's numbers are in the delivery notes.
+* The full Pi suite, on the final commit with a command-local `safe.directory` override (`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=*`), gives **2,033 pass / 28 skip / 0 fail** across 2,061 tests and 208 files, with 156,095 assertions.
+* Without that override, the runner's read-only Git ownership makes 146 tests fail, for example on `git rev-list --max-parents=0 HEAD`. The same 146 failure names appear with the pre-fix sources (1,881 pass vs 1,887 pass here), so they come from the environment, not from this change.
+* The targeted issue 640/641/663/667 subset gives 82 pass, 6 skip (opt-in or `test.failing` cases) and 0 fail.
 
 **Reproduce:**
 
