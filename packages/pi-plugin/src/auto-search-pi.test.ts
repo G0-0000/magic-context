@@ -6,6 +6,12 @@ import {
 	appendAutoSearchHintDecision,
 	getAutoSearchHintDecisions,
 } from "@magic-context/core/features/magic-context/storage";
+import {
+	createAutoSearchReplayFixture,
+	replayHint,
+	replayPrompt,
+	replayScenarios,
+} from "@magic-context/core/hooks/magic-context/auto-search-replay.fixture";
 import { autoSearchTestSnapshot } from "@magic-context/core/hooks/magic-context/auto-search-snapshot.fixture";
 import * as searchModule from "@magic-context/core/hooks/magic-context/auto-search-worker-client";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -13,6 +19,7 @@ import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
+import { injectM0M1Pi, materializeM0Pi } from "./inject-compartments-pi";
 import { PiContextBudget, PiContextDeadlineError } from "./pi-context-budget";
 import {
 	assistantMessage,
@@ -43,6 +50,77 @@ function memoryResult(
 		category: "WORKFLOW_RULES",
 		matchType: "fts",
 	};
+}
+
+for (const scenario of replayScenarios) {
+	it(`pi search exception preserves served user bytes after ${scenario}`, async () => {
+		const fixture = createAutoSearchReplayFixture("pi", scenario);
+		const { sessionId, projectPath } = fixture;
+		const snapshot = spyOn(
+			embeddingModule,
+			"getProjectEmbeddingSnapshot",
+		).mockReturnValue(autoSearchTestSnapshot(projectPath));
+		const search = spyOn(searchModule, "searchAutoHint")
+			.mockResolvedValue([replayHint])
+			.mockImplementationOnce(async () => {
+				throw new Error("transient search failure");
+			});
+		const state = (modelKey = "anthropic/claude") => ({
+			sessionId,
+			projectIdentity: projectPath,
+			projectDirectory: fixture.directory,
+			injectDocs: false,
+			injectionBudgetTokens: 8000,
+			historyBudgetTokens: 60000,
+			hardSignals: fixture.renderOptions(modelKey).hardSignals,
+		});
+		const pair = () => {
+			const messages: Parameters<typeof injectM0M1Pi>[2] = [];
+			injectM0M1Pi(state(), fixture.db, messages, undefined, false);
+			return messages.map(textOf);
+		};
+		const invoke = async (id: string, answered = false) => {
+			const messages = [userMessage(replayPrompt, 1)];
+			if (answered) messages.push(assistantMessage("Answer", 2));
+			await runAutoSearchHintForPi({
+				db: fixture.db,
+				sessionId,
+				messages,
+				entryIds: answered ? [id, "answer"] : [id],
+				options: { ...baseOptions, projectPath },
+			});
+			return JSON.stringify(messages[0]);
+		};
+		try {
+			materializeM0Pi(state(), fixture.db);
+			const baseline = pair();
+			expect(baseline[0]).toContain("Pair baseline distinct from hint.");
+			const served = await invoke("u1");
+			expect(served).not.toContain("<ctx-search-hint>");
+			expect(pair()).toEqual(baseline);
+			if (scenario === "revert") expect(await invoke("u1", true)).toBe(served);
+			if (scenario === "reopen") {
+				clearAutoSearchForPiSession(sessionId);
+				fixture.reopen();
+			}
+			if (scenario === "model fold") {
+				const fold = materializeM0Pi(state("anthropic/other"), fixture.db);
+				expect(fold.snapshotMarkers.modelKey).toBe("anthropic/other");
+			}
+			expect(await invoke("u1")).toBe(served);
+			expect(search).toHaveBeenCalledTimes(1);
+			expect(getAutoSearchHintDecisions(fixture.db, sessionId)).toEqual([
+				{ messageId: "u1", decision: "no-hint", reason: "error" },
+			]);
+			expect(await invoke("u2")).toContain("Independent search-only hint");
+			expect(search).toHaveBeenCalledTimes(2);
+		} finally {
+			search.mockRestore();
+			snapshot.mockRestore();
+			clearAutoSearchForPiSession(sessionId);
+			fixture.close();
+		}
+	});
 }
 
 describe("runAutoSearchHintForPi", () => {
@@ -614,14 +692,16 @@ describe("runAutoSearchHintForPi", () => {
 			expect(
 				createHash("sha256").update(JSON.stringify(secondPass)).digest("hex"),
 			).toBe(beforeHash);
-			expect(getAutoSearchHintDecisions(db, "ses-auto")).toHaveLength(0);
+			expect(getAutoSearchHintDecisions(db, "ses-auto")).toEqual([
+				{ messageId: "entry-user", decision: "no-hint", reason: "error" },
+			]);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);
 		}
 	});
 
-	it("does not persist no-hint decisions for retryable search errors", async () => {
+	it("freezes a no-hint decision when a search error serves the user message", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
 			async () => {
@@ -644,8 +724,14 @@ describe("runAutoSearchHintForPi", () => {
 				options: baseOptions,
 			});
 
-			expect(spy).toHaveBeenCalledTimes(2);
-			expect(getAutoSearchHintDecisions(db, "ses-auto")).toHaveLength(0);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(getAutoSearchHintDecisions(db, "ses-auto")).toEqual([
+				{
+					messageId: "test-entry-0:1",
+					decision: "no-hint",
+					reason: "error",
+				},
+			]);
 			expect(textOf(messages[0])).not.toContain("<ctx-search-hint>");
 		} finally {
 			spy.mockRestore();

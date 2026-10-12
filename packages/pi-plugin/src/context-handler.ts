@@ -121,7 +121,6 @@ import {
 	isProviderOverflowFailClosedProven,
 	type NoteNudgeAnchor,
 	type PendingPiCompactionMarker,
-	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
@@ -10114,7 +10113,8 @@ function applyNoteNudges(args: {
 		const allResolved = messageIdByIndex.size === realMessageCount;
 		if (allResolved && visibleIds.size > 0) {
 			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
-			pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
+			// A branch switch can hide and later restore a served user message.
+			// Keep its auto-search decision so restoration replays identical bytes.
 		}
 	}
 

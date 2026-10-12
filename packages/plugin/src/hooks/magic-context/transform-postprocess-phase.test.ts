@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import todoRideGolden from "../../../../../crates/mc-module/testdata/todo-ride-only.json";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
+import * as embeddingModule from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
@@ -65,7 +66,14 @@ import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import {
+    createAutoSearchReplayFixture,
+    replayHint,
+    replayPrompt,
+} from "./auto-search-replay.fixture";
 import * as autoSearchRunner from "./auto-search-runner";
+import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
+import * as searchModule from "./auto-search-worker-client";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
@@ -316,6 +324,86 @@ function basePostTransformArgs(
 
 function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
+}
+
+for (const host of ["opencode", "opencode2"] as const) {
+    describe(`${host} auto-search served decisions`, () => {
+        function setup(label: string) {
+            const fixture = createAutoSearchReplayFixture(host, label);
+            const snapshot = spyOn(embeddingModule, "getProjectEmbeddingSnapshot").mockReturnValue(
+                autoSearchTestSnapshot(fixture.projectPath),
+            );
+            const search = spyOn(searchModule, "searchAutoHint").mockResolvedValue([replayHint]);
+            return {
+                ...fixture,
+                search,
+                async invoke(id: string, busting = false) {
+                    const user = {
+                        info: { id, role: "user" },
+                        parts: [{ type: "text", text: replayPrompt }],
+                    } as MessageLike;
+                    const input = basePostTransformArgs(fixture.db, fixture.sessionId, [user], {
+                        currentTurnId: id,
+                        schedulerDecision: busting ? "execute" : "defer",
+                        projectPath: fixture.projectPath,
+                        autoSearch: { enabled: true, scoreThreshold: 0.6, minPromptChars: 12 },
+                        m0M1: fixture.renderOptions(
+                            busting ? "anthropic/other" : "anthropic/claude",
+                        ),
+                    });
+                    const result = await runPostTransformPhase(input);
+                    return { userBytes: JSON.stringify(user), result };
+                },
+                close() {
+                    search.mockRestore();
+                    snapshot.mockRestore();
+                    fixture.close();
+                },
+            };
+        }
+
+        it("full host processor cannot retry a served search exception", async () => {
+            const fixture = setup("host-exception");
+            fixture.search.mockImplementationOnce(async () => {
+                throw new Error("transient host-search failure");
+            });
+            try {
+                const first = await fixture.invoke("u1");
+                expect(first.userBytes).not.toContain("<ctx-search-hint>");
+                expect(fixture.search).toHaveBeenCalledTimes(1);
+                const second = await fixture.invoke("u1");
+                expect(second.userBytes).toBe(first.userBytes);
+                expect(fixture.search).toHaveBeenCalledTimes(1);
+            } finally {
+                fixture.close();
+            }
+        });
+
+        it("full host processor preserves a served hint when a truncated branch is restored", async () => {
+            const fixture = setup("host-restore");
+            try {
+                const first = await fixture.invoke("u1");
+                expect(first.userBytes).toContain("Independent search-only hint");
+                const truncated = await fixture.invoke("u2", true);
+                expect(truncated.result.materialized).toBe(true);
+                expect(truncated.result.bustedThisPass).toBe(true);
+                const retained = replayStorage.getAutoSearchHintDecisions(
+                    fixture.db,
+                    fixture.sessionId,
+                );
+                expect(retained.some((decision) => decision.messageId === "u1")).toBe(true);
+                fixture.search.mockResolvedValue([
+                    { ...replayHint, memoryId: 9001, content: "Recomputed changed hint" },
+                ]);
+                const restored = await fixture.invoke("u1");
+                expect(restored.userBytes).toBe(first.userBytes);
+                expect(restored.userBytes).not.toContain("Recomputed changed hint");
+                expect(fixture.search).toHaveBeenCalledTimes(2);
+            } finally {
+                fixture.close();
+            }
+        });
+    });
 }
 
 describe("postprocess replay-or-refuse", () => {

@@ -358,13 +358,14 @@ export async function runAutoSearchHint(args: {
                     });
                 }, startedAt);
             } catch (error) {
-                // Retryable failure — do NOT persist a permanent no-hint decision, or the
-                // hint would be suppressed forever for this message even though the next
-                // pass might succeed. Just skip this pass; a later pass re-evaluates.
+                if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
+                // This pass serves the user message without a hint. Freeze that decision
+                // before returning so a recovered search cannot rewrite cached bytes.
                 log(
-                    `[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
+                    `[auto-search] unified search failed for session ${sessionId} (no-hint frozen for this turn): ${error instanceof Error ? error.message : String(error)}`,
                 );
-                return { ok: false, kind: "search-failure" };
+                const outcome = await writeNoHintAndReconcile("error");
+                return outcome.ok ? { ok: false, kind: "search-failure" } : outcome;
             }
 
             if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;

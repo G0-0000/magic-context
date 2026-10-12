@@ -338,9 +338,8 @@ export async function runAutoSearchHintForPi(args: {
 					return messages;
 				}
 
-				// A retryable search may finish on a later tool continuation. Compute a new
-				// decision only while the target user is still the live array tail; otherwise
-				// appending the recovered hint would rewrite an already-served cache prefix.
+				// Compute a new decision only for the live user tail. A fresh hint on a
+				// previously answered user message would rewrite an already-served prefix.
 				// Persisted decisions were replayed above because replay is byte restoration,
 				// not a new mutation.
 				if (found.index !== messages.length - 1) return messages;
@@ -459,11 +458,13 @@ export async function runAutoSearchHintForPi(args: {
 					);
 				} catch (error) {
 					args.passGuard?.assert();
-					// Retryable failure — do not persist a permanent no-hint decision, or the
-					// same user message would be suppressed even though a later pass may succeed.
+					if (lifecycleSignal.aborted) return messages;
+					// This pass serves the user message without a hint. Freeze that decision
+					// before returning so a recovered search cannot rewrite cached bytes.
 					log(
-						`[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
+						`[auto-search] unified search failed for session ${sessionId} (no-hint frozen for this turn): ${error instanceof Error ? error.message : String(error)}`,
 					);
+					await writeNoHintAndReconcile("error");
 					return messages;
 				}
 

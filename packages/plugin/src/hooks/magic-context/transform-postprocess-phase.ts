@@ -28,7 +28,6 @@ import {
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
     type PendingCompactionMarker,
-    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     replacePendingCompactionMarkerStateIf,
     setPendingCompactionMarkerState,
@@ -3817,11 +3816,12 @@ export async function runPostTransformPhase(
             }
         }
         const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
-        const prunedDecisions = pruneAutoSearchHintDecisions(args.db, args.sessionId, visibleIds);
-        if (prunedAnchors > 0 || prunedDecisions > 0) {
+        // Auto-search decisions outlive branch visibility: a restored user message
+        // must replay its original hint or no-hint bytes, even after a cache bust.
+        if (prunedAnchors > 0) {
             sessionLog(
                 args.sessionId,
-                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s), ${prunedDecisions} auto-search decision(s)`,
+                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s)`,
             );
         }
     }

@@ -35,7 +35,6 @@ import {
     insertTag,
     markNoteReady,
     openDatabase,
-    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     queuePendingOp,
     removeAutoSearchHintDecisionByMessageId,
@@ -329,9 +328,15 @@ describe("magic-context storage", () => {
             kind: "appended",
             decision: { messageId: "m2", decision: "no-hint", reason: "below-threshold" },
         });
-        expect(pruneAutoSearchHintDecisions(db, sessionId, new Set(["m1"]))).toBe(1);
-        expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([first]);
+        expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([
+            first,
+            { messageId: "m2", decision: "no-hint", reason: "below-threshold" },
+        ]);
         expect(removeAutoSearchHintDecisionByMessageId(db, sessionId, "m1")).toBe(true);
+        expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([
+            { messageId: "m2", decision: "no-hint", reason: "below-threshold" },
+        ]);
+        expect(removeAutoSearchHintDecisionByMessageId(db, sessionId, "m2")).toBe(true);
         expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([]);
         closeQuietly(db);
     });

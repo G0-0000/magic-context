@@ -73,7 +73,6 @@ export {
     type ProtectedTailMeta,
     type ProtectedTailSeedResult,
     protectedTailWindowBudget,
-    pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     recordDetectedContextLimit,
     recordHistorianDrainFailure,

@@ -1826,26 +1826,6 @@ export function pruneNoteNudgeAnchors(
     return pruned;
 }
 
-export function pruneAutoSearchHintDecisions(
-    db: Database,
-    sessionId: string,
-    visibleMessageIds: Set<string>,
-): number {
-    let pruned = 0;
-    casUpdateJsonArrayColumn(
-        db,
-        sessionId,
-        "auto_search_hint_decisions",
-        isValidAutoSearchHintDecision,
-        (current) => {
-            const next = current.filter((decision) => visibleMessageIds.has(decision.messageId));
-            pruned = current.length - next.length;
-            return pruned > 0 ? next : null;
-        },
-    );
-    return pruned;
-}
-
 export function removeNoteNudgeAnchorByMessageId(
     db: Database,
     sessionId: string,
