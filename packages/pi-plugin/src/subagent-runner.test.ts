@@ -31,6 +31,7 @@ import {
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-runner";
+import { __temperatureTest } from "@magic-context/core/shared/subagent-temperature";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
@@ -1992,9 +1993,14 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(spawnOptions.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE).toBe("0");
 	});
 
-	it("omits historian temperature from the spawned child environment when unspecified", async () => {
+	it.each([
+		undefined,
+		"0.8",
+	])("omits historian temperature from the spawned child environment when unspecified (inherited %s)", async (inherited) => {
 		const previousTemperature = process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE;
-		delete process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE;
+		if (inherited === undefined)
+			delete process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE;
+		else process.env.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE = inherited;
 		try {
 			const child = createMockChild();
 			const { runner, spawnImpl } = runnerWith(child, {
@@ -4107,4 +4113,81 @@ describe("Pi dreamer prompt-token budget", () => {
 			});
 		expect(await run).toMatchObject({ ok: false, reason: "token_budget" });
 	});
+});
+
+it.each([
+	"stdout",
+	"stderr",
+] as const)("forwards child temperature decisions from %s once per model", async (channel) => {
+	__temperatureTest.reset();
+	const logged = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+	try {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const result = runner.run({
+			...baseOptions,
+			accountingSessionId: "sampling-session",
+		});
+		const notices = [
+			{
+				type: "mc_temperature",
+				model: "openai-codex/gpt-6.1-sol",
+				supported: null,
+				source: "none",
+			},
+			{
+				type: "mc_temperature",
+				model: "openrouter/google/gemini-3.8-flash",
+				supported: true,
+				source: "catalog",
+				entry: "openrouter/google/gemini-3.8-flash",
+			},
+			// Malformed notices are ignored rather than logged.
+			{
+				type: "mc_temperature",
+				model: "x/y",
+				supported: "yes",
+				source: "host",
+			},
+			{
+				type: "mc_temperature",
+				model: "x/z",
+				supported: true,
+				source: "guess",
+			},
+		];
+		for (let count = 0; count < 2; count++) {
+			for (const notice of notices) {
+				if (channel === "stdout") child.writeStdoutLine(notice);
+				else child.writeStderr(`${JSON.stringify(notice)}\n`);
+			}
+		}
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.emitClose(0);
+		expect((await result).ok).toBe(true);
+		const decisions = logged.mock.calls.filter(([, message]) =>
+			String(message).startsWith("Subagent temperature"),
+		);
+		expect(decisions).toEqual([
+			[
+				"sampling-session",
+				"Subagent temperature omitted for openai-codex/gpt-6.1-sol: no host or models.dev metadata",
+			],
+			[
+				"sampling-session",
+				"Subagent temperature sent for openrouter/google/gemini-3.8-flash: models.dev cache entry openrouter/google/gemini-3.8-flash says yes",
+			],
+		]);
+	} finally {
+		logged.mockRestore();
+		__temperatureTest.reset();
+	}
 });

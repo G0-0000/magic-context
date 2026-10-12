@@ -16,6 +16,7 @@ import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import { runTokenLog } from "../shared/run-token-log";
 import type { Database } from "../shared/sqlite";
+import { subagentTemperature } from "../shared/subagent-temperature";
 import { createNativeHiddenChildren } from "./hidden-child-native";
 import {
     assistantOutcome,
@@ -59,6 +60,13 @@ export interface V2HiddenCompletionOptions {
     log?: (message: string) => void;
     /** Return the host catalog when available; catalog failures leave the request unchanged. */
     modelCatalog?: () => Promise<unknown>;
+    /**
+     * The user's `historian.temperature`, applied to historian, editor and recomp passes.
+     * OpenCode 1 carries it on the historian agent config; OpenCode 2 has no agent-level
+     * sampling, so it is authored onto each historian request here. Dreamer tasks never
+     * receive it.
+     */
+    historianTemperature?: () => number | undefined;
 }
 
 interface RunState {
@@ -546,6 +554,37 @@ export async function createV2HiddenCompletionExecutor(
             }
 
             const requested = await validateVariant(requestModel(request, run.child.model));
+            if (run.identity.kind !== "dreamer-task" && request.body.temperature === undefined) {
+                const configured = options.historianTemperature?.();
+                if (typeof configured === "number" && Number.isFinite(configured))
+                    request = { ...request, body: { ...request.body, temperature: configured } };
+            }
+            if (typeof request.body.temperature === "number") {
+                let metadata: unknown;
+                try {
+                    const listed = await options.modelCatalog?.();
+                    const rows = Array.isArray(listed)
+                        ? listed
+                        : (listed as { data?: unknown[] } | undefined)?.data;
+                    metadata = rows?.find(
+                        (row) =>
+                            row?.providerID === requested.providerID &&
+                            (row?.id === requested.modelID || row?.modelID === requested.modelID),
+                    );
+                } catch {
+                    // A failed catalog lookup is not evidence of sampling support.
+                }
+                const temperature = subagentTemperature(
+                    modelKey(requested),
+                    metadata,
+                    request.body.temperature,
+                    (message) => note(message),
+                );
+                const body = { ...request.body };
+                if (temperature === undefined) delete body.temperature;
+                else body.temperature = temperature;
+                request = { ...request, body };
+            }
             if (run.retired) {
                 // Fallback retries share the original handle. A terminal provider failure has
                 // already retired its child, so give the retry a fresh carrier instead of
