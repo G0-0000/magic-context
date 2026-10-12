@@ -5180,9 +5180,9 @@ export function registerPiContextHandler(
 					? {
 							...options.injection,
 							memoryEnabled: options.injection.memoryEnabled,
-							// v2 decay rendering needs the HISTORY budget (~60K), not the
-							// memory injection budget (~4K). Compute it from live usage +
-							// historian config, mirroring OpenCode's decayPressure budget.
+							// History decay uses the history budget, not the smaller memory
+							// injection budget. Derive it from live usage and historian
+							// configuration so history is retained consistently across hosts.
 							historyBudgetPolicyIdentity: historyBudgetPolicyIdentity(
 								options.historian?.historyBudgetPercentage,
 								options.historian?.executeThresholdPercentage,
@@ -5209,9 +5209,8 @@ export function registerPiContextHandler(
 				stableIdSchemeCutover,
 				schedulerDecision,
 				schedulerDeferReason,
-				// 95% emergency forces drop-all-tools regardless of the
-				// derived force gate, so the LLM call sees the smallest possible
-				// prompt before we hand control back to Pi.
+				// At 95% context usage, permit emergency materialization even
+				// when the configured force percentage has not been reached.
 				forceMaterialization: forceMaterialization || isEmergency,
 				forceMaterializationPercentage,
 				contextUsage: {
@@ -5641,12 +5640,10 @@ export function registerPiContextHandler(
 						entryIds: outputEntryIds,
 						provider: lkgProviderKey ?? undefined,
 						model: ctx.model?.id,
-						// The pipeline's permission also governs host-side mutations;
-						// a requested history refresh cannot bypass a signed-prefix hold.
-						//
-						// Strict binding keeps all thinking on a held pass. A proven
-						// prefix rewrite removes every signed block, including the
-						// active turn, rather than retaining newer invalid signatures.
+						// Host-side mutations share the pipeline's permission. A history
+						// refresh alone cannot authorize changes before kept thinking:
+						// signatures bind all preceding bytes. A permitted prefix rewrite
+						// omits every signed block, including those in the active turn.
 						cacheBustingPass:
 							result.signedPrefixRewritten ||
 							(result.prefixBustPermitted &&
@@ -8216,9 +8213,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
-	// An unfinished thinking turn holds new prefix edits only while the cache
-	// can still be reused. First render, idle expiry and pressure relief already
-	// lose that reuse; run eligible deferred work now instead of on a second bust.
+	// Warm-cache thinking holds defer every new prefix edit. First render, idle
+	// expiry and pressure relief can admit work, but target guards still forbid
+	// edits before retained signatures. A genuine rewrite omits all signed blocks;
+	// expiry alone leaves them and their preceding bytes intact.
 	let prefixMutationAllowed =
 		!protectedSignedPrefix ||
 		firstRenderBust ||

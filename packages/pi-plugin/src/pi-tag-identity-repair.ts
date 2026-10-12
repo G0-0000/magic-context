@@ -163,7 +163,7 @@ export function queuePiIdentityRebuild(
 	);
 }
 
-/** Only the first recorded cache-clear failure may refuse a send; later failures serve with the identity repair pending. */
+/** Refuse only the first durable failure to clear m[0]/m[1] for a tag-identity rebuild; later sends retain the pending repair. */
 export function claimPiIdentityRebuildFailure(
 	db: Database,
 	sessionId: string,

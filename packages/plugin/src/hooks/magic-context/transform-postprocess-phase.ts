@@ -2352,10 +2352,10 @@ export async function runPostTransformPhase(
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
     };
-    // Unfinished prefix-bound thinking defers pending reductions and cleanup only
-    // while the provider cache is reusable. First render, idle expiry and pressure
-    // relief already cost a cache rebuild, so eligible edits add no second bust.
-    // The separate freezeM0M1 directory veto protects project injection only.
+    // Warm-cache thinking holds defer every new prefix edit. First render, idle
+    // expiry and pressure relief can admit work, but the target guards still
+    // forbid changes before any retained signature. A genuine prefix rewrite
+    // first omits every signed block. The directory veto freezes injection only.
     const publishedWorkDrainAllowed =
         !compactionOff &&
         (!activeThinkingPrefixHold ||

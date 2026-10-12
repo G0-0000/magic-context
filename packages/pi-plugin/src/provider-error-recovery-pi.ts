@@ -280,29 +280,23 @@ export interface PiProactiveThinkingStrip {
 }
 
 /**
- * Remove every thinking block still on the wire on a busting pass of a
- * prefix-bound model (Fable 5.1, Opus 5.5, Sonnet 5.5).
+ * Persist and replay thinking omissions when a prefix-bound model's prompt changes.
  *
- * On those models a thinking block is valid only while every byte before it is
- * unchanged, and a busting pass is the pass that changes those bytes: older
- * accounts then drop the blocks silently, `drop_block` drops them, and newer
- * accounts reject the request with a 400. The pass therefore removes all of
- * them itself. Held turns keep every signed block and defer edits before them.
- * A caller that proves a prefix rewrite sets stripActiveTurn: that pass omits
- * every block, including the active turn, instead of keeping invalid signatures.
+ * Fable 5.1, Opus 5.5 and Sonnet 5.5 signatures bind every preceding byte.
+ * Changing those bytes can make the provider discard thinking or reject the
+ * request. Held passes keep all blocks and defer edits before them. A caller
+ * that authorizes such an edit sets `stripActiveTurn` to omit every block,
+ * including the active turn, rather than send invalid signatures.
  *
- * `messages` is the final array this pass serves, after binding-mismatch strips
- * were replayed on it at the end of the pass. The entries are persisted into
- * the binding-mismatch set before anything is stripped, the same contract as
- * the reactive recovery; later passes replay the set at the same point of the
- * pass, so they serve identical bytes, and a removed block never comes back.
- * When the write fails, nothing is stripped and nothing is remembered; the
- * reactive recovery remains the fallback. An entry without a stable id cannot
- * be replayed and is left alone. Thinking produced after this pass is kept
- * until the next busting pass.
+ * Record stable entry IDs before removing parts. Later passes replay the same
+ * omissions after transcript commit, so raw history cannot restore a removed
+ * block or change the rendered drop shape. `persistOnly` records this decision
+ * before the pipeline edits the transcript; otherwise `messages` is its final
+ * output. Entries without stable IDs and failed writes leave thinking intact.
+ * Provider-error recovery can handle a rejected request separately.
  *
- * `cacheBustingPass` must be true only on a pass that already busts the cache;
- * a defer pass never originates a strip.
+ * `cacheBustingPass` requires the shared prefix-edit permission; neither idle
+ * expiry nor a scheduler label alone authorizes edits before kept thinking.
  */
 export function applyPiProactiveThinkingStrip(args: {
 	db: ContextDatabase;
@@ -312,7 +306,7 @@ export function applyPiProactiveThinkingStrip(args: {
 	provider?: string;
 	model?: string;
 	cacheBustingPass: boolean;
-	/** Use for changed knowledge bytes or a declared rebuild, not idle expiry alone. */
+	/** Omit the active turn when m[0]/m[1] or preceding transcript bytes must change; idle expiry alone is insufficient. */
 	stripActiveTurn?: boolean;
 	/** Record omissions now; remove parts after transcript commit so replay uses the same part indices. */
 	persistOnly?: boolean;

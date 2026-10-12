@@ -1,6 +1,6 @@
 import { isRecord } from "../../shared/record-type-guard";
 
-/** Compare m[0]/m[1] text and mural with the two knowledge messages last served. */
+/** Compare m[0]/m[1] text and muralDataUrl image with the two knowledge messages last served. */
 export function servedPrefixMatches(args: {
     messages: readonly unknown[] | null | undefined;
     m0Text: string | null | undefined;

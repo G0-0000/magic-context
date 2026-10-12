@@ -7,12 +7,15 @@ The follow-up narrows the directory veto back to m[0]/m[1] injection only. A
 failed lookup cannot stop queued reductions, heuristic cleanup or a useful
 explicit flush; the cached project memory/docs pair remains unchanged.
 
-The active-thinking veto applies only while there is a reusable prefix. First
-render without a cached pair and an idle-expired, already-cold cache admit safe
-reductions, routine cleanup and older-thinking stripping in the same pass.
-Per-target thinking protection still retains unsafe operations. Tests cover
-both hosts and a cold pass whose queued operations are all protected. Separate
-85% and 95% tests defend the existing pressure exceptions.
+The final revision also enforces strict signed-thinking binding. Losing the
+provider cache to idle expiry does not invalidate the signatures: while any
+signed block is kept, its preceding bytes and m[0]/m[1] rendering stay unchanged.
+An already-cold pass can admit eligible suffix work, not older-thinking stripping.
+A first render that genuinely changes previously served knowledge, a necessary
+identity rebuild, or an emergency fit retry persists omissions of **all** signed
+blocks, including the active turn, before rewriting their prefix. First render
+that reproduces the served pair keeps every block. Separate 85% and 95% tests
+defend the existing pressure exceptions.
 
 A carried Pi identity repair is checked before adoption/tagging can expose its
 folded numbers. With a fitting LKG, the handler returns the last served prefix
@@ -20,8 +23,11 @@ plus the new raw tail; it does not clear m[0]/m[1], acknowledge the repair or
 record a tag-identity calibration bust. The next permitted pass completes it.
 When no fitting replay can be proved, the parent selected one deliberate,
 attributed identity rebuild rather than refusing every step of the tool loop.
-That pass clears the cached pair, uses the folded numbers, admits eligible
-cleanup and acknowledges once. Both branches have real-handler tests.
+That pass first persists omissions of every signed block, clears the cached pair,
+uses the folded numbers, admits eligible cleanup and acknowledges once. Tests
+cover fitting, missing and unpriceable LKG evidence. A durable cache-clear failure
+may refuse once; persistent failures keep the repair pending without repeatedly
+interrupting later turns.
 
 The cache-safe unheld Pi contention behavior is retained and pinned: a
 contended preflight with no other invalidation replays the old todo snapshot,
@@ -29,9 +35,12 @@ preserves sticky anchors and keeps older thinking. A successful subsequent
 fold demonstrates that all three edits become available when permission returns.
 Hold-log state is pruned by the OpenCode 1 and OpenCode 2 deletion seams.
 
-The original host differential below remains the warm-cache issue-665 scenario;
-its after arm is rerun against the follow-up code. Rust is a separate task and
-is unchanged here.
+The host differential below was rerun against the final strict-binding revision.
+The held execute/flush/401-op/defer sequence is also pinned: flush intent stays
+parked throughout the loop and is consumed once when the next user releases it.
+Pi's target protection uses the projected mutation view, not raw message indices,
+so empty shells cannot shift a boundary ahead of a retained signature. Rust is a
+separate task and is unchanged here.
 
 ## Real-host differential
 
@@ -57,7 +66,8 @@ request content, not simulated cache billing or estimated savings. Only moving
 `cache_control` breakpoints are excluded from byte comparisons; system content
 and every previously served message remain part of the comparison.
 
-Each host used a fresh root below `$TMPDIR/magic-context/bg_a50a6413bb418af2/`.
+The final after host was PID 57132; the before host was PID 68261. Each used a
+fresh root below `$TMPDIR/magic-context/bg_a50a6413bb418af2/`.
 HOME, all XDG roots, the host database, and Magic Context storage were private.
 The runner inventories the entire host process group with `lsof -p`; the test
 also inventories the host PID directly. No live store was opened, even read-only.
@@ -99,8 +109,13 @@ repair stays unmerged while held and can repair after permission returns. These
 controls were run individually with only their named test selected. For each
 mutation, the index first held the implementation, `git diff --stat` was nonempty
 with the mutant applied, and empty after `git checkout -- <mutated path>` plus
-`touch`. Exact red test names and observations are included in the delivery's
-mutation evidence.
+`touch`. The final revision reran all thirteen named lane controls individually:
+each selected test failed alone. The force-band and wall controls now also fail
+when emergency admission is disabled. Complete-omission controls fail when active
+thinking is excluded from a necessary rewrite. One Pi caller-only omission mutant
+stayed green because the final strip repeated the same decision; disabling that
+decision in the shared strip helper failed the named first-render test. Exact
+controls, outcomes and applied/restored diffs appear in the delivery evidence.
 
 The Pi trim-only force regression was not inverted: its initial strip now runs
 after the initial turns end. An initial active-thinking hold would intentionally
@@ -126,28 +141,34 @@ All package gates below ran on Linux with 8 vCPUs, Bun 1.4.2, TypeScript 5.9.3,
 and Biome 2.5.1. Package unit suites did not export OPENCODE_DB.
 
 - Plugin and Pi typecheck scripts: passed.
-- Plugin and Pi lint scripts: passed (warnings only; 1,378 and 303 files checked).
-- Pi full suite: 1,988 passed, 28 skipped, zero failed (2,016 tests).
-- Plugin full suite after building both packages on Linux: 7,721 passed,
-  27 skipped, one unrelated fixture failure (7,749 tests). All bundled-worker
-  tests pass with Linux-built artifacts.
+- Plugin and Pi lint scripts: passed (warnings only; 1,380 and 304 files checked).
+- Pi full suite: 2,016 passed, 28 skipped, zero failed (2,044 tests).
+- Final plugin full suite after both Linux builds: 7,758 passed, 27 skipped,
+  one unrelated fixture failure (7,786 tests). The initial run's four missing-Pi-
+  artifact failures all passed after building Pi, including a nine-test isolated
+  worker-file rerun (two skips).
 - One unrelated fixture remains failing: `Node WASM Transformers fixture > builds
   with real fs and persists a model for offline reuse`, because its temporary
   bundle cannot resolve `onnxruntime-web/webgpu`. No embedding or fixture code was
   changed to conceal that failure.
-- Focused changed-file gate before the final cold-only Pi fixture: 421 passed,
-  zero failed across five files with the repository's file-isolated `--parallel=4`
-  setting. The added cold-only fixture passed separately, and the final full
-  suites include it and all follow-up regressions.
-- Linux builds: plugin bundled 708 modules for the main entry and 750 for v2;
-  Pi bundled 1,013 modules. Nine compiled TUI files were unchanged.
-- The original host-test typecheck (the test file is unchanged in this follow-up)
+- Linux builds: plugin bundled 709 modules for the main entry and 751 for v2;
+  Pi bundled 1,014 modules. Nine compiled TUI files were unchanged.
+- Final restored Pi regressions: 66 passed across three files, 339 assertions.
+  The full plugin suite includes all restored OpenCode lane, pressure and strict
+  binding controls.
+- The original host-test typecheck (the test file is unchanged in this revision)
   found zero owned diagnostics in the full e2e project, with exactly one owned
   test checked among 3,295 source files. That broader project had 30 diagnostics
   in other files, so its aggregate tsc gate was not clean.
-- Real-host after arm: one test passed, 16 assertions. The before arm reddened only
-  that same test with one loop prefix change instead of zero. The host gates ran
+- Final real-host after run: one test passed, 16 assertions. The before run failed
+  only that same test with one loop prefix change instead of zero. The host gates ran
   locally because the installed 2.0.26 executable is a macOS binary.
-- Scoped live diagnostics covered all four changed implementation files: no
-  errors; one existing unused-import warning and its corresponding hint. The
-  snapshot was fresh.
+- The final gates and mutation selections use Bun 1.4.2; package tools report
+  TypeScript 5.9.3 and Biome 2.5.1. An 8-vCPU mutation job was refused before start
+  because the shared runner was full; its single-test selections subsequently
+  completed on Linux with the appropriate 2-vCPU allocation. No local unit-suite
+  fallback was used.
+- Final scoped diagnostics covered six implementation files: zero errors, two
+  lint warnings and one unused-import hint. Structural-analysis categories were
+  unavailable, so the combined inspection was partial; package typechecks are
+  the authoritative clean diagnostic gates.

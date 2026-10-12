@@ -740,10 +740,10 @@ for (const seed of SEEDS) {
 	}
 }
 
-// Strict binding: a signed block kept on two consecutive passes must have
-// identical provider-visible bytes before it, and m[0]/m[1] must not be
-// re-rendered while signed thinking is kept. These checks must pass on every
-// generated sequence, including first render, expiry and carried repairs.
+// Thinking signatures bind all preceding prompt bytes. If a block is kept on
+// consecutive passes, those bytes and m[0]/m[1] rendering must remain unchanged.
+// Check every generated sequence, including first render, expiry and pending
+// tag-identity repairs.
 function aggregate(kind: Violation["kind"]): string[] {
 	expect(heldViolations.size).toBeGreaterThan(0);
 	return [...heldViolations].flatMap(([seed, violations]) =>
@@ -1000,17 +1000,15 @@ for (const withCarriedRepair of [false, true]) {
 				fixture.db.close();
 			}
 		};
-		// Pressure and expiry do not change the binding of kept thinking. A carried
-		// repair therefore keeps replaying until the signatures can all be omitted.
+		// Pressure and expiry cannot invalidate retained signatures. Replay the
+		// last served prefix until repair can omit all signed thinking safely.
 		test(name, body, 60_000);
 	}
 }
 
-// Issue 650 rule: a tag-identity conflict never refuses more than one turn.
-// Attack it through the carried-repair paths: a pending repair with no
-// last-known-good prefix takes the declared rebuild, whose m[0]/m[1] clear is
-// made to fail. Count refused passes across two held tool steps and two later
-// user turns.
+// A tag-identity conflict must not interrupt every subsequent turn. Without a
+// last-known-good prefix, pending repair rebuilds m[0]/m[1]; inject a cache-clear
+// failure there. Count refused passes across two tool steps and two later users.
 // A persistent clear failure may refuse once, then must serve with the repair
 // still pending rather than interrupt every pass and every later user turn.
 test("Pi carried identity repair: a failing declared rebuild refuses at most one turn", async () => {
