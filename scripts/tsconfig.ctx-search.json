@@ -6,8 +6,18 @@
 		"declaration": false,
 		"declarationMap": false,
 		"emitDeclarationOnly": false,
-		"typeRoots": ["../packages/plugin/node_modules/@types", "../packages/plugin/node_modules"]
+		"typeRoots": [
+			"../packages/plugin/node_modules/@types",
+			"../packages/plugin/node_modules"
+		]
 	},
-	"include": ["ctx-search-benchmark.ts", "ctx-search-rerank.ts", "ctx-search-benchmark.test.ts", "lib/ctx-search-rerank.ts"],
+	"include": [
+		"ctx-search-benchmark.ts",
+		"ctx-search-rerank.ts",
+		"ctx-search-benchmark.test.ts",
+		"ctx-search-rerank-product.ts",
+		"../packages/plugin/src/features/magic-context/search-rerank.test.ts",
+		"lib/ctx-search-rerank.ts"
+	],
 	"exclude": ["../node_modules"]
 }
