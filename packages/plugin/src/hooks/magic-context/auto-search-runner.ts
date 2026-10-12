@@ -31,6 +31,10 @@ import {
     type AutoSearchHintNoHintReason,
     getAutoSearchHintDecisions,
 } from "../../features/magic-context/storage-meta-persisted";
+import {
+    clearUnpublishedAutoSearchNoHints,
+    getUnpublishedAutoSearchNoHint,
+} from "../../shared/auto-search-lifecycle";
 import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
@@ -46,6 +50,7 @@ import {
     persistAutoSearchDecision,
     queueAutoSearchBackfill,
     queueAutoSearchRegistration,
+    retryUnpublishedAutoSearchNoHint,
     searchAutoHint,
 } from "./auto-search-worker-client";
 import type { CavemanWordRules } from "./caveman";
@@ -233,6 +238,9 @@ export async function runAutoSearchHint(args: {
         userMsgId,
         async (lifecycleSignal): Promise<AutoSearchOutcome> => {
             if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
+            if (retryUnpublishedAutoSearchNoHint(db, sessionId, userMsgId, startedAt)) {
+                return AUTO_SEARCH_OK;
+            }
             if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return AUTO_SEARCH_OK;
 
             const existing = getAutoSearchHintDecisions(db, sessionId);
@@ -358,13 +366,14 @@ export async function runAutoSearchHint(args: {
                     });
                 }, startedAt);
             } catch (error) {
-                // Retryable failure — do NOT persist a permanent no-hint decision, or the
-                // hint would be suppressed forever for this message even though the next
-                // pass might succeed. Just skip this pass; a later pass re-evaluates.
+                if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
+                // This pass serves the user message without a hint. Freeze that decision
+                // before returning so a recovered search cannot rewrite cached bytes.
                 log(
-                    `[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
+                    `[auto-search] unified search failed for session ${sessionId} (no-hint frozen for this turn): ${error instanceof Error ? error.message : String(error)}`,
                 );
-                return { ok: false, kind: "search-failure" };
+                const outcome = await writeNoHintAndReconcile("error");
+                return outcome.ok ? { ok: false, kind: "search-failure" } : outcome;
             }
 
             if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
@@ -438,6 +447,7 @@ export async function runAutoSearchHint(args: {
             }
         },
         () => {
+            if (getUnpublishedAutoSearchNoHint(sessionId, userMsgId) !== undefined) return;
             if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return;
             const decision = getAutoSearchHintDecisions(db, sessionId).find(
                 (entry) => entry.messageId === userMsgId,
@@ -451,6 +461,7 @@ export async function runAutoSearchHint(args: {
 /** Test hook — wipe the per-turn cache. */
 export function _resetAutoSearchCache(): void {
     clearAutoSearchTimeoutForSession();
+    clearUnpublishedAutoSearchNoHints();
 }
 
 /** Session cleanup hook — call on session.deleted. */

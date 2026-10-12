@@ -45,6 +45,7 @@ import {
 } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { captureWindowReport } from "../../features/magic-context/window-report-ledger";
+import { forgetUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { log, sessionLog } from "../../shared/logger";
 import {
     getSdkContextLimit,
@@ -214,7 +215,7 @@ function cleanupRemovedMessageState(
     sessionId: string,
     messageId: string,
 ): MessageRemovedCleanupResult {
-    return deps.db
+    const result = deps.db
         .transaction(() => {
             const removedTagNumbers = deleteTagsByMessageId(deps.db, sessionId, messageId);
             deleteTemporalDecision(deps.db, sessionId, messageId);
@@ -290,6 +291,8 @@ function cleanupRemovedMessageState(
             };
         })
         .immediate();
+    forgetUnpublishedAutoSearchNoHint(sessionId, messageId);
+    return result;
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {

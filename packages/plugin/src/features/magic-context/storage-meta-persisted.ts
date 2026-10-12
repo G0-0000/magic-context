@@ -1826,26 +1826,6 @@ export function pruneNoteNudgeAnchors(
     return pruned;
 }
 
-export function pruneAutoSearchHintDecisions(
-    db: Database,
-    sessionId: string,
-    visibleMessageIds: Set<string>,
-): number {
-    let pruned = 0;
-    casUpdateJsonArrayColumn(
-        db,
-        sessionId,
-        "auto_search_hint_decisions",
-        isValidAutoSearchHintDecision,
-        (current) => {
-            const next = current.filter((decision) => visibleMessageIds.has(decision.messageId));
-            pruned = current.length - next.length;
-            return pruned > 0 ? next : null;
-        },
-    );
-    return pruned;
-}
-
 export function removeNoteNudgeAnchorByMessageId(
     db: Database,
     sessionId: string,
@@ -1865,6 +1845,105 @@ export function removeNoteNudgeAnchorByMessageId(
         { ensureRow: false },
     );
     return ok && removed;
+}
+
+/**
+ * Discard saved search hints and no-hint omissions only for message IDs the caller
+ * proved were removed by a summary boundary or deleted by the host. An ID absent
+ * from today's branch may reappear and still needs its record to restore cached
+ * bytes, so callers must not pass the complement of today's visible IDs.
+ */
+export function pruneAutoSearchHintDecisions(
+    db: Database,
+    sessionId: string,
+    retiredMessageIds: ReadonlySet<string>,
+): number {
+    if (retiredMessageIds.size === 0) return 0;
+    return updateAutoSearchHintRetirement(db, sessionId, retiredMessageIds).pruned;
+}
+
+const pendingAutoSearchRetirements = new WeakMap<Database, Map<string, Set<string>>>();
+export const AUTO_SEARCH_DECISION_SOFT_LIMIT = 2000;
+
+/** Record IDs removed under a history summary in memory, without a SQLite write on replay. */
+export function queueAutoSearchHintDecisionRetirement(
+    db: Database,
+    sessionId: string,
+    messageIds: ReadonlySet<string>,
+): void {
+    if (messageIds.size === 0) return;
+    let sessions = pendingAutoSearchRetirements.get(db);
+    if (!sessions) {
+        sessions = new Map();
+        pendingAutoSearchRetirements.set(db, sessions);
+    }
+    let retired = sessions.get(sessionId);
+    if (!retired) {
+        retired = new Set();
+        sessions.set(sessionId, retired);
+    }
+    for (const id of messageIds) retired.add(id);
+}
+
+/** Flush only when the host permits a prefix rebuild (busting/HARD), not cached-prefix replay. */
+export function flushAutoSearchHintDecisionRetirement(
+    db: Database,
+    sessionId: string,
+    visibleMessageIds: ReadonlySet<string>,
+): number {
+    const sessions = pendingAutoSearchRetirements.get(db);
+    const retired = sessions?.get(sessionId) ?? new Set<string>();
+    const outcome = updateAutoSearchHintRetirement(db, sessionId, retired, visibleMessageIds);
+    if (outcome.ok) sessions?.delete(sessionId);
+    return outcome.pruned;
+}
+
+function updateAutoSearchHintRetirement(
+    db: Database,
+    sessionId: string,
+    retiredMessageIds: ReadonlySet<string>,
+    visibleMessageIds?: ReadonlySet<string>,
+): { ok: boolean; pruned: number } {
+    let pruned = 0;
+    const ok = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "auto_search_hint_decisions",
+        isValidAutoSearchHintDecision,
+        (current) => {
+            let next = current.filter(
+                (decision) =>
+                    !retiredMessageIds.has(decision.messageId) ||
+                    visibleMessageIds?.has(decision.messageId),
+            );
+            // After summaries replace raw messages, saved decisions normally track the
+            // remaining users. With compaction off all users remain: the blob is bounded
+            // by the session's own user-message count, not a hard cap. Keep every visible
+            // hint and no-hint record. Above the generous limit, discard only oldest
+            // hidden no-hint records; that removes no bytes from this request. Under the
+            // host's rebuild contract, restoring an evicted earlier ID as a new tail
+            // requires a revert and full prefix rebuild. Saved hints still require proof
+            // that their messages were summarized or deleted before they can be removed.
+            let excess = next.length - AUTO_SEARCH_DECISION_SOFT_LIMIT;
+            if (visibleMessageIds && excess > 0) {
+                next = next.filter((decision) => {
+                    if (
+                        excess > 0 &&
+                        decision.decision === "no-hint" &&
+                        !visibleMessageIds.has(decision.messageId)
+                    ) {
+                        excess--;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+            pruned = current.length - next.length;
+            return pruned > 0 ? next : null;
+        },
+        { ensureRow: false },
+    );
+    return { ok, pruned: ok ? pruned : 0 };
 }
 
 export function removeAutoSearchHintDecisionByMessageId(

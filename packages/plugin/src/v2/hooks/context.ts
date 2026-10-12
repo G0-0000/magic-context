@@ -160,7 +160,7 @@ import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
-import { V2GenerateReplay } from "./generate";
+import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
 import { V2LkgSystemReplay } from "./lkg-system";
@@ -2157,24 +2157,14 @@ export async function registerContext(context: V2Context) {
     };
     await context.session.hook("context", (draft) =>
         withSqliteTransformPass(async () => {
-            const anchor = draft.messages.at(-1)?.id;
+            const anchor = generateReplayAnchor(draft.messages);
             await runManagedContext(draft);
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
             // so side questions reuse the exact history handed back to the host.
-            if (
-                !compactionOff &&
-                draft.messages.some(
-                    (message) =>
-                        message.id === HEAD_IDS[0] ||
-                        message.content.some(
-                            (part) =>
-                                typeof part.text === "string" &&
-                                part.text.includes("<session-history>"),
-                        ),
-                )
-            )
-                generateReplay.capture(draft, anchor);
+            if (!compactionOff) generateReplay.capture(draft, anchor);
+            else
+                sessionLog(draft.sessionID, "generate replay capture skipped: compaction-disabled");
         }),
     );
     await context.session.hook("generate", async (draft) => {

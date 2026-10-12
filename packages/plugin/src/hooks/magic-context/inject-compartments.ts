@@ -35,6 +35,7 @@ import {
     getProjectState,
     MEMORY_VISIBILITY_MUTATION_CATEGORY,
     persistCachedM0,
+    queueAutoSearchHintDecisionRetirement,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
 import {
@@ -3821,6 +3822,21 @@ function trimToPreparedPrefix(
     let status: PrefixTrimStatus = "not-required";
 
     if (boundary) {
+        const retireDecisions = (messageIds: readonly string[]) => {
+            // These messages were just removed because the injected history summary
+            // covers them. Their saved search hints (or no-hint omissions) can go:
+            // restoring raw history before this summary boundary requires a full rebuild
+            // of the cached request prefix, so a new hint adds no extra cache miss.
+            // A message hidden only by a branch switch must keep its saved decision.
+            // Replaying a cached prefix must not write to SQLite. Record the covered
+            // IDs in memory; postprocessing flushes them only when the host permits
+            // a prefix rebuild, possibly on a later pass.
+            queueAutoSearchHintDecisionRetirement(
+                options.db,
+                options.sessionId,
+                new Set(messageIds),
+            );
+        };
         const sourceOrder = options.prefixTrimSourceOrder;
         if (sourceOrder) {
             const refuse = (reason: string): PrefixTrimStatus => {
@@ -3882,6 +3898,17 @@ function trimToPreparedPrefix(
                     if (liveOrderError) status = refuse(liveOrderError);
                     else {
                         options.messages.splice(0, options.messages.length, ...retained);
+                        const preserveBoundary = isPartialCompartmentEnd(
+                            options.db,
+                            options.sessionId,
+                            boundary,
+                        );
+                        retireDecisions(
+                            sourceOrder.messageIds.slice(
+                                0,
+                                boundaryPosition + (preserveBoundary ? 0 : 1),
+                            ),
+                        );
                         status = "applied";
                     }
                 }
@@ -3889,10 +3916,15 @@ function trimToPreparedPrefix(
         } else {
             const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
-                options.messages.splice(
+                const removed = options.messages.splice(
                     0,
                     index +
                         (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1),
+                );
+                retireDecisions(
+                    removed
+                        .map((message) => message.info.id)
+                        .filter((id): id is string => typeof id === "string"),
                 );
                 resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
