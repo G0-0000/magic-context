@@ -2609,12 +2609,15 @@ export function markTagsCompactedByMessageIds(
     // never cross the JS boundary. Delimiter-bearing and NUL-bearing source ids
     // use the general matcher above rather than assuming a single base id.
     // All subsequent writes are primary-key lookups, not session scans.
+    // Protected-tool retirement already supplies an eligibility set. Seek those
+    // tag numbers before matching source ids; discarded history is not new work.
     const rows = db
         .prepare(`WITH ids AS MATERIALIZED (
             SELECT value AS source_id, lower(value) AS folded_id FROM json_each(?)
         )
         SELECT id, tag_number, message_id, tool_owner_message_id FROM tags INDEXED BY ${tagOrderConstraintIndex(db)}
-        WHERE session_id = ? AND status IN ('active', 'dropped') AND (
+        WHERE session_id = ? ${eligibleTagNumbers ? "AND tag_number IN (SELECT value FROM json_each(?))" : ""}
+        AND status IN ('active', 'dropped') AND (
             message_id IN (SELECT source_id FROM ids)
             OR tool_owner_message_id IN (SELECT source_id FROM ids)
             OR (instr(lower(message_id), ':p') > 0 AND
@@ -2627,6 +2630,7 @@ export function markTagsCompactedByMessageIds(
         .all(
             JSON.stringify(Array.from(ids)),
             sessionId,
+            ...(eligibleTagNumbers ? [JSON.stringify([...eligibleTagNumbers])] : []),
             Array.from(ids).some((id) => id.includes(":")) ? 1 : 0,
             nulPrefixes.size > 0 ? 1 : 0,
         ) as {

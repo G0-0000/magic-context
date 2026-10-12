@@ -2127,12 +2127,14 @@ function withCompartmentDates(
         ordinals.add(compartment.startMessage);
         ordinals.add(compartment.endMessage);
     }
+    // Do not let the non-null time predicate select the session/time index:
+    // it would visit every timestamp in the session instead of these ordinals.
     const indexedRows = db
         .prepare(
             `SELECT message_ordinal AS ordinal, message_time_ms AS time
                FROM message_fts_rowid_map
               WHERE session_id = ?
-                AND message_time_ms IS NOT NULL
+                AND +message_time_ms IS NOT NULL
                 AND message_ordinal IN (SELECT value FROM json_each(?))`,
         )
         .all(sessionId, JSON.stringify([...ordinals])) as Array<{ ordinal: number; time: number }>;

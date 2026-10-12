@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,7 +64,7 @@ import {
     trimMemoriesToBudgetV2,
 } from "./inject-compartments";
 import { withRawMessageProvider } from "./read-session-chunk";
-import { closeReadOnlySessionDb } from "./read-session-db";
+import { closeReadOnlySessionDb, withReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 
@@ -1189,6 +1189,95 @@ describe("prepareCompartmentInjection — SQLITE_BUSY handling (issue #23)", () 
 });
 
 describe("m[0]/m[1] materialization", () => {
+    it("fallback compartment dates seek message primary keys instead of the session index", () => {
+        db = makeDb();
+        storeDatedCompartment();
+        createOpenCodeMessageTimes([
+            { id: "m1", timestamp: new Date(2026, 0, 2, 12).getTime() },
+            { id: "m2", timestamp: new Date(2026, 0, 3, 12).getTime() },
+        ]);
+        const path = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        const writer = new Database(path);
+        writer.exec(
+            "CREATE INDEX message_session_time_created_id_idx ON message(session_id,time_created,id)",
+        );
+        const insert = writer.prepare("INSERT INTO message VALUES (?, ?, ?)");
+        writer.transaction(() => {
+            for (let i = 3; i <= 150_000; i++) insert.run(`m${i}`, SESSION_ID, i);
+        })();
+        writer.close();
+        withReadOnlySessionDb((source) => {
+            const prepare = source.prepare.bind(source);
+            let timeReads = 0;
+            let details = "";
+            const intercept = spyOn(source, "prepare").mockImplementation((sql: string) => {
+                if (sql.startsWith("SELECT id, time_created FROM message WHERE")) {
+                    timeReads++;
+                    const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(
+                        SESSION_ID,
+                        "m1",
+                        "m2",
+                    ) as Array<{ detail: string }>;
+                    details = plan.map((r) => r.detail).join(" | ");
+                }
+                return prepare(sql);
+            });
+            try {
+                const rendered = materializeM0({
+                    db,
+                    sessionId: SESSION_ID,
+                    state: readStateFromMeta(),
+                    temporalAwareness: true,
+                });
+                expect(timeReads).toBe(1);
+                expect(details).toContain("(id=?)");
+                expect(details).not.toContain("message_session_time_created_id_idx");
+                expect(rendered.m0Text).toContain("## 1-2 · 2026-01-02→03 · dated compartment");
+            } finally {
+                intercept.mockRestore();
+            }
+        });
+    });
+
+    it("compartment dates seek boundary ordinals instead of all non-null session times", () => {
+        db = makeDb();
+        storeDatedCompartment();
+        const insert = db.prepare(
+            "INSERT INTO message_fts_rowid_map(session_id,message_ordinal,fts_rowid,message_time_ms) VALUES (?,?,?,?)",
+        );
+        db.transaction(() => {
+            for (let i = 1; i <= 150_000; i++)
+                insert.run(SESSION_ID, i, i, new Date(2026, 0, i === 2 ? 3 : 2, 12).getTime());
+        })();
+        const prepare = db.prepare.bind(db);
+        let dateReads = 0;
+        const intercept = spyOn(db, "prepare").mockImplementation((sql: string) => {
+            if (sql.includes("SELECT message_ordinal AS ordinal, message_time_ms AS time")) {
+                dateReads++;
+                const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(
+                    SESSION_ID,
+                    "[1,2]",
+                ) as Array<{ detail: string }>;
+                expect(plan.map((r) => r.detail).join(" | ")).toContain(
+                    "session_id=? AND message_ordinal=?",
+                );
+            }
+            return prepare(sql);
+        });
+        try {
+            const rendered = materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                temporalAwareness: true,
+            });
+            expect(dateReads).toBe(1);
+            expect(rendered.m0Text).toContain("## 1-2 · 2026-01-02→03 · dated compartment");
+        } finally {
+            intercept.mockRestore();
+        }
+    });
+
     it("renders complete date ranges into m[0] only when temporal awareness is enabled", () => {
         db = makeDb();
         storeDatedCompartment();
