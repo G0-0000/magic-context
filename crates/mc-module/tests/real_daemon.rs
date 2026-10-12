@@ -24,6 +24,9 @@ use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, RetryBackoff, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 
+#[path = "support/executable.rs"]
+mod executable_staging;
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const MODULE_ID: &str = "magic-context";
@@ -1058,32 +1061,18 @@ fn dev_named_binary(path: &Path) -> PathBuf {
 
 fn dev_named_binary_as(path: &Path, suffix: &str) -> PathBuf {
     assert!(path.is_file(), "expected binary at {}", path.display());
-    let dev_dir = std::env::temp_dir()
-        .join("magic-context/mc-module-test-binaries")
-        .join(std::process::id().to_string());
-    fs::create_dir_all(&dev_dir).expect("create isolated binary staging directory");
-    let dev_path = dev_dir.join(format!("ckdev-{suffix}"));
-    if path == dev_path.as_path() {
-        return dev_path;
-    }
-    let _ = fs::remove_file(&dev_path);
-    // A copy, never a hard link: on macOS a daemon exec'd through a hard link to
-    // cargo's output was occasionally SIGKILLed at startup, while a copy never was.
-    fs::copy(path, &dev_path)
-        .map(|_| ())
+    let filename = path.file_name().and_then(|name| name.to_str()).unwrap();
+    let identifier = filename
+        .strip_prefix("ckdev-")
+        .map(|name| format!("ck-{}", name.split('-').next().unwrap_or(name)))
+        .unwrap_or_else(|| filename.to_string());
+    executable_staging::stage_executable(path, &format!("ckdev-{suffix}"), &identifier)
         .unwrap_or_else(|error| {
             panic!(
-                "failed to stage test binary {} as {}: {error}",
-                path.display(),
-                dev_path.display()
+                "failed to stage test binary {} as ckdev-{suffix}: {error}",
+                path.display()
             )
-        });
-    assert!(
-        fs::read(path).unwrap() == fs::read(&dev_path).unwrap(),
-        "staged binary must be byte-identical to {}",
-        path.display()
-    );
-    dev_path
+        })
 }
 
 fn workspace_root() -> PathBuf {
