@@ -55,6 +55,11 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { getWindowReportsPath } from "../../features/magic-context/window-report-ledger";
 import { createEventHandler as createPluginEventHandler } from "../../plugin/event";
 import {
+    forgetUnpublishedAutoSearchNoHint,
+    getUnpublishedAutoSearchNoHint,
+    rememberUnpublishedAutoSearchNoHint,
+} from "../../shared/auto-search-lifecycle";
+import {
     clearModelsDevCache,
     refreshModelLimitsFromApi,
     resetAuthRewarmLatchForTest,
@@ -1892,6 +1897,8 @@ describe("createEventHandler", () => {
         useTempDataHome("context-event-message-removed-note-");
         const deps = createDeps(new Map());
         const handler = createEventHandler(deps);
+        rememberUnpublishedAutoSearchNoHint("ses-note", "msg-note", "error");
+        rememberUnpublishedAutoSearchNoHint("ses-note", "msg-other", "error");
 
         appendNoteNudgeAnchor(deps.db, "ses-note", "msg-note", "Remember this");
         appendNoteNudgeAnchor(deps.db, "ses-note", "msg-other", "Keep this");
@@ -1916,6 +1923,9 @@ describe("createEventHandler", () => {
         expect(getNoteNudgeAnchors(openDatabase(), "ses-note")).toEqual([
             { messageId: "msg-other", text: "Keep this" },
         ]);
+        expect(getUnpublishedAutoSearchNoHint("ses-note", "msg-note")).toBeUndefined();
+        expect(getUnpublishedAutoSearchNoHint("ses-note", "msg-other")).toBe("error");
+        forgetUnpublishedAutoSearchNoHint("ses-note", "msg-other");
         expect(getAutoSearchHintDecisions(openDatabase(), "ses-note")).toEqual([
             { messageId: "msg-other", decision: "no-hint", reason: "empty" },
         ]);
