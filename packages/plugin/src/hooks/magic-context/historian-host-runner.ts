@@ -130,6 +130,13 @@ export interface HistorianHostRunnerDeps {
      * both sides means each attempt may use the whole budget.
      */
     attemptTimeoutMs?(): number | undefined;
+    /**
+     * The configured OpenCode variant (for example a reasoning effort) for a chain
+     * model, read from the host's current config. Claims carry model names only, so
+     * without this every attempt would run the model with no variant, which leaves
+     * models such as Claude Sonnet 5.5 with thinking off.
+     */
+    resolveVariant?(model: string): string | undefined;
     now?(): number;
     log?(message: string): void;
     /** How long an idle loop waits before looking again. */
@@ -680,6 +687,10 @@ export class HistorianHostRunner {
         // waits inside `collect` would escape that timeout, so `collect` is held to
         // whatever is left of the same per-attempt window.
         let attemptStartedAt = Date.now();
+        const withVariant = (model: string) => {
+            const qualifier = this.deps.resolveVariant?.(model);
+            return qualifier ? { model, qualifier } : model;
+        };
         try {
             if (!handle.id) throw new Error("hidden completion carrier returned no session id");
             const run = await promptSyncWithValidatedOutputRetry(
@@ -692,7 +703,7 @@ export class HistorianHostRunner {
                     body: {
                         agent: "historian",
                         system: claim.system,
-                        ...modelBodyField(head),
+                        ...modelBodyField(withVariant(head)),
                         parts: [{ type: "text", text: claim.user, synthetic: true }],
                     },
                 },
@@ -713,7 +724,7 @@ export class HistorianHostRunner {
                     ),
                     timeoutMs: attemptMs,
                     signal,
-                    fallbackModels: rest,
+                    fallbackModels: rest.map(withVariant),
                     callContext: `historian-host:${claim.runId}`,
                     fetchOutput: () =>
                         withinAttempt(
@@ -836,6 +847,7 @@ export function createHistorianHostRunner(args: {
     enabled(): boolean;
     maxOutputTokens?: number;
     attemptTimeoutMs?(): number | undefined;
+    resolveVariant?(model: string): string | undefined;
     now?(): number;
     log?(message: string): void;
     idleIntervalMs?: number;
@@ -859,6 +871,7 @@ export function createHistorianHostRunner(args: {
         enabled: args.enabled,
         ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
         ...(args.attemptTimeoutMs ? { attemptTimeoutMs: args.attemptTimeoutMs } : {}),
+        ...(args.resolveVariant ? { resolveVariant: args.resolveVariant } : {}),
         ...(args.now ? { now: args.now } : {}),
         ...(args.log ? { log: args.log } : {}),
         ...(args.idleIntervalMs !== undefined ? { idleIntervalMs: args.idleIntervalMs } : {}),

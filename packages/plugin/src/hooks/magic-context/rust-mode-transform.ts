@@ -1777,6 +1777,15 @@ export function createRustModeTransform(
                 // the next run, as it does for the host's own historian.
                 attemptTimeoutMs: () =>
                     deps.resolveHistorianRun?.().timeoutMs ?? deps.historianTimeoutMs,
+                // Sampled per claim, like the timeout: the variant comes from the
+                // current historian config, matched by model name.
+                resolveVariant: (model) => {
+                    const run = deps.resolveHistorianRun?.();
+                    return resolvedHistorianModelVariants({
+                        historianModel: run?.model ?? deps.historianModel,
+                        fallbackModels: run?.fallbackModels ?? deps.fallbackModels,
+                    })[model];
+                },
             });
         } catch (error) {
             // A loop that cannot be built leaves the runs for another claimant rather
