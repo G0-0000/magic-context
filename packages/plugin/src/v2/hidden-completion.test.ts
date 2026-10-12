@@ -219,6 +219,7 @@ async function setup(
     capabilities: {
         remove?: boolean;
         modelCatalog?: () => Promise<unknown>;
+        historianTemperature?: () => number | undefined;
         logs?: string[];
         /**
          * Which registration, if any, the fake host would report as its own. Undefined stands for
@@ -360,6 +361,9 @@ async function setup(
             ...(capabilities.keepSubagents ? { keepSubagents: true } : {}),
             log: (message) => capabilities.logs?.push(message),
             ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
+            ...(capabilities.historianTemperature
+                ? { historianTemperature: capabilities.historianTemperature }
+                : {}),
         });
     const executor = await create();
     return {
@@ -1279,6 +1283,111 @@ describe("hidden completion temperature capabilities", () => {
             __temperatureTest.reset();
             rmSync(cacheRoot, { recursive: true, force: true });
         }
+    });
+
+    test("OpenCode 2 authors historian.temperature on historian passes only when metadata accepts it", async () => {
+        const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join } = await import("node:path");
+        const { __temperatureTest } = await import("../shared/subagent-temperature");
+        const cacheRoot = join(tmpdir(), `mc-oc2-authored-temperature-${crypto.randomUUID()}`);
+        mkdirSync(join(cacheRoot, "opencode"), { recursive: true });
+        writeFileSync(
+            join(cacheRoot, "opencode", "models.json"),
+            JSON.stringify({ google: { models: { "gemini-3.8-flash": { temperature: true } } } }),
+        );
+        const saved = {
+            XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
+            OPENCODE_MODELS_PATH: process.env.OPENCODE_MODELS_PATH,
+        };
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        delete process.env.OPENCODE_MODELS_PATH;
+        __temperatureTest.reset();
+        // OpenCode 2.0.22 rows: no temperature field, so the cached catalogue decides.
+        const rows = [
+            { id: "gemini-3.8-flash", providerID: "google", capabilities: { tools: true } },
+            { id: "gpt-6.1-sol", providerID: "openai", capabilities: { tools: true } },
+            { id: "cheap", providerID: "mock", capabilities: { temperature: true } },
+        ];
+        let configured: number | undefined = 0.1;
+        const state = await setup("authored-temperature", {
+            modelCatalog: async () => rows,
+            historianTemperature: () => configured,
+        });
+        const at = (providerID: string, modelID: string) =>
+            request(modelID, { model: { providerID, modelID } });
+        try {
+            for (const kind of ["historian", "historian-editor"] as const) {
+                const handle = await state.executor.open({ ...run, kind, agent: kind });
+                await state.executor.attempt(handle, at("google", "gemini-3.8-flash"));
+                await state.executor.attempt(handle, at("openai", "gpt-6.1-sol"));
+                await state.executor.attempt(handle, at("openai-codex", "gpt-6.1-sol"));
+                await close(state.executor, handle, true);
+            }
+            configured = 0;
+            const zero = await state.executor.open(run);
+            await state.executor.attempt(zero, at("mock", "cheap"));
+            await state.executor.attempt(zero, at("google", "gemini-3.8-flash"));
+            await close(state.executor, zero, true);
+            configured = undefined;
+            const unset = await state.executor.open(run);
+            await state.executor.attempt(unset, at("google", "gemini-3.8-flash"));
+            await close(state.executor, unset, true);
+            expect(state.requests.map((draft) => draft.options)).toEqual([
+                { temperature: 0.1 },
+                {},
+                {},
+                { temperature: 0.1 },
+                {},
+                {},
+                { temperature: 0 },
+                { temperature: 0 },
+                {},
+            ]);
+        } finally {
+            state.db.close();
+            for (const [key, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+            __temperatureTest.reset();
+            rmSync(cacheRoot, { recursive: true, force: true });
+        }
+    });
+
+    test("OpenCode 2 dreamer requests are unchanged by a configured historian temperature", async () => {
+        const capture = async (historianTemperature?: () => number | undefined) => {
+            const state = await setup("dreamer-untouched", {
+                modelCatalog: async () => [
+                    { id: "cheap", providerID: "mock", capabilities: { temperature: true } },
+                ],
+                ...(historianTemperature ? { historianTemperature } : {}),
+            });
+            const sent: unknown[] = [];
+            const prompt = state.host.prompt;
+            state.host.prompt = async (input) => {
+                sent.push(input);
+                await prompt(input);
+            };
+            try {
+                const handle = await state.executor.open(dreamerRun);
+                await state.executor.attempt(handle, request("cheap"));
+                await close(state.executor, handle, true);
+                expect(sent).toHaveLength(1);
+                expect(state.requests).toHaveLength(1);
+                // Each attempt carries a fresh random marker; everything else must match.
+                return JSON.stringify({ sent, drafts: state.requests }).replace(
+                    /mc:hidden:[0-9a-f-]+:[0-9a-f-]+/g,
+                    "mc:hidden:marker",
+                );
+            } finally {
+                state.db.close();
+            }
+        };
+        const without = await capture();
+        const withTemperature = await capture(() => 0.1);
+        expect(withTemperature).toBe(without);
+        expect(without).not.toContain("temperature");
     });
 
     test("OpenCode 2 Codex-shaped provider receives no temperature and needs no retry or fallback", async () => {

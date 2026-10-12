@@ -60,6 +60,13 @@ export interface V2HiddenCompletionOptions {
     log?: (message: string) => void;
     /** Return the host catalog when available; catalog failures leave the request unchanged. */
     modelCatalog?: () => Promise<unknown>;
+    /**
+     * The user's `historian.temperature`, applied to historian, editor and recomp passes.
+     * OpenCode 1 carries it on the historian agent config; OpenCode 2 has no agent-level
+     * sampling, so it is authored onto each historian request here. Dreamer tasks never
+     * receive it.
+     */
+    historianTemperature?: () => number | undefined;
 }
 
 interface RunState {
@@ -547,6 +554,11 @@ export async function createV2HiddenCompletionExecutor(
             }
 
             const requested = await validateVariant(requestModel(request, run.child.model));
+            if (run.identity.kind !== "dreamer-task" && request.body.temperature === undefined) {
+                const configured = options.historianTemperature?.();
+                if (typeof configured === "number" && Number.isFinite(configured))
+                    request = { ...request, body: { ...request.body, temperature: configured } };
+            }
             if (typeof request.body.temperature === "number") {
                 let metadata: unknown;
                 try {
@@ -566,7 +578,7 @@ export async function createV2HiddenCompletionExecutor(
                     modelKey(requested),
                     metadata,
                     request.body.temperature,
-                    note,
+                    (message) => note(message),
                 );
                 const body = { ...request.body };
                 if (temperature === undefined) delete body.temperature;

@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { __test as subagentRunnerTest } from "../../../pi-plugin/src/subagent-runner";
 import { hostExtractCache } from '../host-extract-cache';
 import { assertMockEndpoint, pinMockAgents } from "../mock-routing";
+import { seedModelsCatalog } from "../models-catalog";
 
 export const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 export const PI_PLUGIN_ROOT = join(REPO_ROOT, "packages/pi-plugin");
@@ -123,11 +124,24 @@ export interface PiRunnerOptions {
   modelContextLimit?: number;
   extensionsBeforeMagicContext?: string[];
   extensionsAfterMagicContext?: string[];
+  /**
+   * Register this provider/model on the mock (plain Pi only) and pin the historian
+   * to it, while the session keeps the default model. `api` is Pi's wire format.
+   */
+  historianModel?: PiMockModel;
+  /** models.dev catalogue copied into the throwaway host cache. */
+  modelsCatalog?: string;
   /** Compatibility option from the old spawn-per-turn runner. RPC sessions persist naturally. */
   continueSession?: boolean;
 }
 
 export type PiSpawnOptions = PiRunnerOptions;
+
+export interface PiMockModel {
+  provider: string;
+  id: string;
+  api: string;
+}
 
 export function createPiIsolatedEnv(
   sharedDataDir?: string,
@@ -178,6 +192,11 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
   ensurePluginAvailable(env);
   const host = opts.host ?? "pi";
   const modelRef = host === "omp" ? "mock/mock-model" : "anthropic/claude-haiku-4-5";
+  if (opts.historianModel && host !== "pi") throw new Error("historianModel is wired for plain Pi only");
+  const historianRef = opts.historianModel
+    ? `${opts.historianModel.provider}/${opts.historianModel.id}`
+    : undefined;
+  if (opts.modelsCatalog) seedModelsCatalog(env.cacheDir, opts.modelsCatalog);
 
   const settings = {
     packages: [env.pluginDir],
@@ -185,7 +204,7 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     ...(host === "omp" ? { tools: { xdev: false, intentTracing: false } } : {}),
     defaultProvider: host === "omp" ? "mock" : "anthropic",
     defaultModel: host === "omp" ? "mock-model" : "claude-haiku-4-5",
-    enabledModels: [modelRef],
+    enabledModels: historianRef ? [modelRef, historianRef] : [modelRef],
     compaction: { enabled: false },
     retry: { enabled: false },
     quietStartup: true,
@@ -232,8 +251,28 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
           },
         },
       };
-  const provider = models.providers[host === "omp" ? "mock" : "anthropic"]!;
-  assertMockEndpoint(provider.baseUrl, opts.mockProviderURL);
+  if (opts.historianModel) {
+    if (models.providers[opts.historianModel.provider])
+      throw new Error(`historianModel provider ${opts.historianModel.provider} would replace the session provider`);
+    models.providers[opts.historianModel.provider] = {
+      api: opts.historianModel.api,
+      baseUrl: opts.mockProviderURL,
+      apiKey: "test-key-not-real",
+      models: [
+        {
+          id: opts.historianModel.id,
+          name: opts.historianModel.id,
+          input: ["text"],
+          contextWindow: opts.modelContextLimit ?? 200000,
+          maxTokens: 8192,
+          reasoning: false,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+    };
+  }
+  for (const provider of Object.values(models.providers))
+    assertMockEndpoint(provider.baseUrl, opts.mockProviderURL);
   writeFileSync(join(env.agentDir, "models.json"), JSON.stringify(models, null, 2));
 
   const magicContext = {
@@ -250,9 +289,14 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
       git_commit_indexing: { enabled: false },
     },
     embedding: { provider: "off" },
-    historian: { model: modelRef },
+    historian: { model: historianRef ?? modelRef },
     dreamer: { disable: true },
-    ...pinMockAgents(opts.magicContextConfig, modelRef, host),
+    ...pinMockAgents(
+      opts.magicContextConfig,
+      modelRef,
+      host,
+      historianRef ? { historian: historianRef } : {},
+    ),
   };
   // Store Magic Context settings under XDG_CONFIG_HOME/cortexkit, the shared
   // user-level location both hosts load instead of Pi's legacy agent directory.

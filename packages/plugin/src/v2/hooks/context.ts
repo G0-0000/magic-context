@@ -815,6 +815,7 @@ export async function registerContext(context: V2Context) {
                 keepSubagents: config.keep_subagents === true,
                 ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
                 modelCatalog: () => Promise.resolve(context.model.list()),
+                historianTemperature: () => config.historian?.temperature,
                 openReader: openStoreReader,
             },
         );

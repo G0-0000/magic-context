@@ -95,7 +95,8 @@ export function applyHiddenSubagentTemperature(
         `${input.model?.providerID ?? "unknown"}/${input.model?.id ?? "unknown"}`,
         input.model,
         output.temperature,
-        log,
+        // Host loggers treat a second argument as structured data; the message says it all.
+        (message) => log(message),
     );
     if (temperature === undefined) delete output.temperature;
     else output.temperature = temperature;
