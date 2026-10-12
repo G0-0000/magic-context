@@ -345,7 +345,12 @@ Each control followed the same procedure. The file was staged so that
 
 The independent review in `docs/reports/pi-per-pass-cost-review.md` (cherry-picked
 here) found two defects. Both are fixed. Its findings 3 and 4 also exist on master
-and are unchanged; that known-gap test stays skipped.
+and are unchanged:
+
+* 3: an old-build sibling's drop for an already-served message, committed between
+  two passes, is not adopted. Its known-gap test stays skipped.
+* 4: two module instances sharing one SQLite connection would consume each
+  other's change journal.
 
 ### 1. Old-build writers were invisible to the cached fallback probes
 
@@ -365,8 +370,9 @@ The common pass adds one two-scalar query and scans nothing. Other ways
 `tags_version` can move, such as a session clear or the REPLACE-conflict
 trigger, only cause an extra rescan.
 
-The cached snapshot rows themselves keep master's approved limit for such
-writers. The test `known limit: uninitialized foreign writes stay stale…` is
+The cached snapshot rows themselves are unchanged for such writers. Their edits
+stay invisible until the session's revision changes or the connection reopens,
+as on master. The test `known limit: uninitialized foreign writes stay stale…` is
 unchanged.
 
 ### 2. A pass could read two different tag states
@@ -378,7 +384,7 @@ reads, the result is a filter of `passTags`, so both lists come from one state.
 
 ### Mutation controls
 
-Each control followed the same procedure as above: stage the file, confirm an
+Each control followed the procedure of the first mutation-controls section: stage the file, confirm an
 empty `git diff --stat`, apply the mutant (marked `NON-VACUITY BREAK`), confirm a
 non-empty diff, run the tests, then restore with checkout plus `touch` and
 confirm an empty diff. The test run covered 7 files and 57 tests.

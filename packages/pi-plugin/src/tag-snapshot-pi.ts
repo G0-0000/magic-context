@@ -206,10 +206,12 @@ export function createPiTagSnapshotReader(db: Database) {
 			stamp.durable - snapshot.durableVersion !==
 			stamp.own - snapshot.ownVersion
 		) {
-			// A tag write the shared revision did not record (see versionStamp).
-			// Fallback rows answer issue 650 adoption probes, so rescan them on
-			// next use rather than trust them; the cached rows keep their
-			// existing (approved) limit for such writers.
+			// Another connection wrote tags without advancing the shared
+			// tag_revision: counter (see versionStamp), so the journal missed it.
+			// The fallback rows (tags still keyed by an unsettled pi-msg-* id)
+			// decide whether this pass looks for tags to move onto real entry
+			// ids; rescan them on next use. The cached tag rows themselves stay
+			// as they are for such writers, as before this detector existed.
 			snapshot.fallback = undefined;
 		}
 		snapshot.durableVersion = stamp.durable;
@@ -266,7 +268,10 @@ interface SnapshotEntry {
 	tags: SnapshotTag[];
 	/** `tags` rows whose status is "active", in the same order. */
 	active: SnapshotTag[];
-	/** session_meta.tags_version and this connection's share of it at the last sync. */
+	/**
+	 * At the last sync: session_meta.tags_version (durableVersion) and how many
+	 * of its advances this connection's own tag writes caused (ownVersion).
+	 */
 	durableVersion: number;
 	ownVersion: number;
 	/**
