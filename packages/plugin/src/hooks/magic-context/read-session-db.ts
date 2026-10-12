@@ -626,12 +626,12 @@ export function getMessageTimesFromOpenCodeDb(
 
     try {
         withReadOnlySessionDb((db) => {
-            // SQLite limits on IN (?, ?, ...) are high (~999 by default) so a
-            // single batched query is safe for any realistic compartment count.
+            // Unary + excludes the session index from planning. The requested
+            // primary keys, not the size of the session, must bound this lookup.
             const placeholders = messageIds.map(() => "?").join(",");
             const rows = db
                 .prepare(
-                    `SELECT id, time_created FROM message WHERE session_id = ? AND id IN (${placeholders})`,
+                    `SELECT id, time_created FROM message WHERE +session_id = ? AND id IN (${placeholders})`,
                 )
                 .all(sessionId, ...messageIds) as MessageTimeRow[];
             for (const row of rows) {
