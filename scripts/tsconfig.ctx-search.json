@@ -1,0 +1,13 @@
+{
+	"extends": "../packages/plugin/tsconfig.json",
+	"compilerOptions": {
+		"rootDir": "..",
+		"noEmit": true,
+		"declaration": false,
+		"declarationMap": false,
+		"emitDeclarationOnly": false,
+		"typeRoots": ["../packages/plugin/node_modules/@types", "../packages/plugin/node_modules"]
+	},
+	"include": ["ctx-search-benchmark.ts", "ctx-search-rerank.ts", "ctx-search-benchmark.test.ts", "lib/ctx-search-rerank.ts"],
+	"exclude": ["../node_modules"]
+}
