@@ -3573,11 +3573,12 @@ function adoptPiFallbackTags(
 	const revision = () => readPiAdoptionRevision(db);
 	const beforeDiscovery = revision();
 	// Discover candidates without blocking writers and prepare their target ids.
-	// The revision check below is authoritative: discovery may miss a sibling's
-	// newly committed row, or include one another connection already renamed.
-	// Both existence probes query the table, so they see every writer. Read
-	// after beforeDiscovery, they still describe the table at writer admission
-	// when no commit landed in between, and are not repeated under the writer.
+	// The data_version/total_changes comparison inside the immediate transaction
+	// below is authoritative: discovery may miss a fallback row another
+	// connection just committed, or include one it already moved to a real id.
+	// Both existence probes query the tags table, so they see every writer. If
+	// no commit happened between beforeDiscovery and that transaction, their
+	// results still describe the table and are not re-run under the lock.
 	const discoveredMessageFallback = hasPersistedPiFallbackMessageTags(
 		db,
 		sessionId,
@@ -8191,16 +8192,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// text) and migrate any fallback-id tag onto the real id up front, so the
 	// message keeps its tag_number/§N§ instead of getting a fresh tag. No-op for
 	// OpenCode (this path is Pi-only) and for messages already on a real id.
-	// This indexed preflight avoids rebuilding fingerprints for every old message.
-	// A negative result is rechecked by adoption after this map is complete, while
-	// tool-owner adoption performs its only existence probe at that later point.
-	// Bring the tag snapshot (and its fallback rows) up to date before the
-	// preflight revision: consuming its change journal is a TEMP-table write,
-	// which adoption would otherwise mistake for a tag change after preflight.
+	// Sync the tag snapshot (and its cached fallback rows) before taking
+	// preflightRevision. Syncing deletes consumed rows from a TEMP change table;
+	// if that write came after preflightRevision, adoptPiFallbackTags would count
+	// it as a tag change since preflight and take its slower rebuild path.
 	const tTagSnapshotSync = performance.now();
 	readPiFallbackTagRows(args.db, args.sessionId);
 	logTransformTiming(args.sessionId, "tagSnapshotSync", tTagSnapshotSync);
 	const tFallbackIdentity = performance.now();
+	// This indexed preflight avoids rebuilding fingerprints for every old message.
+	// adoptPiFallbackTags rechecks a negative result with a table query after
+	// this map is complete; its tool-owner probe also runs only at that point.
 	const preflightRevision = readPiAdoptionRevision(args.db);
 	const hasFallbackMessageTags = hasPiFallbackMessageTags(
 		args.db,

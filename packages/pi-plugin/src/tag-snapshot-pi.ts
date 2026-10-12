@@ -112,9 +112,10 @@ export function createPiTagSnapshotReader(db: Database) {
 		let snapshot = cache.get(sessionId);
 		if (!snapshot || snapshot.foreignRevision !== external) {
 			// Another connection changed this session's tags. There is no record
-			// of which rows, so reread them all, but keep the cached object of
-			// every row that did not change: consumers that fold deltas by row
-			// identity (tail hygiene attribution) then see only the real changes.
+			// of which rows, so reread them all, but reuse the cached object for
+			// every unchanged row. Consumers that diff rows by object identity
+			// (tagAttribution in tail-hygiene-walk-pi.ts) then see only the rows
+			// that actually changed.
 			const tags = snapshot
 				? reuseUnchangedRows(snapshot.tags, getTagsBySession(db, sessionId))
 				: getTagsBySession(db, sessionId);
@@ -221,8 +222,10 @@ interface SnapshotEntry {
 	/** `tags` rows whose status is "active", in the same order. */
 	active: SnapshotTag[];
 	/**
-	 * Fallback rows, loaded on first use after each full reload and then kept
-	 * current from the same changed-number journal as `tags`.
+	 * Fallback rows, loaded on first use after each full reload (a reread of
+	 * every row of the session) and then kept current from the same journal as
+	 * `tags`: the TEMP table pi_tag_changes, filled by this connection's tag
+	 * triggers with the numbers changed since the last read.
 	 */
 	fallback?: PiFallbackTagRow[];
 }

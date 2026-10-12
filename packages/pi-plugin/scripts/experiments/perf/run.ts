@@ -159,7 +159,8 @@ async function main(): Promise<void> {
 				return points.map((point) => {
 					const pass = byCount.get(point);
 					if (!pass) throw new Error(`no pass for point ${point}`);
-					// Each event clones its messages, so repeated passes can share these.
+					// A repeated point reuses the same pass object. That is safe: the
+					// pass loop below structuredClones pass.messages into each event.
 					return pass;
 				});
 			})()
@@ -544,7 +545,8 @@ let chaosFolds = 0;
 
 /**
  * Apply this pass's randomized external events (see `chaosSeed`). Draws from
- * the generator in a fixed order so both trees see the same events.
+ * the generator in a fixed order, so the baseline checkout and the checkout
+ * under test see identical events when run with the same seed.
  */
 function applyChaos(
 	random: (limit: number) => number,

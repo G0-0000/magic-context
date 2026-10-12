@@ -6,10 +6,11 @@ import type { Database } from "@magic-context/core/shared/sqlite";
 import { readPiFallbackTagRows } from "./tag-snapshot-pi";
 
 /**
- * Answer a `pi-msg-*` existence probe from the session's fallback rows, which
- * the tag snapshot keeps current from changed tag numbers. A pass that only
- * appends tags therefore never rescans the session's tags with LIKE. Inside a
- * transaction those rows are unavailable and the probe queries the table.
+ * Answer a `pi-msg-*` existence probe from the session's cached fallback rows
+ * (see readPiFallbackTagRows) instead of a LIKE query over the tags table. The
+ * tag snapshot re-reads those rows only for tag numbers that changed, so a
+ * context pass that just appends tags avoids a full LIKE rescan. Inside a
+ * transaction the cache returns null and the probe queries the table.
  */
 function probe(
 	db: Database,
