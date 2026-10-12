@@ -180,6 +180,7 @@ pub(super) struct LargeSession {
     pub(super) covered_end: u64,
     pub(super) messages: Vec<CkIngressMessage>,
     pub(super) render_generation: u64,
+    pub(super) history_budget_tokens: f64,
     pub(super) rng: Rng,
 }
 
@@ -195,6 +196,7 @@ impl LargeSession {
         memories: usize,
         live_covered: u64,
         tail: u64,
+        host_resolved: bool,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -211,7 +213,76 @@ impl LargeSession {
                 )
             })
             .collect::<Vec<_>>();
-        store.replace_compartments(&session, &rows).unwrap();
+        if host_resolved {
+            // Rows published by the TypeScript historian carry bare message ids. The host
+            // resolves each to the module's flat block id once and the store caches that
+            // coordinate overlay; every compartment read then applies it.
+            let raw = rows
+                .iter()
+                .map(|row| StoredCompartment {
+                    start_message_id: row.start_message_id.trim_end_matches("#0").to_string(),
+                    end_message_id: row.end_message_id.trim_end_matches("#0").to_string(),
+                    ..row.clone()
+                })
+                .collect::<Vec<_>>();
+            store.replace_compartments(&session, &raw).unwrap();
+            let boundaries = rows
+                .iter()
+                .zip(&raw)
+                .map(|(row, raw)| mc_store::ResolvedContextBoundary {
+                    sequence: row.sequence,
+                    source_start_message: row.start_message,
+                    source_end_message: row.end_message,
+                    source_start_message_id: raw.start_message_id.clone(),
+                    source_end_message_id: raw.end_message_id.clone(),
+                    source_start_block_index: None,
+                    source_end_block_index: None,
+                    source_row_identity: String::new(),
+                    start_message: row.start_message,
+                    end_message: row.end_message,
+                    start_message_id: row.start_message_id.clone(),
+                    end_message_id: row.end_message_id.clone(),
+                    start_date: row.start_date.clone(),
+                    end_date: row.end_date.clone(),
+                })
+                .collect::<Vec<_>>();
+            store
+                .apply_authority_state_sync(mc_store::ModuleStateSyncRequest {
+                    resolved_compartment_boundaries: &boundaries,
+                    session_id: &session,
+                    project_path: PROJECT,
+                    shadow_generation: 0,
+                    expected_shadow_seq: 0,
+                    seed_boundary_id: rows.last().map(|row| row.end_message_id.as_str()),
+                    drop_seeds: &[],
+                    drop_seed_skipped: 0,
+                    pending_agent_drops: &[],
+                    pending_agent_drops_skipped: 0,
+                    user_hint_seeds: &[],
+                    auto_search_hint_skipped: 0,
+                    note_nudge_anchors: None,
+                    todo_synthetic_anchor: None,
+                    todo_synthetic_anchor_present: false,
+                    emergency_latches: None,
+                    pending_compaction_marker: None,
+                    deferred_execute_state: None,
+                    channel2_nudge_state: None,
+                    strip_seeds: &[],
+                    strip_seed_skipped: 0,
+                    reasoning_cleared_through_tag: None,
+                    last_todo_state: None,
+                    acked_watermarks: serde_json::json!({}),
+                })
+                .unwrap();
+            let resolved = store.load_compartments(&session).unwrap();
+            assert_eq!(
+                resolved.last().map(|row| row.end_message_id.as_str()),
+                rows.last().map(|row| row.end_message_id.as_str()),
+                "the cached host coordinates must resolve every bare id"
+            );
+        } else {
+            store.replace_compartments(&session, &rows).unwrap();
+        }
         for index in 0..memories {
             insert_memory(&store, &mut rng, NOW_MS - 86_400_000 + index as i64);
         }
@@ -226,6 +297,7 @@ impl LargeSession {
             covered_end,
             messages: Vec::new(),
             render_generation: 0,
+            history_budget_tokens: 60_000.0,
             rng,
         };
         for ordinal in first_live..=covered_end + tail {
@@ -296,6 +368,7 @@ impl LargeSession {
     pub(super) fn context(&self) -> ProducerContext<'static> {
         let mut context = pctx(PROJECT, "/nonexistent-docs", NOW_MS);
         context.memory_budget_tokens = 15_000.0;
+        context.history_budget_tokens = self.history_budget_tokens;
         context.inject_docs = false;
         context
     }
@@ -342,7 +415,20 @@ fn large_session_compose_profile() {
     let cycles = env_usize("MC_COMPOSE_CYCLES", 5);
     let build_started = Instant::now();
     let live_covered = env_usize("MC_COMPOSE_LIVE_COVERED", 400) as u64;
-    let mut fixture = LargeSession::new(0x5eed, compartments, 65, memories, live_covered, 600);
+    let tail = env_usize("MC_COMPOSE_TAIL", 600) as u64;
+    let publish = env_usize("MC_COMPOSE_PUBLISH", 1);
+    let append = env_usize("MC_COMPOSE_APPEND", 80) as u64;
+    let host_resolved = env_usize("MC_COMPOSE_HOST_RESOLVED", 0) == 1;
+    let mut fixture = LargeSession::new(
+        0x5eed,
+        compartments,
+        65,
+        memories,
+        live_covered,
+        tail,
+        host_resolved,
+    );
+    fixture.history_budget_tokens = env_usize("MC_COMPOSE_HISTORY_BUDGET", 60_000) as f64;
     let rows = fixture.store.load_compartments(&fixture.session).unwrap();
     let tier_bytes = rows
         .iter()
@@ -366,8 +452,10 @@ fn large_session_compose_profile() {
         let timings = response.timings.as_ref().unwrap();
         let [m0, m1] = fixture.m0_m1_digests();
         eprintln!(
-            "large-session pass={label} decision={} wall={wall:.1} total={:.1} planning={:.1} state_evolution={:.1} compose_m0m1={:.1} decay_render_ms={:.1} tier_tokenize_ms={:.1} memory_render_ms={:.1} build_output={:.1} store_commit={:.1} m0={} m1={}",
+            "large-session pass={label} decision={} reason={:?} out={} wall={wall:.1} total={:.1} planning={:.1} state_evolution={:.1} compose_m0m1={:.1} decay_render_ms={:.1} tier_tokenize_ms={:.1} memory_render_ms={:.1} build_output={:.1} store_commit={:.1} m0={} m1={}",
             response.decision,
+            response.materialize_reason,
+            response.messages().len(),
             timings.total,
             timings.planning,
             timings.state_evolution,
@@ -377,8 +465,8 @@ fn large_session_compose_profile() {
             timings.compose.memory_render_ms,
             timings.build_output,
             timings.store_commit,
-            &m0[..12],
-            &m1[..12],
+            m0.get(..12).unwrap_or(&m0),
+            m1.get(..12).unwrap_or(&m1),
         );
     };
     let timed = |fixture: &LargeSession| {
@@ -389,8 +477,10 @@ fn large_session_compose_profile() {
     let (response, wall) = timed(&fixture);
     print("cold", &fixture, &response, wall);
     for cycle in 0..cycles {
-        fixture.append_messages(80);
-        assert!(fixture.publish_compartment(200));
+        fixture.append_messages(append);
+        for _ in 0..publish {
+            assert!(fixture.publish_compartment(200));
+        }
         let (response, wall) = timed(&fixture);
         print(&format!("c{cycle}-defer"), &fixture, &response, wall);
         fixture.request_soft();
@@ -399,5 +489,115 @@ fn large_session_compose_profile() {
         fixture.request_fold();
         let (response, wall) = timed(&fixture);
         print(&format!("c{cycle}-fold"), &fixture, &response, wall);
+    }
+}
+
+/// One seeded randomized run: each step may append live messages, publish
+/// compartments or add a memory, then runs exactly one pass chosen among defer,
+/// SOFT and fold. Returns one line per pass: decision, reason, m0 and m1 digests.
+pub(super) fn differential_run(
+    seed: u64,
+    host_resolved: bool,
+    history_budget_tokens: f64,
+    passes: usize,
+) -> Vec<String> {
+    let mut fixture = LargeSession::new(seed, 80, 9, 40, 20, 160, host_resolved);
+    fixture.history_budget_tokens = history_budget_tokens;
+    let mut lines = Vec::with_capacity(passes + 1);
+    let mut choices = Rng::new(seed ^ 0xd1ff);
+    // The session's first pass materializes it, as on a real host.
+    let response = fixture.run();
+    let [m0, m1] = fixture.m0_m1_digests();
+    lines.push(format!(
+        "seed={seed} pass=cold decision={} reason={} coverage={:?} m0={m0} m1={m1}",
+        response.decision,
+        response.materialize_reason.as_deref().unwrap_or("-"),
+        response.coverage_ordinal,
+    ));
+    for pass in 0..passes {
+        let roll = choices.below(100);
+        if roll < 35 {
+            let count = 1 + choices.below(30);
+            fixture.append_messages(count);
+        } else if roll < 55 {
+            for _ in 0..=choices.below(3) {
+                fixture.publish_compartment(12);
+            }
+        } else if roll < 65 {
+            insert_memory(&fixture.store, &mut fixture.rng, NOW_MS - 1_000 + pass as i64);
+        }
+        let kind = match choices.below(10) {
+            0..=3 => "defer",
+            4..=6 => {
+                fixture.request_soft();
+                "soft"
+            }
+            _ => {
+                fixture.request_fold();
+                "fold"
+            }
+        };
+        let response = fixture.run();
+        let [m0, m1] = fixture.m0_m1_digests();
+        lines.push(format!(
+            "seed={seed} pass={pass} kind={kind} decision={} reason={} coverage={:?} m0={m0} m1={m1}",
+            response.decision,
+            response.materialize_reason.as_deref().unwrap_or("-"),
+            response.coverage_ordinal,
+        ));
+    }
+    lines
+}
+
+/// The served m0/m1 bytes of every pass in four seeded randomized runs (240
+/// randomized passes after each run's materializing pass: folds, SOFT refreshes and
+/// defers over indexed and host-resolved
+/// compartment rows) must equal the digests recorded from the implementation
+/// before the large-session optimizations. Regenerate the file only for an
+/// intentional render change: `MC_COMPOSE_GOLDEN_WRITE=1 cargo test -p mc-module
+/// --lib large_session_compose_differential`.
+#[test]
+fn large_session_compose_differential() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("testdata/compose-large-session-golden.txt");
+    let mut actual = Vec::new();
+    for (seed, host_resolved, budget) in [
+        (11, false, 3_000.0),
+        (12, true, 3_000.0),
+        (13, false, 12_000.0),
+        (14, true, 800.0),
+    ] {
+        actual.extend(differential_run(seed, host_resolved, budget, 60));
+    }
+    let actual = actual.join("\n") + "\n";
+    if std::env::var_os("MC_COMPOSE_GOLDEN_WRITE").is_some() {
+        // Also printed, for runners whose file writes do not reach the checkout.
+        for line in actual.lines() {
+            eprintln!("GOLDEN {line}");
+        }
+        std::fs::write(&path, &actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap();
+    for (index, (actual, expected)) in actual.lines().zip(expected.lines()).enumerate() {
+        assert_eq!(actual, expected, "first differing pass at line {index}");
+    }
+    assert_eq!(actual.lines().count(), expected.lines().count());
+    // The run must exercise every pass type, or a matching digest proves little.
+    assert!(!expected.contains("decision=PASSTHROUGH"));
+    let distinct = |prefix: &str| {
+        expected
+            .lines()
+            .filter_map(|line| line.split(' ').find(|field| field.starts_with(prefix)))
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    assert!(distinct("m0=") >= 40, "too few distinct m0 renders");
+    assert!(distinct("m1=") >= 8, "too few distinct m1 renders");
+    for decision in ["decision=HARD", "decision=SOFT ", "decision=SOFT+"] {
+        assert!(
+            expected.lines().filter(|line| line.contains(decision)).count() >= 20,
+            "fewer than 20 {decision} passes"
+        );
     }
 }
