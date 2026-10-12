@@ -21,6 +21,8 @@ pub mod context_boundaries;
 pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
 mod historian_claim;
+mod historian_telemetry;
+pub use historian_telemetry::{HistorianInvocation, HistorianRunTelemetry};
 pub mod move_inventory;
 pub mod private_permissions;
 pub mod single_store_domain;
