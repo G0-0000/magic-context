@@ -20,6 +20,7 @@ import {
     addMergedReasoningStrippedIds,
     clearEmergencyRecovery,
     getOverflowState,
+    getThinkingBindingRecoveryTarget,
     recordDetectedContextLimit,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
@@ -1243,6 +1244,37 @@ describe("a signed-thinking reset survives a crash and never ships over the wind
         expect(healthy.map((message) => message.info.id)).toEqual(
             remap(fixture.pressured.native_messages).map((message) => message.info.id),
         );
+    });
+
+    // Reactive recovery is ended only once the stripped replacement is captured: a crash
+    // before that leaves it armed, and the fence alone keeps the old thinking out.
+    it("a crash after the reset fence leaves reactive recovery armed until a captured replacement", async () => {
+        const fixture = signedThinkingFixtures.rewrite;
+        const s = frozenSession("signed-reset-crash-reactive");
+        const remap = (messages: MessageLike[]) =>
+            structuredClone(messages).map((message) => {
+                message.info.sessionID = s.sessionId;
+                return message;
+            });
+        const input = remap(fixture.input);
+        s.setModuleOutput(() => remap(fixture.before.native_messages));
+        await s.run(input, "SOFT+");
+        armLatestThinkingRecovery(s.db, s.sessionId);
+        s.setUsage(66, 132_000);
+        s.setModuleOutput(() => remap(fixture.pressured.native_messages));
+        s.setResponseExtras({ signed_thinking_reset: true });
+        s.setResetFenceHook(() => {
+            throw new Error("simulated crash after the reset fence");
+        });
+        await expect(s.run(input, "HARD")).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        expect(getThinkingBindingRecoveryTarget(s.db, s.sessionId) ?? "").toStartWith(
+            "latest_thinking_original",
+        );
+        // The completed reset pass captures its replacement, then ends the recovery.
+        s.setResetFenceHook(undefined);
+        const served = (await s.run(input, "HARD")) as MessageLike[];
+        expect(reasoningIds(served)).toEqual([]);
+        expect(getThinkingBindingRecoveryTarget(s.db, s.sessionId) ?? "").toBe("");
     });
 
     it("a reset whose whole request is still over the window is refused, not sent", async () => {
