@@ -285,49 +285,4 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
         });
         expect(count).toBe(0);
     });
-
-    // The directory a host records for a session and the plugin's own can be two
-    // spellings of one Windows directory. Both are this project's; any other
-    // directory is never swept.
-    test("sweeps Windows spellings of this directory and never another directory", async () => {
-        db = makeOpencodeDb();
-        const own = "D:\\coding\\siac\\wt\\app";
-        const old = now - staleMs - 1;
-        insert(db, "forward", RETROSPECTIVE_CHILD_TITLE, "D:/coding/siac/wt/app", old - 4);
-        insert(db, "lower-drive", RETROSPECTIVE_CHILD_TITLE, "d:\\coding\\siac\\wt\\app", old - 3);
-        insert(db, "trailing", RETROSPECTIVE_CHILD_TITLE, "D:/coding/siac/wt/app/", old - 2);
-        insert(db, "sibling", RETROSPECTIVE_CHILD_TITLE, "D:/coding/siac/wt/app-2", old - 1);
-        insert(db, "other", RETROSPECTIVE_CHILD_TITLE, "D:/coding/siac/wt/other", old);
-
-        const { client, deleted } = deleteClient();
-        const count = await sweepOrphanedRetrospectiveChildren({
-            opencodeDb: db,
-            client,
-            sessionDirectory: own,
-            staleMs,
-            now,
-        });
-        expect(deleted).toEqual(["forward", "lower-drive", "trailing"]);
-        expect(count).toBe(3);
-    });
-
-    test("still sweeps at most 200 rows of this directory when other directories fill the first pages", async () => {
-        db = makeOpencodeDb();
-        let created = now - staleMs - 10_000;
-        for (let index = 0; index < 700; index += 1)
-            insert(db, `other-${index}`, RETROSPECTIVE_CHILD_TITLE, "/repo/elsewhere", created++);
-        for (let index = 0; index < 250; index += 1)
-            insert(db, `own-${index}`, RETROSPECTIVE_CHILD_TITLE, DIR, created++);
-
-        const { client, deleted } = deleteClient();
-        const count = await sweepOrphanedRetrospectiveChildren({
-            opencodeDb: db,
-            client,
-            sessionDirectory: DIR,
-            staleMs,
-            now,
-        });
-        expect(count).toBe(200);
-        expect(deleted).toEqual(Array.from({ length: 200 }, (_, index) => `own-${index}`));
-    });
 });

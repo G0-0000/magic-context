@@ -1,6 +1,5 @@
 import type { PluginContext } from "../../../plugin/types";
 import { log } from "../../../shared/logger";
-import { sameProjectDirectory } from "../../../shared/project-directory-key";
 import type { Database } from "../../../shared/sqlite";
 import type { DreamTaskName } from "./task-registry";
 
@@ -219,32 +218,16 @@ export async function sweepOrphanedRetrospectiveChildren(args: {
 
     let rows: OrphanRow[];
     try {
-        // The directory is matched with `sameProjectDirectory`, not SQL equality,
-        // so another spelling of this directory (separators, Windows drive-letter
-        // case, a trailing separator) is still this project's, and a different
-        // directory never is. Candidates are read oldest first, a page at a time,
-        // until 200 in this directory are found.
-        const page = opencodeDb.prepare(
-            `SELECT id, time_created, COALESCE(directory, '') AS directory
-               FROM session
-              WHERE (${agePredicates.join(" OR ")})
-              ORDER BY time_created ASC, id ASC
-              LIMIT ? OFFSET ?`,
-        );
-        const pageSize = 500;
-        rows = [];
-        for (let offset = 0; rows.length < 200; offset += pageSize) {
-            const candidates = page.all(...predicateParams, pageSize, offset) as Array<
-                OrphanRow & { directory: string }
-            >;
-            for (const candidate of candidates) {
-                if (rows.length >= 200) break;
-                if (sameProjectDirectory(candidate.directory, sessionDirectory)) {
-                    rows.push({ id: candidate.id, time_created: candidate.time_created });
-                }
-            }
-            if (candidates.length < pageSize) break;
-        }
+        rows = opencodeDb
+            .prepare(
+                `SELECT id, time_created
+                   FROM session
+                  WHERE directory = ?
+                    AND (${agePredicates.join(" OR ")})
+                  ORDER BY time_created ASC
+                  LIMIT 200`,
+            )
+            .all(sessionDirectory, ...predicateParams) as OrphanRow[];
     } catch (error) {
         // `session` table absent / schema drift / locked → skip silently.
         log(`[magic-context] internal child orphan sweep: read skipped (${String(error)})`);
