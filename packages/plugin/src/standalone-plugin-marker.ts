@@ -1,8 +1,13 @@
+import { log } from "./shared/logger";
+
 const markerSymbol = Symbol.for("cortexkit.standalone-plugins");
 
-let failureLogged = false;
-
-/** Announce this plugin without interfering with other standalone products. */
+/**
+ * Announce this plugin in the Map that CortexKit standalone plugins share, so a
+ * harness bridge can detect a standalone Magic Context and refuse to run both.
+ * Other products' entries are left untouched, and a failure never stops the
+ * host from loading the plugin.
+ */
 export function registerStandalonePluginMarker(version: string): void {
     try {
         const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
@@ -11,16 +16,12 @@ export function registerStandalonePluginMarker(version: string): void {
             registry = new Map<string, { version: string }>();
             globals[markerSymbol] = registry;
         }
-        (registry as Map<string, { version: string }>).set("magic-context", {
-            version,
-        });
+        (registry as Map<string, { version: string }>).set("magic-context", { version });
     } catch (error) {
-        if (failureLogged) return;
-        failureLogged = true;
         try {
-            console.warn("[magic-context] Could not register standalone plugin marker", error);
+            log("could not register the standalone plugin marker", error);
         } catch {
-            // Marker registration must never prevent the host from loading the plugin.
+            // Registration must never prevent the host from loading the plugin.
         }
     }
 }

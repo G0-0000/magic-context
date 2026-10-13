@@ -38,7 +38,7 @@ test("preserves the shared Map and entries registered by other products", () => 
     });
 });
 
-test("ignores registration failures and logs only once", () => {
+test("ignores registration failures without writing to the host console", () => {
     originalMarker = globals[markerSymbol];
     const invalidRegistry = {
         set() {
@@ -47,11 +47,14 @@ test("ignores registration failures and logs only once", () => {
     };
     globals[markerSymbol] = invalidRegistry;
     const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
 
     expect(() => {
         registerStandalonePluginMarker(packageMetadata.version);
         registerStandalonePluginMarker(packageMetadata.version);
     }).not.toThrow();
-    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
     warning.mockRestore();
+    error.mockRestore();
 });
