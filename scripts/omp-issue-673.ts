@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// Drive Oh My Pi 18.9.2 with a loopback mock provider and throwaway configuration/databases.
+// Reproduce delayed lifecycle notifications during provider retries on exact
+// Oh My Pi 18.9.2/18.10.3 npm versions, with a mock provider and throwaway stores.
 import { execFileSync } from "node:child_process";
 import {
 	appendFileSync,
@@ -36,10 +37,21 @@ const host = join(install, "node_modules/@oh-my-pi/pi-coding-agent");
 const version = JSON.parse(
 	readFileSync(join(host, "package.json"), "utf8"),
 ).version;
-if (version !== "18.9.2")
-	throw new Error(`expected OMP 18.9.2, got ${version}`);
+const expectedVersion = process.env.MC673_VERSION ?? "18.9.2";
+if (
+	!["18.9.2", "18.10.3"].includes(expectedVersion) ||
+	version !== expectedVersion
+)
+	throw new Error(`expected pinned OMP ${expectedVersion}, got ${version}`);
 const mode = process.argv[2] ?? "late-retry";
-if (!["normal", "late-retry"].includes(mode)) throw new Error("unknown mode");
+if (
+	!["normal", "late-retry", "goal-late-retry", "goal-raw-retry"].includes(mode)
+)
+	throw new Error("unknown mode");
+const goalMode = mode.startsWith("goal-");
+const rawRetry = mode === "goal-raw-retry";
+if (goalMode && version !== "18.10.3")
+	throw new Error("goal probe requires OMP 18.10.3");
 const audit = (value: unknown) =>
 	appendFileSync(
 		join(root, "audit.jsonl"),
@@ -69,12 +81,27 @@ mock.setDefault({
 	usage: { input_tokens: 1000, output_tokens: 10 },
 });
 let rejected = false;
+let wireCount = 0;
 mock.addMatcher((body) => {
 	audit({ phase: "wire", body });
+	wireCount++;
+	if (goalMode && wireCount === 1)
+		return {
+			content: [
+				{
+					type: "tool_use",
+					id: "goal-progress",
+					name: "_bash",
+					input: { command: "printf 'progress674\\n'", timeout: 5 },
+				},
+			],
+			stop_reason: "tool_use",
+			usage: { input_tokens: 1000, output_tokens: 10 },
+		};
 	if (
-		mode === "late-retry" &&
+		(mode === "late-retry" || goalMode) &&
 		!rejected &&
-		JSON.stringify(body).includes("SECOND673")
+		(goalMode ? wireCount === 3 : JSON.stringify(body).includes("SECOND673"))
 	) {
 		rejected = true;
 		(globalThis as any).__mc673ReleaseEnd();
@@ -86,6 +113,8 @@ mock.addMatcher((body) => {
 			},
 		};
 	}
+	if (goalMode && wireCount === 4)
+		void session.goalRuntime.completeGoalFromTool();
 	return null;
 });
 writeFileSync(
@@ -99,6 +128,7 @@ writeFileSync(
 		advisor: { enabled: false },
 		autolearn: { enabled: false },
 		retry: { enabled: false },
+		goal: { enabled: true, continuationModes: ["rpc"] },
 		quietStartup: true,
 		enableInstallTelemetry: false,
 	}),
@@ -153,15 +183,17 @@ export default async pi => {
   const delivered=new Promise(resolve=>{endDelivered=resolve;});
   globalThis.__mc673ReleaseEnd=releaseEnd;
   pi.on('agent_end',async event=>{
-    if(++ends===1 && ${JSON.stringify(mode)}==='late-retry') {
+    if(++ends===1 && ${JSON.stringify(mode)}!=='normal') {
       log({phase:'held-earlier-end',messages:event.messages});
       await heldEnd;
     }
   });
   const proxy = new Proxy(pi, {get(target,key) {
     if(key==='on') return (name,handler)=>target.on(name,async (event,ctx)=>{
-      if(name==='before_provider_request' && JSON.stringify(event.payload).includes('SECOND673') && ++attempts===2 && ${JSON.stringify(mode)}==='late-retry') await delivered;
-      if(['agent_start','agent_end','context','before_provider_request'].includes(name)) log({phase:name,messages:event.messages,payload:event.payload,willContinue:event.willContinue,idle:ctx.isIdle(),branch:name!=='agent_start'?ctx.sessionManager.getBranch():undefined});
+      if(name==='before_provider_request' && JSON.stringify(event.payload).includes(${JSON.stringify(goalMode ? "GOAL674" : "SECOND673")}) && ++attempts===${goalMode ? 4 : 2} && ${JSON.stringify(mode)}!=='normal') await delivered;
+      if(name==='context') globalThis.__mc674Raw=structuredClone(event.messages);
+      if(name==='before_provider_request' && attempts===4 && ${rawRetry}) event.payload.messages=(await globalThis.__mc674BuildRaw()).messages;
+      if(['agent_start','agent_end','context','before_provider_request'].includes(name)) log({phase:name,messages:event.messages,payload:event.payload,willContinue:event.willContinue,idle:ctx.isIdle(),agent:ctx.agent,sessionId:ctx.sessionManager.getSessionId(),branch:name!=='agent_start'?ctx.sessionManager.getBranch():undefined});
       const wrapped = Object.defineProperties(Object.create(ctx), {
         abort: {value:()=>{log({phase:'abort',hook:name});return ctx.abort();}},
         ui: {value:Object.defineProperty(Object.create(ctx.ui),'notify',{value:(text,level)=>{log({phase:'notice',text,level});return ctx.ui.notify(text,level);}})},
@@ -193,6 +225,12 @@ const { initializeExtensions } = await import(
 	join(host, "src/modes/runtime-init.ts")
 );
 let session: any;
+let goalController: any;
+let goalEnds = 0;
+let finishGoal!: () => void;
+const goalFinished = new Promise<void>((resolve) => {
+	finishGoal = resolve;
+});
 try {
 	audit({ phase: "host", version, bun: Bun.version, root, plugin, mode });
 	({ session } = await createAgentSession({
@@ -209,12 +247,70 @@ try {
 			audit({ phase: "send-error", error: String(error) }),
 	});
 	session.subscribe((event: any) => {
+		goalController?.observe(event);
+		if (goalMode && event.type === "agent_end" && ++goalEnds === 2)
+			finishGoal();
 		if (["agent_start", "agent_end"].includes(event.type))
 			audit({ phase: "public-" + event.type, messages: event.messages });
 	});
 	isolation("start");
-	await session.prompt("FIRST673");
-	await session.prompt("SECOND673");
+	if (goalMode) {
+		if (rawRetry) {
+			const { convertToLlm } = await import(
+				join(host, "src/session/messages.ts")
+			);
+			const { streamSimple } = await import(
+				join(install, "node_modules/@oh-my-pi/pi-ai/src/index.ts")
+			);
+			(globalThis as any).__mc674BuildRaw = async () => {
+				const controller = new AbortController();
+				let rawPayload: any;
+				const options = {
+					...session.prepareSimpleStreamOptions(
+						{ apiKey: "test-key-not-real", maxTokens: 128 },
+						session.model.provider,
+					),
+					signal: controller.signal,
+					onPayload: (payload: unknown) => {
+						rawPayload = structuredClone(payload);
+						controller.abort();
+						return payload;
+					},
+				};
+				const result = await streamSimple(
+					session.model,
+					{
+						messages: convertToLlm((globalThis as any).__mc674Raw),
+						systemPrompt: "raw adapter reference",
+					},
+					options,
+				).result();
+				audit({
+					phase: "raw-adapter-reference",
+					stopped: result.stopReason,
+					payload: rawPayload,
+				});
+				if (!rawPayload || result.stopReason !== "aborted")
+					throw new Error("raw reference was not cancelled before HTTP");
+				return rawPayload;
+			};
+		}
+		const { RpcGoalController } = await import(
+			join(host, "src/modes/rpc/rpc-goal.ts")
+		);
+		goalController = new RpcGoalController(session);
+		await goalController.handle({
+			op: "create",
+			objective: "GOAL674 make measurable progress",
+			token_budget: 100000,
+		});
+		await goalFinished;
+		await session.waitForIdle();
+		await goalController.settled();
+	} else {
+		await session.prompt("FIRST673");
+		await session.prompt("SECOND673");
+	}
 	await session.flushToDisk();
 	isolation("end");
 	const hooks = readFileSync(join(root, "hooks.jsonl"), "utf8")
@@ -230,43 +326,108 @@ try {
 		audit({ phase: "check", name, passed: ok });
 		if (!ok) throw new Error(`FAIL ${name}`);
 	};
+	if (rawRetry)
+		check("raw provider retry never reaches HTTP", wires.length === 3);
 	check(
-		"all HTTP requests contain managed ordinal tags",
+		goalMode
+			? "all goal HTTP requests contain managed context"
+			: "all HTTP requests contain managed ordinal tags",
 		wires.every((e) =>
-			/§\d+§ (?:FIRST|SECOND)673/.test(JSON.stringify(e.body)),
+			goalMode
+				? JSON.stringify(e.body).includes("<session-history>")
+				: /§\d+§ (?:FIRST|SECOND)673/.test(JSON.stringify(e.body)),
 		),
 	);
-	if (mode === "late-retry") {
+	if (mode !== "normal") {
 		check(
 			"retried context pass publishes a durable LKG slot before dispatch",
-			hooks.filter((e) => e.phase === "lkg-publication").at(-1)?.rows.length === 1,
+			hooks.filter((e) => e.phase === "lkg-publication").at(-1)?.rows.length ===
+				1,
 		);
-		const attempts = hooks.filter(
-			(e) =>
-				e.phase === "before_provider_request" &&
-				JSON.stringify(e.payload).includes("SECOND673"),
+		const attempts = hooks
+			.filter(
+				(e) =>
+					e.phase === "before_provider_request" &&
+					JSON.stringify(e.payload).includes(
+						goalMode ? "GOAL674" : "SECOND673",
+					),
+			)
+			.slice(goalMode ? 2 : 0);
+		const initialEntries = attempts[0]?.branch.filter(
+			(e: any) => e.type === "message" || e.type === "custom_message",
+		);
+		const retryEntries = attempts[1]?.branch.filter(
+			(e: any) => e.type === "message" || e.type === "custom_message",
 		);
 		check(
-			"retry keeps the same native anchor and original transcript",
+			goalMode
+				? "retry retains the persisted prefix anchor while its final custom message persists"
+				: "retry keeps the same native anchor and original transcript",
 			attempts.length === 2 &&
-				JSON.stringify(attempts[0].branch) ===
-					JSON.stringify(attempts[1].branch),
+				(goalMode
+					? initialEntries.length >
+							hooks.find((e) => e.phase === "held-earlier-end").messages
+								.length &&
+						initialEntries.every(
+							(e: any, i: number) =>
+								JSON.stringify(e) === JSON.stringify(retryEntries[i]),
+						)
+					: JSON.stringify(attempts[0].branch) ===
+						JSON.stringify(attempts[1].branch)),
+		);
+		if (goalMode) {
+			check(
+				"goal continuation runs fresh context but its provider fallback does not",
+				hooks.filter((e) => e.phase === "context").length === 3 &&
+					hooks.filter((e) => e.phase === "before_provider_request").length ===
+						4,
+			);
+			check(
+				"goal runs share the parent session and main agent identity",
+				new Set(
+					hooks.filter((e) => e.phase === "context").map((e) => e.sessionId),
+				).size === 1 &&
+					hooks
+						.filter((e) => e.phase === "agent_end")
+						.every((e) => e.agent?.kind === "main"),
+			);
+		}
+		check(
+			rawRetry
+				? "raw retry carries no Magic Context managed prefix"
+				: "strict fallback reuses exactly the same managed messages",
+			rawRetry
+				? !JSON.stringify(attempts[1].payload.messages).includes(
+						"<session-history>",
+					)
+				: wires.length === (goalMode ? 4 : 3) &&
+						JSON.stringify(wires[goalMode ? 2 : 1].body.messages) ===
+							JSON.stringify(wires[goalMode ? 3 : 2].body.messages),
 		);
 		check(
-			"strict fallback reuses exactly the same managed messages",
-			wires.length === 3 &&
-				JSON.stringify(wires[1].body.messages) ===
-					JSON.stringify(wires[2].body.messages),
-		);
-		check(
-			"late earlier end causes no refusal",
-			!hooks.some(
-				(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
-			),
+			rawRetry
+				? "unmanaged retry is refused once for content mismatch"
+				: "late earlier end causes no refusal",
+			rawRetry
+				? hooks.filter(
+						(e) =>
+							e.phase === "entry" && e.type === "magic-context-turn-refused",
+					).length === 1 &&
+						hooks.some(
+							(e) =>
+								e.phase === "entry" &&
+								e.data.message.includes(
+									"does not match this pass's managed dispatch",
+								),
+						)
+				: !hooks.some(
+						(e) =>
+							e.phase === "entry" && e.type === "magic-context-turn-refused",
+					),
 		);
 	}
 	console.log(
-		`Bun ${Bun.version}; OMP ${version}; ${mode === "late-retry" ? 5 : 1} checks passed; evidence ${root}`,
+		`Bun ${Bun.version}; OMP ${version}; ${rawRetry ? 8 : goalMode ? 7 : mode === "late-retry" ? 5 : 1} checks passed; evidence ${root}`,
 	);
 } finally {
 	await session?.dispose();

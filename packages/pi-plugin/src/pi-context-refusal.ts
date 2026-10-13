@@ -7,6 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { findPiTagIdentityConflict } from "@magic-context/core/features/magic-context/storage-tags";
 import {
 	exactReusablePrefix,
+	type LkgContentField,
 	type LkgInputSnapshot,
 	lkgContentFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
@@ -50,7 +51,14 @@ interface Operation {
 	// endBelongsToEarlierRun). Undefined when the input could not be read.
 	inputKeys?: readonly string[];
 	inputMessages?: readonly LkgInputSnapshot[];
-	inputBranch?: { anchorId: string; messages: readonly LkgInputSnapshot[] };
+	inputBranch?: {
+		anchorId: string;
+		anchorIndex: number;
+		entryIds: readonly string[];
+		messages: readonly LkgInputSnapshot[];
+	};
+	dispatchFields?: readonly LkgContentField[];
+	retainedAfterEnd: boolean;
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
 	started: boolean;
@@ -121,29 +129,96 @@ function messageSnapshots(messages: unknown[]): LkgInputSnapshot[] | undefined {
 	return snapshots.length ? snapshots : undefined;
 }
 
+function conversationFields(
+	payload: unknown,
+): readonly LkgContentField[] | undefined {
+	try {
+		if (!payload || typeof payload !== "object") return undefined;
+		const body = payload as {
+			messages?: unknown;
+			system?: unknown;
+			input?: unknown;
+			instructions?: unknown;
+			previous_response_id?: unknown;
+			conversation?: unknown;
+		};
+		// After ignoring a delayed end, compare messages and system text with the
+		// first managed dispatch. Retry controls/tools may change independently;
+		// an unknown conversation representation cannot establish that match.
+		if (Array.isArray(body.messages) && body.input === undefined)
+			return (
+				lkgContentFields({ messages: body.messages, system: body.system }) ??
+				undefined
+			);
+		if (Array.isArray(body.input) && body.messages === undefined)
+			return (
+				lkgContentFields({
+					input: body.input,
+					instructions: body.instructions,
+					previous_response_id: body.previous_response_id,
+					conversation: body.conversation,
+				}) ?? undefined
+			);
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
 function inputBranch(
 	ctx: ExtensionContext,
 	inputs?: readonly LkgInputSnapshot[],
 ): Operation["inputBranch"] {
 	try {
 		const branch = ctx.sessionManager.getBranch();
-		// The host converts custom_message entries before exposing model history;
-		// their stored form cannot be compared directly with context-hook input.
-		if (branch.some((entry) => entry.type === "custom_message"))
-			return undefined;
-		const entries = branch.filter((entry) => entry.type === "message");
+		const entries = branch.filter(
+			(entry) => entry.type === "message" || entry.type === "custom_message",
+		);
 		const anchorId = entries.at(-1)?.id;
-		const native = messageSnapshots(entries.map((entry) => entry.message));
+		const native = messageSnapshots(
+			entries.map((entry) => {
+				if (entry.type === "message") return entry.message;
+				// Oh My Pi restores custom entries as role/content/timestamp plus metadata.
+				// Compare their typed field values with the messages captured before
+				// context rewriting; dropping custom entries would hide changed history.
+				const attribution = (entry as { attribution?: unknown }).attribution;
+				const timestamp = new Date(entry.timestamp).getTime();
+				if (
+					!Number.isFinite(timestamp) ||
+					!entry.customType ||
+					(typeof entry.content !== "string" &&
+						!Array.isArray(entry.content)) ||
+					(attribution !== undefined &&
+						attribution !== "agent" &&
+						attribution !== "user")
+				)
+					return undefined;
+				return {
+					role: "custom",
+					customType: entry.customType,
+					content: entry.content,
+					display: entry.display,
+					details: entry.details,
+					attribution,
+					timestamp,
+				};
+			}),
+		);
 		inputs ??= native;
 		if (
 			!anchorId ||
 			!native ||
 			!inputs ||
-			native.length !== inputs.length ||
-			exactReusablePrefix(native, inputs) !== inputs.length
+			native.length > inputs.length ||
+			exactReusablePrefix(native, inputs) !== native.length
 		)
 			return undefined;
-		return { anchorId, messages: inputs };
+		return {
+			anchorId,
+			anchorIndex: native.length - 1,
+			entryIds: entries.map((entry) => entry.id),
+			messages: inputs,
+		};
 	} catch {
 		return undefined;
 	}
@@ -174,7 +249,7 @@ function dispatchedEndBelongsToEarlierRun(
 		const prepared = operation.inputBranch;
 		if (
 			!current ||
-			current.anchorId !== prepared.anchorId ||
+			current.entryIds[prepared.anchorIndex] !== prepared.anchorId ||
 			current.messages.length !== prepared.messages.length ||
 			exactReusablePrefix(current.messages, prepared.messages) !==
 				prepared.messages.length
@@ -190,6 +265,11 @@ function dispatchedEndBelongsToEarlierRun(
 		// or content by pruning/compacting, or leaves the session idle.
 		return !!(
 			ended &&
+			// This pass's saved session entry must correspond to a message newer than
+			// agent_end's message prefix. Oh My Pi may persist a goal preface before
+			// its continuation; that preface entry ID proves the newer input stayed
+			// on the same branch while the final continuation entry arrived.
+			ended.length <= prepared.anchorIndex &&
 			ended.length < prepared.messages.length &&
 			exactReusablePrefix(prepared.messages, ended) === ended.length
 		);
@@ -250,6 +330,7 @@ export function registerPiGuardedContext(
 	// after cache eviction or reload: OMP still erases side-request attribution.
 	// Only per-turn completion records are invalidated by cache cleanup.
 	const newOperation = (): Operation => ({
+		retainedAfterEnd: false,
 		dispatched: false,
 		started: false,
 		ready: false,
@@ -360,6 +441,7 @@ export function registerPiGuardedContext(
 					(lifecycleSeen.starts > lifecycleSeen.ends &&
 						dispatchedEndBelongsToEarlierRun(operation, event, ctx))
 				) {
+					if (operation.dispatched) operation.retainedAfterEnd = true;
 					// The pass belongs to a run whose own start may still be in flight.
 					// Let that late start adopt the operation instead of erasing it.
 					if (lifecycleSeen.starts <= lifecycleSeen.ends)
@@ -422,6 +504,13 @@ export function registerPiGuardedContext(
 			const capture = isOmpUnmanagedCaptureRequest(payload);
 			const budget =
 				(capture ? undefined : active.pass) ?? new PiContextBudget();
+			// Later callbacks for an already-refused context pass must still abort.
+			// Emit one notice, rather than wrapping the previous "provider dispatch"
+			// stage into itself on each attempt and repeatedly asking for a resend.
+			if (active.refused && active.pass === budget) {
+				ctx.abort();
+				return;
+			}
 			let refusalOrigin: "agent_end" | undefined;
 			try {
 				if (capture)
@@ -457,11 +546,41 @@ export function registerPiGuardedContext(
 					budget.abandoned
 				)
 					throw new Error("context pass ran without a managed context receipt");
+				if (active.retainedAfterEnd) {
+					const fields = conversationFields(payload);
+					if (
+						!fields ||
+						!active.dispatchFields ||
+						exactReusablePrefix(
+							[{ id: "conversation", fields }],
+							[{ id: "conversation", fields: active.dispatchFields }],
+						) !== 1
+					)
+						throw new Error(
+							"provider request does not match this pass's managed dispatch",
+						);
+				}
 				// Record the host's last message entry ID once that prompt is persisted,
 				// only if its history exactly matches the input captured before rewriting.
 				// This reads in-memory history, never SQLite or provider payload bytes.
-				if (!active.dispatched && !active.inputBranch && active.inputMessages)
-					active.inputBranch = inputBranch(ctx, active.inputMessages);
+				if (
+					!active.dispatched &&
+					active.inputMessages &&
+					(!active.inputBranch ||
+						active.inputBranch.anchorIndex < active.inputMessages.length - 1)
+				) {
+					const previous = active.inputBranch;
+					const persisted = inputBranch(ctx, active.inputMessages);
+					if (
+						!previous ||
+						(persisted &&
+							persisted.anchorIndex > previous.anchorIndex &&
+							persisted.entryIds[previous.anchorIndex] === previous.anchorId)
+					)
+						active.inputBranch = persisted;
+				}
+				if (!active.dispatched)
+					active.dispatchFields = conversationFields(payload);
 				active.dispatched = true;
 			} catch (error) {
 				active.refused = true;
@@ -508,6 +627,8 @@ export function registerPiGuardedContext(
 		active.inputKeys = undefined;
 		active.inputMessages = undefined;
 		active.inputBranch = undefined;
+		active.dispatchFields = undefined;
+		active.retainedAfterEnd = false;
 		active.dispatched = false;
 		active.ready = false;
 		// A refusal aborts the run it was raised in. A later pass on the same

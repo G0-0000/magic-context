@@ -1,5 +1,7 @@
 # Issue 673: a delayed end invalidates an already dispatched OMP pass
 
+The combined follow-up for issue 674 is in [Issues 673 and 674: OMP goal continuations and dispatch identity](issue-674-goal-dispatch.md). It extends the first-commit proof below to custom goal messages, partially persisted native anchors, provider-conversation identity, and repeated callback diagnostics.
+
 ## What was reproduced
 
 Pinned **Oh My Pi 18.9.2** (`pi-coding-agent`, `pi-agent-core`, and `pi-ai` all 18.9.2), Bun 1.4.2, macOS arm64, full Magic Context 0.49.0 extension, loopback Anthropic mock provider. The baseline uses `pi-context-refusal.ts` from `e75dcf1a1daf47e49c01364db6f1866bf792e0d3`; the other plugin sources are identical in both builds.
