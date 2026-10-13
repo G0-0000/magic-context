@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { getHarness } from "../../../shared/harness";
 import {
     __resetStoragePrivatePermissionEnforcementForTests,
@@ -20,6 +24,37 @@ afterEach(() => {
 const entry = new URL("./embedding-worker.fixture.ts", import.meta.url);
 
 describe("embedding worker transport", () => {
+    test.skipIf(process.platform !== "linux" || !existsSync("/usr/include/node/node_api.h"))(
+        "native getenv sees telemetry disabled before the model worker initializes",
+        async () => {
+            const dir = mkdtempSync(join(tmpdir(), "ort-getenv-"));
+            const addon = join(dir, "probe.node");
+            const build = spawnSync("cc", [
+                "-shared",
+                "-fPIC",
+                "-I/usr/include/node",
+                new URL(
+                    "../../../../../../scripts/fixtures/onnx-telemetry-probe.c",
+                    import.meta.url,
+                ).pathname,
+                "-ldl",
+                "-o",
+                addon,
+            ]);
+            const previous = process.env.ORT_DISABLE_TELEMETRY;
+            const client = new EmbeddingWorkerClient({ probeAddon: addon }, entry);
+            try {
+                expect(build.status, build.stderr.toString()).toBe(0);
+                process.env.ORT_DISABLE_TELEMETRY = "0";
+                expect((await client.request(["native-env"])).vectors?.[0]?.[0]).toBe(1);
+            } finally {
+                await client.dispose();
+                if (previous === undefined) delete process.env.ORT_DISABLE_TELEMETRY;
+                else process.env.ORT_DISABLE_TELEMETRY = previous;
+                rmSync(dir, { recursive: true, force: true });
+            }
+        },
+    );
     test("worker inherits the resolved model cache, harness and trusted-group permission policy", async () => {
         let captured: Record<string, unknown> | undefined;
         setStoragePrivatePermissionEnforcement(false);
@@ -105,6 +140,11 @@ describe("embedding worker transport", () => {
                 [6, 0.125, -0.25],
             ]);
             expect(result.vectors?.[0]).toBeInstanceOf(Float32Array);
+            const special = (await client.request(["special-floats"])).vectors?.[0];
+            expect(Object.is(special?.[0], -0)).toBe(true);
+            expect(Number.isNaN(special?.[1])).toBe(true);
+            expect(special?.[2]).toBe(Infinity);
+            expect(special?.[3]).toBe(-Infinity);
         } finally {
             await client.dispose();
         }
