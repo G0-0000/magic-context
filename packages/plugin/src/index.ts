@@ -1,4 +1,5 @@
 import type { Hooks, Plugin, PluginModule } from "@opencode-ai/plugin";
+import packageMetadata from "../package.json";
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -104,11 +105,14 @@ import { importPluginModule } from "./shared/stale-plugin-build";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { applyHiddenSubagentTemperature } from "./shared/subagent-temperature";
 import { reloadWindowOverlay } from "./shared/window-geometry";
+import { registerStandalonePluginMarker } from "./standalone-plugin-marker";
 import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { setup } from "./v2/server";
 
 const BOOT_SERVER_DEADLINE_MS = 15_000;
 const RESOLVED_CONFIG_TIMEOUT_MS = 2_000;
+
+registerStandalonePluginMarker(packageMetadata.version);
 
 const server: Plugin = async (ctx) => {
     bindStaleBuildNotice(ctx.client, import.meta.url);
