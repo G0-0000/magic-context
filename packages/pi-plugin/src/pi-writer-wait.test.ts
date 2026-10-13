@@ -66,7 +66,9 @@ test("a usable Pi LKG is replayed before any backed-off writer wait", async () =
 		const started = performance.now();
 		const replay = await handler({ messages: structuredClone(raw) }, ctx);
 		expect(replay).toEqual(first);
-		expect(performance.now() - started).toBeLessThan(350);
+		// Entering the writer wait would take about 16.5 s; a bound far below it
+		// proves the replay skipped the wait without failing on a loaded machine.
+		expect(performance.now() - started).toBeLessThan(5_000);
 		expect(locker.inTransaction).toBe(true);
 	});
 });
@@ -146,7 +148,9 @@ test("Pi writer wait honours a supplied host abort signal before writes", async 
 		} finally {
 			clearTimeout(abort);
 		}
-		expect(performance.now() - started).toBeLessThan(350);
+		// Without the abort the writer wait would run for about 16.5 s; returning
+		// far below that proves the abort was honoured.
+		expect(performance.now() - started).toBeLessThan(5_000);
 		expect(
 			db.prepare("SELECT * FROM session_meta WHERE session_id='waiter'").get(),
 		).toBeNull();
