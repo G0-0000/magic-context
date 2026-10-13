@@ -776,6 +776,16 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         deps.onMessagesPassStarted?.(sessionId, messages);
+        const dateRequest =
+            systemDateRequestForOutput(deps.historyRefreshSessions, output) ??
+            beginSystemDateRequest(
+                deps.historyRefreshSessions,
+                sessionId,
+                "messages",
+                systemDateTurnId(messages),
+                systemDateRequestIdentity(output),
+            );
+        bindSystemDateRequest(output, dateRequest);
         const temporalCandidates = deps.experimentalTemporalAwareness
             ? collectTemporalCandidates(messages)
             : undefined;
@@ -3245,7 +3255,7 @@ export function createTransform(deps: TransformDeps) {
 
         finishSystemDateRefresh(
             deps.historyRefreshSessions,
-            sessionId,
+            dateRequest,
             (postTransformResult.bustedThisPass && !activeThinkingPrefixHold) ||
                 postTransformResult.thinkingReleasedForFit === true,
         );
@@ -3579,5 +3589,12 @@ export function resolveHistoryBudgetTokens(
 
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";
-
-import { finishSystemDateRefresh, registerSystemDateRefresh } from "./system-date-refresh";
+import {
+    beginSystemDateRequest,
+    bindSystemDateRequest,
+    finishSystemDateRefresh,
+    registerSystemDateRefresh,
+    systemDateRequestForOutput,
+    systemDateRequestIdentity,
+    systemDateTurnId,
+} from "./system-date-refresh";

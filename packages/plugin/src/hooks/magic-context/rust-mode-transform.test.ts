@@ -412,11 +412,18 @@ for (const order of ["system-first", "messages-first"] as const) {
             const outputSystem = { system: prompt(date) };
             const input = source() as MessageLike[];
             const output = { messages: structuredClone(input) as unknown[] };
+            bindSystemDateRequestIdentity(output, output);
             if (order === "system-first")
-                await system.handler({ sessionID: sessionId }, outputSystem);
+                await system.handler(
+                    { sessionID: sessionId, dateRefreshRequest: output },
+                    outputSystem,
+                );
             await transform.run(sessionId, input, output, getOrCreateSessionMeta(db, sessionId));
             if (order === "messages-first")
-                await system.handler({ sessionID: sessionId }, outputSystem);
+                await system.handler(
+                    { sessionID: sessionId, dateRefreshRequest: output },
+                    outputSystem,
+                );
             return { system: outputSystem.system, messages: output.messages };
         };
         try {
@@ -10461,3 +10468,5 @@ it("Rust-mode typed protected overflow cannot become passthrough or LKG replay",
             "The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts.",
     });
 });
+
+import { bindSystemDateRequestIdentity } from "./system-date-refresh";

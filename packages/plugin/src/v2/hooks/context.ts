@@ -576,6 +576,7 @@ export async function applyV2SystemPrompt(
     await systemPrompt.handler(
         {
             sessionID: draft.sessionID,
+            dateRefreshRequest: draft,
             model: { providerID: draft.model.providerID, modelID: draft.model.id },
         },
         system,
@@ -2009,6 +2010,7 @@ export async function registerContext(context: V2Context) {
                 }
             }
             const mapped = adaptPayload(draft, admitted);
+            bindSystemDateRequestIdentity(mapped, draft);
             beginV2LkgRequest(
                 draft.sessionID,
                 `${draft.model.providerID}/${draft.model.id}`,
@@ -2375,8 +2377,8 @@ import {
     clearPendingMaterialization,
     requestPendingMaterialization,
 } from "../../hooks/magic-context/pending-materialization";
-
 import {
     bindSystemDateOutput,
+    bindSystemDateRequestIdentity,
     registerSystemDateRefresh,
 } from "../../hooks/magic-context/system-date-refresh";

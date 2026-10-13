@@ -132,21 +132,37 @@ for (const order of ["system-first", "messages-first"] as const) {
         const base = { system: prompt("2026-10-12") };
         await signals.handler({ sessionID: sessionId }, base);
         signals.systemPromptRefreshSessions.add(sessionId);
-        if (order === "messages-first")
-            finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, false);
         const held = { system: prompt("2026-10-13") };
-        await signals.handler({ sessionID: sessionId }, held);
+        const heldMessages = () =>
+            beginSystemDateRequest(
+                signals.historyRefreshSessions,
+                sessionId,
+                "messages",
+                "user",
+                held,
+            );
+        if (order === "messages-first")
+            finishSystemDateRefresh(signals.historyRefreshSessions, heldMessages(), false);
+        await signals.handler({ sessionID: sessionId, dateRefreshRequest: held }, held);
         if (order === "system-first")
-            finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, false);
+            finishSystemDateRefresh(signals.historyRefreshSessions, heldMessages(), false);
         expect(held.system).toEqual(base.system);
         expect(signals.systemPromptRefreshSessions.has(sessionId)).toBe(true);
         expect(signals.pendingMaterializationSessions.size).toBe(0);
-        if (order === "messages-first")
-            finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, true);
         const paid = { system: prompt("2026-10-13") };
-        await signals.handler({ sessionID: sessionId }, paid);
+        const paidMessages = () =>
+            beginSystemDateRequest(
+                signals.historyRefreshSessions,
+                sessionId,
+                "messages",
+                "user",
+                paid,
+            );
+        if (order === "messages-first")
+            finishSystemDateRefresh(signals.historyRefreshSessions, paidMessages(), true);
+        await signals.handler({ sessionID: sessionId, dateRefreshRequest: paid }, paid);
         if (order === "system-first")
-            finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, true);
+            finishSystemDateRefresh(signals.historyRefreshSessions, paidMessages(), true);
         expect(paid.system.join("\n")).toContain("Date: 2026-10-13");
         expect(paid.system.join("\n")).toContain("Date: 1999-12-31");
         expect(signals.systemPromptRefreshSessions.has(sessionId)).toBe(false);
@@ -228,12 +244,20 @@ it("OpenCode 2 advances copied system blocks on the paid rewrite, not its replay
     signals.systemPromptRefreshSessions.add(sessionId);
     const held = draft("2026-10-13");
     await applyV2SystemPrompt(signals, held as never);
-    finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, false);
+    finishSystemDateRefresh(
+        signals.historyRefreshSessions,
+        beginSystemDateRequest(signals.historyRefreshSessions, sessionId, "messages", "user", held),
+        false,
+    );
     expect(held.system).toEqual(base.system);
     const paid = draft("2026-10-13");
     await applyV2SystemPrompt(signals, paid as never);
     expect(paid.system).toEqual(base.system);
-    finishSystemDateRefresh(signals.historyRefreshSessions, sessionId, true);
+    finishSystemDateRefresh(
+        signals.historyRefreshSessions,
+        beginSystemDateRequest(signals.historyRefreshSessions, sessionId, "messages", "user", paid),
+        true,
+    );
     expect(paid.system[0]?.text).toContain("Date: 2026-10-13");
     const replay = draft("2026-10-13");
     await applyV2SystemPrompt(signals, replay as never);
@@ -752,3 +776,5 @@ import {
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
 import { applyV2SystemPrompt } from "../../v2/hooks/context";
+
+import { beginSystemDateRequest } from "./system-date-refresh";

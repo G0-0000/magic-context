@@ -490,3 +490,30 @@ request. Updating only the hook's string array would leave that request frozen
 and expose the new date on replay, causing another miss despite an acknowledged
 hash. A test exercises the real `applyV2SystemPrompt` copy rather than just the
 string-array proxy.
+
+### Request-scoped date permission
+
+Date waiters and completed rewrite decisions now belong to individual requests,
+not to the session. OpenCode 2's context draft is the mutable container holding
+one provider request's system blocks and messages. Its object identity names
+that request, and the adapter attaches that identity to the adapted output before
+the messages wrapper
+runs. TypeScript fit retries and Rust adapter calls retain their own request
+handle through that output, so completing one pass cannot release another
+request's date.
+
+OpenCode 1's hook API supplies no common request token. Its fallback pairs hook
+stages on the last real-user message ID used by thinking recovery to mark the
+start of the unfinished tool loop. This is the issue-665 turn anchor:
+`activeAnthropicTurnStart(messages, true)` identifies the boundary, excluding
+synthetic users and tool-result-only carriers. The system hook reads that same
+anchor from the read-only host store. Each paired pass still owns a unique
+handle. If overlapping unidentified stages share that anchor before they can be
+paired, the dates remain frozen rather than guessing which pass's permission
+belongs to which output. Missing anchors also fail closed. The imported
+independent review witness now asserts that A's rebuilding pass advances only
+A, while B's held output stays at its original date.
+
+The accepted estimate and staleness limits are unchanged: encrypted thinking
+without visible text still uses the documented heuristic when usage is unavailable, and continuously warm
+sessions keep their frozen date until a permitted rebuild.
