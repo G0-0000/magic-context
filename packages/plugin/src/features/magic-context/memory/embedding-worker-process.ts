@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { log } from "../../../shared/logger";
 import type { EmbeddingWorkerReply, EmbeddingWorkerWireReply } from "./embedding-worker-client";
 
 // This process starts with ORT_DISABLE_TELEMETRY in its native environment. Keep the
@@ -30,7 +31,7 @@ process.on(
                 if (process.connected) process.send?.(wire);
             });
             worker.on("error", (error) => {
-                console.error("[magic-context] embedding worker failed:", error);
+                log("[magic-context] embedding worker failed:", error);
                 process.exit(1);
             });
             worker.on("exit", (code) => process.exit(code));

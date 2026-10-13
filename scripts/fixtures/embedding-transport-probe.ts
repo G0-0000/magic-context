@@ -109,6 +109,7 @@ if (action === "bench") {
     for (const death of ["idle", "exit", "SIGKILL"] as const) {
         const host = spawn(process.execPath, [new URL(import.meta.url).pathname, "host", death, ...(model ? [model] : [])], {
             env: process.env, stdio: ["ignore", "pipe", "inherit"],
+            windowsHide: true,
         });
         const exited = new Promise<void>((resolve) => host.once("exit", () => resolve()));
         const ready = await new Promise<{ hostPid: number; childPid: number }>((resolve, reject) => {

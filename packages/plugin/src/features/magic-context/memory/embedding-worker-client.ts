@@ -86,6 +86,7 @@ export class EmbeddingWorkerClient {
                       },
                       execArgv: [],
                       serialization: "json",
+                      ...{ windowsHide: true },
                       stdio: ["ignore", "inherit", "inherit", "ipc"],
                   },
               );
@@ -95,7 +96,6 @@ export class EmbeddingWorkerClient {
                 warnedWindowsTelemetry = true;
                 const warning =
                     "[magic-context] ORT_DISABLE_TELEMETRY=1 prevents ONNX uploads on POSIX. Windows native ONNX uses OS-controlled ETW diagnostics instead and exposes no JavaScript telemetry-disable API; Windows diagnostic settings and trace collectors govern collection.";
-                console.warn(warning);
                 log(warning);
             }
         }

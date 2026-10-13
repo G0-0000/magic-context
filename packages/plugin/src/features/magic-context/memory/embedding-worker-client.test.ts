@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHarness } from "../../../shared/harness";
@@ -8,6 +8,7 @@ import {
     __resetStoragePrivatePermissionEnforcementForTests,
     setStoragePrivatePermissionEnforcement,
 } from "../../../shared/storage-permissions";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetLocalEmbeddingForTests,
     __setLocalEmbeddingTestHooks,
@@ -46,20 +47,24 @@ describe("embedding worker transport", () => {
     test.skipIf(process.platform !== "linux" || !existsSync("/usr/include/node/node_api.h"))(
         "native getenv sees telemetry disabled before the model worker initializes",
         async () => {
-            const dir = mkdtempSync(join(tmpdir(), "ort-getenv-"));
+            const dir = createTestTempDirFromPath(join(tmpdir(), "ort-getenv-"));
             const addon = join(dir, "probe.node");
-            const build = spawnSync("cc", [
-                "-shared",
-                "-fPIC",
-                "-I/usr/include/node",
-                new URL(
-                    "../../../../../../scripts/fixtures/onnx-telemetry-probe.c",
-                    import.meta.url,
-                ).pathname,
-                "-ldl",
-                "-o",
-                addon,
-            ]);
+            const build = spawnSync(
+                "cc",
+                [
+                    "-shared",
+                    "-fPIC",
+                    "-I/usr/include/node",
+                    new URL(
+                        "../../../../../../scripts/fixtures/onnx-telemetry-probe.c",
+                        import.meta.url,
+                    ).pathname,
+                    "-ldl",
+                    "-o",
+                    addon,
+                ],
+                { windowsHide: true },
+            );
             try {
                 expect(build.status, build.stderr.toString()).toBe(0);
                 const script = `import { EmbeddingWorkerClient } from ${JSON.stringify(new URL("./embedding-worker-client.ts", import.meta.url).pathname)};
@@ -69,6 +74,7 @@ describe("embedding worker transport", () => {
                         console.log(JSON.stringify({native:reply.vectors?.[0]?.[0], workerPid:reply.vectors?.[1]?.[0], hostPid:process.pid}));
                     } finally { await client.dispose(); }`;
                 const child = Bun.spawn([process.execPath, "-e", script], {
+                    windowsHide: true,
                     env: { ...process.env, ORT_DISABLE_TELEMETRY: "0" },
                     stdout: "pipe",
                     stderr: "pipe",
@@ -80,7 +86,7 @@ describe("embedding worker transport", () => {
                 expect(result.native).toBe(1);
                 expect(result.workerPid).toBe(result.hostPid);
             } finally {
-                rmSync(dir, { recursive: true, force: true });
+                cleanupTestTempDir(dir);
             }
         },
     );
