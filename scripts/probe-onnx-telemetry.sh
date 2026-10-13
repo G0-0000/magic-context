@@ -16,9 +16,10 @@ bun build scripts/fixtures/onnx-telemetry-load.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker-process.ts \
     --outdir "$scratch/dist" --entry-naming '[name].js' --splitting --target node --format esm \
-    --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite
+    --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external bun:ffi --external node:sqlite
 printf '{"type":"module"}\n' > "$scratch/dist/package.json"
 ln -s "$PWD/packages/plugin/node_modules" "$scratch/dist/node_modules"
+ln -s "$PWD/packages/plugin/node_modules" "$scratch/node_modules"
 if [[ ${ORT_PROBE_COMPILED_HOST:-1} == 1 ]]; then
     bun build --compile scripts/fixtures/onnx-telemetry-compiled-host.ts --outfile "$scratch/compiled-host"
 fi
@@ -43,7 +44,7 @@ for runtime in ${ORT_PROBE_RUNTIMES:-bun node}; do
 done
 
 for runtime in ${ORT_PROBE_RUNTIMES:-bun node}; do
-    for mode in ${ORT_PROBE_MODES:-baseline startup fixed}; do
+    for mode in ${ORT_PROBE_MODES:-baseline startup main-env fixed}; do
         root="$scratch/$runtime-$mode"
         mkdir -p "$root/home" "$root/cache"
         args=()
@@ -84,12 +85,14 @@ done
 if [[ ${ORT_PROBE_COMPILED_HOST:-1} == 1 ]]; then
     root="$scratch/compiled-bun"
     mkdir -p "$root/home" "$root/cache"
+    status=0
     env -u ORT_DISABLE_TELEMETRY HOME="$root/home" XDG_CACHE_HOME="$root/cache" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" \
         LD_PRELOAD="$scratch/guard.so" ORT_PROBE_WAIT_MS="${ORT_PROBE_WAIT_MS:-65000}" \
-        ORT_PROBE_MODEL="$scratch/model" ORT_PROBE_MODE=fixed ORT_PROBE_LOAD_ENTRY="$scratch/dist/onnx-telemetry-load.js" \
-        strace -f -qq -e trace=network -o "$root/network.log" "$scratch/compiled-host" > "$root/load.log" 2>&1
-    echo '=== compiled Bun host fixed ==='
-    grep -E 'Compiled host|NATIVE_GETENV|BLOCKED_|LOAD' "$root/load.log"
+        ORT_PROBE_MODEL="$scratch/model" ORT_PROBE_MODE="${ORT_PROBE_COMPILED_MODE:-fixed}" ORT_PROBE_LOAD_ENTRY="$scratch/dist/onnx-telemetry-load.js" \
+        strace -f -qq -e trace=network -o "$root/network.log" "$scratch/compiled-host" > "$root/load.log" 2>&1 || status=$?
+    echo "=== compiled Bun host ${ORT_PROBE_COMPILED_MODE:-fixed} ==="
+    cat "$root/load.log"
+    if [[ "$status" != 0 ]]; then exit "$status"; fi
     grep -q 'NATIVE_GETENV ORT_DISABLE_TELEMETRY=1' "$root/load.log"
     if grep -q 'BLOCKED_DNS\|BLOCKED_CONNECT' "$root/load.log" ||
         grep -Eq '(connect|sendto|sendmsg)\(.*sa_family=AF_INET' "$root/network.log"; then

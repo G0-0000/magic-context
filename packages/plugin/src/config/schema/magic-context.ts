@@ -792,7 +792,7 @@ const BaseEmbeddingConfigSchema = z
             .enum(["auto", "native", "wasm"])
             .default("auto")
             .describe(
-                "Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Inference runs in a dedicated subprocess with POSIX telemetry disabled before ONNX initializes. Windows native ONNX emits OS-controlled ETW diagnostics, not direct uploads. On Bun before 1.4.0, even explicit 'native' uses WASM because native worker teardown can crash the process. Set 'wasm' to avoid loading the native addon on newer hosts too.",
+                "Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Inference runs in a dedicated worker after disabling POSIX telemetry in the native process environment. Compiled Bun hosts and hosts without a verified in-process opt-out use a subprocess instead. Windows native ONNX emits OS-controlled ETW diagnostics, not direct uploads. On Bun before 1.4.0, even explicit 'native' uses WASM because native worker teardown can crash the process. Set 'wasm' to avoid loading the native addon on newer hosts too.",
             ),
         local_dtype: z
             .enum([

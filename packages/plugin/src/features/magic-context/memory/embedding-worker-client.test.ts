@@ -24,6 +24,25 @@ afterEach(() => {
 const entry = new URL("./embedding-worker.fixture.ts", import.meta.url);
 
 describe("embedding worker transport", () => {
+    test("concurrent startup prepares telemetry once and disposal prevents a late worker", async () => {
+        let ready!: (value: boolean) => void;
+        let preparations = 0;
+        const preparation = new Promise<boolean>((resolve) => {
+            ready = resolve;
+        });
+        const client = new EmbeddingWorkerClient({}, entry, undefined, () => {
+            preparations++;
+            return preparation;
+        });
+        const requests = Promise.allSettled([client.request(), client.request()]);
+        const disposed = client.dispose();
+        ready(true);
+        const results = await requests;
+        await disposed;
+        expect(preparations).toBe(1);
+        expect(results.every((result) => result.status === "rejected")).toBe(true);
+        expect(client.isRunning()).toBe(false);
+    });
     test.skipIf(process.platform !== "linux" || !existsSync("/usr/include/node/node_api.h"))(
         "native getenv sees telemetry disabled before the model worker initializes",
         async () => {
@@ -41,16 +60,26 @@ describe("embedding worker transport", () => {
                 "-o",
                 addon,
             ]);
-            const previous = process.env.ORT_DISABLE_TELEMETRY;
-            const client = new EmbeddingWorkerClient({ probeAddon: addon }, entry);
             try {
                 expect(build.status, build.stderr.toString()).toBe(0);
-                process.env.ORT_DISABLE_TELEMETRY = "0";
-                expect((await client.request(["native-env"])).vectors?.[0]?.[0]).toBe(1);
+                const script = `import { EmbeddingWorkerClient } from ${JSON.stringify(new URL("./embedding-worker-client.ts", import.meta.url).pathname)};
+                    const client = new EmbeddingWorkerClient({probeAddon:${JSON.stringify(addon)}}, new URL(${JSON.stringify(entry.href)}));
+                    try {
+                        const reply = await client.request(["native-env", "pid"]);
+                        console.log(JSON.stringify({native:reply.vectors?.[0]?.[0], workerPid:reply.vectors?.[1]?.[0], hostPid:process.pid}));
+                    } finally { await client.dispose(); }`;
+                const child = Bun.spawn([process.execPath, "-e", script], {
+                    env: { ...process.env, ORT_DISABLE_TELEMETRY: "0" },
+                    stdout: "pipe",
+                    stderr: "pipe",
+                });
+                const stdout = await new Response(child.stdout).text();
+                const stderr = await new Response(child.stderr).text();
+                expect(await child.exited, stderr).toBe(0);
+                const result = JSON.parse(stdout);
+                expect(result.native).toBe(1);
+                expect(result.workerPid).toBe(result.hostPid);
             } finally {
-                await client.dispose();
-                if (previous === undefined) delete process.env.ORT_DISABLE_TELEMETRY;
-                else process.env.ORT_DISABLE_TELEMETRY = previous;
                 rmSync(dir, { recursive: true, force: true });
             }
         },
@@ -161,7 +190,7 @@ describe("embedding worker transport", () => {
     });
 
     test("killed subprocess rejects every in-flight request and restarts lazily", async () => {
-        const client = new EmbeddingWorkerClient({}, entry);
+        const client = new EmbeddingWorkerClient({}, entry, undefined, async () => false);
         try {
             const pid = (await client.request(["pid"])).vectors?.[0]?.[0];
             expect(pid).toBeDefined();

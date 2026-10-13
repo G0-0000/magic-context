@@ -22,7 +22,7 @@ repository to remove. The redundant upstream write is retained: stripping it
 would require rewriting dependency code during every build and adds no privacy
 protection once the native environment is set at process birth.
 
-## Implementation and choice
+## Initial subprocess implementation (superseded as the default below)
 
 The model worker now lives in a dedicated subprocess forked with
 `ORT_DISABLE_TELEMETRY=1` in its startup environment. The subprocess retains the
@@ -281,7 +281,7 @@ normal development builds.
 
 | Package | Baseline files | Updated files | Raw paths added / removed | Added stable paths |
 | --- | ---: | ---: | --- | --- |
-| OpenCode plugin | 1763 | 1767 | 51 / 47 | `dist/embedding-worker-process.js`, `dist/v2/embedding-worker-process.js`, `dist/features/magic-context/memory/embedding-worker-process.d.ts`, `.d.ts.map` |
+| OpenCode plugin | 1763 | 1769 | 53 / 47 | `dist/embedding-worker-process.js`, `dist/v2/embedding-worker-process.js`, declarations/maps for `embedding-worker-process` and `onnx-telemetry` |
 | Pi/OMP plugin | 77 | 78 | 14 / 13 | `dist/embedding-worker-process.js` |
 
 There are no removed stable paths. Other raw changes are content-hashed split
@@ -290,3 +290,108 @@ and removed path lists are committed in `issue-672-pack-plugin.json` and
 `issue-672-pack-pi-plugin.json`; the script explicitly asserts all three published
 subprocess entry paths. The unchanged `files: ["dist", ...]` allowlists include
 them, and the prepublish-only hook is not substituted for an actual pack dry run.
+
+## Current design: in-process preparation where it works
+
+The default no longer allocates a second runtime process for ordinary Bun or
+main-thread Node hosts. Before creating the existing model worker, the client:
+
+- **Node main thread:** assigns `process.env.ORT_DISABLE_TELEMETRY = "1"`.
+  The new worker has **no explicit env override**. Its native ORT `getenv`
+  observes the main process's updated libc environment even though its JavaScript
+  `process.env` is a separate copy.
+- **Ordinary Bun:** dynamically imports `bun:ffi`, calls libc `setenv` with
+  overwrite enabled, and verifies the result with native `getenv` before creating
+  the worker. macOS uses `/usr/lib/libSystem.B.dylib`; Linux first tries
+  `libc.so.6`, with a musl loader candidate if unavailable. No universal library
+  path is assumed: import/load/symbol/setter failures select the protected
+  subprocess fallback. The dynamic import is externalized and optional under
+  Node, with a narrow local API type rather than requiring Bun ambient types in
+  the Node-only Pi package.
+
+The client deduplicates concurrent startup and checks disposal after asynchronous
+preparation, so two first requests do not create two owners and disposal cannot
+leave a late worker. Structured-clone float32 transfer is retained for direct
+workers; the existing base64 IPC codec is used only by subprocesses.
+
+### Concrete evaluation matrix
+
+| Host | Linux | macOS arm64 | Production choice |
+| --- | --- | --- | --- |
+| Node main thread | native getenv=1, native inference, no ID/attempt for 65 s | same | direct worker |
+| Ordinary Bun 1.4.2 | native getenv=1, native inference, no ID/attempt for 65 s | same | direct worker |
+| Compiled Bun 1.4.2, raw disk worker | native setter succeeds, but model import fails | native getter confirms 1, but model import fails | retain subprocess |
+| Compiled Bun 1.4.2, protected subprocess | native getenv=1, native inference, no ID/attempt for 65 s | same | fallback passed |
+
+The original unprotected direct-worker controls still created a device ID and
+attempted the blocked collector hostname on both platforms. Thus the direct
+worker's absence of telemetry is not explained by an uploader-free runtime.
+The normal Node worker inherits native state from the main thread; it does not
+need SHARE_ENV or a JavaScript worker-local setter.
+
+**The compiled failure is not a libc-setenv failure.** A compiled executable
+using FFI successfully changed native getenv to 1 on macOS. On both Linux and
+macOS, its direct disk worker then failed before session creation:
+
+```text
+Cannot find package 'sharp' imported from .../dist/transformers.node-7tx13786.js
+```
+
+The same macOS compiled direct-worker control failed without any setter. Sharp
+was installed and ordinary Bun/Node resolved it; placing dependency symlinks at
+both the bundle directory and its ancestor did not fix the compiled case. The
+existing subprocess with `BUN_BE_BUN=1` loaded the same worker/model successfully.
+We did not invent a module-resolution shim or claim an exact Bun loader root
+cause from this evidence. Because native inference could not be verified in that
+compiled-worker configuration, compiled Bun conservatively keeps the subprocess.
+This still costs the extra runtime memory in stock compiled OpenCode-style hosts.
+
+A second exceptional case is a **Node host already executing inside a worker**:
+its `process.env` writes are not native writes, so preparation refuses that path
+and retains subprocess isolation rather than pretending that setting worked.
+Bun FFI availability or libc failures likewise retain isolation. Musl behavior
+and Windows execution were not tested; the existing Windows ETW warning and
+native-performance decision remain unchanged. No automatic WASM downgrade was
+introduced.
+
+These exceptions mean the subprocess entry, lifecycle cleanup, and packed-file
+checks remain necessary. Its lifecycle probe now explicitly selects the fallback,
+so its crash/SIGKILL/orphan checks still exercise that path instead of accidentally
+killing an in-process test runner. The package build scripts additionally keep
+`bun:ffi` external in each Node-targeted native bundle.
+
+### Memory comparison against the original worker
+
+A new Linux four-vCPU run used the same trained fp32 MiniLM model and 200 batches
+of two texts per scenario. Both the original worker and the updated ordinary
+Bun/Node path had **zero model child processes**:
+
+| Runtime / path | Cold (ms) | p50 (ms) | p95 (ms) | RSS (MiB) | Extra model processes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bun original worker | 461.65 | 105.66 | 144.19 | 336.76 | 0 |
+| Bun native-env worker | 505.63 | 100.19 | 148.36 | 341.34 | 0 |
+| Node original worker | 512.26 | 97.30 | 133.98 | 312.90 | 0 |
+| Node main-env worker | 643.08 | 94.28 | 123.07 | 299.93 | 0 |
+
+The measured RSS differences were **+4.57 MiB for Bun and -12.97 MiB for Node**,
+within allocator/process-run variation rather than the previous fixed second
+runtime's 67–82 MiB. This is not a claim that the fix saves 13 MiB under Node or
+has exactly zero byte overhead. The important structural difference is that no
+second process is allocated in these main-thread cases. Full numeric summaries
+are in `issue-672-in-process-benchmark.json`; the prior subprocess measurements
+remain historical evidence for the retained exceptional path.
+
+### Strengthened mutation-checked test
+
+The native-getenv regression now launches a **fresh Bun process with native
+ORT_DISABLE_TELEMETRY=0**. A native addon reads getenv inside the model worker at
+module initialization. The test requires 1 and also requires worker PID = host
+PID, so a subprocess fallback cannot pass as evidence for the direct-worker fix.
+
+After staging the live implementation, a marked mutation bypassed both native
+setenv and its confirmation while falsely returning success. Only
+`native getenv sees telemetry disabled before the model worker initializes`
+failed: expected 1, received 0. The other eleven transport tests, including the
+new concurrent-start/dispose race and the forced subprocess-kill test, passed.
+The mutated helper diff was one insertion and three deletions in
+`onnx-telemetry.ts`; checkout plus touch restored an empty unstaged diff.

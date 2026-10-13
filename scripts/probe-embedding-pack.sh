@@ -9,7 +9,7 @@ mkdir -p "$scratch/base" "$scratch/new" "$scratch/home" "$scratch/cache"
 git archive e75dcf1a1daf47e49c01364db6f1866bf792e0d3 | tar -x -C "$scratch/base"
 git archive HEAD | tar -x -C "$scratch/new"
 # Overlay current transport source so the comparison also covers uncommitted edits.
-for path in packages/plugin/src/features/magic-context/memory/embedding-worker-client.ts packages/plugin/src/features/magic-context/memory/embedding-worker.fixture.ts; do
+for path in packages/plugin/package.json packages/pi-plugin/package.json packages/plugin/src/features/magic-context/memory/embedding-worker-client.ts packages/plugin/src/features/magic-context/memory/embedding-worker.fixture.ts packages/plugin/src/features/magic-context/memory/onnx-telemetry.ts; do
     cp "$root/$path" "$scratch/new/$path"
 done
 for revision in base new; do

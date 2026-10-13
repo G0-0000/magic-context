@@ -10,20 +10,20 @@
   ],
   "semanticRemoved": [],
   "added": [
-    "dist/embedding-backfill-wb0fj6wy.js",
+    "dist/embedding-backfill-qxp971da.js",
     "dist/embedding-worker-process.js",
-    "dist/index-1gzxmsnh.js",
     "dist/index-9c1k1mvx.js",
     "dist/index-9vs81ecg.js",
     "dist/index-50cya079.js",
-    "dist/index-ayd6f4pn.js",
-    "dist/index-g2nzwqcc.js",
-    "dist/index-n9yjq8hp.js",
-    "dist/index-rnjtrs00.js",
+    "dist/index-fqgs1pkm.js",
+    "dist/index-hjx00dtt.js",
+    "dist/index-jbzpbdrd.js",
+    "dist/index-r171h82t.js",
+    "dist/index-vn8pr35w.js",
     "dist/index-zdedeaps.js",
     "dist/message-index-bounded-mcnsy5k9.js",
-    "dist/project-embedding-registry-mrjcf1nr.js",
-    "dist/search-1c98fb9v.js"
+    "dist/project-embedding-registry-va6xj2a4.js",
+    "dist/search-2zamhqya.js"
   ],
   "removed": [
     "dist/embedding-backfill-dk9b55gn.js",

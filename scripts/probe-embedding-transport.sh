@@ -11,7 +11,7 @@ bun build scripts/fixtures/embedding-transport-probe.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker-process.ts \
     packages/plugin/src/features/magic-context/memory/embedding-worker.fixture.ts \
     --outdir "$scratch/dist" --entry-naming '[name].js' --splitting --target node --format esm \
-    --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite
+    --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:ffi --external bun:sqlite --external node:sqlite
 printf '{"type":"module"}\n' > "$scratch/dist/package.json"
 ln -s "$PWD/packages/plugin/node_modules" "$scratch/dist/node_modules"
 report=${ORT_TRANSPORT_REPORT:-"$scratch/report.jsonl"}

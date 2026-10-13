@@ -78,7 +78,7 @@ if (action === "bench") {
     const client = new EmbeddingWorkerClient(model ? {
         magicContextEmbeddingWorker: true, model, dtype: "fp32", maxInputTokens: 512,
         runtimePreference: "native", modelCacheDir: process.env.XDG_CACHE_HOME, harness: "opencode",
-    } : {}, model ? realEntry : entry);
+    } : {}, model ? realEntry : entry, undefined, async () => false);
     let childPid: number | undefined;
     if (model) {
         const loaded = await client.request(["A memory record describing safe worker shutdown and cancellation."]);
@@ -93,7 +93,7 @@ if (action === "bench") {
 } else if (action === "lifecycle") {
     let checks = 0;
     for (const death of ["crash", "SIGKILL"] as const) {
-        const client = new EmbeddingWorkerClient({}, entry);
+        const client = new EmbeddingWorkerClient({}, entry, undefined, async () => false);
         try {
             const childPid = (await client.request(["pid"])).vectors?.[0]?.[0]!;
             const pending = [client.request(["hang-a"]), client.request([death === "crash" ? "crash" : "hang-b"])];

@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { EmbeddingWorkerClient } from "../../packages/plugin/src/features/magic-context/memory/embedding-worker-client";
+import { prepareNativeOnnxTelemetry } from "../../packages/plugin/src/features/magic-context/memory/onnx-telemetry";
 import { LocalEmbeddingProvider, __setLocalEmbeddingTestHooks } from "../../packages/plugin/src/features/magic-context/memory/embedding-local";
 
 const model = process.env.ORT_PROBE_MODEL ?? process.argv[2];
@@ -22,7 +23,8 @@ function checkpoint(phase: string): void {
     visit(root);
     console.log("DEVICE_ID_CHECKPOINT", JSON.stringify({ phase, count: paths.length, paths }));
 }
-if (mode === "baseline") {
+if (mode === "main-env" && !(await prepareNativeOnnxTelemetry())) throw new Error("native main-thread opt-out unavailable");
+if (mode === "baseline" || mode === "main-env") {
     // Start an embedding worker directly; Transformers writes process.env only inside that thread.
     const worker = new Worker(new URL("./embedding-worker.js", import.meta.url), {
         workerData: {
