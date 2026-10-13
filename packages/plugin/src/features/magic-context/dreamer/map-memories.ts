@@ -66,7 +66,7 @@ import { DreamTokenBudgetExceeded } from "./token-budget";
 // ~880K fixed per-child overhead. This is ~70% of the 2.5M default budget; smaller
 // batches repeatedly pay that overhead and reduce backfill throughput.
 // Outcome counts omit remapping and observed costs vary widely, so this is not
-// an upper bound (docs/reports/verify-token-budget-2026-09-30.md).
+// an upper bound.
 const MAP_BATCH_SIZE = 20;
 
 /**

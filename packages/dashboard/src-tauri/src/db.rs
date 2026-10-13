@@ -2573,8 +2573,7 @@ fn build_db_cache_events_with_attribution(
     //   - Anthropic reports it directly as cache_write (cache_creation tokens).
     //   - When cache_write is absent, use only the previous uncached input.
     //     Generated output (including reasoning) is not automatically part of
-    //     the next step's cached input; measured comparisons support this rule
-    //     (docs/reports/pi-openai-cache-busts-2026-09-28.md).
+    //     the next step's cached input: the host may not resend those bytes.
     // retention = current.cache_read / expected (only when prev had a cache):
     //   >= 0.95 stable · 0.80..0.95 warning · < 0.80 bust · ==0 full_bust
     // (Verified empirically: on a stable step retention is 0.97-1.00+ across

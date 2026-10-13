@@ -137,8 +137,7 @@ const server: Plugin = async (ctx) => {
     // session-scoped row under the wrong harness.
     setHarness("opencode");
     // Off-by-default diagnostic for multi-second host main-thread stalls. Without
-    // its enable file this is one existsSync every 30 s; see
-    // docs/reports/host-stall-profiler.md. Process-wide and idempotent.
+    // its enable file this is one existsSync every 30 s. Process-wide and idempotent.
     startHostStallProfilerSwitch();
 
     const configStartedAt = performance.now();

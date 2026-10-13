@@ -1,5 +1,5 @@
 //! The contract a Broca-hosted session relies on before the transform is switched on
-//! for it. `docs/architecture/broca-transform-contract.md` is the prose half; these
+//! for it. The caller must pin the same manifest text it reports; these
 //! tests pin the parts a caller caches: the facade tool array it declares once per
 //! session, and what the transform serves on the first and second send under the
 //! `owned-broca` serializer profile.

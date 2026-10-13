@@ -1,15 +1,14 @@
 //! `tool.catalog` and `role.describe`: Magic Context's answers under the
 //! `tool-provider/v1` role (commons `cortexkit-role-tool-provider`).
 //!
-//! `docs/designs/mc-tool-catalog-v1.md` is the design; its example payloads in
-//! `docs/designs/mc-tool-catalog-v1/` are the exact bytes this module serves,
-//! and the tests compare against them byte for byte.
+//! Pinned request/response fixtures in `src/tests/fixtures/tool-catalog/`
+//! hold the exact bytes this module serves; tests compare them byte for byte.
 //!
 //! Everything the answer says comes from one shared definition,
 //! `assets/tool_catalog_v1.json` plus the two tools-only texts beside it: the
 //! tools, their argument-schema structures, descriptions and parameter
-//! descriptions, and the guidance templates. The documentation generator
-//! (`docs/designs/mc-tool-catalog-v1/generate.ts`) reads the same files and
+//! descriptions, and the guidance templates. The fixture generator
+//! (`gen/gen-tool-catalog.ts`) reads the same files and
 //! checks them against the plugin's shipped strings.
 //!
 //! The answer is a pure function of the request (preset, params, composition,

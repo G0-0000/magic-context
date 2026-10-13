@@ -1331,7 +1331,7 @@ function getMaxMemoryId(
 // rendered bytes no longer depend on session_facts. (Avoids wasted rebuilds.)
 // session_facts is a retired table (facts are promoted memories now); this
 // branch is kept inert-safe but never fires. Do NOT rewire facts through here.
-// See docs/AUDIT-KNOWN-ISSUES.md A14 (vestigial table, drop gated on min TUI).
+// The retired table remains for older TUI readers; remove it only when those readers are unsupported.
 function getSessionFactsVersion(_db: Database, _sessionId: string): number {
     return 0;
 }

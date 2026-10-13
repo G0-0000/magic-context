@@ -1,8 +1,7 @@
 /**
  * Review witnesses for the Pi per-pass cost change (incremental active-tag
  * projection, cached fallback rows, target-only served-number lookup and the
- * writer-admission reuse of fallback existence probes). The findings are in
- * docs/reports/pi-per-pass-cost-review.md.
+ * writer-admission reuse of fallback existence probes).
  *
  * The two "witness" tests run by default: their findings are fixed (the
  * durable tags_version detector in tag-snapshot-pi.ts, and the shared tag state
