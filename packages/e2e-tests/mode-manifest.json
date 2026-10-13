@@ -2928,6 +2928,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/copied-tag-persistence.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 host with a mock model that copies §N§ tags into its replies (issue 671): the host stores the replies unchanged, the next request carries them stripped under a fresh tag, later defer passes replay those bytes unchanged, and host PID lsof shows only throwaway databases. OpenCode 1 and Pi strip at persistence and have their own unit gates.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/degraded-pass-lock.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

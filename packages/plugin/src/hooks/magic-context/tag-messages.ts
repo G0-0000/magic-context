@@ -498,6 +498,14 @@ export interface TagMessagesOptions {
      * remove its emptied rows from the served array as well.
      */
     servedMessages?: MessageLike[];
+    /**
+     * Applied to assistant text that a pass restores from its saved source copy.
+     * OpenCode 2 cannot strip copied `§N§` notation before the host stores a reply,
+     * so its adapter strips it from the request copy instead; a source copy saved
+     * before that strip existed still holds the copies and would put them back.
+     * Unset on every other host, where restored text is served as saved.
+     */
+    normalizeRestoredAssistantText?: (text: string) => string;
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -927,7 +935,10 @@ export function tagMessages(
                 // than what the resolver expected.
                 const persistedSource = sourceContents.get(tagId);
                 if (persistedSource !== undefined) {
-                    textPart.text = persistedSource;
+                    textPart.text =
+                        options.normalizeRestoredAssistantText && message.info.role === "assistant"
+                            ? options.normalizeRestoredAssistantText(persistedSource)
+                            : persistedSource;
                 } else {
                     const sourceContent = stripTagPrefix(textPart.text);
                     if (sourceContent.trim().length > 0) {

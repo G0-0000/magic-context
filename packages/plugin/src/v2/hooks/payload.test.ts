@@ -810,10 +810,12 @@ describe("adaptPayload commit on canonical Anthropic", () => {
     }
 
     function rows(): V2Message[] {
+        // The host stores assistant replies without tag notation; adaptPayload strips
+        // any it finds there (a model-copied tag), so the assistant row starts plain.
         return [
             { id: "u1", role: "user", content: [{ type: "text", text: "§1§ start" }] },
             { id: "s1", role: "system", content: [{ type: "text", text: "[dropped §2§]" }] },
-            { id: "a1", role: "assistant", content: [{ type: "text", text: "§3§ reply" }] },
+            { id: "a1", role: "assistant", content: [{ type: "text", text: "reply" }] },
             { id: "u2", role: "user", content: [{ type: "text", text: "§4§ next" }] },
         ];
     }
@@ -873,7 +875,7 @@ describe("adaptPayload commit on canonical Anthropic", () => {
                 id: "a1",
                 role: "assistant",
                 content: [
-                    { type: "text", text: "§3§ reply" },
+                    { type: "text", text: "reply" },
                     { type: "text", text: "§5§ more", cache: HINT },
                 ],
             },
@@ -892,7 +894,7 @@ describe("adaptPayload commit on canonical Anthropic", () => {
         });
         expect(context.messages.find((message) => message.id === "a1")?.content).toEqual([
             { type: "text", text: "kept", cache: HINT },
-            { type: "text", text: "§3§ reply" },
+            { type: "text", text: "reply" },
         ]);
     });
 
@@ -910,7 +912,7 @@ describe("adaptPayload commit on canonical Anthropic", () => {
             { type: "text", text: "[dropped]" },
         ]);
         expect(context.messages.find((message) => message.id === "a1")?.content).toEqual([
-            { type: "text", text: "§3§ reply" },
+            { type: "text", text: "reply" },
             { type: "text", text: "" },
         ]);
     });

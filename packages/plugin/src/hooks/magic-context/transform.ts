@@ -667,6 +667,12 @@ export interface TransformDeps {
      * keeps them (Pi in particular) out of the coordinate rebase entirely.
      */
     storeGeneration?: CoordinateGeneration;
+    /**
+     * Passed to tagging for assistant text restored from a saved source copy (see
+     * `TagMessagesOptions.normalizeRestoredAssistantText`). Only the OpenCode 2
+     * adapter supplies it.
+     */
+    normalizeRestoredAssistantText?: (text: string) => string;
 }
 
 export function resolveTransformHostSeams(
@@ -2336,6 +2342,7 @@ export function createTransform(deps: TransformDeps) {
                     skipPrefixInjection,
                     scopedToolSweep,
                     servedMessages: messages,
+                    normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                 });
                 targets = result.targets;
                 if (thinkingRecovery.restore)

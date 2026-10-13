@@ -4,6 +4,7 @@ import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
 import { isToolError, toolErrorText, toolStateContent } from "../tool-result";
+import { stripCopiedTagNotation } from "./copied-tag-notation";
 import type { SessionContext, V2Message } from "./types";
 
 export const HEAD_IDS = ["__magic_context_v2_m0__", "__magic_context_v2_m1__"] as const;
@@ -324,6 +325,14 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 (content.type === "tool-result"
                     ? nativeTool(undefined, { part: content, message })
                     : clonePreservingInstances(content));
+            // Assistant text only: reasoning, tool calls and tool results keep their
+            // bytes (signed thinking must replay exactly as the provider sent it).
+            if (
+                message.role === "assistant" &&
+                part.type === "text" &&
+                typeof part.text === "string"
+            )
+                part.text = stripCopiedTagNotation(part.text);
             if (message.id && admittedIDs.has(message.id)) part.synthetic = true;
             parts.push(part);
         }
