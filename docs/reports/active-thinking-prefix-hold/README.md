@@ -1,5 +1,55 @@
 # Active thinking prefix hold (issue 665 and issue 664)
 
+## Round-three unheld compatibility correction
+
+Imported the third review and its witnesses from `5925c21a979ccd9ce7c48fb76cbe2cba47776aef`.
+It found 2,808 changed serves out of 15,360 comparisons: every first divergence
+was at idle expiry, with unresolved-directory fallback also required on OpenCode.
+The earlier revision had authorized extra cleanup even without an unfinished
+thinking turn, changing preexisting behavior. Pi now grants that additional
+cleanup and permission to strip thinking only while signed thinking holds the turn.
+OpenCode again respects its existing unresolved-directory veto for idle timers;
+its extra heuristic and emergency pricing also stays confined to held turns.
+Actual unheld history rebuilds, explicit flushes and pressure relief retain their
+existing admission rules. The initial durable thinking-omission call is unchanged.
+
+The reviewer's `MC_665_R3` differential now reports **zero served differences and
+zero state differences across 15,360 comparisons**, both before and after merging
+master through `e3dcfd39338a33f01ca28f63f98f89e706c69ce0`. It compares against pinned
+master `24ebef59`, the pre-change compatibility baseline; `e3dcfd39` is the later
+master merged into this branch. Eight seeds and 320 passes per sequence cover
+OpenCode 1, OpenCode 2 and Pi transforms. One shape has no signed thinking anywhere;
+the other has signed final answers only in completed turns followed by a user,
+not in the current turn. All 96 driver tests pass.
+`unheld-parity-after.json` retains the merged-tree result outside build directories.
+
+Two direct regressions pin the distinction. Pi's unheld idle expiry keeps the
+queued drop, completed thinking and exact served bytes until an explicit flush.
+OpenCode's unresolved-directory plus idle-expiry pass likewise leaves the queued
+drop and bytes intact, while its existing explicit-flush regression still drains
+the eligible drop. Removing either host's idle prerequisite makes only its named
+test fail; restoring both returns the three-test selection to green. The prior
+Pi test asserting extra cleanup on unheld idle expiry was intentionally changed
+to preserve master behavior instead. The three cases are **Pi unheld idle expiry
+preserves queued work and completed thinking until a priced rewrite**, **directory
+fallback and unheld idle expiry do not authorize a queued drop**, and **directory
+fallback freezes injection but drains an execute-threshold queued drop**.
+
+Merged master's OMP diagnostic-context dispatch handling (`fb4792c4`, issue 668)
+and release notes without conflicts. On the merged tree, Linux with 4 vCPUs,
+Bun 1.4.2, TypeScript 5.9.3 and
+Biome 2.5.1: both builds, typechecks and lint scripts pass. Diagnostic-context,
+OMP dispatch and supersession fencing, and durable tag-identity/served-pair suites
+(668, 663, 667 and 650), plus hold/latest-thinking/Rust-mode/pressure regressions pass
+**1,136 tests with 19 skips and zero failures** across 29 files (11,625 assertions).
+The held drivers cover 3,600 passes: no kept signed block follows a change to its
+preceding provider-visible bytes. All eight measured pressure cases visibly
+refuse; the unpriced reset case persists nine
+omissions and fits. Builds bundle 712 plugin-entry, 754 v2 and 1,022 Pi modules;
+lint checks 1,389 plugin and 317 Pi files, warnings only. Temporary baseline copies
+were removed after verification. No live stores or host services were used by
+these unit and differential runs.
+
 ## Current-master integration and second witness
 
 Merged `origin/master` through `24ebef59e11a61a0317aafe53ce16c73451b7439`. The sole
