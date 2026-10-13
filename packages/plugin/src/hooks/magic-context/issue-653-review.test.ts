@@ -195,15 +195,12 @@ describe("issue 653 independent upgrade review", () => {
         expect(lkgContentDigest(after)).toBe(lkgContentDigest(before));
     });
 
-    test("current-format restart refuses BUSY until the served representation is proven", async () => {
+    test("current-format restart partner serves the managed prefix on BUSY", async () => {
         restartFromDurableSlot("current");
         const output = { messages: history() };
-        // The stored request cannot prove whether recovery served a newer raw
-        // suffix before restart. A healthy transform must replace the cached
-        // request before recovery can promise unchanged bytes again.
-        await expect(busyHandler()({}, output as never)).rejects.toThrow(STORAGE_BUSY_MESSAGE);
+        await busyHandler()({}, output as never);
         expect((output.messages[0]!.parts[0] as { text: string }).text).toBe(
-            "Fix the TypeScript build.",
+            "§1§ Fix the TypeScript build.",
         );
     });
 
@@ -233,12 +230,12 @@ describe("issue 653 independent upgrade review", () => {
         expect(loadPersistedLkgSlot(openDatabase()!, SESSION)).toBeUndefined();
     });
 
-    test("legacy-format restart also refuses an unproven served representation on BUSY", async () => {
+    test("legacy-format upgrade retains managed replay availability on BUSY", async () => {
         restartFromDurableSlot("legacy");
         const output = { messages: history() };
-        await expect(busyHandler()({}, output as never)).rejects.toThrow(STORAGE_BUSY_MESSAGE);
+        await busyHandler()({}, output as never);
         expect((output.messages[0]!.parts[0] as { text: string }).text).toBe(
-            "Fix the TypeScript build.",
+            "§1§ Fix the TypeScript build.",
         );
     });
 

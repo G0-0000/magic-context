@@ -25,7 +25,6 @@ import {
 	getPiServedTagNumbers,
 	getPiServedTagNumbersPath,
 	PI_SERVED_ARRAY_TAIL_MESSAGES,
-	piLastServedMatchesLkg,
 } from "./served-array-ledger";
 
 const temporaryDirectories: string[] = [];
@@ -232,44 +231,6 @@ console.log(JSON.stringify([...getPiServedTagNumbers("restart", ${JSON.stringify
 		expect(readFileSync(identityPath, "utf8")).toBe(
 			"unreadable identity state",
 		);
-	});
-	test("restart evidence proves only the latest complete served bytes, never an older prefix", async () => {
-		const storageDir = temporaryDirectory();
-		const prefix = ["§1§ old prefix"];
-		capturePiServedArray("restart-proof", prefix, { storageDir });
-		await flushPiServedArrayLedger();
-		clearPiServedArraySession("restart-proof");
-		expect(
-			piLastServedMatchesLkg(
-				"restart-proof",
-				JSON.stringify(prefix),
-				storageDir,
-			),
-		).toBe(true);
-		capturePiServedArray("restart-proof", [...prefix, "raw tail"], {
-			storageDir,
-			recoveryWithoutTagState: true,
-		});
-		await flushPiServedArrayLedger();
-		clearPiServedArraySession("restart-proof");
-		expect(
-			piLastServedMatchesLkg(
-				"restart-proof",
-				JSON.stringify(prefix),
-				storageDir,
-			),
-		).toBe(false);
-		appendFileSync(
-			getPiServedArrayLedgerPath("restart-proof", storageDir),
-			"partial row",
-		);
-		expect(
-			piLastServedMatchesLkg(
-				"restart-proof",
-				JSON.stringify([...prefix, "raw tail"]),
-				storageDir,
-			),
-		).toBe(false);
 	});
 	test("records served numbers across normal and detached LKG arrays after cleanup", () => {
 		const storageDir = temporaryDirectory();

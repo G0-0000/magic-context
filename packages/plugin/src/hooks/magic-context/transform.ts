@@ -135,9 +135,15 @@ import {
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
-import { noteLkgHealthyPrefix, readLkgRecoveryPrefix } from "./lkg-recovery-prefix";
+import { invalidateCleanLkgRecoveryFence } from "./lkg-recovery-fence";
+import {
+    lkgDirtyRevision,
+    noteLkgHealthyPrefix,
+    noteUncertifiedNormalLkg,
+    readLkgRecoveryPrefix,
+} from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
-import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
+import { beginLkgPass, captureSlot, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import {
     createPassOutcome,
@@ -789,7 +795,7 @@ export function createTransform(deps: TransformDeps) {
         const recovery =
             deps.compactionOff || deps.transformMode === "rust"
                 ? {}
-                : readLkgRecoveryPrefix(sessionId, lkgInput, messages);
+                : readLkgRecoveryPrefix(sessionId, lkgInput, messages, deps.db);
         logTransformTiming(
             sessionId,
             "lkg.entryProjection",
@@ -3289,13 +3295,17 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        if (passOutcome.captureEligible) {
+        // Mandatory preparation failures already throw before this boundary.
+        // Save the exact returned array even when optional work declined: an
+        // older snapshot cannot certify a newer successfully served request.
+        if (!compactionOff) {
             const keys = resolveLkgModelKeys(messages);
             const modelKey = modelForBudget
                 ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
                 : keys.modelKey;
             const providerKey = modelForBudget?.providerID ?? keys.providerKey;
             const captured = captureLkgSlot({
+                completeOutput: true,
                 sessionId,
                 input: lkgInput,
                 output: messages,
@@ -3305,23 +3315,47 @@ export function createTransform(deps: TransformDeps) {
                 agentName: notificationParams?.agent,
             });
             if (captured) {
-                noteLkgHealthyPrefix(sessionId, lkgInput, messages, !!recoveryReleaseReason);
-                // Keep the durable snapshot in step with the TS-mode capture too:
-                // replay consumes the last successful capture of either mode, and
-                // drops clear the durable row regardless of mode. Deferred so the
-                // pass tail does not pay a synchronous multi-MB write; the slot
-                // copy is detached from live messages.
+                // Commit before returning so a competing recovery cannot supersede
+                // this request unnoticed between serving it and publishing clean.
                 const capturedSlot = getInMemorySlot(sessionId);
                 if (capturedSlot) {
-                    withoutSqliteTransformPass(() =>
-                        setImmediate(() => saveLkgSlotToDb(db, sessionId, capturedSlot)),
-                    );
+                    if (
+                        !saveLkgSlotToDb(db, sessionId, capturedSlot, undefined, {
+                            ownDirtyRevision: lkgDirtyRevision(sessionId),
+                            rebuild: !!recoveryReleaseReason,
+                            retainDirtyRevision:
+                                recovery.prefix && !recoveryReleaseReason
+                                    ? lkgDirtyRevision(sessionId)
+                                    : undefined,
+                        })
+                    )
+                        throw new Error("Last-good safety publication failed");
+                    const durable = loadPersistedLkgSlot(db, sessionId);
+                    if (durable) captureSlot(sessionId, durable);
                 }
+                noteLkgHealthyPrefix(sessionId, lkgInput, messages, !!recoveryReleaseReason);
             }
             if (postTransformResult.bustedThisPass && !captured) {
                 dropSlot(sessionId, "lkg_refresh_declined");
+            } else if (!captured) {
+                noteUncertifiedNormalLkg(
+                    sessionId,
+                    invalidateCleanLkgRecoveryFence(
+                        sessionId,
+                        () => loadPersistedLkgSlot(db, sessionId, true),
+                        lkgDirtyRevision(sessionId),
+                    ),
+                );
             }
         } else if (passOutcome.degradations.length > 0) {
+            noteUncertifiedNormalLkg(
+                sessionId,
+                invalidateCleanLkgRecoveryFence(
+                    sessionId,
+                    () => loadPersistedLkgSlot(db, sessionId, true),
+                    lkgDirtyRevision(sessionId),
+                ),
+            );
             sessionLog(
                 sessionId,
                 `lkg_capture_declined degradations=${passOutcome.degradations.map((item) => item.site).join(",")}`,

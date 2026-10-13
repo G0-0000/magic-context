@@ -1,12 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-	closeSync,
-	fstatSync,
-	openSync,
-	readFileSync,
-	readSync,
-	statSync,
-} from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { log } from "@magic-context/core/shared/logger";
@@ -123,46 +116,6 @@ export function clearPiServedArraySession(sessionId: string): void {
 	previousBySession.delete(sessionId);
 	servedTagNumbersBySession.delete(sessionId);
 	sequenceBySession.delete(sessionId);
-}
-
-/** Prove that no later recovery bytes superseded the persisted last-good output. */
-export function piLastServedMatchesLkg(
-	sessionId: string,
-	jsonPrefix: string,
-	storageDir = getMagicContextStorageDir(),
-): boolean {
-	const expected = sha256(jsonPrefix);
-	const previous = previousBySession.get(sessionId);
-	if (previous) return previous.digest === expected;
-	const ledgerPath = getPiServedArrayLedgerPath(sessionId, storageDir);
-	const pending = pendingLinesByPath.get(ledgerPath)?.at(-1);
-	let line = pending?.line;
-	if (!line) {
-		let fd: number | undefined;
-		try {
-			fd = openSync(ledgerPath, "r");
-			const size = fstatSync(fd).size;
-			const bytes = Buffer.alloc(Math.min(size, 256 * 1024));
-			const read = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
-			const tail = bytes.subarray(0, read).toString("utf8");
-			if (!tail.endsWith("\n")) return false;
-			line = tail.trimEnd().split("\n").at(-1);
-		} catch {
-			return false;
-		} finally {
-			if (fd !== undefined) closeSync(fd);
-		}
-	}
-	try {
-		const record = JSON.parse(line ?? "") as PiServedArrayDigestRecord;
-		return (
-			record.version === 1 &&
-			record.session_id === sessionId &&
-			record.sha256 === expected
-		);
-	} catch {
-		return false;
-	}
 }
 
 /** Assigned numbers in served records, including earlier process lifetimes. */

@@ -1,5 +1,10 @@
 # Last-good recovery tails remain byte-stable
 
+> Historical implementation report for cc47f005. Its diagnostic-ledger restart
+> proof and completed-turn strip were rejected by independent review. See
+> `lkg-durable-recovery-fence-2026-10-13.md` for the durable fence, signed-turn
+> corrections, restored clean-restart availability and current verification.
+
 ## Change and restart policy
 
 The diagnosis in `pi-lkg-late-tags-2026-10-13.md` was cherry-picked from

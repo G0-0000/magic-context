@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import * as reasoningStorage from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	recordOverflowDetected,
 	resetEmergencyRecoveryRegistryForTest,
@@ -300,10 +301,10 @@ describe("Pi context handler LKG replay", () => {
 		"signed content mismatch",
 		"signed active restart",
 		"signed active content mismatch",
+		"signed content mismatch persistence failure",
+		"signed content mismatch multiple completed turns",
 	] as const) {
-		it.skipIf(
-			change.startsWith("signed") && process.env.LKG_REVIEW_SAFETY !== "1",
-		)(`rebuilds an unproven recovery prefix after ${change}`, async () => {
+		it(`rebuilds an unproven recovery prefix after ${change}`, async () => {
 			const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-unproven-"));
 			tempDirs.push(dir);
 			const db = createTestDb(join(dir, "context.db"));
@@ -351,6 +352,15 @@ describe("Pi context handler LKG replay", () => {
 						thinkingSignature: "signed-proof",
 					});
 					raw.splice(1, 0, assistantMessage("unsigned before signature", 1.5));
+					if (change.includes("multiple")) {
+						const older = assistantMessage("another signed reply", 2.5);
+						(older as { content: unknown[] }).content.unshift({
+							type: "thinking",
+							thinking: "second bound thought",
+							thinkingSignature: "signed-proof-2",
+						});
+						raw.push(older);
+					}
 				}
 				const rawIds = raw.map((_, index) =>
 					index === 0 ? "head" : `tail-${index}`,
@@ -358,7 +368,9 @@ describe("Pi context handler LKG replay", () => {
 				db.exec("PRAGMA busy_timeout=0");
 				locker.exec("BEGIN IMMEDIATE");
 				const busy = await pass(structuredClone(raw), rawIds);
-				expect(textOf(busy?.messages.at(-1))).toBe("served raw");
+				expect(textOf(busy?.messages.at(-1))).toBe(
+					change.includes("multiple") ? "another signed reply" : "served raw",
+				);
 				locker.exec("ROLLBACK");
 				let nextRaw = raw;
 				let nextIds = rawIds;
@@ -384,6 +396,30 @@ describe("Pi context handler LKG replay", () => {
 					sessions.add(activeSessionId);
 				}
 				if (change.includes("restart")) clearContextHandlerSession(sessionId);
+				if (change.includes("persistence failure")) {
+					const omission = spyOn(
+						reasoningStorage,
+						"addMergedReasoningStrippedIds",
+					).mockReturnValue(false);
+					try {
+						await expect(
+							pass(
+								[...structuredClone(nextRaw), userMessage("new turn", 3)],
+								[...nextIds, "new"],
+							),
+						).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
+						expect(
+							omission.mock.calls.some((call) =>
+								call[2].includes(
+									reasoningStorage.thinkingBindingRecoveryFrozenId("tail-2"),
+								),
+							),
+						).toBe(true);
+					} finally {
+						omission.mockRestore();
+					}
+					return;
+				}
 				const healthy = await pass(
 					change.includes("active")
 						? structuredClone(nextRaw)

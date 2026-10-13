@@ -202,6 +202,11 @@ import {
 	captureOriginalTurn,
 	prepareLatestThinkingRecovery,
 } from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
+import { loadPersistedLkgSlot } from "@magic-context/core/hooks/magic-context/lkg-persist";
+import {
+	invalidateCleanLkgRecoveryFence,
+	LkgRecoveryFenceError,
+} from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
 import {
 	markNoteNudgeDelivered,
 	observeNoteNudgeServe,
@@ -5759,6 +5764,7 @@ export function registerPiContextHandler(
 						// signatures bind all preceding bytes. A permitted prefix rewrite
 						// omits every signed block, including those in the active turn.
 						cacheBustingPass:
+							!!recovery.rebuildReason ||
 							result.signedPrefixRewritten ||
 							(result.prefixBustPermitted &&
 								!result.strictThinkingKept &&
@@ -5768,9 +5774,11 @@ export function registerPiContextHandler(
 										(result.prefixEditBesidesReasoningTrim ||
 											hostEditBeforeNewestThinking)))),
 						stripActiveTurn: result.signedPrefixRewritten,
+						requirePersistence: !!recovery.rebuildReason,
 						report: (line) => sessionLog(sessionId, line),
 					});
 				} catch (err) {
+					if (recovery.rebuildReason) throw err;
 					sessionLog(
 						sessionId,
 						`proactive thinking strip failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -6181,11 +6189,21 @@ export function registerPiContextHandler(
 						// Refresh the replay request on every successful managed pass. If reductions
 						// changed its representation, invalidate the stale request before replacement.
 						cacheBusting: result.bustedThisPass,
-						releaseRecovery: result.recoveryNormalized,
+						releaseRecovery:
+							result.recoveryNormalized || !!recovery.rebuildReason,
 					});
 					numbersCommitted = true;
 				} catch (error) {
 					// Publication failure cannot admit an expired, cancelled or superseded context invocation.
+					if (error instanceof LkgRecoveryFenceError)
+						throw new PiServedIdentityError(error);
+					try {
+						invalidateCleanLkgRecoveryFence(sessionId, () =>
+							loadPersistedLkgSlot(options.db, sessionId),
+						);
+					} catch (fenceError) {
+						throw new PiServedIdentityError(fenceError);
+					}
 					budget.assertOutcome();
 					// Do not attach the next assistant's provider-usage measurement to a
 					// previous request when this newly served request was not captured.
@@ -6293,7 +6311,7 @@ export function registerPiContextHandler(
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
-				if (!budget.sideTurn && lkgPassSnapshot)
+				if (lkgPassSnapshot)
 					lkgCoordinator.noteRecovery(lkgPassSnapshot, err.messages);
 				if (!budget.sideTurn)
 					captureServedEvidence(sessionIdForError, err.messages, {
@@ -6385,8 +6403,7 @@ export function registerPiContextHandler(
 							`${failureLabel} ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
 						);
 						budget.assertOutcome();
-						if (!budget.sideTurn)
-							lkgCoordinator.noteRecovery(lkgPassSnapshot, replay.messages);
+						lkgCoordinator.noteRecovery(lkgPassSnapshot, replay.messages);
 						if (!budget.sideTurn)
 							captureServedEvidence(sessionIdForError, replay.messages, {
 								recoveryWithoutTagState: true,
@@ -7850,6 +7867,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			cacheBustingPass: true,
 			stripActiveTurn: true,
 			persistOnly: true,
+			requirePersistence: !!args.recoveryRebuildReason,
 		});
 		if (activeThinkingTurn && !result)
 			throw new Error(
@@ -7860,8 +7878,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		protectedSignedPrefix = false;
 	};
 	if (
-		(args.forceSignedRebuildForFit || args.recoveryRebuildReason) &&
-		protectedSignedPrefix
+		args.recoveryRebuildReason ||
+		(args.forceSignedRebuildForFit && protectedSignedPrefix)
 	)
 		stripForPrefixRewrite();
 	// Messages without a real entry id get a position-independent fallback id
@@ -10292,6 +10310,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		bustedThisPass,
 		agentDropsAppliedThisPass: pendingOpsDidMutate,
 		prefixEditBesidesReasoningTrim:
+			!!args.recoveryRebuildReason ||
 			prefixEditBesidesReasoningTrim ||
 			firstRenderBust ||
 			args.isCacheBusting ||

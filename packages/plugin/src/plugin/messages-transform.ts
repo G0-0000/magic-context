@@ -14,10 +14,14 @@ import {
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
+import { markLkgRecoveryDirty } from "../hooks/magic-context/lkg-recovery-fence";
 import {
+    hasProcessLocalLkgProof,
+    lkgDirtyRevision,
     lkgRecoveryEntryUnproven,
     lkgRecoveryReplayUnproven,
     noteLkgRecoveryPrefix,
+    rememberLkgDirtyRevision,
 } from "../hooks/magic-context/lkg-recovery-prefix";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { lkgReplayFits, lkgReplayLimit } from "../hooks/magic-context/lkg-replay-fit";
@@ -343,6 +347,15 @@ export function tryMessagesTransformLkgReplay(args: {
                     replayBlocked = true;
                     sessionLog(sessionId, "lkg_replay_does_not_fit");
                 } else if (replay.ok) {
+                    const recoverySlot = getSlot(sessionId);
+                    if (!recoverySlot) return false;
+                    const revision = markLkgRecoveryDirty({
+                        sessionId,
+                        slot: recoverySlot,
+                        processLocalProof: hasProcessLocalLkgProof(sessionId),
+                        ownDirtyRevision: lkgDirtyRevision(sessionId),
+                    });
+                    rememberLkgDirtyRevision(sessionId, revision);
                     if (
                         !rust &&
                         !noteLkgRecoveryPrefix({

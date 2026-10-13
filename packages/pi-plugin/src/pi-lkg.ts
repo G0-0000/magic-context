@@ -1,7 +1,13 @@
 import {
 	createDbLkgPersistence,
+	loadPersistedLkgSlot,
 	saveLkgSlotToDb,
 } from "@magic-context/core/hooks/magic-context/lkg-persist";
+import {
+	lkgFenceRequiresRebuild,
+	markLkgRecoveryDirty,
+	ownsLkgDirtyFence,
+} from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
 import { replayLkg } from "@magic-context/core/hooks/magic-context/lkg-replay";
 import {
 	captureSlot,
@@ -36,7 +42,6 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import type { PiMeasuredPrefixFit } from "./pi-raw-fallback";
-import { piLastServedMatchesLkg } from "./served-array-ledger";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 interface PiLkgInputSnapshot {
@@ -75,6 +80,7 @@ export interface PiLkgSerializedOutput {
 }
 
 export interface PiLkgRecoveryPrefix {
+	fenceRevision: string;
 	modelKey: string | null;
 	providerKey: string | null;
 	systemEntries?: readonly string[];
@@ -588,18 +594,23 @@ export function createPiLkgCoordinator(
 		const state = stateFor(snapshot.sessionId);
 		const prefix = state.recoveryPrefix;
 		if (!prefix) {
-			// Writer-admission recovery sends the saved output plus raw new messages
-			// without storing a new request. After restart, only a matching latest
-			// served digest can prove that the saved output was not superseded.
 			const slot = getSlot(snapshot.sessionId);
-			return !state.acceptedInputs &&
-				slot &&
-				!piLastServedMatchesLkg(snapshot.sessionId, slot.jsonPrefix)
+			return slot &&
+				lkgFenceRequiresRebuild(
+					snapshot.sessionId,
+					loadPersistedLkgSlot(db, snapshot.sessionId) ?? slot,
+					!!state.acceptedInputs,
+				)
 				? { rebuildReason: "lkg_restart_rebuild" }
 				: {};
 		}
+		const durableSlot =
+			loadPersistedLkgSlot(db, snapshot.sessionId) ??
+			getSlot(snapshot.sessionId);
 		if (
 			snapshot.preparationFailure ||
+			!durableSlot ||
+			!ownsLkgDirtyFence(snapshot.sessionId, prefix.fenceRevision) ||
 			prefix.modelKey !== snapshot.modelKey ||
 			prefix.providerKey !== snapshot.providerKey ||
 			JSON.stringify(prefix.systemEntries) !==
@@ -637,6 +648,12 @@ export function createPiLkgCoordinator(
 				"Recovered output ownership does not match the served array",
 			);
 		state.recoveryPrefix = {
+			fenceRevision: markLkgRecoveryDirty({
+				sessionId: snapshot.sessionId,
+				slot,
+				processLocalProof: !!state.acceptedInputs,
+				ownDirtyRevision: state.recoveryPrefix?.fenceRevision,
+			}),
 			modelKey: snapshot.modelKey,
 			providerKey: snapshot.providerKey,
 			systemEntries: snapshot.systemEntries,
@@ -1173,6 +1190,12 @@ export function createPiLkgCoordinator(
 							plan.sessionId,
 							slot,
 							args.publishServedNumbers,
+							{
+								rebuild: args.releaseRecovery,
+								retainDirtyRevision: !args.releaseRecovery
+									? state.recoveryPrefix?.fenceRevision
+									: undefined,
+							},
 						)
 					) {
 						throw new Error("Pi LKG/served publication failed");
@@ -1199,7 +1222,10 @@ export function createPiLkgCoordinator(
 				}
 				const persisted = args.publishServedNumbers
 					? true
-					: saveLkgSlotToDb(db, plan.sessionId, slot);
+					: saveLkgSlotToDb(db, plan.sessionId, slot, undefined, {
+							rebuild: args.releaseRecovery,
+							retainDirtyRevision: state.recoveryPrefix?.fenceRevision,
+						});
 				state.syncCaptureRequired = !persisted;
 				if (args.publishServedNumbers) noteCapturedRequest();
 			} catch (error) {

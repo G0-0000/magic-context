@@ -1,4 +1,7 @@
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import type { Database } from "../../shared/sqlite";
+import { loadPersistedLkgSlot } from "./lkg-persist";
+import { lkgFenceRequiresRebuild, ownsLkgDirtyFence } from "./lkg-recovery-fence";
 import { type LkgEntryProjection, resolveLkgModelKeys } from "./lkg-replay";
 import { getSlot, type LkgEntryNote, lkgContentDigest } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
@@ -15,7 +18,28 @@ interface RecoveryPrefix {
 // may predate raw messages sent while SQLite's writer was unavailable. Refuse
 // recovery until a successful transform explicitly rebuilds the request;
 // those older stored bytes cannot prove what the provider has cached.
-const sessions = new BoundedSessionMap<{ prefix?: RecoveryPrefix }>(1000);
+const sessions = new BoundedSessionMap<{
+    prefix?: RecoveryPrefix;
+    fenceRevision?: string;
+    uncertifiedNormal?: boolean;
+}>(1000);
+export function noteUncertifiedNormalLkg(sessionId: string, revision: string | undefined): void {
+    sessions.set(sessionId, {
+        ...sessions.get(sessionId),
+        fenceRevision: revision,
+        uncertifiedNormal: true,
+    });
+}
+
+export function hasProcessLocalLkgProof(sessionId: string): boolean {
+    return sessions.has(sessionId) && !sessions.get(sessionId)?.uncertifiedNormal;
+}
+export function lkgDirtyRevision(sessionId: string): string | undefined {
+    return sessions.get(sessionId)?.fenceRevision;
+}
+export function rememberLkgDirtyRevision(sessionId: string, revision: string): void {
+    sessions.set(sessionId, { ...sessions.get(sessionId), fenceRevision: revision });
+}
 
 export function clearLkgRecoveryPrefixes(): void {
     sessions.clear();
@@ -45,6 +69,7 @@ export function noteLkgRecoveryPrefix(args: {
     const ids = args.entry.entryInputIds;
     if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return false;
     sessions.set(args.sessionId, {
+        fenceRevision: sessions.get(args.sessionId)?.fenceRevision,
         prefix: {
             inputs: ids.map((id, index) => ({ id, digest: digests[index] as string })),
             json: JSON.stringify(args.messages),
@@ -63,13 +88,21 @@ export function readLkgRecoveryPrefix(
     sessionId: string,
     inputs: Pick<LkgEntryProjection, "id" | "contentDigest">[],
     messages: MessageLike[],
+    db?: Database,
 ): { prefix?: RecoveryPrefix; rebuildReason?: string } {
     const state = sessions.get(sessionId);
-    if (!state) return getSlot(sessionId) ? { rebuildReason: "lkg_restart_rebuild" } : {};
-    const prefix = state.prefix;
-    if (!prefix) return {};
+    const slot = db ? loadPersistedLkgSlot(db, sessionId, true) : getSlot(sessionId);
+    const prefix = state?.prefix;
+    if (!prefix && state?.uncertifiedNormal && ownsLkgDirtyFence(sessionId, state.fenceRevision))
+        return {};
+    if (!prefix)
+        return slot && lkgFenceRequiresRebuild(sessionId, slot, !!state)
+            ? { rebuildReason: "lkg_restart_rebuild" }
+            : {};
     const keys = resolveLkgModelKeys(messages);
     if (
+        (state?.fenceRevision !== undefined &&
+            (!slot || !ownsLkgDirtyFence(sessionId, state.fenceRevision))) ||
         prefix.modelKey !== keys.modelKey ||
         prefix.providerKey !== keys.providerKey ||
         inputs.length < prefix.inputs.length ||
@@ -91,6 +124,7 @@ export function noteLkgHealthyPrefix(
 ): void {
     const prefix = sessions.get(sessionId)?.prefix;
     sessions.set(sessionId, {
+        fenceRevision: sessions.get(sessionId)?.fenceRevision,
         prefix:
             prefix && !release
                 ? {
@@ -106,7 +140,8 @@ export function noteLkgHealthyPrefix(
 }
 
 export function lkgRecoveryReplayUnproven(sessionId: string): boolean {
-    return !sessions.has(sessionId) && !!getSlot(sessionId);
+    const slot = getSlot(sessionId);
+    return !!slot && !sessions.has(sessionId) && lkgFenceRequiresRebuild(sessionId, slot, false);
 }
 
 export function lkgRecoveryEntryUnproven(

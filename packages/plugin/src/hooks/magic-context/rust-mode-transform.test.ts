@@ -97,6 +97,13 @@ import {
     noteLkgProviderResponse,
 } from "./lkg-measured-request";
 import { createDbLkgPersistence, loadPersistedLkgSlot } from "./lkg-persist";
+import {
+    certifyCommittedLkgCapture,
+    hasCleanLkgRecoveryFence,
+    LkgRecoveryFenceError,
+    lkgServedArrayDigest,
+} from "./lkg-recovery-fence";
+import { lkgDirtyRevision } from "./lkg-recovery-prefix";
 import * as lkgSlot from "./lkg-slot";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
@@ -5910,9 +5917,115 @@ describe("Rust mode authority adapter", () => {
         registerLkgPersistence(createDbLkgPersistence(db));
         const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
         const coldReplay = { messages: [...input] as unknown[] };
-        await restarted.run(sessionId, input, coldReplay, makeMeta(db, sessionId));
-        expect(JSON.stringify(coldReplay.messages)).toContain("module output 1");
+        // Output 2 was returned without a matching durable commit. Output 1 is
+        // no longer proven current, so restart must not resurrect it.
+        await expect(
+            restarted.run(sessionId, input, coldReplay, makeMeta(db, sessionId)),
+        ).rejects.toBeInstanceOf(LkgRecoveryFenceError);
+        expect(JSON.stringify(coldReplay.messages)).not.toContain("module output 1");
     });
+
+    for (const newerReturn of [false, true]) {
+        it(
+            newerReturn
+                ? "a newer Rust result after clean commit refuses restart before its deferred commit"
+                : "a matching deferred Rust commit restores clean restart availability",
+            async () => {
+                const sessionId = `rust-certificate-${newerReturn}-${Date.now()}`;
+                sessions.push(sessionId);
+                const db = makeFileDb();
+                installRawProvider(sessionId);
+                const pending: (() => void)[] = [];
+                let pass = 0;
+                let offline = false;
+                const moduleClient: RustModeModuleClient = {
+                    call: async ({ method }) => {
+                        if (method !== "transform") return { ok: true };
+                        if (offline) throw new Error("daemon unavailable");
+                        pass++;
+                        return {
+                            decision: pass === 1 ? "HARD" : "SOFT+",
+                            prefix_bust_permitted: pass === 1,
+                            row_version: pass,
+                            native_messages: [
+                                {
+                                    info: { id: "served", role: "assistant", sessionID: sessionId },
+                                    parts: [{ type: "text", text: `module output ${pass}` }],
+                                },
+                            ],
+                        };
+                    },
+                };
+                const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                    moduleClient,
+                    scheduleLkgCapture: (capture) => pending.push(capture),
+                });
+                const input = makeMessages(sessionId);
+                const serve = async () => {
+                    const output = { messages: [...input] as unknown[] };
+                    await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+                    return output;
+                };
+                await serve();
+                const path = getDatabasePath(db);
+                if (!path) throw new Error("Expected disposable database");
+                const blocker = new Database(path);
+                try {
+                    db.exec("PRAGMA busy_timeout=0");
+                    blocker.exec("BEGIN IMMEDIATE");
+                    const second = await serve();
+                    expect(JSON.stringify(second.messages)).toContain("module output 2");
+                    blocker.exec("ROLLBACK");
+                    expect(pending).toHaveLength(1);
+                    pending.shift()?.();
+                    expect(
+                        hasCleanLkgRecoveryFence(sessionId, loadPersistedLkgSlot(db, sessionId)!),
+                    ).toBe(true);
+                    if (newerReturn) {
+                        blocker.exec("BEGIN IMMEDIATE");
+                        const third = await serve();
+                        blocker.exec("ROLLBACK");
+                        expect(JSON.stringify(third.messages)).toContain("module output 3");
+                        expect(getSlot(sessionId)?.jsonPrefix).toBe(JSON.stringify(third.messages));
+                        const revision = lkgDirtyRevision(sessionId);
+                        if (!revision) throw new Error("Expected pre-return dirty revision");
+                        expect(
+                            certifyCommittedLkgCapture({
+                                sessionId,
+                                slot: getSlot(sessionId)!,
+                                revision,
+                                latestServedDigest: lkgServedArrayDigest(
+                                    JSON.stringify(third.messages),
+                                ),
+                                load: () => loadPersistedLkgSlot(db, sessionId),
+                            }),
+                        ).toBe(false);
+                    }
+                    transform.dispose();
+                    resetLkgSlotsForTest();
+                    registerLkgPersistence(createDbLkgPersistence(db));
+                    offline = true;
+                    const restarted = createRustModeTransform(makeDeps(db, moduleClient), {
+                        moduleClient,
+                    });
+                    const output = { messages: [...input] as unknown[] };
+                    if (newerReturn)
+                        await expect(
+                            restarted.run(sessionId, input, output, makeMeta(db, sessionId)),
+                        ).rejects.toBeInstanceOf(LkgRecoveryFenceError);
+                    else {
+                        await restarted.run(sessionId, input, output, makeMeta(db, sessionId));
+                        expect(JSON.stringify(output.messages)).toBe(
+                            JSON.stringify(second.messages),
+                        );
+                    }
+                } finally {
+                    if (blocker.inTransaction) blocker.exec("ROLLBACK");
+                    closeQuietly(blocker);
+                }
+            },
+        );
+    }
 
     it("persists a priced replacement before a process restart can expose stale LKG", async () => {
         const sessionId = `rust-lkg-priced-sync-${Date.now()}`;
