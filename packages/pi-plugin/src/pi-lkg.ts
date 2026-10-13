@@ -36,6 +36,7 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import type { PiMeasuredPrefixFit } from "./pi-raw-fallback";
+import { piLastServedMatchesLkg } from "./served-array-ledger";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 interface PiLkgInputSnapshot {
@@ -73,7 +74,18 @@ export interface PiLkgSerializedOutput {
 	json: string;
 }
 
+export interface PiLkgRecoveryPrefix {
+	modelKey: string | null;
+	providerKey: string | null;
+	systemEntries?: readonly string[];
+	inputs: readonly PiLkgInputSnapshot[];
+	json: string;
+	outputEntryIds: readonly (string | null)[];
+	untaggedInputIds: ReadonlySet<string>;
+}
+
 interface PiLkgSessionState {
+	recoveryPrefix?: PiLkgRecoveryPrefix;
 	captureSequence: number;
 	syncCaptureRequired: boolean;
 	acceptedInputs: readonly PiLkgInputSnapshot[] | null;
@@ -211,6 +223,12 @@ export function clearPiLkgSessionState(sessionId: string): void {
 }
 
 export interface PiLkgCoordinator {
+	/** Retain the AgentMessage[] sent during recovery without reading tag assignments or allocating numbers. */
+	noteRecovery(snapshot: PiLkgPassSnapshot, messages: readonly unknown[]): void;
+	recoveryFor(snapshot: PiLkgPassSnapshot): {
+		prefix?: PiLkgRecoveryPrefix;
+		rebuildReason?: string;
+	};
 	beginPass(args: {
 		sessionId: string;
 		messages: readonly unknown[];
@@ -238,6 +256,7 @@ export interface PiLkgCoordinator {
 		outputMessages: readonly unknown[];
 		outputEntryIds?: readonly (string | null | undefined)[];
 		cacheBusting: boolean;
+		releaseRecovery?: boolean;
 		hostEnvelopeSignature?: string;
 	}): PiLkgSerializedOutput | undefined;
 }
@@ -564,6 +583,71 @@ export function createPiLkgCoordinator(
 			piLkgSessionStates.set(sessionId, state);
 		}
 		return state;
+	};
+	const recoveryFor: PiLkgCoordinator["recoveryFor"] = (snapshot) => {
+		const state = stateFor(snapshot.sessionId);
+		const prefix = state.recoveryPrefix;
+		if (!prefix) {
+			// Writer-admission recovery sends the saved output plus raw new messages
+			// without storing a new request. After restart, only a matching latest
+			// served digest can prove that the saved output was not superseded.
+			const slot = getSlot(snapshot.sessionId);
+			return !state.acceptedInputs &&
+				slot &&
+				!piLastServedMatchesLkg(snapshot.sessionId, slot.jsonPrefix)
+				? { rebuildReason: "lkg_restart_rebuild" }
+				: {};
+		}
+		if (
+			snapshot.preparationFailure ||
+			prefix.modelKey !== snapshot.modelKey ||
+			prefix.providerKey !== snapshot.providerKey ||
+			JSON.stringify(prefix.systemEntries) !==
+				JSON.stringify(snapshot.systemEntries) ||
+			exactReusablePrefix(snapshot.inputs, prefix.inputs) !==
+				prefix.inputs.length
+		)
+			return { rebuildReason: "lkg_recovery_input_rebuild" };
+		return { prefix };
+	};
+	const noteRecovery: PiLkgCoordinator["noteRecovery"] = (
+		snapshot,
+		messages,
+	) => {
+		const state = stateFor(snapshot.sessionId);
+		const anchor = snapshot.replayAnchorInputIndex;
+		const slot = getSlot(snapshot.sessionId);
+		if (
+			snapshot.preparationFailure ||
+			anchor === null ||
+			!slot?.piOutputEntryIds
+		)
+			throw new PiLkgUncapturable(
+				"lkg_output_mapping_unavailable",
+				"Cannot retain recovered output ownership",
+			);
+		const surviving = new Set(snapshot.inputs.map((input) => input.id));
+		const outputEntryIds = [
+			...slot.piOutputEntryIds.filter((id) => id === null || surviving.has(id)),
+			...snapshot.inputs.slice(anchor + 1).map((input) => input.id),
+		];
+		if (outputEntryIds.length !== messages.length)
+			throw new PiLkgUncapturable(
+				"lkg_output_mapping_unavailable",
+				"Recovered output ownership does not match the served array",
+			);
+		state.recoveryPrefix = {
+			modelKey: snapshot.modelKey,
+			providerKey: snapshot.providerKey,
+			systemEntries: snapshot.systemEntries,
+			inputs: snapshot.inputs,
+			json: JSON.stringify(messages),
+			outputEntryIds,
+			untaggedInputIds: new Set([
+				...(state.recoveryPrefix?.untaggedInputIds ?? []),
+				...snapshot.inputs.slice(anchor + 1).map((input) => input.id),
+			]),
+		};
 	};
 
 	const beginPass: PiLkgCoordinator["beginPass"] = (args) => {
@@ -1102,6 +1186,17 @@ export function createPiLkgCoordinator(
 				}
 				state.acceptedInputs = plan.inputs;
 				state.acceptedSlot = slot;
+				if (state.recoveryPrefix) {
+					state.recoveryPrefix = args.releaseRecovery
+						? undefined
+						: {
+								...state.recoveryPrefix,
+								inputs: plan.inputs,
+								json: plan.jsonPrefix,
+								outputEntryIds:
+									ownership ?? state.recoveryPrefix.outputEntryIds,
+							};
+				}
 				const persisted = args.publishServedNumbers
 					? true
 					: saveLkgSlotToDb(db, plan.sessionId, slot);
@@ -1164,6 +1259,8 @@ export function createPiLkgCoordinator(
 	};
 
 	return {
+		noteRecovery,
+		recoveryFor,
 		beginPass(args) {
 			return {
 				...beginPass(args),

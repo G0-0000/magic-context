@@ -28,6 +28,7 @@ import {
     getPendingOpsCount,
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
+    getTagsBySession,
     type PendingCompactionMarker,
     pruneNoteNudgeAnchors,
     replacePendingCompactionMarkerStateIf,
@@ -1552,6 +1553,8 @@ export const defaultCompactionMarkerStrategy: CompactionMarkerStrategy = {
 };
 
 interface RunPostTransformPhaseArgs {
+    /** Add §N§ reduction handles to messages sent untagged during recovery, once a fold replaces the provider's cached prefix. */
+    normalizeRecoveryTail?: () => void;
     compactionMarkerStrategy?: CompactionMarkerStrategy;
     sessionId: string;
     db: ContextDatabase;
@@ -2306,6 +2309,16 @@ export async function runPostTransformPhase(
         sessionLog(
             args.sessionId,
             `m[0] HARD fold decision: reason=${m0MaterializeReason ?? foldDueDecision.reason ?? (foldExecutedThisPass ? "drift" : "soft_refresh")} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+        );
+    }
+    if (args.normalizeRecoveryTail && (foldBustsServedPrefixThisPass || firstRenderBust)) {
+        args.normalizeRecoveryTail();
+        args.tags = getTagsBySession(args.db, args.sessionId);
+        newTargets = protectNewTagMutations(
+            args.messages,
+            args.targets,
+            retainedThinking,
+            args.thinkingBindingRecoveryEnabledForModel === true,
         );
     }
     // Fold decision, cached-prefix capture and the m[1] soft refresh run above;

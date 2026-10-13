@@ -4,11 +4,16 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
-import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
+import {
+	getTagsBySession,
+	queuePendingOp,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage";
 import {
 	recordOverflowDetected,
 	resetEmergencyRecoveryRegistryForTest,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { __test as decisionLogInternals } from "@magic-context/core/features/magic-context/transform-decision-log";
 import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import {
 	getInMemorySlot,
@@ -28,9 +33,12 @@ import { contextHost } from "./pi-context-host.test";
 import { reconcilePiLkgEntryIds } from "./pi-lkg";
 import {
 	assistantMessage,
+	assistantToolCall,
 	createFakePi,
 	createTestDb,
 	fakeContext,
+	textOf,
+	toolResultMessage,
 	userMessage,
 } from "./test-utils.test";
 
@@ -88,6 +96,242 @@ describe("Pi context handler LKG replay", () => {
 		for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 		tempDirs.length = 0;
 	});
+
+	for (const tailKind of ["prose and result", "two results"] as const) {
+		it(`preserves complete busy recovery bytes on healthy passes (${tailKind})`, async () => {
+			const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-handoff-"));
+			tempDirs.push(dir);
+			const path = join(dir, "context.db");
+			const db = createTestDb(path);
+			const locker = new Database(path);
+			const sessionId = `pi-lkg-handoff-${tailKind}`;
+			sessions.add(sessionId);
+			try {
+				updateSessionMeta(db, sessionId, {
+					piStableIdScheme: 1,
+					systemPromptHash: "sys-v1",
+				});
+				const fake = createFakePi();
+				Object.assign(fake.pi, { getAllTools: () => [] });
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					injection: { injectionBudgetTokens: 10000 },
+					scheduler: { executeThresholdPercentage: 80 },
+				});
+				const handler = fake.handlers.get("context") as PiHandler;
+				const pass = (raw: unknown[], ids: string[]) => {
+					const ctx = fakeContext(sessionId, dir, ids, raw as never);
+					Object.assign(ctx, {
+						getSystemPrompt: () => "Complete system prompt.",
+						model: {
+							provider: "openai-codex",
+							id: "gpt-5.6-sol",
+							contextWindow: 272000,
+							maxTokens: 68000,
+						},
+					});
+					return handler({ messages: raw as never[] }, ctx as never);
+				};
+				const head = [userMessage("original prompt", 1)];
+				if (tailKind === "two results") {
+					const calls = assistantToolCall("call-1", "Read", {}, 2);
+					(calls as { content: unknown[] }).content.push({
+						type: "toolCall",
+						id: "call-2",
+						name: "Read",
+						arguments: {},
+					});
+					head.push(calls);
+				}
+				const headIds = head.map((_, i) => `head-${i}`);
+				const first = await pass(structuredClone(head), headIds);
+				expect(first).toBeDefined();
+				await nextImmediate();
+				updateSessionMeta(db, sessionId, {
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+					lastContextPercentage: 4,
+					lastInputTokens: 4000,
+				});
+				const prose = assistantToolCall("call-1", "Read", {}, 2);
+				(prose as { content: unknown[] }).content.unshift({
+					type: "text",
+					text: "I'll refresh the drafts.",
+				});
+				const tail =
+					tailKind === "two results"
+						? [
+								toolResultMessage("call-1", "Created new file.", 3),
+								toolResultMessage("call-2", "Created new work.", 4),
+							]
+						: [
+								prose,
+								toolResultMessage("call-1", "ca92ad8f\ncommand output", 3),
+							];
+				const raw = [...head, ...tail];
+				const ids = [...headIds, "tail-1", "tail-2"];
+				const tagsBefore = db
+					.query("SELECT * FROM tags WHERE session_id = ? ORDER BY id")
+					.all(sessionId);
+				db.exec("PRAGMA busy_timeout=0");
+				locker.exec("BEGIN IMMEDIATE");
+				const busy = await pass(structuredClone(raw), ids);
+				expect(busy).toBeDefined();
+				if (!busy || !first) throw new Error("Expected served recovery");
+				expect(JSON.stringify(busy.messages)).toBe(
+					JSON.stringify([...first.messages, ...tail]),
+				);
+				expect(
+					db
+						.query("SELECT * FROM tags WHERE session_id = ? ORDER BY id")
+						.all(sessionId),
+				).toEqual(tagsBefore);
+				locker.exec("ROLLBACK");
+				const healthy = await pass(
+					[...structuredClone(raw), userMessage("new turn", 5)],
+					[...ids, "new-1"],
+				);
+				if (!healthy) throw new Error("Expected healthy pass");
+				expect(
+					JSON.stringify(healthy.messages.slice(0, busy.messages.length)),
+				).toBe(JSON.stringify(busy.messages));
+				expect(textOf(healthy.messages.at(-1))).toMatch(/^§\d+§ new turn/);
+				const repeated = await pass(
+					[
+						...structuredClone(raw),
+						userMessage("new turn", 5),
+						userMessage("next turn", 6),
+					],
+					[...ids, "new-1", "new-2"],
+				);
+				expect(
+					JSON.stringify(repeated?.messages.slice(0, healthy.messages.length)),
+				).toBe(JSON.stringify(healthy.messages));
+				updateSessionMeta(db, sessionId, { systemPromptHash: "sys-v2" });
+				const foldRaw = [
+					...structuredClone(raw),
+					userMessage("new turn", 5),
+					userMessage("next turn", 6),
+				];
+				const foldIds = [...ids, "new-1", "new-2"];
+				const folded = await pass(structuredClone(foldRaw), foldIds);
+				const results =
+					folded?.messages.filter(
+						(message) => (message as { role: string }).role === "toolResult",
+					) ?? [];
+				expect(results).toHaveLength(tailKind === "two results" ? 2 : 1);
+				for (const message of results)
+					expect(textOf(message)).toMatch(/^§\d+§ /);
+				const decision = decisionLogInternals.getPendingPi(sessionId);
+				expect(decision?.lkgFrozenReleaseReason).toBe(
+					"recovery_tail_normalized",
+				);
+				if (!decision) throw new Error("Expected normalization decision");
+				decisionLogInternals.writeRow(path, {
+					...decision,
+					sessionId,
+					harness: "pi",
+					messageId: "fold-proof",
+				});
+				expect(
+					(
+						db
+							.query(
+								"SELECT materialize_reason FROM transform_decisions WHERE session_id = ?",
+							)
+							.get(sessionId) as { materialize_reason: string }
+					).materialize_reason,
+				).toContain("recovery_tail_normalized");
+				const toolTag = getTagsBySession(db, sessionId).find(
+					(tag) => tag.type === "tool" && tag.messageId === "call-1",
+				);
+				if (!toolTag) throw new Error("Expected normalized tool target");
+				queuePendingOp(db, sessionId, toolTag.tagNumber, "drop", 1);
+				updateSessionMeta(db, sessionId, { systemPromptHash: "sys-v3" });
+				await pass(structuredClone(foldRaw), foldIds);
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTag.tagNumber,
+					)?.status,
+				).toBe("dropped");
+			} finally {
+				if (locker.inTransaction) locker.exec("ROLLBACK");
+				closeQuietly(locker);
+				closeQuietly(db);
+			}
+		});
+	}
+
+	for (const change of [
+		"content mismatch",
+		"branch contraction",
+		"restart",
+	] as const) {
+		it(`rebuilds an unproven recovery prefix after ${change}`, async () => {
+			const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-unproven-"));
+			tempDirs.push(dir);
+			const db = createTestDb(join(dir, "context.db"));
+			const locker = new Database(join(dir, "context.db"));
+			const sessionId = `pi-lkg-unproven-${change}`;
+			sessions.add(sessionId);
+			try {
+				updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+				const fake = createFakePi();
+				Object.assign(fake.pi, { getAllTools: () => [] });
+				registerPiContextHandler(fake.pi as never, { db });
+				const handler = fake.handlers.get("context") as PiHandler;
+				const pass = (raw: unknown[], ids: string[]) => {
+					const ctx = fakeContext(sessionId, dir, ids, raw as never);
+					Object.assign(ctx, {
+						getSystemPrompt: () => "Complete system.",
+						model: {
+							provider: "openai-codex",
+							id: "gpt-5.6-sol",
+							contextWindow: 272000,
+							maxTokens: 68000,
+						},
+					});
+					return handler({ messages: raw as never[] }, ctx as never);
+				};
+				await pass([userMessage("head", 1)], ["head"]);
+				await nextImmediate();
+				const raw = [userMessage("head", 1), assistantMessage("served raw", 2)];
+				db.exec("PRAGMA busy_timeout=0");
+				locker.exec("BEGIN IMMEDIATE");
+				const busy = await pass(structuredClone(raw), ["head", "tail"]);
+				expect(textOf(busy?.messages.at(-1))).toBe("served raw");
+				locker.exec("ROLLBACK");
+				let nextRaw = raw;
+				let nextIds = ["head", "tail"];
+				if (change === "content mismatch")
+					nextRaw = [raw[0], assistantMessage("edited raw", 2)];
+				if (change === "branch contraction") {
+					nextRaw = raw.slice(1);
+					nextIds = ["tail"];
+				}
+				if (change === "restart") clearContextHandlerSession(sessionId);
+				const healthy = await pass(
+					[...structuredClone(nextRaw), userMessage("new turn", 3)],
+					[...nextIds, "new"],
+				);
+				expect(JSON.stringify(healthy?.messages)).toContain(
+					change === "content mismatch" ? "edited raw" : "served raw",
+				);
+				expect(
+					decisionLogInternals.getPendingPi(sessionId)?.lkgFrozenReleaseReason,
+				).toBe(
+					change === "restart"
+						? "lkg_restart_rebuild"
+						: "lkg_recovery_input_rebuild",
+				);
+			} finally {
+				if (locker.inTransaction) locker.exec("ROLLBACK");
+				closeQuietly(locker);
+				closeQuietly(db);
+			}
+		});
+	}
 
 	it("admits first Pi turns during bounded background holds without a saved request", async () => {
 		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-bounded-writer-"));

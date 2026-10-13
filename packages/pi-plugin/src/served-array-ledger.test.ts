@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFileSync,
+	mkdirSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
@@ -11,7 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as storagePermissions from "@magic-context/core/shared/storage-permissions";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
@@ -24,6 +25,7 @@ import {
 	getPiServedTagNumbers,
 	getPiServedTagNumbersPath,
 	PI_SERVED_ARRAY_TAIL_MESSAGES,
+	piLastServedMatchesLkg,
 } from "./served-array-ledger";
 
 const temporaryDirectories: string[] = [];
@@ -202,6 +204,72 @@ console.log(JSON.stringify([...getPiServedTagNumbers("restart", ${JSON.stringify
 			servedTagNumbers: [1],
 		});
 		expect([...getPiServedTagNumbers("literal", storageDir)]).toEqual([1]);
+	});
+	test("busy recovery records bytes without reading or writing tag identity state", () => {
+		const storageDir = temporaryDirectory();
+		const identityPath = getPiServedTagNumbersPath("busy", storageDir);
+		mkdirSync(dirname(identityPath), { recursive: true });
+		writeFileSync(identityPath, "unreadable identity state");
+		const db = new Proxy(
+			{},
+			{
+				get: () => {
+					throw new Error("Recovery consulted SQLite identity state");
+				},
+			},
+		);
+		const record = capturePiServedArray(
+			"busy",
+			["§1§ old prefix", "raw tail"],
+			{
+				storageDir,
+				db: db as never,
+				servedTagNumbers: [99],
+				recoveryWithoutTagState: true,
+			},
+		);
+		expect(record?.message_count).toBe(2);
+		expect(readFileSync(identityPath, "utf8")).toBe(
+			"unreadable identity state",
+		);
+	});
+	test("restart evidence proves only the latest complete served bytes, never an older prefix", async () => {
+		const storageDir = temporaryDirectory();
+		const prefix = ["§1§ old prefix"];
+		capturePiServedArray("restart-proof", prefix, { storageDir });
+		await flushPiServedArrayLedger();
+		clearPiServedArraySession("restart-proof");
+		expect(
+			piLastServedMatchesLkg(
+				"restart-proof",
+				JSON.stringify(prefix),
+				storageDir,
+			),
+		).toBe(true);
+		capturePiServedArray("restart-proof", [...prefix, "raw tail"], {
+			storageDir,
+			recoveryWithoutTagState: true,
+		});
+		await flushPiServedArrayLedger();
+		clearPiServedArraySession("restart-proof");
+		expect(
+			piLastServedMatchesLkg(
+				"restart-proof",
+				JSON.stringify(prefix),
+				storageDir,
+			),
+		).toBe(false);
+		appendFileSync(
+			getPiServedArrayLedgerPath("restart-proof", storageDir),
+			"partial row",
+		);
+		expect(
+			piLastServedMatchesLkg(
+				"restart-proof",
+				JSON.stringify([...prefix, "raw tail"]),
+				storageDir,
+			),
+		).toBe(false);
 	});
 	test("records served numbers across normal and detached LKG arrays after cleanup", () => {
 		const storageDir = temporaryDirectory();

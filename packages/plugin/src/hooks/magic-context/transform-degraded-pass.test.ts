@@ -24,6 +24,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import * as coordinateRebase from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
+import { __test as decisionLogInternals } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
@@ -146,7 +147,7 @@ function nextTurn(sessionId: string): Message[] {
  * tagging step find the writer lock held by a second connection, released when
  * the transform resets the tagger, i.e. exactly across the tagging step.
  */
-async function sessionWithPersistedDrop(sessionId: string) {
+async function sessionWithPersistedDrop(sessionId: string, generation?: "v1" | "v2") {
     useTempDataHome("mc-degraded-pass-");
     const db = openDatabase();
     let lockDuringTagging = false;
@@ -170,6 +171,10 @@ async function sessionWithPersistedDrop(sessionId: string) {
     };
     const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
     const deps: Parameters<typeof createTransform>[0] = {
+        directory: generation ? process.env.XDG_DATA_HOME : undefined,
+        storeGeneration: generation,
+        hostRawMessages: generation ? async () => history(sessionId) : undefined,
+        hostPrepareRawOrdinals: generation ? async () => true : undefined,
         tagger,
         scheduler,
         contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
@@ -202,6 +207,12 @@ async function sessionWithPersistedDrop(sessionId: string) {
 
     // A healthy defer pass replays the drop; it is the last good request.
     const managed = JSON.stringify(await serve(history(sessionId)));
+    if (generation)
+        updateSessionMeta(db, sessionId, {
+            lastResponseTime: Date.now(),
+            cacheTtl: "59m",
+            systemPromptHash: "system-before-change",
+        });
     expect(managed).not.toContain("BULKY-TOOL-OUTPUT");
     expect(getSlot(sessionId)).toBeDefined();
 
@@ -228,6 +239,63 @@ function expectReplayOfManaged(served: Message[], managed: string, sessionId: st
 }
 
 describe("a degraded transform pass is never served", () => {
+    for (const generation of ["v1", "v2"] as const) {
+        it(`preserves the entire busy raw tail on healthy ${generation} passes`, async () => {
+            const sessionId = `ses-recovery-handoff-${generation}`;
+            const session = await sessionWithPersistedDrop(sessionId, generation);
+            await session.serve(history(sessionId));
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            const path = getDatabasePath(session.db);
+            if (!path) throw new Error("Expected throwaway database");
+            const before = getTagsBySession(session.db, sessionId);
+            heldLock = new Database(path);
+            heldLock.exec("BEGIN IMMEDIATE");
+            const busy = await session.serve(nextTurn(sessionId));
+            expect(JSON.stringify(busy.slice(-2))).toBe(
+                JSON.stringify(nextTurn(sessionId).slice(-2)),
+            );
+            expect(getTagsBySession(session.db, sessionId)).toEqual(before);
+            releaseLock();
+            const raw = [
+                ...nextTurn(sessionId),
+                {
+                    info: { id: "u5", time: { created: 8 }, role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "genuinely new" }],
+                },
+            ];
+            const healthy = await session.serve(structuredClone(raw));
+            expect(JSON.stringify(healthy.slice(0, busy.length))).toBe(JSON.stringify(busy));
+            expect(JSON.stringify(healthy.at(-1))).toMatch(/§\d+§ genuinely new/);
+            expect(
+                getTagsBySession(session.db, sessionId).some(
+                    (tag) => tag.messageId === "a3:p0" || tag.messageId === "u4:p0",
+                ),
+            ).toBe(false);
+            expect(JSON.stringify(await session.serve(structuredClone(raw)))).toBe(
+                JSON.stringify(healthy),
+            );
+            updateSessionMeta(session.db, sessionId, { systemPromptHash: "system-after-change" });
+            const folded = await session.serve(structuredClone(raw));
+            expect(JSON.stringify(folded.find((message) => message.info.id === "a3"))).toMatch(
+                /§\d+§ answer/,
+            );
+            const tag = getTagsBySession(session.db, sessionId).find(
+                (tag) => tag.messageId === "a3:p0",
+            );
+            if (!tag) throw new Error("Expected a normalized text target");
+            expect(decisionLogInternals.getPending(sessionId)?.lkgFrozenReleaseReason).toBe(
+                "recovery_tail_normalized",
+            );
+            queuePendingOp(session.db, sessionId, tag.tagNumber, "drop", 1);
+            updateSessionMeta(session.db, sessionId, { systemPromptHash: "system-third-change" });
+            await session.serve(structuredClone(raw));
+            expect(
+                getTagsBySession(session.db, sessionId).find(
+                    (value) => value.tagNumber === tag.tagNumber,
+                )?.status,
+            ).toBe("dropped");
+        }, 30_000);
+    }
     it("keeps seeded ordinary passes byte-identical in pure replay", async () => {
         const sessionId = "ses-pure-replay-degraded-pass";
         const session = await sessionWithPersistedDrop(sessionId);

@@ -135,6 +135,7 @@ import {
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
+import { noteLkgHealthyPrefix, readLkgRecoveryPrefix } from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
@@ -785,6 +786,10 @@ export function createTransform(deps: TransformDeps) {
         // The Rust adapter captures its own last-known-good input snapshot and returns
         // before the TypeScript capture, so it does not need this entry projection.
         const lkgInput = deps.transformMode === "rust" ? [] : projectEntry(sessionId, messages);
+        const recovery =
+            deps.compactionOff || deps.transformMode === "rust"
+                ? {}
+                : readLkgRecoveryPrefix(sessionId, lkgInput, messages);
         logTransformTiming(
             sessionId,
             "lkg.entryProjection",
@@ -2298,6 +2303,28 @@ export function createTransform(deps: TransformDeps) {
         }
 
         let taggingSucceeded = false;
+        let recoveryBatch: { finalize: () => void } | null = null;
+        let recoveryNormalized = false;
+        const normalizeRecoveryTail = recovery.prefix
+            ? () => {
+                  if (recoveryNormalized) return;
+                  const tail = messages.filter((message) =>
+                      recovery.prefix?.untaggedInputIds.has(message.info.id ?? ""),
+                  );
+                  const tagged = tagMessages(sessionId, tail, deps.tagger, db, {
+                      skipPrefixInjection: !ctxReduceCallable,
+                      servedMessages: messages,
+                      normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
+                  });
+                  for (const [number, target] of tagged.targets) targets.set(number, target);
+                  for (const [message, parts] of tagged.reasoningByMessage)
+                      reasoningByMessage.set(message, parts);
+                  for (const [message, number] of tagged.messageTagNumbers)
+                      messageTagNumbers.set(message, number);
+                  recoveryBatch = tagged.batch;
+                  recoveryNormalized = true;
+              }
+            : undefined;
         // Compaction-off mode: the tagger writes ZERO tag rows and emits no
         // §N§ prefixes (spec #266 decision #6). Every consumer of the tag
         // walk's outputs (drops, heuristics, nudges, caveman, flushed-status
@@ -2338,18 +2365,34 @@ export function createTransform(deps: TransformDeps) {
                 const scopedToolSweep = useScopedToolSweep(db, sessionId, canAdoptScopedToolSweep)
                     ? true
                     : createPreAdoptionToolSweepResolver(db, sessionId);
-                const result = tagMessages(sessionId, messagesForTagging, deps.tagger, db, {
-                    skipPrefixInjection,
-                    scopedToolSweep,
-                    servedMessages: messages,
-                    normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
-                });
+                const result = tagMessages(
+                    sessionId,
+                    recovery.prefix
+                        ? messagesForTagging.filter(
+                              (message) =>
+                                  !recovery.prefix?.untaggedInputIds.has(message.info.id ?? ""),
+                          )
+                        : messagesForTagging,
+                    deps.tagger,
+                    db,
+                    {
+                        skipPrefixInjection,
+                        scopedToolSweep,
+                        servedMessages: messages,
+                        normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
+                    },
+                );
                 targets = result.targets;
                 if (thinkingRecovery.restore)
                     restoreLatestTurnOriginals = captureLatestTurnOriginals(messages);
                 reasoningByMessage = result.reasoningByMessage;
                 messageTagNumbers = result.messageTagNumbers;
-                batch = result.batch;
+                batch = {
+                    finalize: () => {
+                        result.batch?.finalize();
+                        recoveryBatch?.finalize();
+                    },
+                };
                 // The forced call skeleton beside reasoning protects Anthropic
                 // signed turns from merging (issue 423). Other routes have no
                 // such rule, so their drops remove the whole pair. An unknown
@@ -2767,6 +2810,7 @@ export function createTransform(deps: TransformDeps) {
 
         const tPostProcess = performance.now();
         const postTransformResult = await runPostTransformPhase({
+            normalizeRecoveryTail,
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
             sessionId,
@@ -2811,7 +2855,7 @@ export function createTransform(deps: TransformDeps) {
             freezeM0M1,
             activeThinkingPrefixHold,
             directoryPrefixHold: unresolvedDirectoryHold,
-            forceSignedRebuildForFit: thinkingFitRetries.has(sessionId),
+            forceSignedRebuildForFit: thinkingFitRetries.has(sessionId) || !!recovery.rebuildReason,
             readLastServedMessages: () => {
                 const slot = getInMemorySlot(sessionId) ?? loadPersistedLkgSlot(db, sessionId);
                 try {
@@ -2908,6 +2952,21 @@ export function createTransform(deps: TransformDeps) {
                 muralEnabled: deps.muralEnabled,
             },
         });
+        if (recovery.prefix && !recoveryNormalized) {
+            const priorIds = new Set(recovery.prefix.inputs.map((input) => input.id));
+            const newIds = new Set(
+                lkgInput.flatMap((input) =>
+                    input.id && !priorIds.has(input.id) ? [input.id] : [],
+                ),
+            );
+            const suffix = messages.filter(
+                (message) => message.info.id && newIds.has(message.info.id),
+            );
+            messages.splice(0, messages.length, ...JSON.parse(recovery.prefix.json), ...suffix);
+        }
+        const recoveryReleaseReason =
+            recovery.rebuildReason ?? (recoveryNormalized ? "recovery_tail_normalized" : undefined);
+        if (recoveryReleaseReason) postTransformResult.bustedThisPass = true;
         passOutcome.markFinalized();
         // Compaction-off: the emergency/overflow machinery is fully disarmed
         // (derived force-band tiered drop, absolute 95% fail-closed block, overflow-recovery latch).
@@ -3246,6 +3305,7 @@ export function createTransform(deps: TransformDeps) {
                 agentName: notificationParams?.agent,
             });
             if (captured) {
+                noteLkgHealthyPrefix(sessionId, lkgInput, messages, !!recoveryReleaseReason);
                 // Keep the durable snapshot in step with the TS-mode capture too:
                 // replay consumes the last successful capture of either mode, and
                 // drops clear the durable row regardless of mode. Deferred so the
@@ -3292,6 +3352,7 @@ export function createTransform(deps: TransformDeps) {
                 droppedCount: postTransformResult.droppedCount,
                 inputTokens: contextUsage.inputTokens,
                 bustedThisPass: true,
+                lkgFrozenReleaseReason: recoveryReleaseReason,
             });
         }
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);

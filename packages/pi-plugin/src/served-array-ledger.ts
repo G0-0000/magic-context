@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import {
+	closeSync,
+	fstatSync,
+	openSync,
+	readFileSync,
+	readSync,
+	statSync,
+} from "node:fs";
 import * as path from "node:path";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { log } from "@magic-context/core/shared/logger";
@@ -83,6 +90,8 @@ function sameIdentityFile(
 }
 
 interface CaptureOptions {
+	/** The saved request plus raw recovery messages assigns no new tag numbers; log bytes without consulting or publishing their identity tables. */
+	recoveryWithoutTagState?: boolean;
 	/** Managed identities are authoritative in SQLite; JSONL is a post-commit mirror. */
 	db?: import("@magic-context/core/shared/sqlite").Database;
 	/** Numbers assigned to identities represented by this managed result, not parsed from text. */
@@ -114,6 +123,46 @@ export function clearPiServedArraySession(sessionId: string): void {
 	previousBySession.delete(sessionId);
 	servedTagNumbersBySession.delete(sessionId);
 	sequenceBySession.delete(sessionId);
+}
+
+/** Prove that no later recovery bytes superseded the persisted last-good output. */
+export function piLastServedMatchesLkg(
+	sessionId: string,
+	jsonPrefix: string,
+	storageDir = getMagicContextStorageDir(),
+): boolean {
+	const expected = sha256(jsonPrefix);
+	const previous = previousBySession.get(sessionId);
+	if (previous) return previous.digest === expected;
+	const ledgerPath = getPiServedArrayLedgerPath(sessionId, storageDir);
+	const pending = pendingLinesByPath.get(ledgerPath)?.at(-1);
+	let line = pending?.line;
+	if (!line) {
+		let fd: number | undefined;
+		try {
+			fd = openSync(ledgerPath, "r");
+			const size = fstatSync(fd).size;
+			const bytes = Buffer.alloc(Math.min(size, 256 * 1024));
+			const read = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
+			const tail = bytes.subarray(0, read).toString("utf8");
+			if (!tail.endsWith("\n")) return false;
+			line = tail.trimEnd().split("\n").at(-1);
+		} catch {
+			return false;
+		} finally {
+			if (fd !== undefined) closeSync(fd);
+		}
+	}
+	try {
+		const record = JSON.parse(line ?? "") as PiServedArrayDigestRecord;
+		return (
+			record.version === 1 &&
+			record.session_id === sessionId &&
+			record.sha256 === expected
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** Assigned numbers in served records, including earlier process lifetimes. */
@@ -385,14 +434,19 @@ export function capturePiServedArray(
 		const digest = sha256(serializedArray);
 		const storageDir = options.storageDir ?? getMagicContextStorageDir();
 		identityPersistenceFailed = true;
-		const previousNumbers = getPiServedTagNumbers(sessionId, storageDir);
+		const previousNumbers = options.recoveryWithoutTagState
+			? new Set<number>()
+			: getPiServedTagNumbers(sessionId, storageDir);
+		const managedNumbers = options.recoveryWithoutTagState
+			? []
+			: (options.servedTagNumbers ?? []);
 		identityPersistenceFailed = false;
 		const served = new Set(previousNumbers);
-		if (options.db) {
+		if (options.db && !options.recoveryWithoutTagState) {
 			identityPersistenceFailed = true;
 			for (const number of readPiCommittedServedNumbers(options.db, sessionId))
 				served.add(number);
-			for (const number of options.servedTagNumbers ?? []) {
+			for (const number of managedNumbers) {
 				if (!served.has(number))
 					throw new PiServedIdentityError(
 						new Error("Pi identities have no committed LKG"),
@@ -400,7 +454,7 @@ export function capturePiServedArray(
 			}
 			identityPersistenceFailed = false;
 		}
-		for (const number of options.servedTagNumbers ?? []) {
+		for (const number of managedNumbers) {
 			if (Number.isSafeInteger(number) && number > 0) served.add(number);
 		}
 		const previous = previousBySession.get(sessionId);
