@@ -124,8 +124,12 @@ function extractAndBuild(ref: string, destination: string): string {
 	execFileSync("tar", ["-xf", "-", "-C", destination], { input: archive, maxBuffer: 512 * 1024 * 1024 });
 	if (existsSync(join(REPO_ROOT, "node_modules")))
 		symlinkSync(join(REPO_ROOT, "node_modules"), join(destination, "node_modules"), "dir");
-	const pluginModules = join(REPO_ROOT, "packages/plugin/node_modules");
-	if (existsSync(pluginModules)) symlinkSync(pluginModules, join(destination, "packages/plugin/node_modules"), "dir");
+	// The plugin build also compiles packages/retina-local-fs, so link every
+	// package's installed modules, not just the plugin's.
+	for (const name of ["e2e-tests", "plugin", "pi-plugin", "retina-local-fs"]) {
+		const source = join(REPO_ROOT, "packages", name, "node_modules");
+		if (existsSync(source)) symlinkSync(source, join(destination, "packages", name, "node_modules"), "dir");
+	}
 	const plugin = join(destination, "packages/plugin");
 	const build = spawnSync(process.execPath, ["run", "build"], { cwd: plugin, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 	if (build.status !== 0) throw new Error(`build failed for ${ref}\n${build.stdout}\n${build.stderr}`);
@@ -164,7 +168,9 @@ async function identityRun(plugin: string): Promise<{ turns: Turn[]; deferPasses
 			});
 			client = clientFor();
 		}
-		// A high reading every 100 turns makes the following pass an execute pass.
+		// Every 100th turn the mock reports 150k input tokens, 75% of the 200k
+		// window and over the 40% execute threshold the harness configures, so the next
+		// pass is an execute pass (one allowed to rewrite already-sent history).
 		usage = turn % 100 === 99 ? 150_000 : 1_000 + turn * 10;
 		const marker = `[[issue-671-turn-${turn}]]`;
 		await client.session.prompt({ sessionID: session.id, text: userPrompt(turn) });
