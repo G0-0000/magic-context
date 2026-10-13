@@ -79,7 +79,9 @@ type WireBucket = keyof MessageTokenEstimate;
  * the field's value (a string, or a value the request carries serialized), and
  * `image` with the token count of an image the request carries. Fields OpenCode
  * keeps only for itself, such as tool metadata, are not visited. Token estimates
- * and wire byte counts both walk this, so they agree on what the wire holds.
+ * and fit byte bounds both walk this. Encrypted thinking signatures and redacted
+ * payloads remain in exact request identity for authentication and replay, but
+ * their ciphertext is not conversation text to tokenize.
  */
 function visitWireContent(
     message: MessageLike,
@@ -88,6 +90,17 @@ function visitWireContent(
         image: (bucket: WireBucket, tokens: number) => void;
     },
 ): void {
+    let opaqueCounted = false;
+    const opaque = () => {
+        if (opaqueCounted) return;
+        opaqueCounted = true;
+        const usage = (
+            message.info as unknown as
+                | { tokens?: { reasoning?: number; output?: number } }
+                | undefined
+        )?.tokens;
+        visit.image("conversation", opaqueThinkingCost(usage?.reasoning, usage?.output).tokens);
+    };
     for (const part of message.parts) {
         if (!part || typeof part !== "object") continue;
         const p = part as {
@@ -97,6 +110,7 @@ function visitWireContent(
             signature?: string;
             data?: string;
             ignored?: boolean;
+            redacted?: boolean;
             state?: { input?: unknown; output?: unknown; content?: unknown; error?: unknown };
             args?: unknown;
             input?: unknown;
@@ -105,7 +119,7 @@ function visitWireContent(
             result?: unknown;
             mime?: string;
             url?: unknown;
-            metadata?: { anthropic?: { signature?: string } };
+            metadata?: { anthropic?: { signature?: string; redactedData?: string } };
         };
         if (p.ignored) continue;
         const text = (value: unknown) => {
@@ -117,15 +131,23 @@ function visitWireContent(
                 text(p.text);
                 break;
             case "reasoning":
-                text(p.text);
-                text(p.metadata?.anthropic?.signature);
+                if (p.redacted || p.metadata?.anthropic?.redactedData) opaque();
+                else {
+                    text(p.text);
+                    if (!p.text && p.metadata?.anthropic?.signature) opaque();
+                }
                 break;
             case "thinking":
-                text(p.thinking);
-                text(p.signature);
+                if (p.redacted) opaque();
+                else {
+                    text(p.thinking);
+                    if (!p.thinking && p.signature) opaque();
+                }
                 break;
             case "redacted_thinking":
-                text(p.data);
+                // Encrypted thinking/signatures are not input prose. Preserve
+                // their bytes for replay and prefix matching, not tokenization.
+                opaque();
                 break;
             case "file":
                 if (typeof p.mime === "string" && p.mime.startsWith("image/")) {
@@ -233,9 +255,18 @@ export interface FinalWireTokenEstimateInput {
  * No durable session aggregate or another route's usage can stand in for this.
  */
 export function createFinalWireUsageTracker() {
+    const fallbackLogged = new Set<string>();
     const served = new Map<
         string,
-        { envelope: string; prefix: string[]; parent: string; at: number }
+        {
+            envelope: string;
+            prefix: string[];
+            parent: string;
+            at: number;
+            signed: boolean;
+            estimate: number;
+            driftLogged?: boolean;
+        }
     >();
     const wireRows = (input: FinalWireTokenEstimateInput) =>
         input.messages.filter((message) =>
@@ -308,17 +339,80 @@ export function createFinalWireUsageTracker() {
                                 inputTokens,
                                 appendedMessages: rows.slice(previous.prefix.length),
                             };
+                        if (inputTokens > 0 && previous.signed && !previous.driftLogged) {
+                            sessionLog(
+                                sessionId,
+                                `thinking estimate drift: estimate=${previous.estimate} provider=${inputTokens} ratio=${(previous.estimate / inputTokens).toFixed(4)} (previous served request; telemetry only)`,
+                            );
+                            previous.driftLogged = true;
+                        }
                     }
                 }
             } catch {
                 /* If prior usage cannot be matched to this request, estimate from
                  * current calibration instead. */
             }
+            const fallbackSteps = opaqueThinkingFallbackSteps(input.messages);
+            if (fallbackSteps > 0 && !fallbackLogged.has(sessionId)) {
+                sessionLog(
+                    sessionId,
+                    `opaque thinking fallback: steps=${fallbackSteps} tokensPerStep=1000 (native usage unavailable; telemetry only)`,
+                );
+                fallbackLogged.add(sessionId);
+            }
             return estimateOutgoingWireForRefusal({ ...input, measuredPrefix }, limit);
         },
         capture(sessionId: string, input: FinalWireTokenEstimateInput): void {
+            const previous = served.get(sessionId);
             served.delete(sessionId);
             try {
+                const alreadyLogged = fallbackLogged.delete(sessionId);
+                const fallbackSteps = opaqueThinkingFallbackSteps(input.messages);
+                if (!alreadyLogged && fallbackSteps > 0)
+                    sessionLog(
+                        sessionId,
+                        `opaque thinking fallback: steps=${fallbackSteps} tokensPerStep=1000 (native usage unavailable; telemetry only)`,
+                    );
+                if (previous?.signed && !previous.driftLogged) {
+                    const [providerID, modelID] = JSON.parse(previous.envelope);
+                    const reply = [...input.messages].reverse().find((row) => {
+                        const info = row.info as unknown as Record<string, unknown> | undefined;
+                        const time = info?.time as { completed?: number } | undefined;
+                        return (
+                            info?.role === "assistant" &&
+                            info.parentID === previous.parent &&
+                            info.providerID === providerID &&
+                            info.modelID === modelID &&
+                            !info.error &&
+                            ["stop", "tool-calls", "length"].includes(String(info.finish)) &&
+                            typeof time?.completed === "number" &&
+                            time.completed >= previous.at
+                        );
+                    });
+                    const usage = (
+                        reply?.info as unknown as
+                            | {
+                                  tokens?: {
+                                      input?: number;
+                                      cache?: { read?: number; write?: number };
+                                  };
+                              }
+                            | undefined
+                    )?.tokens;
+                    const counts = [usage?.input, usage?.cache?.read, usage?.cache?.write];
+                    if (
+                        counts.every(
+                            (n) => typeof n === "number" && Number.isSafeInteger(n) && n >= 0,
+                        )
+                    ) {
+                        const inputTokens = counts.reduce<number>((sum, n) => sum + (n ?? 0), 0);
+                        if (inputTokens > 0)
+                            sessionLog(
+                                sessionId,
+                                `thinking estimate drift: estimate=${previous.estimate} provider=${inputTokens} ratio=${(previous.estimate / inputTokens).toFixed(4)} (previous served request; telemetry only)`,
+                            );
+                    }
+                }
                 const envelope = envelopeFor(input);
                 const rows = wireRows(input);
                 const parent = [...rows].reverse().find((row) => row.info.role === "user")?.info.id;
@@ -328,12 +422,65 @@ export function createFinalWireUsageTracker() {
                 // Keep this exact-match evidence small without limiting the larger durable replay cache.
                 if (prefix.reduce((sum, text) => sum + text.length, 0) > 4 * 1024 * 1024) return;
                 if (served.size >= 16) served.delete(served.keys().next().value!);
-                served.set(sessionId, { envelope, prefix, parent, at: Date.now() });
+                const signed = input.messages.some((row) =>
+                    row.parts.some((part) => {
+                        const p = part as {
+                            signature?: string;
+                            metadata?: {
+                                anthropic?: { signature?: string; redactedData?: string };
+                            };
+                        };
+                        return Boolean(p.signature || p.metadata?.anthropic?.signature);
+                    }),
+                );
+                served.set(sessionId, {
+                    envelope,
+                    prefix,
+                    parent,
+                    at: Date.now(),
+                    signed,
+                    estimate: signed ? estimateFinalWireInputTokens(input).tokens : 0,
+                });
             } catch {
                 /* A failed evidence capture must not reject a healthy request. */
             }
         },
     };
+}
+
+export function opaqueThinkingFallbackSteps(messages: readonly MessageLike[]): number {
+    return messages.filter((message) => {
+        if (!message || !Array.isArray(message.parts)) return false;
+        const usage = (
+            message.info as unknown as
+                | { tokens?: { reasoning?: number; output?: number } }
+                | undefined
+        )?.tokens;
+        return (
+            opaqueThinkingCost(usage?.reasoning, usage?.output).fallback &&
+            message.parts.some((part) => {
+                if (!part || typeof part !== "object") return false;
+                const p = part as {
+                    type?: string;
+                    ignored?: boolean;
+                    redacted?: boolean;
+                    text?: string;
+                    thinking?: string;
+                    signature?: string;
+                    metadata?: { anthropic?: { signature?: string; redactedData?: string } };
+                };
+                return (
+                    !p.ignored &&
+                    (p.type === "redacted_thinking" ||
+                        (p.type === "reasoning" &&
+                            (p.redacted ||
+                                p.metadata?.anthropic?.redactedData ||
+                                (!p.text && p.metadata?.anthropic?.signature))) ||
+                        (p.type === "thinking" && (p.redacted || (!p.thinking && p.signature))))
+                );
+            })
+        );
+    }).length;
 }
 
 export interface FinalWireTokenEstimate {
@@ -632,3 +779,6 @@ function hasCountableParts(message: MessageLike): boolean {
         }
     });
 }
+
+import { sessionLog } from "../../shared/logger";
+import { opaqueThinkingCost } from "./opaque-thinking";

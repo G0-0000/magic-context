@@ -65,7 +65,7 @@ function rustPassLogDecisions(
             inputTokens: 0,
             inputCount: Number(match[5]),
             identityDelta,
-            flush: reason === "explicit_flush",
+            flush: reason === "explicit_flush" || reason === "user_flush",
             source: "rust pass log",
         }];
     });

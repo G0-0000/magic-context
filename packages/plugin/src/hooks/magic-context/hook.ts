@@ -1038,7 +1038,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         onFlush: (sessionId) => {
             historyRefreshSessions.add(sessionId);
             systemPromptRefreshSessions.add(sessionId);
-            pendingMaterializationSessions.add(sessionId);
+            requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
         },
         // E3 (recomp) runs through the SHARED orchestrator (runManagedRecomp) so
         // the command path gets identical model fallback + live progress +
@@ -1325,3 +1325,5 @@ export async function createMagicContextHookAsync(
         openDatabaseForHook: () => database,
     });
 }
+
+import { requestPendingMaterialization } from "./pending-materialization";

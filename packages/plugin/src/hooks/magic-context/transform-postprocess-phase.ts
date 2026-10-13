@@ -1982,11 +1982,14 @@ export async function runPostTransformPhase(
     const reasoningMutationExemptMessage = findLatestAssistantReasoningMutationExemptMessage(
         args.messages,
     );
-    // `isExplicitFlush` reads pendingMaterializationSessions — the persistent
-    // "user wants pending ops + heuristics to run" signal. Survives across
-    // blocked defer passes (compartmentRunning) so /ctx-flush intent is not
-    // lost when historian races the user's command.
+    // Keep queued drops and cleanup work after a pass that cannot apply them.
+    // A user command, fit retry or system change may have requested that work;
+    // the request is not necessarily an explicit user flush.
     const pendingMaterializationAtPassStart = args.pendingMaterializationSessions.has(
+        args.sessionId,
+    );
+    const pendingOrigin = pendingMaterializationOrigin(
+        args.pendingMaterializationSessions,
         args.sessionId,
     );
     const deferredMaterializationAtPassStart = args.deferredMaterializationSessions.has(
@@ -2357,7 +2360,11 @@ export async function runPostTransformPhase(
         args.schedulerDecision === "execute" &&
         pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
     )
-        args.pendingMaterializationSessions.add(args.sessionId);
+        requestPendingMaterialization(
+            args.pendingMaterializationSessions,
+            args.sessionId,
+            "thinking_hold",
+        );
     const formatPendingOpsDepth = (): string => {
         const depth = getPendingOpsCount(args.db, args.sessionId);
         return depth === null ? "not loaded (deferred pass)" : String(depth);
@@ -2583,7 +2590,7 @@ export async function runPostTransformPhase(
             !isExplicitFlush &&
             !forceMaterialization;
         const reason = isExplicitFlush
-            ? "explicit_flush"
+            ? `pending_materialization origin=${pendingOrigin}`
             : deferredMaterialize
               ? "deferred_materialization"
               : forceMaterialization
@@ -2690,7 +2697,7 @@ export async function runPostTransformPhase(
     try {
         if (shouldApplyPendingOps) {
             const applyReason = isExplicitFlush
-                ? "explicit_flush"
+                ? `pending_materialization origin=${pendingOrigin}`
                 : deferredMaterialize
                   ? "deferred_materialization"
                   : foldBustsServedPrefixThisPass && args.schedulerDecision !== "execute"
@@ -3069,7 +3076,7 @@ export async function runPostTransformPhase(
                 !freezeM0M1 &&
                 !pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
             ) {
-                args.pendingMaterializationSessions.delete(args.sessionId);
+                clearPendingMaterialization(args.pendingMaterializationSessions, args.sessionId);
             }
             if (args.currentTurnId) {
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
@@ -3948,7 +3955,7 @@ export async function runPostTransformPhase(
     }
 
     const materializeReason =
-        m0MaterializeReason ?? (explicitMaterializedSuccessfully ? "explicit_flush" : null);
+        m0MaterializeReason ?? (explicitMaterializedSuccessfully ? pendingOrigin : null);
     const materialized =
         m0RematerializedThisPass ||
         explicitMaterializedSuccessfully ||
@@ -4663,7 +4670,11 @@ export function checkM0MutationDriftAndSignal(args: {
     const currentMaxMutationId = getMaxM0MutationId(args.db, args.sessionId) ?? 0;
     const cachedMaxMutationId = args.cachedM0MaxMutationId ?? 0;
     if (currentMaxMutationId !== cachedMaxMutationId) {
-        args.pendingMaterializationSessions.add(args.sessionId);
+        requestPendingMaterialization(
+            args.pendingMaterializationSessions,
+            args.sessionId,
+            "mutation_drift",
+        );
         args.historyRefreshSessions?.add(args.sessionId);
         sessionLog(
             args.sessionId,
@@ -4673,3 +4684,9 @@ export function checkM0MutationDriftAndSignal(args: {
     }
     return false;
 }
+
+import {
+    clearPendingMaterialization,
+    pendingMaterializationOrigin,
+    requestPendingMaterialization,
+} from "./pending-materialization";

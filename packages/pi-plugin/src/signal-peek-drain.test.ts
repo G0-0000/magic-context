@@ -379,6 +379,8 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 		const segment = code.slice(idx, idx + 500);
 		expect(segment).toContain("signalPiHistoryRefresh(sessionId)");
 		expect(segment).toContain("signalPiSystemPromptRefresh(sessionId)");
-		expect(segment).toContain("signalPiPendingMaterialization(sessionId)");
+		expect(segment).toContain(
+			'signalPiPendingMaterialization(sessionId, "system_hash")',
+		);
 	});
 });

@@ -4633,7 +4633,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             const fold = await pass();
             expect(fold.result.materialized).toBe(true);
             expect(lines).toContain(
-                "heuristics WILL RUN — reason=explicit_flush, context=20.0%, turn=null",
+                "heuristics WILL RUN — reason=pending_materialization origin=pending_materialization, context=20.0%, turn=null",
             );
             expect(getPendingOps(db, sessionId)).toHaveLength(0);
             expect(pendingMaterializationSessions.has(sessionId)).toBe(false);

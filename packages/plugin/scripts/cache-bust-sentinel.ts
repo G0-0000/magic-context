@@ -611,7 +611,7 @@ export function loadSessionDecisions(
             identityDelta: stringListField(row, "identity_delta", "render_identity_delta"),
             flush:
                 booleanField(row, "flush", "flush_applied", "explicit_flush") ||
-                materializeReason === "explicit_flush",
+                materializeReason === "explicit_flush" || materializeReason === "user_flush",
             source,
         };
     };
