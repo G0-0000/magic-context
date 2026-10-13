@@ -16,6 +16,7 @@ import {
 import { __test as decisionLogInternals } from "@magic-context/core/features/magic-context/transform-decision-log";
 import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import {
+	dropSlot,
 	getInMemorySlot,
 	resetLkgSlotsForTest,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
@@ -208,6 +209,21 @@ describe("Pi context handler LKG replay", () => {
 				expect(
 					JSON.stringify(repeated?.messages.slice(0, healthy.messages.length)),
 				).toBe(JSON.stringify(healthy.messages));
+				for (let passIndex = 0; passIndex < 3; passIndex++)
+					expect(
+						JSON.stringify(
+							(
+								await pass(
+									[
+										...structuredClone(raw),
+										userMessage("new turn", 5),
+										userMessage("next turn", 6),
+									],
+									[...ids, "new-1", "new-2"],
+								)
+							)?.messages,
+						),
+					).toBe(JSON.stringify(repeated?.messages));
 				updateSessionMeta(db, sessionId, { systemPromptHash: "sys-v2" });
 				const foldRaw = [
 					...structuredClone(raw),
@@ -221,8 +237,10 @@ describe("Pi context handler LKG replay", () => {
 						(message) => (message as { role: string }).role === "toolResult",
 					) ?? [];
 				expect(results).toHaveLength(tailKind === "two results" ? 2 : 1);
-				for (const message of results)
+				for (const message of results) {
 					expect(textOf(message)).toMatch(/^§\d+§ /);
+					expect(textOf(message).match(/§\d+§/g)).toHaveLength(1);
+				}
 				const decision = decisionLogInternals.getPendingPi(sessionId);
 				expect(decision?.lkgFrozenReleaseReason).toBe(
 					"recovery_tail_normalized",
@@ -243,6 +261,13 @@ describe("Pi context handler LKG replay", () => {
 							.get(sessionId) as { materialize_reason: string }
 					).materialize_reason,
 				).toContain("recovery_tail_normalized");
+				const normalizedTags = getTagsBySession(db, sessionId);
+				expect(
+					JSON.stringify(
+						(await pass(structuredClone(foldRaw), foldIds))?.messages,
+					),
+				).toBe(JSON.stringify(folded?.messages));
+				expect(getTagsBySession(db, sessionId)).toEqual(normalizedTags);
 				const toolTag = getTagsBySession(db, sessionId).find(
 					(tag) => tag.type === "tool" && tag.messageId === "call-1",
 				);
@@ -267,8 +292,18 @@ describe("Pi context handler LKG replay", () => {
 		"content mismatch",
 		"branch contraction",
 		"restart",
+		"branch revert",
+		"model switch",
+		"session clear",
+		"other session",
+		"signed restart",
+		"signed content mismatch",
+		"signed active restart",
+		"signed active content mismatch",
 	] as const) {
-		it(`rebuilds an unproven recovery prefix after ${change}`, async () => {
+		it.skipIf(
+			change.startsWith("signed") && process.env.LKG_REVIEW_SAFETY !== "1",
+		)(`rebuilds an unproven recovery prefix after ${change}`, async () => {
 			const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-unproven-"));
 			tempDirs.push(dir);
 			const db = createTestDb(join(dir, "context.db"));
@@ -281,13 +316,20 @@ describe("Pi context handler LKG replay", () => {
 				Object.assign(fake.pi, { getAllTools: () => [] });
 				registerPiContextHandler(fake.pi as never, { db });
 				const handler = fake.handlers.get("context") as PiHandler;
+				let switched = false;
+				let activeSessionId = sessionId;
+				const signed = change.startsWith("signed");
 				const pass = (raw: unknown[], ids: string[]) => {
-					const ctx = fakeContext(sessionId, dir, ids, raw as never);
+					const ctx = fakeContext(activeSessionId, dir, ids, raw as never);
 					Object.assign(ctx, {
 						getSystemPrompt: () => "Complete system.",
 						model: {
-							provider: "openai-codex",
-							id: "gpt-5.6-sol",
+							provider: signed ? "anthropic" : "openai-codex",
+							id: signed
+								? "claude-opus-5-5"
+								: switched
+									? "gpt-5.7"
+									: "gpt-5.6-sol",
 							contextWindow: 272000,
 							maxTokens: 68000,
 						},
@@ -297,34 +339,93 @@ describe("Pi context handler LKG replay", () => {
 				await pass([userMessage("head", 1)], ["head"]);
 				await nextImmediate();
 				const raw = [userMessage("head", 1), assistantMessage("served raw", 2)];
+				if (signed) {
+					Object.assign(raw[1], {
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-opus-5-5",
+					});
+					(raw[1] as { content: unknown[] }).content.unshift({
+						type: "thinking",
+						thinking: "bound thought",
+						thinkingSignature: "signed-proof",
+					});
+					raw.splice(1, 0, assistantMessage("unsigned before signature", 1.5));
+				}
+				const rawIds = raw.map((_, index) =>
+					index === 0 ? "head" : `tail-${index}`,
+				);
 				db.exec("PRAGMA busy_timeout=0");
 				locker.exec("BEGIN IMMEDIATE");
-				const busy = await pass(structuredClone(raw), ["head", "tail"]);
+				const busy = await pass(structuredClone(raw), rawIds);
 				expect(textOf(busy?.messages.at(-1))).toBe("served raw");
 				locker.exec("ROLLBACK");
 				let nextRaw = raw;
-				let nextIds = ["head", "tail"];
-				if (change === "content mismatch")
-					nextRaw = [raw[0], assistantMessage("edited raw", 2)];
+				let nextIds = rawIds;
+				if (change.includes("content mismatch"))
+					nextRaw = signed
+						? [userMessage("edited head", 1), ...raw.slice(1)]
+						: [raw[0], assistantMessage("edited raw", 2)];
 				if (change === "branch contraction") {
 					nextRaw = raw.slice(1);
-					nextIds = ["tail"];
+					nextIds = rawIds.slice(1);
 				}
-				if (change === "restart") clearContextHandlerSession(sessionId);
+				if (change === "branch revert") {
+					nextRaw = [raw[0]];
+					nextIds = ["head"];
+				}
+				if (change === "model switch") switched = true;
+				if (change === "session clear") {
+					clearContextHandlerSession(sessionId);
+					dropSlot(sessionId);
+				}
+				if (change === "other session") {
+					activeSessionId = `${sessionId}-different`;
+					sessions.add(activeSessionId);
+				}
+				if (change.includes("restart")) clearContextHandlerSession(sessionId);
 				const healthy = await pass(
-					[...structuredClone(nextRaw), userMessage("new turn", 3)],
-					[...nextIds, "new"],
+					change.includes("active")
+						? structuredClone(nextRaw)
+						: [...structuredClone(nextRaw), userMessage("new turn", 3)],
+					change.includes("active") ? nextIds : [...nextIds, "new"],
 				);
 				expect(JSON.stringify(healthy?.messages)).toContain(
-					change === "content mismatch" ? "edited raw" : "served raw",
+					change === "content mismatch"
+						? "edited raw"
+						: change === "branch revert"
+							? "new turn"
+							: "served raw",
 				);
-				expect(
-					decisionLogInternals.getPendingPi(sessionId)?.lkgFrozenReleaseReason,
-				).toBe(
-					change === "restart"
-						? "lkg_restart_rebuild"
-						: "lkg_recovery_input_rebuild",
-				);
+				if (change === "branch revert")
+					expect(JSON.stringify(healthy?.messages)).not.toContain("served raw");
+				if (signed) {
+					expect(JSON.stringify(busy?.messages)).toContain("signed-proof");
+					expect(JSON.stringify(busy?.messages)).toContain(
+						'"text":"unsigned before signature"',
+					);
+					expect(JSON.stringify(healthy?.messages)).not.toContain(
+						"signed-proof",
+					);
+					expect(JSON.stringify(healthy?.messages)).not.toContain(
+						"bound thought",
+					);
+				}
+				if (change === "session clear" || change === "other session") {
+					expect(textOf(healthy?.messages.at(-2))).toMatch(/^§\d+§ served raw/);
+					expect(
+						decisionLogInternals.getPendingPi(activeSessionId)
+							?.lkgFrozenReleaseReason,
+					).toBeUndefined();
+				} else
+					expect(
+						decisionLogInternals.getPendingPi(sessionId)
+							?.lkgFrozenReleaseReason,
+					).toBe(
+						change.includes("restart")
+							? "lkg_restart_rebuild"
+							: "lkg_recovery_input_rebuild",
+					);
 			} finally {
 				if (locker.inTransaction) locker.exec("ROLLBACK");
 				closeQuietly(locker);

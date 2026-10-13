@@ -1,0 +1,116 @@
+{
+  "read_utc": "2026-10-13T12:18:48.068325+00:00",
+  "root": "/var/folders/18/257zzylx4h1gbkcvs4cnpqqc0000gn/T",
+  "method": "Read bytes once per file; count literal recovery/refusal labels. Logs may interleave processes and rotation truncates the oldest line. No stores opened.",
+  "files": [
+    {
+      "host": "opencode",
+      "file": "magic-context.log.1",
+      "bytes": 33552916,
+      "lines": 205629,
+      "first_timestamp": "2026-10-12T22:41:03.274Z",
+      "last_timestamp": "2026-10-13T07:58:03.267Z",
+      "sha256": "b9bd5a5d70e7cad3272102826f7e5505f1310a040da608d819b46f5f5fe0c383",
+      "counts": {
+        "busy_replays": 0,
+        "busy_refusals": 0,
+        "all_lkg_refusals": 0,
+        "hydrations": 56,
+        "scheduler_or_rust_pass_lines": 5048,
+        "context_entry_lines": 3872
+      },
+      "events": []
+    },
+    {
+      "host": "opencode",
+      "file": "magic-context.log",
+      "bytes": 25253483,
+      "lines": 151441,
+      "first_timestamp": "2026-10-13T07:58:10.114Z",
+      "last_timestamp": "2026-10-13T12:18:45.237Z",
+      "sha256": "6ec7d90a47b27f9f50ebda19f221c121bd170c4e1dbd4c07ceee994fdd7a2223",
+      "counts": {
+        "busy_replays": 0,
+        "busy_refusals": 0,
+        "all_lkg_refusals": 0,
+        "hydrations": 1,
+        "scheduler_or_rust_pass_lines": 4222,
+        "context_entry_lines": 2614
+      },
+      "events": []
+    },
+    {
+      "host": "pi",
+      "file": "magic-context.log.1",
+      "bytes": 33554432,
+      "lines": 234148,
+      "first_timestamp": "2026-10-11T00:49:30.464Z",
+      "last_timestamp": "2026-10-12T23:00:08.201Z",
+      "sha256": "fb3ef99f597383b38d90daf33ffa5bcaa6ffd9316c993fa50311cc4aec0bb5e5",
+      "counts": {
+        "busy_replays": 5,
+        "busy_refusals": 0,
+        "all_lkg_refusals": 0,
+        "hydrations": 12,
+        "scheduler_or_rust_pass_lines": 4265,
+        "context_entry_lines": 4256
+      },
+      "events": [
+        {
+          "line": 8882,
+          "timestamp": "2026-10-11T12:39:58.764Z",
+          "result": "replay"
+        },
+        {
+          "line": 31013,
+          "timestamp": "2026-10-11T14:19:28.123Z",
+          "result": "replay"
+        },
+        {
+          "line": 89080,
+          "timestamp": "2026-10-11T19:41:36.814Z",
+          "result": "replay"
+        },
+        {
+          "line": 93264,
+          "timestamp": "2026-10-11T20:18:24.830Z",
+          "result": "replay"
+        },
+        {
+          "line": 128571,
+          "timestamp": "2026-10-12T02:57:12.585Z",
+          "result": "replay"
+        }
+      ]
+    },
+    {
+      "host": "pi",
+      "file": "magic-context.log",
+      "bytes": 3744953,
+      "lines": 26134,
+      "first_timestamp": "2026-10-12T23:00:11.129Z",
+      "last_timestamp": "2026-10-13T12:16:56.077Z",
+      "sha256": "13933a45637a19c494855cba3b52a383e473ddb63693811484318f54c124136b",
+      "counts": {
+        "busy_replays": 2,
+        "busy_refusals": 0,
+        "all_lkg_refusals": 0,
+        "hydrations": 0,
+        "scheduler_or_rust_pass_lines": 456,
+        "context_entry_lines": 458
+      },
+      "events": [
+        {
+          "line": 11819,
+          "timestamp": "2026-10-13T08:57:37.574Z",
+          "result": "replay"
+        },
+        {
+          "line": 12951,
+          "timestamp": "2026-10-13T09:29:38.609Z",
+          "result": "replay"
+        }
+      ]
+    }
+  ]
+}

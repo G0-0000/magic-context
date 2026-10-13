@@ -274,6 +274,10 @@ describe("a degraded transform pass is never served", () => {
             expect(JSON.stringify(await session.serve(structuredClone(raw)))).toBe(
                 JSON.stringify(healthy),
             );
+            for (let pass = 0; pass < 3; pass++)
+                expect(JSON.stringify(await session.serve(structuredClone(raw)))).toBe(
+                    JSON.stringify(healthy),
+                );
             updateSessionMeta(session.db, sessionId, { systemPromptHash: "system-after-change" });
             const folded = await session.serve(structuredClone(raw));
             expect(JSON.stringify(folded.find((message) => message.info.id === "a3"))).toMatch(
@@ -283,9 +287,19 @@ describe("a degraded transform pass is never served", () => {
                 (tag) => tag.messageId === "a3:p0",
             );
             if (!tag) throw new Error("Expected a normalized text target");
+            const normalizedTags = getTagsBySession(session.db, sessionId);
+            expect(
+                String(folded.find((message) => message.info.id === "a3")?.parts[0].text).match(
+                    /§\d+§/g,
+                ),
+            ).toHaveLength(1);
             expect(decisionLogInternals.getPending(sessionId)?.lkgFrozenReleaseReason).toBe(
                 "recovery_tail_normalized",
             );
+            expect(JSON.stringify(await session.serve(structuredClone(raw)))).toBe(
+                JSON.stringify(folded),
+            );
+            expect(getTagsBySession(session.db, sessionId)).toEqual(normalizedTags);
             queuePendingOp(session.db, sessionId, tag.tagNumber, "drop", 1);
             updateSessionMeta(session.db, sessionId, { systemPromptHash: "system-third-change" });
             await session.serve(structuredClone(raw));
@@ -296,6 +310,94 @@ describe("a degraded transform pass is never served", () => {
             ).toBe("dropped");
         }, 30_000);
     }
+    for (const generation of ["v1", "v2"] as const) {
+        it(`review ${generation}: signed busy tail refuses an unproven bound prefix`, async () => {
+            const sessionId = `review-signed-${generation}`;
+            const session = await sessionWithPersistedDrop(sessionId, generation);
+            session.deps.liveModelBySession = new Map([
+                [sessionId, { providerID: "anthropic", modelID: "claude-opus-5-5" }],
+            ]);
+            await session.serve(history(sessionId));
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            const path = getDatabasePath(session.db);
+            if (!path) throw new Error("Expected throwaway database");
+            const raw = [
+                ...nextTurn(sessionId),
+                {
+                    info: { id: "a4", role: "assistant", sessionID: sessionId, finish: "stop" },
+                    parts: [
+                        { type: "thinking", thinking: "bound thought", signature: "signed-proof" },
+                        { type: "text", text: "signed answer" },
+                    ],
+                },
+                {
+                    info: { id: "u5", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "close the signed turn" }],
+                },
+            ];
+            session.db.exec("PRAGMA busy_timeout=0");
+            heldLock = new Database(path);
+            heldLock.exec("BEGIN IMMEDIATE");
+            await expect(session.serve(structuredClone(raw))).rejects.toThrow(STORAGE_BUSY_MESSAGE);
+            releaseLock();
+        }, 30_000);
+        for (const change of [
+            "content mismatch",
+            "branch contraction",
+            "branch revert",
+            "model switch",
+            "session clear",
+            "other session",
+        ] as const) {
+            it(`review ${generation}: ${change} refuses busy replay during an obligation`, async () => {
+                const sessionId = `review-${generation}-${change}`;
+                const session = await sessionWithPersistedDrop(sessionId, generation);
+                await session.serve(history(sessionId));
+                await new Promise<void>((resolve) => setImmediate(resolve));
+                const path = getDatabasePath(session.db);
+                if (!path) throw new Error("Expected throwaway database");
+                session.db.exec("PRAGMA busy_timeout=0");
+                heldLock = new Database(path);
+                heldLock.exec("BEGIN IMMEDIATE");
+                const busy = await session.serve(nextTurn(sessionId));
+                expect(String(busy.at(-1)?.parts[0].text)).toBe("follow-up");
+                let next = nextTurn(sessionId);
+                if (change === "content mismatch") next.at(-1)!.parts[0].text = "edited raw";
+                if (change === "branch contraction") next = next.slice(1);
+                if (change === "branch revert")
+                    next = [
+                        ...history(sessionId),
+                        {
+                            info: { id: "new-branch", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "different branch" }],
+                        },
+                    ];
+                if (change === "model switch") {
+                    next[0].info.model = { providerID: "openai", modelID: "gpt-4.1" };
+                    session.deps.liveModelBySession = new Map([
+                        [sessionId, { providerID: "openai", modelID: "gpt-4.1" }],
+                    ]);
+                }
+                if (change === "session clear") dropSlot(sessionId);
+                if (change === "other session")
+                    for (const message of next) message.info.sessionID = "unrelated-session";
+                await expect(session.serve(structuredClone(next))).rejects.toThrow();
+                releaseLock();
+                if (change !== "other session") {
+                    const rebuilt = await session.serve(structuredClone(next));
+                    if (change === "content mismatch")
+                        expect(JSON.stringify(rebuilt)).toContain("edited raw");
+                    if (change === "branch revert") {
+                        expect(JSON.stringify(rebuilt)).toContain("different branch");
+                        expect(JSON.stringify(rebuilt)).not.toContain("follow-up");
+                    }
+                    if (change === "session clear")
+                        expect(JSON.stringify(rebuilt.at(-1))).toMatch(/§\d+§ follow-up/);
+                }
+            }, 30_000);
+        }
+    }
+
     it("keeps seeded ordinary passes byte-identical in pure replay", async () => {
         const sessionId = "ses-pure-replay-degraded-pass";
         const session = await sessionWithPersistedDrop(sessionId);
