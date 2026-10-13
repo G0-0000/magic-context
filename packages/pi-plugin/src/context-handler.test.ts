@@ -1019,9 +1019,7 @@ describe("Pi scheduler decision observability", () => {
 				undefined,
 				fakeContext(sessionId) as never,
 			);
-			expect((ack.content[0] as { text: string }).text).toContain(
-				`Held: §${tag.tagNumber} is inside the protected working set`,
-			);
+			expect((ack.content[0] as { text: string }).text).toBe("1 tag stamped.");
 			const status = () =>
 				getTagsBySession(db, sessionId).find(
 					(row) => row.tagNumber === tag.tagNumber,

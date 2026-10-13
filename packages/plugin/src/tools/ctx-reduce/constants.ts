@@ -11,3 +11,16 @@ export const CTX_REDUCE_SELF_STAMP_MESSAGE_TEMPLATE =
 export function ctxReduceSelfStampMessage(tagNumber: number): string {
     return CTX_REDUCE_SELF_STAMP_MESSAGE_TEMPLATE.replace("§N§", `§${tagNumber}§`);
 }
+
+export function formatCtxReduceReply(stampedCount: number, selfStampCount = 0): string {
+    const parts: string[] = [];
+    if (stampedCount > 0) {
+        parts.push(`${stampedCount} tag${stampedCount === 1 ? "" : "s"} stamped.`);
+    }
+    if (selfStampCount > 0) {
+        parts.push(
+            `${selfStampCount} ${selfStampCount === 1 ? "was" : "were"} a ctx_reduce call; leave those alone, they are cleaned up automatically.`,
+        );
+    }
+    return parts.join(" ");
+}
