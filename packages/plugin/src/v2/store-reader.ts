@@ -9,6 +9,7 @@ import {
     resolveOpenCodeDbPath,
     sourceOpenCodeDatabaseFilename,
 } from "../shared/opencode-db-path";
+import { sameProjectDirectory } from "../shared/project-directory-key";
 import { Database } from "../shared/sqlite";
 
 /** Compatibility export; shared/opencode-db-path.ts is the single filename authority. */
@@ -569,10 +570,16 @@ export class V2StoreReader {
     /**
      * The most recently updated top-level user session the host created in
      * `directory`, or undefined when there is none. Children, Magic Context's
-     * own hidden runs and archived sessions are never returned. The directory
-     * must match exactly: OpenCode 2 puts a child session in its parent's
+     * own hidden runs and archived sessions are never returned. The session must
+     * be in this very directory: OpenCode 2 puts a child session in its parent's
      * location, and only the plugin context of that location recognises the
      * child, so a parent from a sibling checkout would strand the run.
+     *
+     * The directory is compared by `sameProjectDirectory`, not by SQL equality.
+     * OpenCode 2 on Windows stores `D:/work/app` while the plugin's location is
+     * `D:\work\app`; an exact match found no session there, and every scheduled
+     * task that needs a child session was skipped. Roots are read newest first,
+     * a page at a time, and the first one in this directory wins.
      */
     latestRootSessionInDirectory(directory: string): string | undefined {
         const columns = new Set(
@@ -582,13 +589,19 @@ export class V2StoreReader {
         );
         const archived = columns.has("time_archived") ? " AND time_archived IS NULL" : "";
         const order = columns.has("time_updated") ? "time_updated DESC, id DESC" : "id DESC";
-        const row = this.prepare(
-            `SELECT id FROM session_v2
-                 WHERE directory = ? AND parent_id IS NULL${archived}
+        const page = this.prepare(
+            `SELECT id, COALESCE(directory, '') AS directory FROM session_v2
+                 WHERE parent_id IS NULL${archived}
                    AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
-                 ORDER BY ${order} LIMIT 1`,
-        ).get(directory) as { id: string } | undefined;
-        return row?.id;
+                 ORDER BY ${order} LIMIT ? OFFSET ?`,
+        );
+        const pageSize = 500;
+        for (let offset = 0; ; offset += pageSize) {
+            const rows = page.all(pageSize, offset) as Array<{ id: string; directory: string }>;
+            const match = rows.find((row) => sameProjectDirectory(row.directory, directory));
+            if (match) return match.id;
+            if (rows.length < pageSize) return undefined;
+        }
     }
 
     /** Native user activity on root sessions; internal children must never become

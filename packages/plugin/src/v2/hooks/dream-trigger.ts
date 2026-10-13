@@ -7,6 +7,7 @@ import { openCurrentDatabase as openDatabase } from "../../features/magic-contex
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { sameProjectDirectory } from "../../shared/project-directory-key";
 import { V2RetrospectiveRawProvider } from "../retrospective-raw-provider";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { selectRunnableDreamTasks } from "./dream-manual";
@@ -23,7 +24,10 @@ import type { V2Context } from "./types";
  * location, and its turns would reach the other instance, which never
  * registered the run: the child would run unshaped, in the other directory,
  * under the user's own permissions. A session that cannot be read is treated
- * as foreign.
+ * as foreign. Directories are compared by `sameProjectDirectory`, so two
+ * spellings of this location (separators, Windows drive-letter case, a
+ * trailing separator) still count as this location, and any other directory
+ * does not.
  */
 export async function sessionInThisLocation(
     context: Pick<V2Context, "location" | "session">,
@@ -36,7 +40,8 @@ export async function sessionInThisLocation(
         return false;
     }
     return (
-        location?.directory === context.location.directory &&
+        location?.directory !== undefined &&
+        sameProjectDirectory(location.directory, context.location.directory) &&
         (location.workspaceID ?? "") === (context.location.workspaceID ?? "")
     );
 }
