@@ -7874,6 +7874,7 @@ impl McHandler {
                     &mut response,
                     &ctx_reduce_self_stamps,
                     &accepted_tag_numbers,
+                    0,
                 );
                 return respond(response);
             }
@@ -7908,6 +7909,7 @@ impl McHandler {
                     &mut response,
                     &ctx_reduce_self_stamps,
                     &accepted_tag_numbers,
+                    0,
                 );
                 respond(response)
             }
@@ -7932,6 +7934,7 @@ impl McHandler {
                     &mut resp,
                     &ctx_reduce_self_stamps,
                     &accepted_tag_numbers,
+                    outcome.queued as usize,
                 );
                 respond(resp)
             }
@@ -13177,7 +13180,7 @@ impl McHandler {
             .iter()
             .copied()
             .collect::<HashSet<_>>();
-        let ctx_reduce_self_stamp_note = ctx_reduce_self_stamp_notes(&ctx_reduce_self_stamps);
+        let ctx_reduce_self_stamp_count = ctx_reduce_self_stamps.len();
         let pending_ids = pending
             .iter()
             .map(|drop| drop.target_id.as_str())
@@ -13208,13 +13211,16 @@ impl McHandler {
             })
             .collect::<Vec<_>>();
         if queueable.is_empty() {
-            if !ctx_reduce_self_stamp_note.is_empty()
-                && unknown.is_empty()
-                && already_queued.is_empty()
-            {
-                return mcp_text_result(ctx_reduce_self_stamp_note, false);
+            if unknown.is_empty() && !already_queued.is_empty() {
+                return mcp_text_result(
+                    ctx_reduce_reply(already_queued.len(), ctx_reduce_self_stamp_count),
+                    false,
+                );
             }
-            let reason = ctx_reduce_ack_details(&unknown, &already_queued);
+            if !ctx_reduce_self_stamps.is_empty() && unknown.is_empty() {
+                return mcp_text_result(ctx_reduce_reply(0, ctx_reduce_self_stamp_count), false);
+            }
+            let reason = ctx_reduce_ack_details(&unknown);
             let mut refusal = format!(
                 "Refused: no valid tags to queue. {}",
                 if reason.is_empty() {
@@ -13223,70 +13229,25 @@ impl McHandler {
                     reason
                 }
             );
-            if !ctx_reduce_self_stamp_note.is_empty() {
+            let self_stamp_note = ctx_reduce_reply(0, ctx_reduce_self_stamp_count);
+            if !self_stamp_note.is_empty() {
                 refusal.push(' ');
-                refusal.push_str(&ctx_reduce_self_stamp_note);
+                refusal.push_str(&self_stamp_note);
             }
             return tool_error_result(refusal);
         }
 
-        let loaded = match store.load(session_id) {
-            Ok(loaded) => loaded,
-            Err(error) => return tool_error_result(format!("Error: {error}")),
-        };
-        let floor = loaded
-            .meta
-            .protected_tokens_effective
-            .or_else(|| {
-                protection_window::pre_snapshot_floor(store.tag_cache_namespace(), session_id)
-            })
-            .unwrap_or_else(|| protection_window::derive_default_floor(200_000));
-        let window = protection_window::ProtectionWindow::from_persisted_rows_calibrated(
-            &tags,
-            floor,
-            loaded
-                .meta
-                .decision_calibration
-                .as_ref()
-                .and_then(decision_calibration::DecisionCalibration::from_frozen)
-                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral)
-                .tools_ratio,
-        );
-        let (deferred, immediate): (Vec<_>, Vec<_>) =
-            queueable.iter().copied().partition(|number| {
-                window
-                    .tag_numbers
-                    .tag_numbers
-                    .contains(&protection_window::TagNumber(*number as i64))
-                    || by_number.get(number).is_some_and(|tag| {
-                        loaded.meta.protected_tool_block_ids.contains(&tag.block_id)
-                    })
-            });
-        let mut details = Vec::new();
-        if !immediate.is_empty() {
-            details.push(format!("drop {}", format_tag_numbers(&immediate)));
-        }
-        let validation_detail = ctx_reduce_ack_details(&unknown, &already_queued);
-        if !validation_detail.is_empty() {
-            details.push(validation_detail);
-        }
+        let stamped_count = queueable.len() + already_queued.len();
+        let validation_detail = ctx_reduce_ack_details(&unknown);
         // This acknowledgement validates the durable tag state but deliberately does not
         // mutate it. The response observer owns asynchronous delivery on this facade.
-        let mut reply = if details.is_empty() {
-            String::new()
-        } else {
-            format!("Queued: {}.", details.join("; "))
-        };
-        if !deferred.is_empty() {
+        let mut reply = ctx_reduce_reply(stamped_count, ctx_reduce_self_stamp_count);
+        if !validation_detail.is_empty() {
             if !reply.is_empty() {
                 reply.push(' ');
             }
-            reply.push_str(&ctx_reduce_held_reply(&deferred));
-        }
-        reply.push_str(" Marking QUEUES content for release. It stays fully visible to you until it is actually released, which may be the next turn or many turns later.");
-        if !ctx_reduce_self_stamp_note.is_empty() {
-            reply.push(' ');
-            reply.push_str(&ctx_reduce_self_stamp_note);
+            reply.push_str(&validation_detail);
+            reply.push('.');
         }
         mcp_text_result(reply, false)
     }
@@ -17223,16 +17184,7 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
     }
 }
 
-fn ctx_reduce_held_reply(held: &[u64]) -> String {
-    let tags = format_tag_numbers(held);
-    if held.len() == 1 {
-        format!("Held: {tags} is inside the protected working set; it applies once newer work displaces it.")
-    } else {
-        format!("Held: {tags} are inside the protected working set; they apply once newer work displaces them.")
-    }
-}
-
-fn ctx_reduce_ack_details(unknown: &[u64], already_queued: &[u64]) -> String {
+fn ctx_reduce_ack_details(unknown: &[u64]) -> String {
     let mut details = Vec::new();
     if !unknown.is_empty() {
         details.push(format!(
@@ -17240,20 +17192,24 @@ fn ctx_reduce_ack_details(unknown: &[u64], already_queued: &[u64]) -> String {
             format_plain_tag_numbers(unknown)
         ));
     }
-    if !already_queued.is_empty() {
-        details.push(format!(
-            "tags {} already queued",
-            format_plain_tag_numbers(already_queued)
-        ));
-    }
     details.join("; ")
 }
 
-const CTX_REDUCE_SELF_STAMP_MESSAGE_TEMPLATE: &str =
-    "§N§ is a ctx_reduce call; leave those alone, they are cleaned up automatically.";
-
-fn ctx_reduce_self_stamp_message(tag_number: u64) -> String {
-    CTX_REDUCE_SELF_STAMP_MESSAGE_TEMPLATE.replace("§N§", &format!("§{tag_number}§"))
+fn ctx_reduce_reply(stamped_count: usize, self_stamp_count: usize) -> String {
+    let mut parts = Vec::new();
+    if stamped_count > 0 {
+        parts.push(format!(
+            "{stamped_count} tag{} stamped.",
+            if stamped_count == 1 { "" } else { "s" }
+        ));
+    }
+    if self_stamp_count > 0 {
+        parts.push(format!(
+            "{self_stamp_count} {} a ctx_reduce call; leave those alone, they are cleaned up automatically.",
+            if self_stamp_count == 1 { "was" } else { "were" }
+        ));
+    }
+    parts.join(" ")
 }
 
 fn cached_tool_name_for_tag(
@@ -17291,17 +17247,16 @@ fn ctx_reduce_self_stamp_tag_numbers(
     refused
 }
 
-fn ctx_reduce_self_stamp_notes(numbers: &[u64]) -> String {
-    numbers
-        .iter()
-        .map(|number| ctx_reduce_self_stamp_message(*number))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn add_ctx_reduce_stamp_fields(response: &mut Value, refused: &[u64], accepted: &[u64]) {
+fn add_ctx_reduce_stamp_fields(
+    response: &mut Value,
+    refused: &[u64],
+    accepted: &[u64],
+    queued: usize,
+) {
     if !refused.is_empty() {
         response["ctx_reduce_self_stamps"] = json!(refused);
+    }
+    if !refused.is_empty() || accepted.len() != queued {
         response["ctx_reduce_queued_tags"] = json!(accepted);
     }
 }
@@ -17310,14 +17265,6 @@ fn format_plain_tag_numbers(numbers: &[u64]) -> String {
     numbers
         .iter()
         .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn format_tag_numbers(numbers: &[u64]) -> String {
-    numbers
-        .iter()
-        .map(|number| format!("§{number}§"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -31220,9 +31167,26 @@ mod tests {
     }
 
     #[test]
-    fn ctx_reduce_held_copy_has_no_totals_or_countdown() {
-        assert_eq!(ctx_reduce_held_reply(&[7]), "Held: §7§ is inside the protected working set; it applies once newer work displaces it.");
-        assert_eq!(ctx_reduce_held_reply(&[7, 8]), "Held: §7§, §8§ are inside the protected working set; they apply once newer work displaces them.");
+    fn ctx_reduce_reply_matches_shared_cases() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            label: String,
+            stamped: usize,
+            self_stamps: usize,
+            expected: String,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!(
+            "../../../packages/plugin/src/tools/ctx-reduce/reply-cases.json"
+        ))
+        .unwrap();
+        for case in cases {
+            assert_eq!(
+                ctx_reduce_reply(case.stamped, case.self_stamps),
+                case.expected,
+                "{}",
+                case.label
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -31287,15 +31251,7 @@ mod tests {
     }
 
     #[test]
-    fn ctx_reduce_self_stamp_message_matches_typescript_golden() {
-        let golden =
-            include_str!("../../../packages/plugin/src/tools/ctx-reduce/self-stamp-message.golden")
-                .trim_end();
-        assert_eq!(CTX_REDUCE_SELF_STAMP_MESSAGE_TEMPLATE, golden);
-        assert_eq!(
-            ctx_reduce_self_stamp_message(41),
-            golden.replace("§N§", "§41§")
-        );
+    fn ctx_reduce_self_stamp_identification_uses_cached_call() {
         let cached_calls = vec![cached_tool_call("call-mid", "ctx_reduce")];
         assert_eq!(
             cached_tool_name_for_tag(Some(&cached_calls), "call-mid#0").as_deref(),
@@ -31353,21 +31309,15 @@ mod tests {
         );
 
         let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1,2,3" })).await);
-        assert!(
-            ack.contains("Held: §2§, §3§ are inside the protected working set"),
-            "{ack}"
+        assert_eq!(
+            ack,
+            "2 tags stamped. 1 was a ctx_reduce call; leave those alone, they are cleaned up automatically."
         );
-        assert!(!ack.contains("drop §1§"), "{ack}");
-        assert!(
-            ack.contains(
-                "§1§ is a ctx_reduce call; leave those alone, they are cleaned up automatically."
-            ),
-            "{ack}"
-        );
+        assert!(!ack.contains("§1§"), "{ack}");
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
         assert_eq!(
             tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1" })).await),
-            "§1§ is a ctx_reduce call; leave those alone, they are cleaned up automatically."
+            "1 was a ctx_reduce call; leave those alone, they are cleaned up automatically."
         );
 
         let delivered = handler.handle_agent_drops_value(
@@ -31464,12 +31414,7 @@ mod tests {
                 )
                 .await,
             );
-            assert_eq!(
-                ack,
-                ctx_reduce_self_stamp_message(case.drop as u64),
-                "{}",
-                case.label
-            );
+            assert_eq!(ack, ctx_reduce_reply(0, 1), "{}", case.label);
             let delivered = tool_body(handler.handle_agent_drops_value(
                 7,
                 json!({
@@ -31519,7 +31464,7 @@ mod tests {
             ],
         );
         let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop":"2,1,3"})).await);
-        assert_eq!(ack, "Queued: drop §3§. Held: §1§ is inside the protected working set; it applies once newer work displaces it. Marking QUEUES content for release. It stays fully visible to you until it is actually released, which may be the next turn or many turns later. §2§ is a ctx_reduce call; leave those alone, they are cleaned up automatically.");
+        assert_eq!(ack, "2 tags stamped. 1 was a ctx_reduce call; leave those alone, they are cleaned up automatically.");
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
         let delivered = tool_body(handler.handle_agent_drops_value(7, json!({
             "method":"agent_drops.append", "session_id":"ses", "drop":"2,1,3", "command_id":"mixed-reply",
@@ -31564,8 +31509,7 @@ mod tests {
             )
             .await,
         );
-        assert!(mixed_ack.contains("drop §1§"));
-        assert!(mixed_ack.contains("Held: §21§ is inside the protected working set; it applies once newer work displaces it."));
+        assert!(mixed_ack.contains("2 tags stamped."));
         assert!(mixed_ack.contains("tags 99, 100 not found"));
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
@@ -31593,18 +31537,20 @@ mod tests {
         );
         assert_eq!(
             tool_body(retry),
-            json!({ "ok": true, "queued": 0, "duplicate": true })
+            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1, 21] })
         );
         assert_eq!(
             store.load_pending_agent_drops("ses").unwrap(),
             pending_after_delivery
         );
 
+        let already_queued_ack =
+            tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 21" })).await);
+        assert_eq!(already_queued_ack, "2 tags stamped.");
+
         let queued_ack =
             tool_text(call_facade(&handler, "ctx_reduce", json!({ "drop": "1, 2, 99" })).await);
-        assert!(queued_ack.contains("Held: §2§ is inside the protected working set; it applies once newer work displaces it."), "{queued_ack}");
-        assert!(queued_ack.contains("tags 1 already queued"));
-        assert!(queued_ack.contains("tags 99 not found"));
+        assert_eq!(queued_ack, "2 tags stamped. tags 99 not found.");
 
         let refused = tool_body(call_facade(&handler, "ctx_reduce", json!({ "drop": "99" })).await);
         assert_eq!(refused["isError"], json!(true));
@@ -31721,7 +31667,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_tool_ctx_reduce_ack_reuses_selection_snapshot() {
+    async fn protected_tool_ctx_reduce_ack_counts_held_tags_and_delivery_preserves_hold() {
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, _project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
@@ -31746,10 +31692,7 @@ mod tests {
             .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
         let ack = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop":"2"})).await);
-        assert!(
-            ack.contains("Held: §2§ is inside the protected working set"),
-            "{ack}"
-        );
+        assert_eq!(ack, "1 tag stamped.");
         let delivery = tool_body(handler.handle_agent_drops_value(
             7,
             json!({"session_id":"ses", "drop":"2", "command_id":"held-tool-command"}),
@@ -35451,7 +35394,10 @@ mod tests {
         let pending = store.load_pending_agent_drops("ses").unwrap();
 
         let retry = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(retry, json!({ "ok": true, "queued": 0, "duplicate": true }));
+        assert_eq!(
+            retry,
+            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1] })
+        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap(), pending);
     }
 
@@ -35572,7 +35518,10 @@ mod tests {
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let retry = queue_drop_command_with_id(&handler, "tool-use-1");
-        assert_eq!(retry, json!({ "ok": true, "queued": 0, "duplicate": true }));
+        assert_eq!(
+            retry,
+            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1] })
+        );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let new_request = queue_drop_command_with_id(&handler, "tool-use-2");
@@ -35675,7 +35624,10 @@ mod tests {
             HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(repeat, json!({ "ok": true, "queued": 0 }));
+        assert_eq!(
+            repeat,
+            json!({ "ok": true, "queued": 0, "ctx_reduce_queued_tags": [1, 2] })
+        );
 
         // Malformed range syntax is a typed bad_request, nothing partially queued.
         match handler.handle_agent_drops_value(
@@ -35736,7 +35688,10 @@ mod tests {
             HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
             other => panic!("unexpected handler outcome: {other:?}"),
         };
-        assert_eq!(retry, json!({ "ok": true, "queued": 0, "duplicate": true }));
+        assert_eq!(
+            retry,
+            json!({ "ok": true, "queued": 0, "duplicate": true, "ctx_reduce_queued_tags": [1] })
+        );
         assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     }
 
