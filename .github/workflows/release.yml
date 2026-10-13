@@ -644,6 +644,13 @@ jobs:
             echo "Draft them under .cortexkit/alfonso/release-notes/ before tagging the release."
             exit 1
           fi
+          # Release-note drafts are often checked against the code in an audit
+          # appendix. That audit is for the maintainer; it must never become
+          # the public release body (it did once, in v0.49.0).
+          if grep -n -i -E '^#{1,6} .*(appendix|commit audit)' "$notes_file"; then
+            echo "::error::$notes_file contains an internal audit section. Remove it before tagging."
+            exit 1
+          fi
           echo "Using $notes_file as the release body."
           wc -l "$notes_file"
 
@@ -669,9 +676,11 @@ jobs:
                   or not s.strip()
                   or s.startswith("#")
                   or re.match(r"^\s*([-*+]|\d+\.)\s", s)
+                  or s.lstrip().startswith("|")
               )
               if structural or not out or not out[-1].strip() \
-                      or out[-1].startswith("#") or out[-1].lstrip().startswith("```"):
+                      or out[-1].startswith("#") or out[-1].lstrip().startswith("```") \
+                      or out[-1].lstrip().startswith("|"):
                   out.append(s)
               else:
                   out[-1] = out[-1].rstrip() + " " + s.strip()
