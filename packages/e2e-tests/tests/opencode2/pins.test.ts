@@ -9,7 +9,8 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 	// The SHA-256 pin for `packages/plugin/src/v2/server.ts` changed when startup
 	// began registering Magic Context's package version in
 	// `globalThis[Symbol.for("cortexkit.standalone-plugins")]`, the Map shared by
-	// standalone plugins.
+	// standalone plugins. The `packages/plugin/src/index.ts` pin changed when a
+	// comment there stopped pointing at a report that moved out of `docs/`.
 	for (const [path, expected] of Object.entries(pins)) {
 		let bytes = readFileSync(resolve(root, path), "utf8");
 		if (path === "packages/plugin/src/index.ts") {
