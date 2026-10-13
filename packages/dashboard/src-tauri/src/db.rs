@@ -8408,7 +8408,7 @@ pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
 pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let affected = tx.execute(
-+        "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
+        "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
         params![now_millis(), id],
     )?;
     // Same invariant as dismiss/delete: user_memories render into the cached
