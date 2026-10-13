@@ -61,6 +61,9 @@ export function normalizeError(error: string | null): string {
         .replace(/\b[a-f0-9]{8}(?:-[a-f0-9]{1,12})+/gi, "<id>")
         .replace(/\b(?:0x[a-f0-9]+|[a-f0-9]{16,}|(?:session|task|run|agent|invocation|request|trace|job|msg|wi|ct)_[a-z0-9_-]+)\b/gi, "<id>")
         .replace(/\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|secs?|minutes?|mins?|hours?|hrs?)\b/gi, "<duration>")
+        // Compact countdowns such as "34h 33m 37s" change on every report of the
+        // same failure, so they must collapse into one class.
+        .replace(/\b\d+[dhms](?:\s+\d+[dhms])*\b/gi, "<duration>")
         .replace(/\b\d+(?:\.\d+)?\b/g, "<number>")
         .replace(/\s+/g, " ")
         .trim();

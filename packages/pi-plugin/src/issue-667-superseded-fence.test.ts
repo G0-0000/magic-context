@@ -23,7 +23,7 @@ import {
 
 // OMP delivers the extension agent_end notification detached, after post-turn
 // maintenance. These tests replay the orders a real OMP 18.7 host produced
-// (docs/reports/issue-667-superseded-fence.md) against the guarded context.
+// against the guarded context.
 
 const SESSION = "issue-667";
 

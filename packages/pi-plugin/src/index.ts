@@ -123,7 +123,9 @@ import {
 } from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import { reloadWindowOverlay } from "@magic-context/core/shared/window-geometry";
+import { registerStandalonePluginMarker } from "@magic-context/core/standalone-plugin-marker";
 import { startHostStallProfilerSwitch } from "../../plugin/src/shared/host-stall-profiler";
+import packageMetadata from "../package.json";
 import { handlePiCloneSessionStart } from "./clone-inheritance";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
 import {
@@ -249,6 +251,8 @@ import {
 	rememberTodowriteToolCallTodos,
 	setTodoSnapshot,
 } from "./tools/todo-view-pi";
+
+registerStandalonePluginMarker(packageMetadata.version);
 
 const PI_HARNESS_DETECTION = await resolvePiHarnessDetection();
 const PI_HARNESS_KIND = PI_HARNESS_DETECTION.kind;

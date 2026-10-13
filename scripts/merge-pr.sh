@@ -192,6 +192,9 @@ while IFS= read -r -d '' file; do
 done < "$changed_file"
 (
   cd "$worktree"
+  run bash scripts/check-cortexkit-layout.sh
+  run bash scripts/check-docs-layout.sh
+  run bash scripts/check-docs-layout.test.sh
   run bun install --frozen-lockfile
   # Some plugin and Pi tests load the built worker bundles (for example the
   # auto-search worker), as CI does after its build step. A fresh worktree has

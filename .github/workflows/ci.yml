@@ -51,6 +51,18 @@ env:
 # subconscious default-branch HEAD and reports it as drift in the job summary.
 
 jobs:
+  check-docs-layout:
+    name: Check (public documentation layout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Reject tracked ignored CortexKit files
+        run: bash scripts/check-cortexkit-layout.sh
+      - name: Reject internal documentation in docs
+        run: bash scripts/check-docs-layout.sh
+      - name: Exercise planted layout violations
+        run: bash scripts/check-docs-layout.test.sh
+
   check-plugin:
     name: Check (plugin)
     runs-on: ubuntu-latest

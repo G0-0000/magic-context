@@ -24,8 +24,7 @@
  *
  * Error handling: ordinary thrown errors are caught and logged, then the
  * original messages pass through unmodified — the same fail-open
- * philosophy as the OpenCode `messages-transform` wrapper (see
- * AUDIT-KNOWN-ISSUES.md for the documented tradeoff). FailClosedBlockingError
+ * philosophy as the OpenCode `messages-transform` wrapper. FailClosedBlockingError
  * is rethrown so deterministic inoperability cannot silently degrade to
  * native compaction.
  */

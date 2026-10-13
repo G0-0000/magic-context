@@ -97,6 +97,11 @@ test("normalisation folds ids numbers durations and paths but preserves the fail
     expect(normalizeError("Insufficient Balance (request_id: 1a52d1e8-50cb…")).toBe(
         normalizeError("Insufficient Balance (request_id: 885b3a6a-e982-40a3…"),
     );
+    // A quota-reset countdown changes on every report of the same failure.
+    expect(normalizeError("Account pool empty. Quota resets in 34h 34m 9s. (status=412)")).toBe(
+        normalizeError("Account pool empty. Quota resets in 35h 45m 22s. (status=412)"),
+    );
+    expect(normalizeError("Quota resets in 2h")).toBe(normalizeError("Quota resets in 59m 3s"));
 });
 
 test("dedupe suppresses a wake for six hours unless class count grows by half", async () => {

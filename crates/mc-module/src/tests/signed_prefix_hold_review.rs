@@ -724,7 +724,7 @@ fn review_open_turn_with_publication(label: &str) -> (ReviewSession, TransformRe
     (sim, held)
 }
 
-/// Strict prefix binding (docs/reports/anthropic-thinking-binding.md): a signed thinking
+/// Strict prefix binding: a signed thinking
 /// block stays valid only while everything before it is unchanged, and an m0/m1 re-render
 /// invalidates every thinking block after it. An expired provider cache does not relax
 /// that: the cached pair can still be replayed byte for byte. So an idle-expired pass

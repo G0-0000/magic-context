@@ -6756,6 +6756,64 @@ describe("postprocess empty-sentinel provider gate", () => {
         expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual(["m-image"]);
     });
 
+    it("keeps processed image bytes stable after failed freeze persistence and retries only on a bust", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-anthropic-processed-image-persistence-failure";
+        const nativeMessages: MessageLike[] = [
+            {
+                info: { id: "m-image", role: "user" },
+                parts: [
+                    {
+                        type: "file",
+                        mime: "image/png",
+                        url: `data:image/png;base64,${"a".repeat(220)}`,
+                    },
+                ],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "seen" }],
+            },
+        ] as unknown as MessageLike[];
+        const runPass = async (bust: boolean, turn: string) => {
+            const messages = cloneMessages(nativeMessages);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    watermark: 1,
+                    messageTagNumbers: new Map([[messages[0], 1]]),
+                    resolvedProviderID: "anthropic",
+                    schedulerDecision: bust ? "execute" : "defer",
+                    pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                    contextUsage: { percentage: 60, inputTokens: 6000 },
+                    currentTurnId: turn,
+                }),
+            );
+            return messages;
+        };
+
+        const persist = spyOn(replayStorage, "addProcessedImageStrippedIds").mockReturnValue(false);
+        let first: MessageLike[];
+        let deferred: MessageLike[];
+        try {
+            first = await runPass(true, "turn-img-failed");
+            expect(persist).toHaveBeenCalledTimes(1);
+            expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual([]);
+            deferred = await runPass(false, "turn-img-deferred");
+            expect(persist).toHaveBeenCalledTimes(1);
+        } finally {
+            persist.mockRestore();
+        }
+        expect(JSON.stringify(deferred[0].parts)).toBe(JSON.stringify(first[0].parts));
+        expect(first[0].parts).toEqual(nativeMessages[0].parts);
+
+        const retried = await runPass(true, "turn-img-retry");
+        expect(retried[0].parts).toEqual([{ type: "text", text: "" }]);
+        expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual(["m-image"]);
+        const replayed = await runPass(false, "turn-img-replay");
+        expect(JSON.stringify(replayed[0].parts)).toBe(JSON.stringify(retried[0].parts));
+    });
+
     it("replays frozen processed image strips on defer passes even when the watermark is zero", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);

@@ -1004,13 +1004,14 @@ export interface StripProcessedImagesResult {
  * images on a defer pass and collapsed the cached prefix). Freezing the id set
  * on cache-busting passes and replaying it everywhere removes the moving
  * boundary: DETECT (cache-busting passes only) finds newly-aged processed image
- * messages, strips them, and returns their ids to persist; REPLAY (every pass,
+ * messages, persists their ids before stripping them; REPLAY (every pass,
  * incl. defer) re-strips only already-frozen ids, byte-identical regardless of
  * how the live array grew.
  *
  * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is
  * true, because non-Anthropic adapters can forward the empty text replacement
- * to the wire.
+ * to the wire. Hosts detecting new images must supply `persistNewIds` so a
+ * failed freeze cannot serve a strip that disappears on the next replay.
  */
 export function stripProcessedImages(
     messages: MessageLike[],
@@ -1019,6 +1020,8 @@ export function stripProcessedImages(
         detect: boolean;
         watermark: number;
         messageTagNumbers: Map<MessageLike, number>;
+        /** Commit new replay IDs before changing bytes; false leaves new images intact. */
+        persistNewIds?: (ids: readonly string[]) => boolean;
         /** Reports only first strips, never restoring an already frozen image. */
         onFirstApplication?: (message: MessageLike, partIndex: number) => void;
     },
@@ -1026,6 +1029,7 @@ export function stripProcessedImages(
     const { detect, watermark, messageTagNumbers } = options;
     let stripped = 0;
     const newlyStrippedIds: string[] = [];
+    const planned: { message: MessageLike; partIndex: number; firstApplication: boolean }[] = [];
     let hasAssistantResponse = false;
 
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1064,15 +1068,23 @@ export function stripProcessedImages(
                 part.url.startsWith("data:") &&
                 part.url.length > 200
             ) {
-                if (isNewDetection) options.onFirstApplication?.(msg, j);
-                msg.parts[j] = makeSentinel(part);
-                stripped++;
+                planned.push({ message: msg, partIndex: j, firstApplication: isNewDetection });
                 touchedThisMsg = true;
             }
         }
         if (touchedThisMsg && isNewDetection && id !== undefined) {
             newlyStrippedIds.push(id);
         }
+    }
+
+    const persisted =
+        newlyStrippedIds.length === 0 || options.persistNewIds?.(newlyStrippedIds) !== false;
+    if (!persisted) newlyStrippedIds.length = 0;
+    for (const { message, partIndex, firstApplication } of planned) {
+        if (firstApplication && !persisted) continue;
+        if (firstApplication) options.onFirstApplication?.(message, partIndex);
+        message.parts[partIndex] = makeSentinel(message.parts[partIndex]);
+        stripped++;
     }
 
     return { stripped, newlyStrippedIds };

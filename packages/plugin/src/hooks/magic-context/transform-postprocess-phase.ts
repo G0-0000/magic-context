@@ -3286,15 +3286,13 @@ export async function runPostTransformPhase(
         try {
             const tImg = performance.now();
             const frozenImageIds = replaySnapshot.processedImageStrippedIds;
-            const imageResult = stripProcessedImages(args.messages, frozenImageIds, {
+            stripProcessedImages(args.messages, frozenImageIds, {
                 detect: canEditWholePrefix && args.watermark > 0,
                 watermark: args.watermark,
                 messageTagNumbers: args.messageTagNumbers,
+                persistNewIds: (ids) => addProcessedImageStrippedIds(args.db, args.sessionId, ids),
                 onFirstApplication: recordFirstApplicationAt,
             });
-            if (isCacheBustingPass && imageResult.newlyStrippedIds.length > 0) {
-                addProcessedImageStrippedIds(args.db, args.sessionId, imageResult.newlyStrippedIds);
-            }
             logTransformTiming(args.sessionId, "stripProcessedImages", tImg);
         } catch (error) {
             failPass("image-strip-exception", error);

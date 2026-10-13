@@ -1,9 +1,13 @@
+import packageMetadata from "../../package.json";
 import { loadPluginConfigDetailed } from "../config";
 import { bindStaleBuildNotice } from "../plugin/stale-build-notice";
 import { setHarness } from "../shared/harness";
 import { flushLogger, log } from "../shared/logger";
+import { registerStandalonePluginMarker } from "../standalone-plugin-marker";
 import type { V2Context } from "./hooks/types";
 import { startUpdateChecks } from "./hooks/update-check";
+
+registerStandalonePluginMarker(packageMetadata.version);
 
 /**
  * Only an OpenCode 2 host hands `setup` a context carrying `session.hook`.
