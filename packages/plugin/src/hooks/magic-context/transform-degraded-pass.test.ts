@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { createScheduler, type Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -36,6 +36,7 @@ import * as modeTransition from "./compaction-off-transition";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import * as injectCompartments from "./inject-compartments";
+import { __test as fenceInternals, lkgRecoveryFencePath } from "./lkg-recovery-fence";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import * as noteNudger from "./note-nudger";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
@@ -603,6 +604,44 @@ describe("a pass that falls back to the launch directory", () => {
             },
         } as unknown as PluginContext["client"];
     }
+
+    it("a no-busy directory-fallback managed pass writes no recovery fence", async () => {
+        useTempDataHome("mc-directory-no-fence-");
+        const db = openDatabase();
+        const sessionId = "ses-directory-no-fence";
+        const transform = createTransform({
+            db,
+            directory: process.env.XDG_DATA_HOME,
+            client: directoryClient(() => undefined),
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) } as Scheduler,
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 40, inputTokens: 80_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+            historianRunnable: false,
+        });
+        const operations: string[] = [];
+        const restore = fenceInternals.setIoObserver((operation) => operations.push(operation));
+        try {
+            const output = { messages: history(sessionId) };
+            await transform({}, output as never);
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(JSON.stringify(output.messages)).toContain("§");
+            expect(operations.filter((operation) => operation === "write")).toEqual([]);
+            expect(existsSync(lkgRecoveryFencePath(sessionId))).toBe(false);
+        } finally {
+            restore();
+            transform.disposeRust();
+        }
+    });
 
     function m0m1(messages: Message[]): string {
         return JSON.stringify(messages.filter((message) => message.info.syntheticHead === true));

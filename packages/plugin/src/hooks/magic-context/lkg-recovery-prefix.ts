@@ -1,7 +1,12 @@
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import type { Database } from "../../shared/sqlite";
 import { loadPersistedLkgSlot } from "./lkg-persist";
-import { lkgFenceRequiresRebuild, ownsLkgDirtyFence } from "./lkg-recovery-fence";
+import {
+    clearLkgFenceProcessState,
+    lkgFenceRequiresRebuild,
+    lkgRecoveryFenceUnclean,
+    ownsLkgDirtyFence,
+} from "./lkg-recovery-fence";
 import { type LkgEntryProjection, resolveLkgModelKeys } from "./lkg-replay";
 import { getSlot, type LkgEntryNote, lkgContentDigest } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
@@ -43,10 +48,12 @@ export function rememberLkgDirtyRevision(sessionId: string, revision: string): v
 
 export function clearLkgRecoveryPrefixes(): void {
     sessions.clear();
+    clearLkgFenceProcessState();
 }
 
 export function clearLkgRecoverySession(sessionId: string): void {
     sessions.delete(sessionId);
+    clearLkgFenceProcessState(sessionId);
 }
 
 export function noteLkgCapturedPrefix(sessionId: string): void {
@@ -91,12 +98,16 @@ export function readLkgRecoveryPrefix(
     db?: Database,
 ): { prefix?: RecoveryPrefix; rebuildReason?: string } {
     const state = sessions.get(sessionId);
-    const slot = db ? loadPersistedLkgSlot(db, sessionId, true) : getSlot(sessionId);
+    const slot =
+        db && (!state || state.prefix || state.uncertifiedNormal)
+            ? (loadPersistedLkgSlot(db, sessionId, true) ?? getSlot(sessionId))
+            : getSlot(sessionId);
     const prefix = state?.prefix;
     if (!prefix && state?.uncertifiedNormal && ownsLkgDirtyFence(sessionId, state.fenceRevision))
         return {};
     if (!prefix)
-        return slot && lkgFenceRequiresRebuild(sessionId, slot, !!state)
+        return (!state && lkgRecoveryFenceUnclean(sessionId)) ||
+            (slot && lkgFenceRequiresRebuild(sessionId, slot, !!state))
             ? { rebuildReason: "lkg_restart_rebuild" }
             : {};
     const keys = resolveLkgModelKeys(messages);

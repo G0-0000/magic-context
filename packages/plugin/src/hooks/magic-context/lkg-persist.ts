@@ -325,9 +325,6 @@ export function saveLkgSlotToDb(
         sessionId,
         slot,
         ...fence,
-        unchanged:
-            !publishMetadata &&
-            persistedFingerprints.get(db)?.get(sessionId) === slotFingerprint(slot),
         load: () => loadPersistedLkgSlot(db, sessionId, true),
         commit: () => persistLkgSlot(db, sessionId, slot, publishMetadata),
     });

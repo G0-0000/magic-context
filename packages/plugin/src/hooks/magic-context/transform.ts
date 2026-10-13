@@ -135,7 +135,11 @@ import {
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
-import { invalidateCleanLkgRecoveryFence } from "./lkg-recovery-fence";
+import {
+    dirtyLkgRecoveryRevision,
+    invalidateCleanLkgRecoveryFence,
+    ownsLkgDirtyFence,
+} from "./lkg-recovery-fence";
 import {
     lkgDirtyRevision,
     noteLkgHealthyPrefix,
@@ -143,7 +147,7 @@ import {
     readLkgRecoveryPrefix,
 } from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
-import { beginLkgPass, captureSlot, dropSlot, getInMemorySlot } from "./lkg-slot";
+import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import {
     createPassOutcome,
@@ -3295,10 +3299,10 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        // Mandatory preparation failures already throw before this boundary.
-        // Save the exact returned array even when optional work declined: an
-        // older snapshot cannot certify a newer successfully served request.
-        if (!compactionOff) {
+        // Ordinary passes retain the original capture gate and deferred save.
+        // Capture the complete array so a restart also retains the bytes of a
+        // signed newest turn; recovery's raw tail stays accounted for until a fold.
+        if (passOutcome.captureEligible || recovery.prefix || recoveryReleaseReason) {
             const keys = resolveLkgModelKeys(messages);
             const modelKey = modelForBudget
                 ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
@@ -3315,29 +3319,55 @@ export function createTransform(deps: TransformDeps) {
                 agentName: notificationParams?.agent,
             });
             if (captured) {
-                // Commit before returning so a competing recovery cannot supersede
-                // this request unnoticed between serving it and publishing clean.
+                // Preserve ordinary publication timing. Recovery already published
+                // dirty before returning, so its fence stays dirty until this save lands.
                 const capturedSlot = getInMemorySlot(sessionId);
                 if (capturedSlot) {
-                    if (
-                        !saveLkgSlotToDb(db, sessionId, capturedSlot, undefined, {
-                            ownDirtyRevision: lkgDirtyRevision(sessionId),
-                            rebuild: !!recoveryReleaseReason,
-                            retainDirtyRevision:
-                                recovery.prefix && !recoveryReleaseReason
-                                    ? lkgDirtyRevision(sessionId)
-                                    : undefined,
-                        })
-                    )
-                        throw new Error("Last-good safety publication failed");
-                    const durable = loadPersistedLkgSlot(db, sessionId);
-                    if (durable) captureSlot(sessionId, durable);
+                    const revision =
+                        lkgDirtyRevision(sessionId) ??
+                        dirtyLkgRecoveryRevision(sessionId, capturedSlot);
+                    const fence = {
+                        ownDirtyRevision: revision,
+                        requiredRevision:
+                            revision && ownsLkgDirtyFence(sessionId, revision)
+                                ? revision
+                                : undefined,
+                        rebuild: !!recoveryReleaseReason,
+                        retainDirtyRevision:
+                            recovery.prefix && !recoveryReleaseReason ? revision : undefined,
+                    };
+                    withoutSqliteTransformPass(() =>
+                        setImmediate(() => {
+                            // Ordinary saves preserve base's ordered deferred callbacks.
+                            // Recovery certification additionally rejects superseded captures.
+                            if (fence.requiredRevision) {
+                                const latest = getInMemorySlot(sessionId);
+                                if (
+                                    !latest ||
+                                    latest.capturedAt !== capturedSlot.capturedAt ||
+                                    latest.jsonPrefix !== capturedSlot.jsonPrefix ||
+                                    latest.lastInputMessageId !== capturedSlot.lastInputMessageId ||
+                                    latest.modelKey !== capturedSlot.modelKey ||
+                                    latest.providerKey !== capturedSlot.providerKey
+                                )
+                                    return;
+                            }
+                            try {
+                                saveLkgSlotToDb(db, sessionId, capturedSlot, undefined, fence);
+                            } catch (error) {
+                                sessionLog(
+                                    sessionId,
+                                    "Last-good deferred publication remains uncertified:",
+                                    error,
+                                );
+                            }
+                        }),
+                    );
                 }
                 noteLkgHealthyPrefix(sessionId, lkgInput, messages, !!recoveryReleaseReason);
             }
-            if (postTransformResult.bustedThisPass && !captured) {
-                dropSlot(sessionId, "lkg_refresh_declined");
-            } else if (!captured) {
+            if (!captured) {
+                if (postTransformResult.bustedThisPass) dropSlot(sessionId, "lkg_refresh_declined");
                 noteUncertifiedNormalLkg(
                     sessionId,
                     invalidateCleanLkgRecoveryFence(
@@ -3348,14 +3378,16 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
         } else if (passOutcome.degradations.length > 0) {
-            noteUncertifiedNormalLkg(
-                sessionId,
-                invalidateCleanLkgRecoveryFence(
+            if (compactionOff) {
+                noteUncertifiedNormalLkg(
                     sessionId,
-                    () => loadPersistedLkgSlot(db, sessionId, true),
-                    lkgDirtyRevision(sessionId),
-                ),
-            );
+                    invalidateCleanLkgRecoveryFence(
+                        sessionId,
+                        () => loadPersistedLkgSlot(db, sessionId, true),
+                        lkgDirtyRevision(sessionId),
+                    ),
+                );
+            }
             sessionLog(
                 sessionId,
                 `lkg_capture_declined degradations=${passOutcome.degradations.map((item) => item.site).join(",")}`,

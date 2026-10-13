@@ -20,10 +20,12 @@ import {
 } from "./lkg-persist";
 import {
     __test,
+    clearLkgFenceProcessState,
     clearLkgRecoveryFence,
     hasCleanLkgRecoveryFence,
     lkgFenceRequiresRebuild,
     lkgRecoveryFencePath,
+    lkgRecoverySlotKey,
     markLkgRecoveryDirty,
 } from "./lkg-recovery-fence";
 import type { LkgSlot } from "./lkg-slot";
@@ -34,6 +36,7 @@ const previousXdg = process.env.XDG_DATA_HOME;
 const roots: string[] = [];
 const restorers: (() => void)[] = [];
 afterEach(() => {
+    clearLkgFenceProcessState();
     for (const restore of restorers.splice(0).reverse()) restore();
     closeDatabase();
     if (previousRoot === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
@@ -76,6 +79,12 @@ function fixture(seed = true) {
     const path = lkgRecoveryFencePath("session");
     const record = () =>
         JSON.parse(readFileSync(path, "utf8")) as { state: string; slotKey: string; host: string };
+    // Seed a real dirty-to-clean transition for publication/crash witnesses.
+    // Ordinary synchronous captures intentionally do not create a fence file.
+    if (seed && hasCleanLkgRecoveryFence("session", load()!)) {
+        dirty();
+        expect(saveLkgSlotToDb(db, "session", slot, undefined, { rebuild: true })).toBe(true);
+    }
     return { dir, dbPath, raw, db, load, dirty, path, record };
 }
 function child(f: ReturnType<typeof fixture>, code: string) {
@@ -108,18 +117,64 @@ ${code}`,
 }
 
 describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
-    test("clean restart replays, while missing corrupt scope and generation evidence refuse", () => {
+    test("warm synchronous captures perform zero fence I/O", () => {
+        const f = fixture();
+        const operations: string[] = [];
+        try {
+            restorers.push(__test.setIoObserver((operation) => operations.push(operation)));
+            for (let i = 0; i < 32; i++) {
+                const next = {
+                    ...slot,
+                    jsonPrefix: JSON.stringify([{ text: `sync-${i}` }]),
+                    capturedAt: i + 2,
+                };
+                expect(saveLkgSlotToDb(f.db, "session", next)).toBe(true);
+                expect(hasCleanLkgRecoveryFence("session", next)).toBe(true);
+            }
+            expect(operations).toEqual([]);
+            expect(f.record().state).toBe("clean");
+            clearLkgFenceProcessState("session");
+            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            expect(operations).toEqual(["read"]);
+        } finally {
+            f.raw.close();
+        }
+    });
+    test("cold absence and clean marks allow replay, while corrupt and mismatched scope refuse", () => {
         const f = fixture();
         try {
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
-            expect(hasCleanLkgRecoveryFence("other-session", f.load()!)).toBe(false);
-            expect(hasCleanLkgRecoveryFence("session", { ...slot, capturedAt: 2 })).toBe(false);
-            expect(hasCleanLkgRecoveryFence("session", { ...slot, modelKey: "other" })).toBe(false);
+            expect(hasCleanLkgRecoveryFence("other-session", f.load()!)).toBe(true);
+            expect(hasCleanLkgRecoveryFence("session", { ...slot, capturedAt: 2 })).toBe(true);
+            expect(hasCleanLkgRecoveryFence("session", { ...slot, modelKey: "other" })).toBe(true);
+            const wrongHost = JSON.parse(readFileSync(f.path, "utf8"));
+            wrongHost.host = "another-host";
+            wrongHost.checksum = new Bun.CryptoHasher("sha256")
+                .update(
+                    JSON.stringify([
+                        wrongHost.version,
+                        wrongHost.sessionId,
+                        wrongHost.host,
+                        wrongHost.modelKey,
+                        wrongHost.providerKey,
+                        wrongHost.slotKey,
+                        wrongHost.servedDigest,
+                        wrongHost.revision,
+                        wrongHost.state,
+                    ]),
+                )
+                .digest("hex");
+            writeStorageFileSync(f.path, JSON.stringify(wrongHost));
+            clearLkgFenceProcessState("session");
+            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(false);
             writeStorageFileSync(f.path, "corrupt");
+            clearLkgFenceProcessState("session");
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(false);
             expect(f.dirty).toThrow("No clean durable");
             rmSync(f.path);
-            expect(f.dirty).toThrow("No clean durable");
+            clearLkgFenceProcessState("session");
+            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            expect(f.dirty()).toBeString();
         } finally {
             f.raw.close();
         }
@@ -173,15 +228,21 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
                 "markLkgRecoveryDirty({sessionId:'session', slot, load, processLocalProof:false});",
             );
             expect(result.status, result.stderr).toBe(0);
-            expect(() =>
+            expect(
                 saveLkgSlotToDb(f.db, "session", {
                     ...slot,
                     jsonPrefix: '[{"text":"late tags"}]',
                     capturedAt: 2,
                 }),
-            ).toThrow("concurrent recovery");
-            expect(f.load()?.jsonPrefix).toBe(slot.jsonPrefix);
+            ).toBe(true);
+            expect(f.load()?.jsonPrefix).toBe('[{"text":"late tags"}]');
             expect(f.record().state).toBe("dirty");
+            clearLkgFenceProcessState("session");
+            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(false);
+            expect(saveLkgSlotToDb(f.db, "session", f.load()!, undefined, { rebuild: true })).toBe(
+                true,
+            );
+            expect(f.record().state).toBe("clean");
         } finally {
             f.raw.close();
         }
@@ -195,6 +256,7 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
             );
             expect(result.status, result.stderr).toBe(77);
             expect(f.record().state).toBe("dirty");
+            clearLkgFenceProcessState("session");
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(false);
             expect(saveLkgSlotToDb(f.db, "session", slot, undefined, { rebuild: true })).toBe(true);
         } finally {
@@ -210,6 +272,7 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
             );
             expect(result.status, result.stderr).toBe(77);
             expect(f.record().state).toBe("clean");
+            clearLkgFenceProcessState("session");
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
             f.dirty();
             expect(f.record().state).toBe("dirty");
@@ -222,11 +285,12 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
         try {
             const result = child(
                 f,
-                "__test.setObserver(phase => { if (phase === 'committed') process.exit(77); }); saveLkgSlotToDb(db, 'session', {...slot, jsonPrefix:'[{\"text\":\"replacement\"}]', capturedAt:2}, undefined, {rebuild:true});",
+                "markLkgRecoveryDirty({sessionId:'session', slot, processLocalProof:false}); __test.setObserver(phase => { if (phase === 'committed') process.exit(77); }); saveLkgSlotToDb(db, 'session', {...slot, jsonPrefix:'[{\"text\":\"replacement\"}]', capturedAt:2}, undefined, {rebuild:true});",
             );
             expect(result.status, result.stderr).toBe(77);
             expect(f.load()?.jsonPrefix).toContain("replacement");
             expect(f.record().state).toBe("dirty");
+            clearLkgFenceProcessState("session");
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(false);
         } finally {
             f.raw.close();
@@ -234,6 +298,7 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
     });
     test("a failed clean publish leaves dirty evidence after a committed replacement", () => {
         const f = fixture();
+        f.dirty();
         let committed = false;
         try {
             restorers.push(
@@ -266,15 +331,20 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
             const script = `
 import { Database } from 'bun:sqlite';
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from ${JSON.stringify(join(import.meta.dir, "lkg-persist.ts"))};
-import { __test } from ${JSON.stringify(join(import.meta.dir, "lkg-recovery-fence.ts"))};
+import { __test, prepareLkgCaptureFence, LkgRecoveryFenceError } from ${JSON.stringify(join(import.meta.dir, "lkg-recovery-fence.ts"))};
 const db = new Database(${JSON.stringify(f.dbPath)});
 db.exec('PRAGMA busy_timeout=5000');
 const pause = new Int32Array(new SharedArrayBuffer(4));
 __test.setObserver(phase => { if (phase === 'committed') Atomics.wait(pause, 0, 0, 15); });
-for (let i=0; i<12; i++) {
+for (let i=0, attempts=0; i<12;) {
+ if (++attempts > 1000) throw new Error('publication never completed');
  const old = loadPersistedLkgSlot(db, 'session');
  const value = {...old, jsonPrefix:JSON.stringify([{text:${JSON.stringify(actor)} + i}]), capturedAt:Date.now()};
- if (!saveLkgSlotToDb(db, 'session', value, () => db.query("INSERT INTO publication_log (ordinal,actor) SELECT COALESCE(MAX(ordinal),0)+1, ? FROM publication_log").run(${JSON.stringify(actor)}), {rebuild:true})) throw new Error('publication failed');
+ const revision = prepareLkgCaptureFence({sessionId:'session', slot:value, previousSlot:old, rebuild:true});
+ try {
+  if (!saveLkgSlotToDb(db, 'session', value, () => db.query("INSERT INTO publication_log (ordinal,actor) SELECT COALESCE(MAX(ordinal),0)+1, ? FROM publication_log").run(${JSON.stringify(actor)}), {rebuild:true, ownDirtyRevision:revision, requiredRevision:revision})) throw new Error('publication failed');
+  i++;
+ } catch (error) { if (!(error instanceof LkgRecoveryFenceError)) throw error; }
 }
 `;
             const child = Bun.spawn([process.execPath, "--eval", script], {
@@ -299,6 +369,8 @@ for (let i=0; i<12; i++) {
             expect(
                 (f.raw.query("SELECT COUNT(*) AS n FROM publication_log").get() as { n: number }).n,
             ).toBe(24);
+            expect(f.record().slotKey).toBe(lkgRecoverySlotKey(f.load()!));
+            clearLkgFenceProcessState("session");
             expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
         } finally {
             f.raw.close();
@@ -306,6 +378,7 @@ for (let i=0; i<12; i++) {
     });
     test("a failed final clean notification cannot leave a visible clean certificate", () => {
         const f = fixture();
+        f.dirty();
         try {
             restorers.push(
                 __test.setObserver((phase) => {
@@ -346,6 +419,7 @@ for (let i=0; i<12; i++) {
             const full = openDatabase();
             if (!full) throw new Error("Expected disposable full-schema database");
             expect(saveLkgSlotToDb(full, "orphan", slot)).toBe(true);
+            markLkgRecoveryDirty({ sessionId: "orphan", slot, processLocalProof: true });
             expect(existsSync(lkgRecoveryFencePath("orphan"))).toBe(true);
             full.transaction(() => deleteSessionScopedRows(full, ["orphan"])).immediate();
             expect(existsSync(lkgRecoveryFencePath("orphan"))).toBe(false);

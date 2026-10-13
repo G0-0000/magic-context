@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { SessionContext } from "../../plugin/src/v2/hooks/types";
 
@@ -18,6 +18,30 @@ const digest = (value: string) =>
 	new Bun.CryptoHasher("sha256").update(value).digest("hex");
 const median = (values: number[]) =>
 	[...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+
+async function fenceIo() {
+	const operations: string[] = [];
+	// The baseline predates recovery fences, so only a revision containing that
+	// implementation can observe its file I/O. Both compare complete host output.
+	if (
+		!existsSync(
+			join(
+				source,
+				"packages/plugin/src/hooks/magic-context/lkg-recovery-fence.ts",
+			),
+		)
+	)
+		return { operations, restore: () => {} };
+	const { __test } = await load(
+		"plugin/src/hooks/magic-context/lkg-recovery-fence.ts",
+	);
+	return {
+		operations,
+		restore: __test.setIoObserver((operation: string) =>
+			operations.push(operation),
+		),
+	};
+}
 
 // A fixed PRNG seed makes two independent revisions receive identical raw bytes.
 function corpusText(index: number): string {
@@ -118,9 +142,12 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 		raw.push(userMessage("Please inspect writer admission", messageCount + 4));
 
 		const times: number[] = [];
+		const settledTimes: number[] = [];
 		const wires: string[] = [];
+		const io = await fenceIo();
 		try {
 			for (let i = 0; i < 32; i++) {
+				io.operations.length = 0;
 				raw.push(userMessage(corpusText(100 + i), 100 + i));
 				const messages = structuredClone(raw);
 				const ctx = fakeContext(
@@ -135,6 +162,8 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 				const wire = JSON.stringify(result.messages);
 				wires.push(wire);
 				await new Promise((resolve) => setImmediate(resolve));
+				settledTimes.push(performance.now() - start);
+				if (i >= 2) expect(io.operations).toEqual([]);
 			}
 			expect(wires).toHaveLength(32);
 			expect(new Set(wires).size).toBe(32);
@@ -162,12 +191,15 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 							.map((time, index) => time - transformTimes[index + 2]),
 					),
 					warmMedianMs: median(times.slice(2)),
+					settledWarmMedianMs: median(settledTimes.slice(2)),
+					warmFenceIo: io.operations.length,
 					warmMinMs: Math.min(...times.slice(2)),
 					warmMaxMs: Math.max(...times.slice(2)),
 					wireSha256: digest(wires[0]),
 				}),
 			);
 		} finally {
+			io.restore();
 			restoreTiming();
 			clearContextHandlerSession("review-pi");
 			resetLkgSlotsForTest();
@@ -237,9 +269,12 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 		});
 		const raw = Array.from({ length: 90 }, (_, i) => makeMessage(i));
 		const times: number[] = [];
+		const settledTimes: number[] = [];
 		const wires: string[] = [];
+		const io = await fenceIo();
 		try {
 			for (let i = 0; i < 32; i++) {
+				io.operations.length = 0;
 				raw.push(makeMessage(100 + i));
 				const output = { messages: structuredClone(raw) };
 				const start = performance.now();
@@ -247,6 +282,8 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 				times.push(performance.now() - start);
 				wires.push(JSON.stringify(output.messages));
 				await new Promise((resolve) => setImmediate(resolve));
+				settledTimes.push(performance.now() - start);
+				if (i >= 2) expect(io.operations).toEqual([]);
 			}
 			expect(wires).toHaveLength(32);
 			expect(new Set(wires).size).toBe(32);
@@ -270,12 +307,15 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 					sha256: digest(wires[0]),
 					coldMs: times[0],
 					warmMedianMs: median(times.slice(2)),
+					settledWarmMedianMs: median(settledTimes.slice(2)),
+					warmFenceIo: io.operations.length,
 					warmMinMs: Math.min(...times.slice(2)),
 					warmMaxMs: Math.max(...times.slice(2)),
 					wireSha256: digest(wires[0]),
 				}),
 			);
 		} finally {
+			io.restore();
 			transform.disposeRust();
 			resetLkgSlotsForTest();
 			resetCtxReduceRegisteredGloballyForTest();
@@ -367,11 +407,14 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 			})),
 		};
 		const times: number[] = [];
+		const settledTimes: number[] = [];
 		const wires: string[] = [];
+		const io = await fenceIo();
 		try {
 			duties = await registerContext(host);
 			if (!hook) throw new Error("no context hook");
 			for (let i = 0; i < 32; i++) {
+				io.operations.length = 0;
 				raw.messages.push({
 					id: `m${100 + i}`,
 					role: "user",
@@ -384,6 +427,8 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 				times.push(performance.now() - start);
 				wires.push(JSON.stringify(draft));
 				await new Promise((resolve) => setImmediate(resolve));
+				settledTimes.push(performance.now() - start);
+				if (i >= 2) expect(io.operations).toEqual([]);
 			}
 			expect(wires).toHaveLength(32);
 			expect(new Set(wires).size).toBe(32);
@@ -399,11 +444,14 @@ test.skipIf(process.env.REVIEW_OUTPUT === undefined)(
 					sha256: digest(wires[0]),
 					coldMs: times[0],
 					warmMedianMs: median(times.slice(2)),
+					settledWarmMedianMs: median(settledTimes.slice(2)),
+					warmFenceIo: io.operations.length,
 					warmMinMs: Math.min(...times.slice(2)),
 					warmMaxMs: Math.max(...times.slice(2)),
 				}),
 			);
 		} finally {
+			io.restore();
 			await duties?.dispose();
 			bootSpy.mockRestore();
 			configSpy.mockRestore();

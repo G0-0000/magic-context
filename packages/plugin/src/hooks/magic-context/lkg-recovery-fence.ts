@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getMagicContextStorageDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import { withStorageFileMutex } from "../../shared/storage-file-mutex";
@@ -30,6 +31,38 @@ export class LkgRecoveryFenceError extends Error {
 }
 let platform: NodeJS.Platform = process.platform;
 let observer: ((phase: "dirty" | "committed" | "temp-synced" | "clean") => void) | undefined;
+// Mark dirty before returning replay recovery tails, untagged or raw content,
+// failed snapshot preparation, Pi numbers-only publication, or Rust output that
+// is uncommitted by design: a later healthy pass could otherwise change its bytes.
+// Deliberately do not mark ordinary fully-tagged nonfatal-degraded TypeScript
+// passes, including directory fallback and declined optional work. They retain
+// base's deferred-save window, where restart may replay a valid earlier request.
+type KnownFence = { state: "clean" | "dirty" | "invalid"; record: Fence | null };
+const knownFences = new BoundedSessionMap<KnownFence>(1000);
+let ioObserver: ((operation: "read" | "write" | "mutex") => void) | undefined;
+const cacheKey = (sessionId: string) =>
+    `${getMagicContextStorageDir()}\0${getHarness()}\0${sessionId}`;
+function remember(sessionId: string, value: KnownFence): KnownFence {
+    knownFences.set(cacheKey(sessionId), value);
+    return value;
+}
+function known(sessionId: string): KnownFence {
+    const prior = knownFences.get(cacheKey(sessionId));
+    if (prior) return prior;
+    const record = read(sessionId);
+    if (record) return remember(sessionId, { state: record.state, record });
+    try {
+        lstatSync(lkgRecoveryFencePath(sessionId));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+            return remember(sessionId, { state: "clean", record: null });
+    }
+    return remember(sessionId, { state: "invalid", record: null });
+}
+export function clearLkgFenceProcessState(sessionId?: string): void {
+    if (sessionId) knownFences.delete(cacheKey(sessionId));
+    else knownFences.clear();
+}
 
 // Node has no proven Windows directory-fsync primitive. Never trust a restart
 // certificate there: retain process-local BUSY replay, then refuse after restart
@@ -81,13 +114,20 @@ function payload(record: Omit<Fence, "checksum">) {
     ];
 }
 function publishRecord(record: Omit<Fence, "checksum">): void {
+    ioObserver?.("write");
     try {
+        // Reject a failed clean notification while the durable dirty mark still exists.
+        if (record.state === "clean") observer?.("clean");
         writeStorageFileDurableAtomicSync(
             lkgRecoveryFencePath(record.sessionId),
             JSON.stringify({ ...record, checksum: hash(JSON.stringify(payload(record))) }),
             () => observer?.("temp-synced"),
         );
-        observer?.(record.state);
+        if (record.state === "dirty") observer?.("dirty");
+        remember(record.sessionId, {
+            state: record.state,
+            record: { ...record, checksum: hash(JSON.stringify(payload(record))) },
+        });
     } catch (error) {
         const visible = read(record.sessionId);
         if (
@@ -96,13 +136,18 @@ function publishRecord(record: Omit<Fence, "checksum">): void {
             visible.revision === record.revision &&
             visible.slotKey === record.slotKey
         ) {
-            rmSync(lkgRecoveryFencePath(record.sessionId), { force: true });
-            syncStorageDirectorySync(dirname(lkgRecoveryFencePath(record.sessionId)));
+            const dirty = { ...record, state: "dirty" as const };
+            writeStorageFileDurableAtomicSync(
+                lkgRecoveryFencePath(record.sessionId),
+                JSON.stringify({ ...dirty, checksum: hash(JSON.stringify(payload(dirty))) }),
+            );
         }
+        remember(record.sessionId, { state: "invalid", record: null });
         throw error;
     }
 }
 function read(sessionId: string): Fence | null {
+    ioObserver?.("read");
     try {
         const path = lkgRecoveryFencePath(sessionId);
         const stat = lstatSync(path);
@@ -137,14 +182,6 @@ function read(sessionId: string): Fence | null {
         return null;
     }
 }
-function matches(record: Fence | null, slot: LkgSlot): record is Fence {
-    return (
-        !!record &&
-        record.slotKey === lkgRecoverySlotKey(slot) &&
-        record.modelKey === slot.modelKey &&
-        record.providerKey === slot.providerKey
-    );
-}
 function publish(sessionId: string, slot: LkgSlot, state: Fence["state"], revision: string): void {
     const record: Omit<Fence, "checksum"> = {
         version: 1,
@@ -160,6 +197,7 @@ function publish(sessionId: string, slot: LkgSlot, state: Fence["state"], revisi
     publishRecord(record);
 }
 function locked<T>(sessionId: string, work: () => T): T {
+    ioObserver?.("mutex");
     return withStorageFileMutex(`${lkgRecoveryFencePath(sessionId)}.locks`, () => {
         const path = lkgRecoveryFencePath(sessionId);
         for (const name of readdirSync(dirname(path))) {
@@ -170,29 +208,37 @@ function locked<T>(sessionId: string, work: () => T): T {
     });
 }
 
-/** Only a matching durable certificate can authorize a process-cold replay. */
-export function hasCleanLkgRecoveryFence(sessionId: string, slot: LkgSlot): boolean {
+/** A missing file at startup means no recovery obligation was recorded. */
+export function hasCleanLkgRecoveryFence(sessionId: string, _slot: LkgSlot): boolean {
     if (!durableFencesSupported()) return false;
-    const record = read(sessionId);
-    return matches(record, slot) && record.state === "clean";
+    const state = known(sessionId);
+    // A clean mark is not a generation or route certificate: later ordinary saves
+    // may advance either without touching it. The slot's own replay rules validate
+    // the current model and content; read() validates the file's host/session scope.
+    return state.state === "clean";
 }
 export function lkgFenceRequiresRebuild(
     sessionId: string,
     slot: LkgSlot,
     processLocalProof: boolean,
 ): boolean {
-    return durableFencesSupported()
-        ? !hasCleanLkgRecoveryFence(sessionId, slot)
-        : !processLocalProof;
+    return (
+        !processLocalProof &&
+        (durableFencesSupported() ? !hasCleanLkgRecoveryFence(sessionId, slot) : true)
+    );
 }
-export function dirtyLkgRecoveryRevision(sessionId: string, slot: LkgSlot): string | undefined {
+/** A declined capture can leave a recovery obligation even when no LKG row exists. */
+export function lkgRecoveryFenceUnclean(sessionId: string): boolean {
+    return durableFencesSupported() && known(sessionId).state !== "clean";
+}
+export function dirtyLkgRecoveryRevision(sessionId: string, _slot: LkgSlot): string | undefined {
     if (!durableFencesSupported()) return undefined;
-    const record = read(sessionId);
-    return matches(record, slot) && record.state === "dirty" ? record.revision : undefined;
+    const record = known(sessionId).record;
+    return record?.state === "dirty" ? record.revision : undefined;
 }
 export function ownsLkgDirtyFence(sessionId: string, revision: string | undefined): boolean {
     if (!durableFencesSupported()) return revision === "process-local";
-    const record = read(sessionId);
+    const record = known(sessionId).record;
     return revision !== undefined && record?.state === "dirty" && record.revision === revision;
 }
 
@@ -203,10 +249,24 @@ export function invalidateCleanLkgRecoveryFence(
     ownRevision?: string,
 ): string | undefined {
     if (!durableFencesSupported()) return "process-local";
+    const prior = known(sessionId);
+    if (prior.state === "dirty")
+        return prior.record?.revision === ownRevision ? ownRevision : undefined;
     return locked(sessionId, () => {
-        const slot = load();
+        // If even the first capture is declined, record that its returned output
+        // was not saved. This empty generation means no last-good request exists;
+        // it is never a request that can be replayed.
+        const slot = load() ?? {
+            jsonPrefix: "",
+            inputIdSeq: [],
+            inputContentDigests: [],
+            lastInputMessageId: "",
+            modelKey: null,
+            providerKey: null,
+            capturedAt: 0,
+        };
         const record = read(sessionId);
-        if (slot && matches(record, slot) && record.state === "clean") {
+        if (record?.state !== "dirty") {
             const revision = randomUUID();
             publish(sessionId, slot, "dirty", revision);
             return revision;
@@ -231,18 +291,10 @@ export function prepareLkgCaptureFence(args: {
         const owns = before?.state === "dirty" && before.revision === args.ownDirtyRevision;
         const unchangedBytes =
             before?.state === "clean" && before.servedDigest === hash(args.slot.jsonPrefix);
-        if (
-            !args.rebuild &&
-            before &&
-            !owns &&
-            !unchangedBytes &&
-            (!args.previousSlot || !matches(before, args.previousSlot) || before.state !== "clean")
-        )
+        if (!args.rebuild && before && !owns && !unchangedBytes && before.state !== "clean")
             throw new LkgRecoveryFenceError(
                 `A concurrent recovery requires a declared prefix rebuild (state=${before?.state}, owned=${owns}, previous=${!!args.previousSlot}, bytes=${unchangedBytes})`,
             );
-        if (!args.rebuild && !before && args.previousSlot)
-            throw new LkgRecoveryFenceError("Unproven prior request requires a prefix rebuild");
         const revision = randomUUID();
         if (before) publishRecord({ ...before, state: "dirty", revision });
         else publish(args.sessionId, args.previousSlot ?? args.slot, "dirty", revision);
@@ -259,6 +311,8 @@ export function certifyCommittedLkgCapture(args: {
     load: () => LkgSlot | undefined;
 }): boolean {
     if (!durableFencesSupported()) return false;
+    const state = known(args.sessionId);
+    if (state.state !== "dirty" || state.record?.revision !== args.revision) return false;
     return locked(args.sessionId, () => {
         const before = read(args.sessionId);
         if (before?.state !== "dirty" || before.revision !== args.revision) return false;
@@ -286,10 +340,19 @@ export function markLkgRecoveryDirty(args: {
             throw new LkgRecoveryFenceError("Restart replay requires a healthy rebuild on Windows");
         return "process-local";
     }
+    const state = known(args.sessionId);
+    if (
+        state.state === "dirty" &&
+        args.processLocalProof &&
+        state.record &&
+        state.record.revision === args.ownDirtyRevision
+    )
+        return state.record.revision;
+    if (state.state === "invalid")
+        throw new LkgRecoveryFenceError("No clean durable recovery certificate");
     return locked(args.sessionId, () => {
         const slot = args.slot;
         const before = read(args.sessionId);
-        const known = matches(before, slot);
         if (before?.state === "dirty") {
             if (!args.processLocalProof || before.revision !== args.ownDirtyRevision)
                 throw new LkgRecoveryFenceError(
@@ -297,7 +360,7 @@ export function markLkgRecoveryDirty(args: {
                 );
             return before.revision;
         }
-        if (!known || before?.state !== "clean")
+        if (before && before.state !== "clean")
             throw new LkgRecoveryFenceError("No clean durable recovery certificate");
         const revision = randomUUID();
         publish(args.sessionId, slot, "dirty", revision);
@@ -305,7 +368,7 @@ export function markLkgRecoveryDirty(args: {
     });
 }
 
-/** Serialize the SQLite commit and certificate publication with BUSY returns. */
+/** Publish clean only after this process observed dirty and saved the matching last-good output. */
 export function commitLkgWithRecoveryFence(args: {
     sessionId: string;
     slot: LkgSlot;
@@ -316,11 +379,28 @@ export function commitLkgWithRecoveryFence(args: {
     ownDirtyRevision?: string;
     requiredRevision?: string;
     cleanDigest?: string;
-    unchanged?: boolean;
 }): boolean {
     if (!durableFencesSupported()) return args.commit();
+    const state = known(args.sessionId);
+    // Once this process knows its fence is clean, it does not read or clear
+    // another process's dirty mark. The fence does not guarantee byte stability
+    // when two processes serve the same session concurrently. Deferred publishers
+    // still compare revisions and saved generations before publishing clean.
+    // Ordinary TypeScript saves retain their pre-existing setImmediate timing.
+    // If the process crashes before that save, a clean fence can remain alongside
+    // a valid earlier last-good request. The fence does not prevent that ordinary
+    // healthy-pass crash window; recovery writes dirty before returning any tail.
+    if (state.state === "clean" && !args.requiredRevision && !args.retainDirtyRevision) {
+        const committed = args.commit();
+        if (committed) {
+            observer?.("committed");
+            remember(args.sessionId, { state: "clean", record: null });
+        }
+        return committed;
+    }
+    if (state.state === "invalid" && !args.rebuild)
+        throw new LkgRecoveryFenceError("Unproven prior request requires a prefix rebuild");
     return locked(args.sessionId, () => {
-        const current = args.load();
         const before = read(args.sessionId);
         if (args.requiredRevision && before?.revision !== args.requiredRevision)
             throw new LkgRecoveryFenceError("A later publisher superseded the rollback snapshot");
@@ -328,48 +408,27 @@ export function commitLkgWithRecoveryFence(args: {
             before?.state === "dirty" &&
             (before.revision === args.retainDirtyRevision ||
                 before.revision === args.ownDirtyRevision);
-        if (
-            current &&
-            (!matches(before, current) || before.state === "dirty") &&
-            !ownsDirty &&
-            !args.rebuild
-        )
+        if (before?.state === "dirty" && !ownsDirty && !args.rebuild)
             throw new LkgRecoveryFenceError(
                 "A concurrent recovery requires a declared prefix rebuild",
             );
-        if (
-            args.unchanged &&
-            current &&
-            matches(before, current) &&
-            before.state === "clean" &&
-            representationKey(current) === representationKey(args.slot)
-        ) {
-            if (!args.commit()) return false;
-            const saved = args.load();
-            if (saved && matches(before, saved)) return true;
-            throw new LkgRecoveryFenceError(
-                "An unchanged commit unexpectedly replaced its certified generation",
-            );
-        }
-        publish(
-            args.sessionId,
-            current ?? args.slot,
-            "dirty",
-            ownsDirty ? before.revision : randomUUID(),
-        );
+        if (before?.state !== "dirty" && state.state === "invalid")
+            publish(args.sessionId, args.load() ?? args.slot, "dirty", randomUUID());
         if (!args.commit()) return false;
         observer?.("committed");
         const saved = args.load();
         if (!saved || representationKey(saved) !== representationKey(args.slot))
             throw new LkgRecoveryFenceError("Last-good commit did not match its certificate");
-        const cleanMatches =
-            args.cleanDigest === undefined || hash(saved.jsonPrefix) === args.cleanDigest;
-        publish(
-            args.sessionId,
-            saved,
-            args.retainDirtyRevision || !cleanMatches ? "dirty" : "clean",
-            ownsDirty ? before.revision : randomUUID(),
-        );
+        if (
+            args.retainDirtyRevision ||
+            (args.cleanDigest !== undefined && hash(saved.jsonPrefix) !== args.cleanDigest)
+        )
+            return true;
+        // Only a process which knew dirty before the commit may remove that
+        // obligation. Re-read under the mutex to fence superseded deferred work.
+        const dirty = read(args.sessionId);
+        if (dirty?.state === "dirty") publish(args.sessionId, saved, "clean", dirty.revision);
+        else remember(args.sessionId, { state: "clean", record: null });
         return true;
     });
 }
@@ -385,6 +444,7 @@ export function clearLkgRecoveryFence<T = void>(
         if (shouldClear && !shouldClear(result)) return result;
         rmSync(lkgRecoveryFencePath(sessionId), { force: true });
         syncStorageDirectorySync(dirname(lkgRecoveryFencePath(sessionId)));
+        clearLkgFenceProcessState(sessionId);
         return result;
     });
 }
@@ -400,6 +460,12 @@ export const __test = {
         observer = value;
         return () => {
             observer = undefined;
+        };
+    },
+    setIoObserver(value: typeof ioObserver) {
+        ioObserver = value;
+        return () => {
+            ioObserver = undefined;
         };
     },
 };

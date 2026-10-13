@@ -4,7 +4,9 @@ import {
 	saveLkgSlotToDb,
 } from "@magic-context/core/hooks/magic-context/lkg-persist";
 import {
+	clearLkgFenceProcessState,
 	lkgFenceRequiresRebuild,
+	lkgRecoveryFenceUnclean,
 	markLkgRecoveryDirty,
 	ownsLkgDirtyFence,
 } from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
@@ -226,6 +228,7 @@ export function clearPiLkgSessionState(sessionId: string): void {
 	const state = piLkgSessionStates.get(sessionId);
 	if (state) state.captureSequence += 1;
 	piLkgSessionStates.delete(sessionId);
+	clearLkgFenceProcessState(sessionId);
 }
 
 export interface PiLkgCoordinator {
@@ -595,12 +598,15 @@ export function createPiLkgCoordinator(
 		const prefix = state.recoveryPrefix;
 		if (!prefix) {
 			const slot = getSlot(snapshot.sessionId);
-			return slot &&
-				lkgFenceRequiresRebuild(
-					snapshot.sessionId,
-					loadPersistedLkgSlot(db, snapshot.sessionId) ?? slot,
-					!!state.acceptedInputs,
-				)
+			return lkgRecoveryFenceUnclean(snapshot.sessionId) ||
+				(slot &&
+					lkgFenceRequiresRebuild(
+						snapshot.sessionId,
+						state.acceptedInputs
+							? slot
+							: (loadPersistedLkgSlot(db, snapshot.sessionId) ?? slot),
+						!!state.acceptedInputs,
+					))
 				? { rebuildReason: "lkg_restart_rebuild" }
 				: {};
 		}

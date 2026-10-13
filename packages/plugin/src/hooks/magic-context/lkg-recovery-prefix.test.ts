@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import { markLkgRecoveryDirty } from "./lkg-recovery-fence";
 import {
     clearLkgRecoverySession,
     lkgRecoveryEntryUnproven,
@@ -7,7 +9,13 @@ import {
     readLkgRecoveryPrefix,
 } from "./lkg-recovery-prefix";
 import { projectLkgEntry } from "./lkg-replay";
-import { captureSlot, lkgContentDigest, noteEntry, resetLkgSlotsForTest } from "./lkg-slot";
+import {
+    captureSlot,
+    getSlot,
+    lkgContentDigest,
+    noteEntry,
+    resetLkgSlotsForTest,
+} from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
 
 afterEach(resetLkgSlotsForTest);
@@ -74,10 +82,24 @@ for (const change of ["edited", "contracted", "reordered"] as const) {
 }
 
 test("restart refuses busy replay and declares a healthy rebuild of an unproven request", () => {
-    const { raw } = recovery();
-    clearLkgRecoverySession("session");
-    expect(lkgRecoveryReplayUnproven("session")).toBe(true);
-    expect(readLkgRecoveryPrefix("session", projectLkgEntry(raw), raw).rebuildReason).toBe(
-        "lkg_restart_rebuild",
-    );
+    const { dir } = createTestTempDir("mc-prefix-restart-");
+    const previous = process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    process.env.MAGIC_CONTEXT_STORAGE_DIR = dir;
+    try {
+        const { raw } = recovery();
+        markLkgRecoveryDirty({
+            sessionId: "session",
+            slot: getSlot("session")!,
+            processLocalProof: true,
+        });
+        clearLkgRecoverySession("session");
+        expect(lkgRecoveryReplayUnproven("session")).toBe(true);
+        expect(readLkgRecoveryPrefix("session", projectLkgEntry(raw), raw).rebuildReason).toBe(
+            "lkg_restart_rebuild",
+        );
+    } finally {
+        if (previous === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+        else process.env.MAGIC_CONTEXT_STORAGE_DIR = previous;
+        cleanupTestTempDir(dir);
+    }
 });

@@ -2604,8 +2604,11 @@ export function createRustModeTransform(
         // trusting the older row until this matching deferred save succeeds.
         const persisted = saveLkgSlotToDb(deps.db, plan.sessionId, slot, undefined, {
             rebuild: requireDurable,
-            ownDirtyRevision: plan.fenceRevision,
-            cleanDigest: state.lkgLatestServedDigest,
+            ownDirtyRevision: plan.fenceRevision ?? lkgDirtyRevision(plan.sessionId),
+            requiredRevision: plan.fenceRevision,
+            cleanDigest: plan.fenceRevision
+                ? state.lkgLatestServedDigest
+                : lkgServedArrayDigest(plan.jsonPrefix),
             retainDirtyRevision:
                 !plan.eligibleForClean || plan.returnedDigest !== state.lkgLatestServedDigest
                     ? plan.fenceRevision
@@ -4714,14 +4717,16 @@ export function createRustModeTransform(
                     const previousSlot = getSlot(sessionId);
                     const installed = commitRustCapture(state, capturePlan, false, true);
                     if (installed === "captured" && capturePlan.prepared) {
-                        capturePlan.fenceRevision = prepareLkgCaptureFence({
-                            sessionId,
-                            previousSlot,
-                            slot: capturePlan.prepared.slot,
-                            ownDirtyRevision: lkgDirtyRevision(sessionId),
-                            rebuild: synchronousReplacement,
-                        });
-                        rememberLkgDirtyRevision(sessionId, capturePlan.fenceRevision);
+                        if (!synchronousReplacement && !state.lkgSyncCaptureRequired) {
+                            capturePlan.fenceRevision = prepareLkgCaptureFence({
+                                sessionId,
+                                previousSlot,
+                                slot: capturePlan.prepared.slot,
+                                ownDirtyRevision: lkgDirtyRevision(sessionId),
+                                rebuild: synchronousReplacement,
+                            });
+                            rememberLkgDirtyRevision(sessionId, capturePlan.fenceRevision);
+                        }
                         captureForCertificate = capturePlan;
                     }
                 }
@@ -5011,6 +5016,22 @@ export function createRustModeTransform(
                 captureForCertificate.eligibleForClean =
                     lkgServedArrayDigest(captureForCertificate.jsonPrefix) ===
                     state.lkgLatestServedDigest;
+                if (
+                    (!captureForCertificate.committed || !captureForCertificate.eligibleForClean) &&
+                    captureForCertificate.prepared &&
+                    !captureForCertificate.fenceRevision
+                ) {
+                    // A failed synchronous save or later host edit turned this into
+                    // an uncommitted return. Publish dirty before returning those bytes.
+                    captureForCertificate.fenceRevision = prepareLkgCaptureFence({
+                        sessionId,
+                        slot: captureForCertificate.prepared.slot,
+                        previousSlot: loadPersistedLkgSlot(deps.db, sessionId, true),
+                        ownDirtyRevision: lkgDirtyRevision(sessionId),
+                        rebuild: true,
+                    });
+                    rememberLkgDirtyRevision(sessionId, captureForCertificate.fenceRevision);
+                }
                 if (
                     captureForCertificate.committed &&
                     captureForCertificate.eligibleForClean &&
