@@ -586,6 +586,18 @@ function resolveModelRefForTarget(
 }
 let configuredSubagentExtensions: readonly string[] | undefined;
 
+// Mirrors Pi 1.1.0's isLocalPath() non-local source prefixes; these entries
+// must reach Pi as sources instead of being resolved as filesystem paths.
+const PI_NON_LOCAL_EXTENSION_PREFIXES = [
+	"npm:",
+	"git:",
+	"github:",
+	"http:",
+	"https:",
+	"ssh:",
+	"builtin:",
+] as const;
+
 /** Configure the user-tier extension allowlist used by new Pi child runners. */
 export function configurePiSubagentExtensions(
 	extensions: readonly string[] | undefined,
@@ -599,9 +611,29 @@ function resolveSubagentExtensionEntry(
 ): string {
 	const trimmed = entry.trim();
 	const isNpmSource = trimmed.startsWith("npm:");
-	return !isNpmSource && !isAbsolute(trimmed)
-		? resolvePath(getHostAgentSettingsDir(targetHarness), trimmed)
-		: trimmed;
+	const isPiSource = PI_NON_LOCAL_EXTENSION_PREFIXES.some((prefix) =>
+		trimmed.startsWith(prefix),
+	);
+	// OMP's extension loader resolves configured entries as paths; remote packages
+	// use `omp install`. Preserve its existing npm: passthrough without implying
+	// that OMP loads npm: entries remotely.
+	if (isNpmSource || (targetHarness === "pi" && isPiSource)) return trimmed;
+
+	let normalized = trimmed;
+	if (normalized === "~") {
+		normalized = homedir();
+	} else if (
+		normalized.startsWith("~/") ||
+		(process.platform === "win32" && normalized.startsWith("~\\"))
+	) {
+		normalized = join(homedir(), normalized.slice(2));
+	} else if (/^file:\/\//.test(normalized)) {
+		normalized = fileURLToPath(normalized);
+	}
+
+	return isAbsolute(normalized)
+		? normalized
+		: resolvePath(getHostAgentSettingsDir(targetHarness), normalized);
 }
 
 const PI_READ_ONLY_BUILTINS = ["read", "grep", "find", "ls"] as const;
