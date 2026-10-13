@@ -1,0 +1,77 @@
+{
+  "tool": "Bun 1.4.2 (744846f84); linux,4c; BUN_JSC_useOMGJIT=0 bun test --parallel=4 --timeout 30000",
+  "mutated_path": "packages/pi-plugin/src/pi-context-refusal.ts",
+  "procedure": "Stage the live source and review test; confirm git diff --stat is empty; mark each source break NON-VACUITY BREAK; capture nonempty git diff --stat; run the selected tests; restore with git checkout -- packages/pi-plugin/src/pi-context-refusal.ts && touch packages/pi-plugin/src/pi-context-refusal.ts; capture empty git diff --stat. No product-source break is committed.",
+  "test_names": {
+    "T1": "issue 674: goal inner run end preserves the parent's exact managed continuation",
+    "T2": "issue 674: a persisted goal preface anchors a later-persisted continuation",
+    "T3": "issue 674: an anchor inside the ended transcript cannot identify the later run",
+    "T4": "issue 674: an incompletely persisted continuation cannot preserve a receipt",
+    "T5": "issue 674: changing the persisted goal preface ID refuses the stale continuation",
+    "T6": "issue 674: same custom timestamps and IDs do not authorize changed goal content",
+    "T7": "issue 674: invalid custom timestamps leave the end effective",
+    "T8": "issue 674: the goal continuation's own end still refuses its managed payload",
+    "T9": "issue 674: a new model pass within the same run gets a fresh receipt without another start",
+    "T10": "issue 674: raw history cannot borrow a receipt retained after an earlier end",
+    "T11": "issue 674: changed provider system content cannot borrow a retained receipt",
+    "T12": "issue 674: retry controls can change while the managed conversation stays identical",
+    "T13": "issue 674: unknown provider shapes cannot use a retained receipt",
+    "T14": "issue 674: repeated stale callbacks still abort but notify once without nested stages",
+    "T15": "issue 674: persisting a tail cannot replace a changed prefix anchor",
+    "T16": "issue 674: response-chain identifiers cannot change under a retained receipt",
+    "R1": "review safety: retained Responses instructions and conversation are bound",
+    "R2": "review safety: nested cache metadata and reasoning items are bound",
+    "R3": "review compatibility: top-level controls and tool ordering can change",
+    "R4": "review compatibility: actual tool-loop followup needs no new start",
+    "R5": "review witness: retained Responses receipt ignores a changed prompt template",
+    "R6": "review witness: retained receipt accepts a hybrid unknown history representation",
+    "R7": "review witness: retained receipt is not rechecked after native compaction",
+    "R8": "review witness: a completed overlapping pass authorizes the prior raw request",
+    "R9": "review witness: equivalent message object key order is refused"
+  },
+  "controls": [
+    {
+      "id": "rerun-N3",
+      "control": "Remove the requirement that the saved anchor lie beyond the ended prefix (ended.length <= prepared.anchorIndex)",
+      "red": "T3",
+      "green": ["T1", "T2", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13", "T14", "T15", "T16"],
+      "captured_output": "(fail) issue 674: an anchor inside the ended transcript cannot identify the later run; Expected: 1 Received: 0; 15 pass, 1 fail, 35 expect() calls; 16 tests across 1 file",
+      "during_stat": "1 file changed, 2 insertions(+), 1 deletion(-)",
+      "restored_stat": "empty",
+      "outcome": "reddened"
+    },
+    {
+      "id": "rerun-N7",
+      "control": "Remove complete current native-input length and field-token equality",
+      "selector": "issue 674: (an incompletely persisted continuation cannot preserve a receipt|a persisted goal preface anchors a later-persisted continuation)$",
+      "red": "T4",
+      "green": ["T2"],
+      "captured_output": "(fail) issue 674: an incompletely persisted continuation cannot preserve a receipt; Expected: 1 Received: 0; 1 pass, 14 filtered out, 1 fail, 4 expect() calls; 2 tests across 1 file",
+      "during_stat": "1 file changed, 2 insertions(+), 4 deletions(-)",
+      "restored_stat": "empty",
+      "outcome": "reddened"
+    },
+    {
+      "id": "rerun-N8",
+      "control": "Omit previous_response_id from the provider-conversation snapshot",
+      "red": "T16",
+      "green": ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13", "T14", "T15"],
+      "captured_output": "(fail) issue 674: response-chain identifiers cannot change under a retained receipt; Expected: 1 Received: 0; 15 pass, 1 fail, 35 expect() calls; 16 tests across 1 file",
+      "during_stat": "1 file changed, 2 insertions(+), 1 deletion(-)",
+      "restored_stat": "empty",
+      "outcome": "reddened"
+    },
+    {
+      "id": "independent-instructions",
+      "control": "Omit instructions from the Responses provider-conversation snapshot",
+      "red": "R1",
+      "green": ["R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"],
+      "captured_output": "(fail) review safety: retained Responses instructions and conversation are bound; Expected: 1 Received: 0; 8 pass, 1 skip (benchmark), 1 fail, 26 expect() calls; 10 tests across 1 file",
+      "during_stat": "1 file changed, 2 insertions(+), 1 deletion(-)",
+      "restored_stat": "empty",
+      "outcome": "reddened"
+    }
+  ],
+  "review_test_evolution": "The independent mutation ran before adding the cache-only host witness test. R2 was subsequently relabeled review identity: nested cache metadata and reasoning items are compared, because binding cache controls is a compatibility defect, not a safety contract. R7 was relabeled review witness: retained receipt is not rechecked after native branch replacement because native compaction is normally vetoed when the fence is on; the harness proves branch drift, not real compaction scheduling. The underlying assertions did not change. R1 remains unchanged and green with the restored implementation.",
+  "baseline_comparison": "An indexed, marked historical substitution using e75dcf1a:packages/pi-plugin/src/pi-context-refusal.ts also passed R8 (1 pass, 9 filtered, 0 fail, 3 assertions), proving the overlapping raw-request admission predates this range. During diff: 1 file changed, 6 insertions(+), 242 deletions(-); indexed restore/touch diff: empty. This is a provenance comparison, not a claimed red mutation control."
+}
