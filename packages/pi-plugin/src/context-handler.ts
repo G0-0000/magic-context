@@ -9610,13 +9610,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 
-	// Caveman renders from pristine source, so frozen reminder cleanup must run
-	// after both its discovery and replay paths, including when cleanup is disabled.
+	// Compression can restore original text, including system reminders that an
+	// earlier request omitted. Reproduce those omissions after compression even
+	// when new cleanup is disabled. Use the original targets: newTargets blocks
+	// newly changing text before signed thinking, but replay must restore the
+	// already-served text to preserve both the signed prefix and the prompt cache.
 	const contentDecisions = replayPiReminderStrips({
 		db: args.db,
 		sessionId: args.sessionId,
 		activeTags,
-		targets: newTargets,
+		targets,
 		legacyReminderTagNumbers: textIdentityPlan.legacyReminderTagNumbers,
 		cacheBusting: isCacheBustingPass,
 	});

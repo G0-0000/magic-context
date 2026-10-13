@@ -156,6 +156,46 @@ describe("transform_decisions retention cap", () => {
         expect(newest ?? null).not.toBeNull();
     });
 
+    it("records new Pi decisions after the production 2000-row cap is reached", () => {
+        __test.setRetentionForTests(null);
+        // Seed history on one connection so the production-size fixture does not
+        // pay for thousands of database opens before exercising the real writer.
+        const seed = db.prepare(
+            `INSERT INTO transform_decisions
+                (session_id, harness, message_id, ts_ms, decision, materialized,
+                 emergency, dropped_tokens, dropped_count, input_tokens)
+             VALUES ('ses-1', 'pi', ?, ?, 'execute', 0, 0, 0, 0, 100)`,
+        );
+        db.transaction(() => {
+            for (let i = 0; i < TRANSFORM_DECISIONS_RETENTION; i++) {
+                seed.run(`old-${i}`, 1000 + i);
+            }
+        })();
+        for (const [messageId, tsMs] of [
+            ["new-1", 5000],
+            ["new-2", 5001],
+        ] as const) {
+            __test.writeRow(dbPath, { ...baseRow(messageId, tsMs), harness: "pi" });
+        }
+        expect(
+            db
+                .prepare(
+                    `SELECT COUNT(*) AS count, MIN(ts_ms) AS oldest, MAX(ts_ms) AS newest
+                 FROM transform_decisions WHERE session_id = 'ses-1' AND harness = 'pi'`,
+                )
+                .get(),
+        ).toEqual({ count: 2000, oldest: 1002, newest: 5001 });
+        expect(
+            db
+                .prepare(
+                    `SELECT message_id FROM transform_decisions
+                 WHERE session_id = 'ses-1' AND harness = 'pi'
+                 ORDER BY ts_ms DESC LIMIT 2`,
+                )
+                .all(),
+        ).toEqual([{ message_id: "new-2" }, { message_id: "new-1" }]);
+    });
+
     it("records the compared system hashes for a system_hash fold", () => {
         __test.writeRow(dbPath, baseRow("system-hash-fold", 1));
 
