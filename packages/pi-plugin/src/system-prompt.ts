@@ -17,6 +17,7 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { systemPromptDates } from "@magic-context/core/hooks/magic-context/system-prompt-dates";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { PromptSurfacePreset } from "@magic-context/core/shared/prompt-surface";
 import { promptSurfaceHashMaterial } from "@magic-context/core/shared/prompt-surface-runtime";
@@ -104,8 +105,6 @@ export interface SystemPromptHashResult {
 	currentHash: string;
 }
 
-const DATE_PATTERN = /Today's date: .+/;
-
 /**
  * Process the assembled system prompt for cache stability:
  *
@@ -150,13 +149,11 @@ export function processSystemPromptForCache(args: {
 	// Decide whether content or preset already requires a bust before choosing
 	// which date to hash. This lets a midnight date change ride the same fold.
 	let frozenPrompt = systemPrompt;
-	const dateMatch = systemPrompt.match(DATE_PATTERN);
-	const liveDate = dateMatch ? dateMatch[0] : null;
+	if (isFirstHash) stickyDateBySession.delete(sessionId);
 	const stickyDate = stickyDateBySession.get(sessionId);
-	const stableCandidate =
-		liveDate && stickyDate && liveDate !== stickyDate
-			? systemPrompt.replace(DATE_PATTERN, stickyDate)
-			: systemPrompt;
+	const dates = systemPromptDates(systemPrompt, stickyDate);
+	const liveDate = dates.live;
+	const stableCandidate = dates.stable;
 	const stableCandidateHash = createHash("md5")
 		.update(
 			promptSurfaceHashMaterial(stableCandidate, args.promptSurfacePreset),
@@ -187,7 +184,7 @@ export function processSystemPromptForCache(args: {
 				`system prompt date updated: ${stickyDate} → ${liveDate} (cache-busting pass)`,
 			);
 		} else {
-			frozenPrompt = systemPrompt.replace(DATE_PATTERN, stickyDate);
+			frozenPrompt = stableCandidate;
 			sessionLog(
 				sessionId,
 				`system prompt date frozen: real=${liveDate}, using=${stickyDate} (cache-stable pass)`,

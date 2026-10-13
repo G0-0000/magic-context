@@ -562,6 +562,17 @@ export async function applyV2SystemPrompt(
         })),
     );
     const system = { system: draft.system.map((part) => String(part.text ?? "")) };
+    bindSystemDateOutput(system.system, () => {
+        draft.system.splice(
+            0,
+            draft.system.length,
+            ...system.system.map((text, index) => ({
+                ...draft.system[index],
+                type: "text",
+                text,
+            })),
+        );
+    });
     await systemPrompt.handler(
         {
             sessionID: draft.sessionID,
@@ -953,6 +964,7 @@ export async function registerContext(context: V2Context) {
     const agents = new Map<string, string>();
     const sessionDirectories = new Map<string, string>();
     const historyRefreshSessions = new Set<string>();
+    registerSystemDateRefresh(historyRefreshSessions);
     const pendingMaterializationSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
     const restoredRows = new RestoredRowCache();
@@ -1276,7 +1288,7 @@ export async function registerContext(context: V2Context) {
                     agents.delete(sessionID);
                     channel1.delete(sessionID);
                     historyRefreshSessions.delete(sessionID);
-                    pendingMaterializationSessions.delete(sessionID);
+                    clearPendingMaterialization(pendingMaterializationSessions, sessionID);
                     lastHeuristicsTurnId.delete(sessionID);
                     restoredRows.forget(sessionID);
                     await nativeFoldReplay?.forget(sessionID);
@@ -1815,7 +1827,11 @@ export async function registerContext(context: V2Context) {
                     boundaryRepair?.kind === "baseline-reset"
                 ) {
                     historyRefreshSessions.add(draft.sessionID);
-                    pendingMaterializationSessions.add(draft.sessionID);
+                    requestPendingMaterialization(
+                        pendingMaterializationSessions,
+                        draft.sessionID,
+                        "boundary_repair",
+                    );
                 }
                 const incoming = cut && draft.messages.find((message) => message.id === cut.id);
                 postFold = cut !== undefined;
@@ -1853,7 +1869,11 @@ export async function registerContext(context: V2Context) {
                     // cleanup) are flagged to apply in that same pass rather than
                     // causing a second cache rebuild later.
                     historyRefreshSessions.add(draft.sessionID);
-                    pendingMaterializationSessions.add(draft.sessionID);
+                    requestPendingMaterialization(
+                        pendingMaterializationSessions,
+                        draft.sessionID,
+                        "host_history_change",
+                    );
                 }
                 if (cut && incoming && nativeRestored) {
                     const present = new Set(
@@ -1878,7 +1898,11 @@ export async function registerContext(context: V2Context) {
                         onHard: (reason) => {
                             sessionLog(draft.sessionID, `HARD reason=${reason}`);
                             materialize(draft);
-                            pendingMaterializationSessions.add(draft.sessionID);
+                            requestPendingMaterialization(
+                                pendingMaterializationSessions,
+                                draft.sessionID,
+                                "host_compaction",
+                            );
                         },
                     });
                     checkpoint = structuredClone(identity.rendered ?? incoming);
@@ -2346,3 +2370,13 @@ export async function registerContext(context: V2Context) {
         },
     };
 }
+
+import {
+    clearPendingMaterialization,
+    requestPendingMaterialization,
+} from "../../hooks/magic-context/pending-materialization";
+
+import {
+    bindSystemDateOutput,
+    registerSystemDateRefresh,
+} from "../../hooks/magic-context/system-date-refresh";

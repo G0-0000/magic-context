@@ -13,6 +13,89 @@ import {
 } from "./pi-raw-fallback";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
 
+it("Pi fit and fallback byte proxies do not price ciphertext as input text", () => {
+	const envelope = {
+		modelKey: "anthropic/claude-opus-5-5",
+		systemTokens: 100,
+		toolDefinitionTokens: 100,
+		refusalToolDefinitionTokens: 100,
+		toolDefinitionsMeasured: true,
+	};
+	const plain = [
+		{
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "A short thought" }],
+		},
+	];
+	const signed = [
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "A short thought",
+					thinkingSignature: "opaque".repeat(100_000),
+				},
+			],
+		},
+	];
+	expect(estimatePiOutgoingInputTokens(signed, envelope).refusalTokens).toBe(
+		estimatePiOutgoingInputTokens(plain, envelope).refusalTokens,
+	);
+	const fit = estimatePiOutgoingInputTokens(
+		signed,
+		envelope,
+		undefined,
+		16_000,
+	);
+	expect(fit.refusalTokens ?? fit.tokens).toBeLessThan(16_000);
+	expect(fit.tokens).toBeLessThan(16_000);
+	expect(() =>
+		assertPiRawFallbackFits(signed, 16_000, () => {}, null, envelope),
+	).not.toThrow();
+	const redacted = [
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "opaque".repeat(100_000),
+					redacted: true,
+					thinkingSignature: "opaque",
+				},
+			],
+		},
+	];
+	expect(
+		estimatePiOutgoingInputTokens(redacted, envelope, undefined, 16_000)
+			.refusalGrade,
+	).toBe(false);
+	expect(() =>
+		assertPiRawFallbackFits(redacted, 16_000, () => {}, null, envelope),
+	).not.toThrow();
+	const text = [{ role: "user", content: "large text ".repeat(20_000) }];
+	expect(
+		estimatePiOutgoingInputTokens(text, envelope, undefined, 16_000)
+			.refusalGrade,
+	).toBe(true);
+	const tool = [
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					name: "probe",
+					arguments: { thinkingSignature: "large text ".repeat(20_000) },
+				},
+			],
+		},
+	];
+	expect(
+		estimatePiOutgoingInputTokens(tool, envelope, undefined, 16_000)
+			.refusalGrade,
+	).toBe(true);
+});
+
 it("Pi healthy refusal settles huge and small byte bounds without BPE", () => {
 	const envelope = {
 		modelKey: "unknown/unknown",

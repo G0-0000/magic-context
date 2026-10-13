@@ -5446,7 +5446,9 @@ it("a flush in a held signed turn is parked through execute and defer passes and
             logs.mock.calls
                 .slice(start)
                 .filter((args) =>
-                    String(args[1]).includes("pending ops WILL APPLY — reason=explicit_flush"),
+                    String(args[1]).includes(
+                        "pending ops WILL APPLY — reason=pending_materialization",
+                    ),
                 ),
         ).toHaveLength(1);
     } finally {

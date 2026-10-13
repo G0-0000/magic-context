@@ -283,7 +283,11 @@ export function createChatMessageHook(args: {
                 );
                 args.historyRefreshSessions.add(sessionId);
                 args.systemPromptRefreshSessions.add(sessionId);
-                args.pendingMaterializationSessions.add(sessionId);
+                requestPendingMaterialization(
+                    args.pendingMaterializationSessions,
+                    sessionId,
+                    "variant_change",
+                );
                 args.lastHeuristicsTurnId.delete(sessionId);
             } else {
                 // The provider's cache ignores request params, so a variant
@@ -458,7 +462,7 @@ export function createEventHook(args: {
             args.historyRefreshSessions.delete(sessionId);
             args.deferredHistoryRefreshSessions.delete(sessionId);
             args.systemPromptRefreshSessions.delete(sessionId);
-            args.pendingMaterializationSessions.delete(sessionId);
+            clearPendingMaterialization(args.pendingMaterializationSessions, sessionId);
             args.deferredMaterializationSessions.delete(sessionId);
             args.lastHeuristicsTurnId.delete(sessionId);
             args.commitSeenLastPass?.delete(sessionId);
@@ -774,3 +778,8 @@ export function createToolExecuteAfterHook(args: {
         }
     };
 }
+
+import {
+    clearPendingMaterialization,
+    requestPendingMaterialization,
+} from "./pending-materialization";

@@ -4706,6 +4706,7 @@ export function createRustModeTransform(
                 throw error;
             }
             const bookkeepingStartedAt = performance.now();
+            finishSystemDateRefresh(deps.historyRefreshSessions, sessionId, moduleDecisionBusts);
             if (shouldAdoptModuleAfterFreeze(moduleDecisionBusts, frozenReplayReleased)) {
                 if (frozenReleaseReason) {
                     sessionLog(
@@ -5236,3 +5237,5 @@ import {
     protectedToolRefusal,
     signedTurnContextRefusal,
 } from "./emergency-fail-closed";
+
+import { finishSystemDateRefresh } from "./system-date-refresh";

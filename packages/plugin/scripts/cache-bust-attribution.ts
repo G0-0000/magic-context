@@ -433,7 +433,9 @@ function classifyOwnCacheBust(input: CacheBustAttributionInput): CacheBustDiverg
         input.firstDivergenceSize !== undefined &&
         input.firstDivergenceSize <= 256 &&
         input.divergenceIndex < Math.max(0, input.previousMessageCount - 2);
-    if (decision.flush || materializeReason === "explicit_flush") return "accounted_ctx_flush";
+    if (decision.flush || materializeReason === "explicit_flush" || materializeReason === "user_flush") return "accounted_ctx_flush";
+    if (materializeReason === "fit_retry") return "accounted_force_band";
+    if (materializeReason === "system_hash") return "accounted_hard_system_hash";
     if (decision.emergency && decision.droppedCount > 0) return "accounted_force_band";
     if (decision.lkgFrozenReleaseReason) return "accounted_lkg_frozen_release";
     if (isTinyFirstRenderDefer && (usageMissing || providerFullMiss)) {

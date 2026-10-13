@@ -417,4 +417,76 @@ test-only changes; the supplied worktree's initial `bun run build` was green.
 4. Actual non-date identity changes retain the signed-prefix hold contract and
    marker update's same-request agreement: the summary placed in the provider
    request must match the summary identity written to the host store. Attribution reports those
-   hard signals separately from the scheduler decision and from user commands.
+    hard signals separately from the scheduler decision and from user commands.
+
+## Implementation follow-up: estimation and evidence limits
+
+The preceding sections describe the original investigation, including the
+expected-failing tests before the fixes. The reproduction assertions now run as
+ordinary tests. The delayed date-miss characterization has become a non-date
+content-change control: that intentional signed-prefix hold/release remains.
+
+Encrypted signature strings are no longer tokenized as conversation prose in
+the OpenCode final-wire and Pi request estimators (including their fit byte
+proxies). Plaintext thinking still counts, and ciphertext still participates in
+exact prefix identity. The captured-body aggregates above support this change:
+`872,526 - 222,976 = 649,550`, compared with provider input **657,477** on the
+previous served request carrying **98 signed assistants**. The difference is
+7,927 tokens (about 1.2%). This is aggregate corroboration, not an independent
+count of the unsent request or a claim that underlying thinking is free.
+
+Anthropic documents that signatures contain encrypted full thinking, are opaque
+to clients, and must be preserved unchanged during tool use:
+[Thinking encryption and preserving thinking blocks](https://platform.claude.com/docs/en/build-with-claude/thinking).
+Its omitted-display mode still bills full thinking, and prior thinking on models
+that preserve it counts as later input:
+[context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)
+and [token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting).
+These pages do not separately itemize ciphertext's token contribution. They
+support counting the underlying thought, not applying prose BPE to its encrypted
+representation. No live bodies or stores were accessed during this follow-up.
+
+For a signature-only or redacted assistant step, the estimator uses the host's
+stored reasoning count, then its output count (which includes thinking), and
+finally the existing **1,000-token unknown-reasoning-step heuristic**, once per
+assistant message. That fallback is independent of ciphertext length and is
+not a proven upper bound. An unchanged, exactly correlated provider request
+prefix takes precedence: fit uses its measured input plus only the appended
+suffix. Unknown opaque-step counts and signed-request estimate/provider ratios
+are logged for drift visibility without changing decisions. Provider overflow
+recovery and the measured-usage emergency guard remain intact.
+
+The Rust module's reasoning-budget path already uses plaintext/reported usage
+or the same opaque fallback, rather than signature BPE. Its request guard consumes
+the host's final-wire evidence, so it benefits from the shared OpenCode estimator
+change. Generic Rust BPE of serialized historian/boundary blocks is not a
+provider request estimate and is unchanged.
+
+### Rust-mode environment dates
+
+The additional reported OpenCode 1/ck-mc incident had a date-only full miss of
+about 387k at 08:33:30Z, followed by a history-head HARD rewrite of about 197k at
+08:33:57Z. Those are supplied incident aggregates, not newly inspected stores.
+The owner of date normalization is still the TypeScript system hook:
+`hook.ts` registers it independently of the messages transform backend.
+`rust-mode-transform.ts` forwards its persisted `systemPromptHash` as
+`system_prompt_hash` in the request and pass inputs. The module compares that
+render identity in `crates/mc-module/src/transform.rs` before classifying HARD.
+Keeping date-only drift out of the host hash therefore prevents both the wire
+escape and the later module system-identity fold; no Rust hash normalization
+rule is necessary. When the system hook runs first, it can leave a date update
+waiting for the messages pass. The Rust adapter supplies its actual
+`prefix_bust_permitted` verdict to that pending update: a replay keeps the date
+frozen, while an admitted prefix rewrite lets the already-built system array
+advance on the same request.
+Adapter tests run the real system hook in both hook orders, keep signed thinking
+on the served wire, and assert identical requests, unchanged module hash inputs,
+no queued materialization, and no second simulated system-hash HARD.
+
+OpenCode 2 copies the system hook's strings into structured system blocks before
+the messages pass. Its adapter now registers a request-local update callback so
+an authorized deferred date change reaches those blocks on the same paid
+request. Updating only the hook's string array would leave that request frozen
+and expose the new date on replay, causing another miss despite an acknowledged
+hash. A test exercises the real `applyV2SystemPrompt` copy rather than just the
+string-array proxy.

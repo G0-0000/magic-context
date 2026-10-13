@@ -215,7 +215,11 @@ export function buildRecompDeps(
         getNotificationParams: () => ctx.getNotificationParams(sessionId),
         onCompartmentStatePublished: (sid: string) => {
             ctx.liveSessionState.historyRefreshSessions.add(sid);
-            ctx.liveSessionState.pendingMaterializationSessions.add(sid);
+            requestPendingMaterialization(
+                ctx.liveSessionState.pendingMaterializationSessions,
+                sid,
+                "recomp",
+            );
         },
         // Plan v6: recomp is explicit (applies the marker directly) so this is a
         // no-op for recomp, but the runner type is shared and the callback is
@@ -289,3 +293,5 @@ export async function runManagedRecomp(
         return `## Magic Recomp — Failed\n\n${failure}`;
     }
 }
+
+import { requestPendingMaterialization } from "./pending-materialization";

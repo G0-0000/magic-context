@@ -1077,8 +1077,15 @@ export function signalPiSystemPromptRefresh(sessionId: string): void {
  * Mark a Pi session as needing pending-op materialization on the next
  * execute pass. Used by /ctx-flush.
  */
-export function signalPiPendingMaterialization(sessionId: string): void {
-	pendingMaterializationSessions.add(sessionId);
+export function signalPiPendingMaterialization(
+	sessionId: string,
+	origin: PendingMaterializationOrigin = "user_flush",
+): void {
+	requestPendingMaterialization(
+		pendingMaterializationSessions,
+		sessionId,
+		origin,
+	);
 }
 
 export function clearPiM0Cache(
@@ -1320,7 +1327,7 @@ export function hasPendingMaterialization(sessionId: string): boolean {
  *  this pass is `defer`). */
 export function consumePendingMaterialization(sessionId: string): boolean {
 	const wasSet = pendingMaterializationSessions.has(sessionId);
-	pendingMaterializationSessions.delete(sessionId);
+	clearPendingMaterialization(pendingMaterializationSessions, sessionId);
 	return wasSet;
 }
 
@@ -4084,7 +4091,11 @@ export function registerPiContextHandler(
 			);
 			historyRefreshSessions.add(sessionId);
 			systemPromptRefreshSessions.add(sessionId);
-			pendingMaterializationSessions.add(sessionId);
+			requestPendingMaterialization(
+				pendingMaterializationSessions,
+				sessionId,
+				"variant_change",
+			);
 			lastHeuristicsTurnIdBySession.delete(sessionId);
 			return;
 		}
@@ -5031,7 +5042,7 @@ export function registerPiContextHandler(
 			}
 			if (stableIdSchemeCutover && !options.compactionOff) {
 				schedulerDecision = "execute";
-				signalPiPendingMaterialization(sessionId);
+				signalPiPendingMaterialization(sessionId, "tag_identity_repair");
 				// Re-keying of stripped_placeholder_ids from pi-msg-* to real ids is
 				// done by the strip's own prune this pass (forceDiscovery + carried
 				// map → finalIds = idsToStrip ∩ presentIds, and stale pi-msg-* ids
@@ -6008,16 +6019,17 @@ export function registerPiContextHandler(
 					sessionDecisionCalibration(options.db, sessionId),
 					toolWireSchema,
 				);
+				const measuredPrefix = lkgPassSnapshot
+					? lkgCoordinator.measureOutgoingPrefix(
+							lkgPassSnapshot,
+							outputMessages,
+							(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+						)
+					: undefined;
 				let estimate = estimatePiOutgoingInputTokens(
 					outputMessages,
 					envelope,
-					lkgPassSnapshot
-						? lkgCoordinator.measureOutgoingPrefix(
-								lkgPassSnapshot,
-								outputMessages,
-								(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
-							)
-						: undefined,
+					measuredPrefix,
 					rawFallbackLimit,
 				);
 				if (
@@ -6062,6 +6074,33 @@ export function registerPiContextHandler(
 						envelope,
 						undefined,
 						rawFallbackLimit,
+					);
+				}
+				const opaqueFallbackSteps =
+					piOpaqueThinkingFallbackSteps(outputMessages);
+				if (opaqueFallbackSteps > 0)
+					sessionLog(
+						sessionId,
+						`opaque thinking fallback: steps=${opaqueFallbackSteps} tokensPerStep=1000 (native usage unavailable; telemetry only)`,
+					);
+				if (
+					measuredPrefix?.previousMessages?.some((raw) => {
+						const message = raw as {
+							content?: Array<{ thinkingSignature?: string }>;
+						};
+						return (
+							Array.isArray(message.content) &&
+							message.content.some((part) => part.thinkingSignature)
+						);
+					})
+				) {
+					const previous = estimatePiOutgoingInputTokens(
+						measuredPrefix.previousMessages,
+						envelope,
+					);
+					sessionLog(
+						sessionId,
+						`thinking estimate drift: estimate=${previous.tokens} provider=${measuredPrefix.inputTokens} ratio=${(previous.tokens / measuredPrefix.inputTokens).toFixed(4)} (previous served request; telemetry only)`,
 					);
 				}
 				if (
@@ -7764,7 +7803,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				? (message as { content: unknown[] }).content
 				: [],
 	});
-	if (thinkingRecovery.ended) signalPiPendingMaterialization(args.sessionId);
+	if (thinkingRecovery.ended)
+		signalPiPendingMaterialization(args.sessionId, "thinking_hold");
 	let restoreOriginals:
 		| ReturnType<typeof captureOriginalTurn<unknown>>
 		| undefined;
@@ -8871,7 +8911,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	});
 	if (shouldApplyPendingOps) {
 		const applyReason = hasPendingMaterializeSignal
-			? "explicit_flush"
+			? `pending_materialization origin=${pendingMaterializationOrigin(pendingMaterializationSessions, args.sessionId)}`
 			: deferredMaterialize
 				? "deferred_publication"
 				: args.forceMaterialization
@@ -10747,7 +10787,7 @@ function appendReminderToPiUserMessage(
 function clearPiCompactionOffInMemoryState(sessionId: string): void {
 	historyRefreshSessions.delete(sessionId);
 	deferredHistoryRefreshSessions.delete(sessionId);
-	pendingMaterializationSessions.delete(sessionId);
+	clearPendingMaterialization(pendingMaterializationSessions, sessionId);
 	deferredMaterializationSessions.delete(sessionId);
 	clearPiChannel1State(sessionId);
 }
@@ -10797,7 +10837,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);
 	historyRefreshSessions.delete(sessionId);
-	pendingMaterializationSessions.delete(sessionId);
+	clearPendingMaterialization(pendingMaterializationSessions, sessionId);
 	systemPromptRefreshSessions.delete(sessionId);
 	deferredHistoryRefreshSessions.delete(sessionId);
 	deferredMaterializationSessions.delete(sessionId);
@@ -10874,3 +10914,11 @@ function runPersistedReplayStage<T>(
 		throw new PiDegradedPassError(site, { cause: error });
 	}
 }
+
+import type { PendingMaterializationOrigin } from "@magic-context/core/hooks/magic-context/pending-materialization";
+import {
+	clearPendingMaterialization,
+	pendingMaterializationOrigin,
+	requestPendingMaterialization,
+} from "@magic-context/core/hooks/magic-context/pending-materialization";
+import { piOpaqueThinkingFallbackSteps } from "./tokenize-pi-messages";

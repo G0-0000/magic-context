@@ -118,7 +118,9 @@ export function estimatePiOutgoingInputTokens(
 						(p) =>
 							p &&
 							typeof p === "object" &&
-							["text", "thinking", "toolCall"].includes(String(p.type)),
+							["text", "thinking", "redacted_thinking", "toolCall"].includes(
+								String(p.type),
+							),
 					)))
 		);
 	});
@@ -143,6 +145,7 @@ export function estimatePiOutgoingInputTokens(
 					| Array<{
 							text?: string;
 							thinking?: string;
+							redacted?: boolean;
 							thinkingSignature?: string;
 							textSignature?: string;
 							name?: string;
@@ -155,9 +158,7 @@ export function estimatePiOutgoingInputTokens(
 				for (const part of message.content) {
 					for (const value of [
 						part.text,
-						part.thinking,
-						part.thinkingSignature,
-						part.textSignature,
+						part.redacted ? undefined : part.thinking,
 						part.name,
 					])
 						if (typeof value === "string")
@@ -191,7 +192,10 @@ export function estimatePiOutgoingInputTokens(
 		const upper =
 			envelope +
 			Math.max(UNKNOWN_FIT_RATIO, fit.toolsRatio, fit.proseRatio) *
-				Buffer.byteLength(JSON.stringify(priced));
+				priced.reduce<number>(
+					(sum, message) => sum + piFitMessageBytes(message),
+					0,
+				);
 		if (upper <= contextLimit)
 			return {
 				tokens: upper,
@@ -206,9 +210,7 @@ export function estimatePiOutgoingInputTokens(
 		return (content as Array<Record<string, unknown>>).some((part) =>
 			[
 				part.text,
-				part.thinking,
-				part.thinkingSignature,
-				part.textSignature,
+				part.redacted ? undefined : part.thinking,
 				part.name,
 				part.arguments === undefined
 					? undefined
@@ -225,7 +227,10 @@ export function estimatePiOutgoingInputTokens(
 					system: observed.systemTokens,
 					tools:
 						observed.toolDefinitionTokens +
-						Buffer.byteLength(JSON.stringify(messages)),
+						messages.reduce<number>(
+							(sum, message) => sum + piFitMessageBytes(message),
+							0,
+						),
 				},
 				observed.calibration ?? calibrationForModelKey(observed.modelKey),
 				true,
@@ -258,9 +263,7 @@ export function estimatePiOutgoingInputTokens(
 			return (content as Array<Record<string, unknown>>).every((part) =>
 				[
 					part.text,
-					part.thinking,
-					part.thinkingSignature,
-					part.textSignature,
+					part.redacted ? undefined : part.thinking,
 					part.name,
 					part.arguments === undefined
 						? undefined
@@ -318,6 +321,8 @@ export interface PiMeasuredPrefixFit {
 	envelopeSignature: string;
 	inputTokens: number;
 	appendedMessages: readonly unknown[];
+	/** Messages sent in the previous request, used only to measure estimate drift. */
+	previousMessages?: readonly unknown[];
 }
 
 /** Prefer correlated provider input plus the new tail; otherwise price the full envelope. */
@@ -367,12 +372,7 @@ export function assertPiRawFallbackFits(
 	let serializationFailed = false;
 	try {
 		for (const message of pricedMessages) {
-			const serialized = JSON.stringify(message);
-			if (typeof serialized !== "string") {
-				serializationFailed = true;
-				break;
-			}
-			bytes += Buffer.byteLength(serialized) + 1;
+			bytes += piFitMessageBytes(message) + 1;
 			if (baseInputTokens + Math.ceil(bytes / 4) > contextLimit) break;
 		}
 	} catch {
@@ -396,7 +396,7 @@ export function assertPiRawFallbackFits(
 						(p: unknown) =>
 							p !== null &&
 							typeof p === "object" &&
-							["text", "thinking", "toolCall"].includes(
+							["text", "thinking", "redacted_thinking", "toolCall"].includes(
 								String((p as { type?: unknown }).type),
 							),
 					)))
@@ -432,3 +432,5 @@ export function assertPiRawFallbackFits(
 		throw new PiStorageBusyError({ cause });
 	}
 }
+
+import { piFitMessageBytes } from "./tokenize-pi-messages";
