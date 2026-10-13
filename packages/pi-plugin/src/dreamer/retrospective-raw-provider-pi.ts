@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type {
 	RetrospectiveProjectSession,
 	RetrospectiveRawMessage,
@@ -6,6 +6,7 @@ import type {
 	RetrospectiveSinceRead,
 } from "@magic-context/core/features/magic-context/dreamer/retrospective-raw-provider";
 import { readSessionActivity } from "@magic-context/core/features/magic-context/session-activity";
+import { sameProjectDirectory } from "@magic-context/core/shared/project-directory-key";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { sessionEntries, sessionHeaders } from "./bounded-session-reader";
 import { resolvePiCodingAgentModule } from "./pi-session-api";
@@ -58,7 +59,7 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 			: directory
 				? sessionHeaders(directory, !this.deps.sessionDir)
 				: [];
-		const projectCwd = resolve(this.deps.projectCwd);
+		const projectCwd = this.deps.projectCwd;
 		const result: RetrospectiveProjectSession[] = [];
 		this.sessionPathById.clear();
 
@@ -67,7 +68,13 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 			if (!info || typeof info !== "object") continue;
 			if (typeof info.id !== "string" || typeof info.path !== "string")
 				continue;
-			if (typeof info.cwd !== "string" || resolve(info.cwd) !== projectCwd)
+			// One spelling-normalized comparison for every host: separators,
+			// Windows drive-letter case and trailing separators do not make this
+			// project's sessions look foreign, and other directories stay out.
+			if (
+				typeof info.cwd !== "string" ||
+				!sameProjectDirectory(info.cwd, projectCwd)
+			)
 				continue;
 
 			const activity = this.deps.contextDb

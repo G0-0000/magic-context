@@ -6,6 +6,7 @@ import { closeDatabase, openDatabase } from "../../features/magic-context/storag
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import { _getDreamTimerStateForTests, _resetDreamTimerForTests } from "../../plugin/dream-timer";
 import { _resetHarnessForTesting } from "../../shared/harness";
+import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { setup } from "../server";
@@ -207,5 +208,92 @@ describe("OpenCode 2 timer parent lookup", () => {
                 throw new Error("store missing");
             }, "/work/app"),
         ).toBeUndefined();
+    });
+
+    // Issue 669: OpenCode 2 on Windows stores a session's directory with forward
+    // slashes while the plugin's location uses backslashes. An exact comparison
+    // found no parent, logged "no OpenCode 2 session in <dir> to parent a
+    // timer-started dream run", and every task needing a child was skipped.
+    test("finds the reporter's Windows session stored with forward slashes from a backslash location", () => {
+        const path = createV2Store([
+            {
+                id: "ses_003d66de0ffehWx8sGUHOvz6wx",
+                directory: "D:/coding/siac/wt/migracion-asincrona",
+                time_updated: 5,
+            },
+            {
+                id: "ses_f25830a8bffeSKtIB5Ja0MVb1v",
+                directory: "D:/coding/siac/wt/migracion-asincrona",
+                parent_id: "ses_003d66de0ffehWx8sGUHOvz6wx",
+                time_updated: 9,
+            },
+            {
+                id: "ses_f2b9cb3bcffewuQTM25cxU0TH1",
+                directory: "D:/coding/siac/wt/notificaciones-pui",
+                time_updated: 9,
+            },
+        ]);
+        const logged: string[] = [];
+        const logSpy = spyOn(logger, "log").mockImplementation((...args: unknown[]) => {
+            logged.push(args.map(String).join(" "));
+        });
+        try {
+            expect(
+                findV2DreamParentSession(
+                    () => new V2StoreReader(path),
+                    "D:\\coding\\siac\\wt\\migracion-asincrona",
+                ),
+            ).toBe("ses_003d66de0ffehWx8sGUHOvz6wx");
+        } finally {
+            logSpy.mockRestore();
+        }
+        expect(
+            logged.filter((line) => line.includes("to parent a timer-started dream run")),
+        ).toEqual([]);
+    });
+
+    for (const [label, location] of [
+        ["forward slashes against backslashes", "C:\\Users\\dev\\work\\app"],
+        ["drive-letter case", "c:/Users/dev/work/app"],
+        ["a trailing slash", "C:/Users/dev/work/app/"],
+        ["a trailing backslash", "C:\\Users\\dev\\work\\app\\"],
+        ["a `.` and a `..` segment", "C:\\Users\\dev\\.\\work\\tmp\\..\\app"],
+    ] as const) {
+        test(`a Windows location spelled with ${label} finds its own session`, () => {
+            const path = createV2Store([
+                { id: "ses-own", directory: "C:/Users/dev/work/app", time_updated: 1 },
+                { id: "ses-other", directory: "C:/Users/dev/work/app-worktree", time_updated: 9 },
+            ]);
+            expect(findV2DreamParentSession(() => new V2StoreReader(path), location)).toBe(
+                "ses-own",
+            );
+        });
+    }
+
+    test("a genuinely different Windows directory is still refused", () => {
+        const path = createV2Store([
+            { id: "ses-sibling", directory: "C:/Users/dev/work/app-worktree", time_updated: 9 },
+            { id: "ses-parent-dir", directory: "C:/Users/dev/work", time_updated: 9 },
+            { id: "ses-other-drive", directory: "D:/Users/dev/work/app", time_updated: 9 },
+        ]);
+        expect(
+            findV2DreamParentSession(() => new V2StoreReader(path), "C:\\Users\\dev\\work\\app"),
+        ).toBeUndefined();
+    });
+
+    test("the newest matching root wins even when it is past the first page of roots", () => {
+        const rows = Array.from({ length: 1200 }, (_, index) => ({
+            id: `ses-other-${String(index).padStart(4, "0")}`,
+            directory: "/work/other",
+            time_updated: 10_000 + index,
+        }));
+        const path = createV2Store([
+            ...rows,
+            { id: "ses-own-old", directory: "/work/app", time_updated: 1 },
+            { id: "ses-own-new", directory: "/work/app/", time_updated: 2 },
+        ]);
+        expect(findV2DreamParentSession(() => new V2StoreReader(path), "/work/app")).toBe(
+            "ses-own-new",
+        );
     });
 });

@@ -2,6 +2,7 @@ import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
+import { sameProjectDirectory } from "../shared/project-directory-key";
 import {
     childCreateInput,
     errorText,
@@ -124,10 +125,13 @@ export function createNativeHiddenChildren(
             return;
         }
         const directory = stored.location?.directory;
+        // Compared by spelling-normalized equality: the host can write this
+        // instance's own directory as `D:/work/app` while the instance knows it
+        // as `D:\work\app`. Any genuinely different directory is still refused.
         if (
             options.directory !== undefined &&
             directory !== undefined &&
-            directory !== options.directory
+            !sameProjectDirectory(directory, options.directory)
         ) {
             // Nothing has been prompted yet. Every turn of this child would reach the
             // plugin instance of `directory`, which has no record of this run: it
