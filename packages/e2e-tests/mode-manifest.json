@@ -2920,6 +2920,14 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/active-thinking-prefix-hold.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 thinking loop past the execute threshold: the prefix before kept signed thinking stays byte-identical through the loop, and queued work lands in one rebuild on the next user turn",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/degraded-pass-lock.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
