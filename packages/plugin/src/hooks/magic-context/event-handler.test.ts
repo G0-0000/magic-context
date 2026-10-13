@@ -256,8 +256,8 @@ describe("provider-measured proven floor", () => {
     });
 });
 
-// Captured 400 body for Claude Fable 5.1 and Claude Opus 5.5 (identical on both),
-// from docs/reports/anthropic-thinking-binding.md section 2.
+// The provider's binding-error body identifies lowered wire-array positions,
+// not host message ids, so recovery cannot infer a single offending host row.
 const LIVE_BINDING_400_BODY = {
     type: "error",
     error: {

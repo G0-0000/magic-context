@@ -35,10 +35,9 @@ export function availableDreamTasks(smartNotesEnabled = true): DreamTaskName[] {
     );
 }
 
-/** Prompt-token ceilings informed by docs/reports/dreamer-token-usage.md.
+/** Prompt-token ceilings leave headroom for repeated tool-loop prompt sends.
  * Completed Gemini run usage predicts 20-memory mapping/verification batches
- * at about 70% of their allowance
- * (docs/reports/verify-token-budget-2026-09-30.md); curate and other tasks retain
+ * at about 70% of their ceiling; curate and other tasks retain
  * their separate allowances. */
 export const DREAM_TOOL_LOOP_TOKEN_BUDGETS = {
     "map-memories": 2_500_000,

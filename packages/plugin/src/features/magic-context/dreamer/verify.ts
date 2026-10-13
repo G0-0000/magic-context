@@ -81,7 +81,7 @@ import {
 // Broad verification fits ~2.00M at 20, below 70% of its 3M default budget.
 // Both leave room to finalize without repeatedly paying overhead for tiny batches.
 // Observed costs vary widely around these means; heavy batches can still finalize
-// early (docs/reports/verify-token-budget-2026-09-30.md).
+// early.
 const VERIFY_BATCH_SIZE = 20;
 // One batch already exhausts the configured model fallback chain. A second
 // identical provider-shaped completion means continuing this run only hammers

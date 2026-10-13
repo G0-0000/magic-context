@@ -90,7 +90,7 @@ if [[ -n "$CI_GATE_SHA" ]]; then
     echo "Error: --ci-gate commit $CI_GATE_SHA is not an ancestor of HEAD"; exit 1
   fi
   # Only release tooling and release notes may differ from the CI-verified commit.
-  CI_GATE_DRIFT=$(git diff --name-only "$CI_GATE_SHA" HEAD | grep -vE '^(scripts/release[^/]*\.sh|\.cortexkit/)' || true)
+  CI_GATE_DRIFT=$(git diff --name-only "$CI_GATE_SHA" HEAD | grep -vE '^(scripts/release[^/]*\.sh|\.cortexkit/release-notes/)' || true)
   if [[ -n "$CI_GATE_DRIFT" ]]; then
     echo "Error: HEAD differs from the CI-verified commit outside release tooling:"; echo "$CI_GATE_DRIFT"; exit 1
   fi
@@ -161,6 +161,11 @@ echo "→ Running pre-release checks..."
 echo ""
 
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
+NOTES_FILE="$REPO_ROOT/.cortexkit/release-notes/$TAG.md"
+if [[ ! -s "$NOTES_FILE" ]]; then
+  echo "Error: draft public release notes in .cortexkit/release-notes/$TAG.md before releasing."
+  exit 1
+fi
 PLUGIN_DIR="$REPO_ROOT/packages/plugin"
 PI_DIR="$REPO_ROOT/packages/pi-plugin"
 CLI_DIR="$REPO_ROOT/packages/cli"

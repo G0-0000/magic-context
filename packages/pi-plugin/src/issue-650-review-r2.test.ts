@@ -7,9 +7,8 @@
  * trade one for the other. Where the fix's ruling (no tag-identity conflict
  * may refuse more than one turn) changed what a test may expect, the test says
  * so in a comment.
- * See docs/reports/issue-650-review-r2.md for the narrative and reproductions;
- * "Finding N" section headers below use that report's numbering, and "field
- * question" refers to its Oh My Pi field-evidence section.
+ * "Finding N" section headers group the reproduction cases; "field question"
+ * marks an Oh My Pi host-behavior case.
  */
 import { afterEach, expect, test } from "bun:test";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";

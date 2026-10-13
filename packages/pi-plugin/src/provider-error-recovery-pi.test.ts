@@ -47,8 +47,8 @@ function fableMessages() {
 	];
 }
 
-// Captured 400 body, identical for Claude Fable 5.1 and Claude Opus 5.5
-// (docs/reports/anthropic-thinking-binding.md section 2).
+// The thinking-signature error identifies positions in the provider's messages
+// array, not the host's message ids, so it cannot name an offending host row.
 const LIVE_BINDING_400_BODY = {
 	type: "error",
 	error: {

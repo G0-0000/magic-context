@@ -13,8 +13,7 @@
 // - no pass is refused for more than one user turn.
 //
 // With R2_TRACE set, every pass is also appended to that file as one JSON line,
-// so two checkouts can be compared pass by pass (the differential in
-// docs/reports/issue-665-hold-review-r2.md).
+// so two checkouts can be compared pass by pass without changing the driver.
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";

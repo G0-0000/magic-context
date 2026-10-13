@@ -5209,7 +5209,7 @@ fn apply_once(
     };
     // Signed-prefix hold. An unfinished Anthropic thinking turn on a prefix-bound model signs
     // its thinking against the request prefix: a signed thinking block stays valid only while
-    // everything sent before it is unchanged (docs/reports/anthropic-thinking-binding.md),
+    // everything sent before it is unchanged, because its signature binds to that prefix,
     // and re-rendering the synthetic m0/m1 head invalidates every signed block after it
     // (HTTP 400 on strict-binding accounts). The provider also caches that prefix between the
     // turn's tool steps, and the next real user message pays for a rewrite anyway. So inside

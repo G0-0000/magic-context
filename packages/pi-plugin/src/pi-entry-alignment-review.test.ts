@@ -11,7 +11,7 @@ import { createFakePi, createTestDb } from "./test-utils.test";
 // Pi entry-id resolution: the visible-only positional lane with per-position
 // header checks, and the header filter on fallback-tag adoption. Each case is
 // followed by a partner: the closest neighbouring case, so a reader can see the
-// boundary. docs/reports/pi-entry-alignment-review.md describes each case.
+// boundary. Each case below pins the raw-entry shape and the served projection.
 
 type Entry = Record<string, unknown> & {
 	id: string;
