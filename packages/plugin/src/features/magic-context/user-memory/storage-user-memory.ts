@@ -229,10 +229,9 @@ export function dismissUserMemory(db: Database, id: number): void {
 }
 
 export function restoreUserMemory(db: Database, id: number): void {
-    db.prepare("UPDATE user_memories SET status = 'active', updated_at = ? WHERE id = ?").run(
-        Date.now(),
-        id,
-    );
+    db.prepare(
+        "UPDATE user_memories SET status = 'active', updated_at = ? WHERE id = ? AND status = 'dismissed'",
+    ).run(Date.now(), id);
 }
 
 function parseCandidateIds(raw: string): number[] {
