@@ -702,6 +702,83 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).toContain("--no-extensions");
 	});
 
+	it.each([
+		"pi",
+		"omp",
+	] as const)("applies host extension-source and path rules for %s child sessions", (targetHarness) => {
+		const previous = {
+			agentDir: process.env.PI_CODING_AGENT_DIR,
+			configDir: process.env.PI_CONFIG_DIR,
+			ompProfile: process.env.OMP_PROFILE,
+			piProfile: process.env.PI_PROFILE,
+		};
+		const agentDir =
+			targetHarness === "omp"
+				? "/tmp/omp-extension-entry-agent"
+				: join(homedir(), ".pi", "agent");
+		if (targetHarness === "omp") {
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			delete process.env.PI_CONFIG_DIR;
+			delete process.env.OMP_PROFILE;
+			delete process.env.PI_PROFILE;
+		}
+
+		const sourceEntries = [
+			"npm:provider-package",
+			"git:https://example.com/provider.git",
+			"github:owner/provider",
+			"http://example.com/provider.ts",
+			"https://example.com/provider.ts",
+			"ssh://git@example.com/provider.git",
+			"builtin:provider",
+		];
+		const absoluteEntry = `${tmpdir()}/absolute/../provider.ts`;
+		const entries = [
+			...sourceEntries,
+			"~/provider.ts",
+			"file:///tmp/file-url-provider.ts",
+			"./relative-provider.ts",
+			absoluteEntry,
+		];
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ targetHarness, subagentExtensions: entries },
+			);
+			const resolvedEntries: string[] = [];
+			for (let index = 0; index < args.length; index += 1) {
+				if (args[index] === "--extension") {
+					const extension = args[index + 1];
+					if (extension !== undefined) resolvedEntries.push(extension);
+				}
+			}
+			const expectedSourceEntries =
+				targetHarness === "pi"
+					? sourceEntries
+					: [
+							...sourceEntries.slice(0, 1),
+							...sourceEntries.slice(1).map((entry) => join(agentDir, entry)),
+						];
+			expect(resolvedEntries.slice(0, entries.length)).toEqual([
+				...expectedSourceEntries,
+				join(homedir(), "provider.ts"),
+				"/tmp/file-url-provider.ts",
+				join(agentDir, "relative-provider.ts"),
+				absoluteEntry,
+			]);
+		} finally {
+			for (const [key, value] of [
+				["PI_CODING_AGENT_DIR", previous.agentDir],
+				["PI_CONFIG_DIR", previous.configDir],
+				["OMP_PROFILE", previous.ompProfile],
+				["PI_PROFILE", previous.piProfile],
+			] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	it("keeps plain Pi relative allowlist entries rooted at the stock agent dir", () => {
 		const previous = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = "/tmp/plain-pi-custom-agent";
