@@ -17204,10 +17204,11 @@ fn ctx_reduce_reply(stamped_count: usize, self_stamp_count: usize) -> String {
         ));
     }
     if self_stamp_count > 0 {
-        parts.push(format!(
-            "{self_stamp_count} {} a ctx_reduce call; leave those alone, they are cleaned up automatically.",
-            if self_stamp_count == 1 { "was" } else { "were" }
-        ));
+        parts.push(if self_stamp_count == 1 {
+            "1 was a ctx_reduce call; leave those alone, they are cleaned up automatically.".to_owned()
+        } else {
+            format!("{self_stamp_count} were ctx_reduce calls; leave those alone, they are cleaned up automatically.")
+        });
     }
     parts.join(" ")
 }
