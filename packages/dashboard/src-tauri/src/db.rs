@@ -8404,6 +8404,25 @@ pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
     Ok(())
 }
 
+pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let affected = tx.execute(
+        "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
+        params![now_millis(), id],
+    )?;
+    // Same invariant as dismiss/delete: user_memories render into the cached
+    // m[0] <user-profile> block, so a restore must bump the global
+    // user-profile version or running sessions keep serving the profile
+    // without the restored entry. The status predicate keeps affected at 0
+    // for a row that is already active, so a no-op restore cannot
+    // invalidate every running session's cached profile.
+    if affected > 0 {
+        bump_project_user_profile_version(&tx)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let affected = tx.execute("DELETE FROM user_memories WHERE id = ?1", params![id])?;
