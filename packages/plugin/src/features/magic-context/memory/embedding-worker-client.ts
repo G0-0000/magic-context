@@ -115,7 +115,9 @@ export class EmbeddingWorkerClient {
             worker.kill();
         };
         worker.on("error", fail);
-        worker.on("exit", (code) => fail(new Error(`embedding worker exited (${code})`)));
+        worker.on("exit", (code, signal) =>
+            fail(new Error(`embedding worker exited (${signal ?? code})`)),
+        );
         worker.send({ entry: this.entry.href, data: this.data });
         return worker;
     }

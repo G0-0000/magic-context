@@ -13,7 +13,7 @@ Verified on the offline Linux x86_64 build server with Bun **1.4.2**, Node
 | Loading through Magic Context attempts an upload | **Confirmed at the destination-attempt boundary.** The real `LocalEmbeddingProvider`/embedding-worker/Transformers pipeline loaded a native ONNX session and produced `[1]`. With the original direct-worker transport, both runtimes attempted the Microsoft collector hostname; native DNS was blocked before a connection or payload could leave. The collector URL is set in upstream `posix/telemetry.cc:463-465`. We did not capture the HTTP POST or SDK header because DNS was intentionally denied. |
 | A persistent device ID is created | **Confirmed in both baselines.** Each created `cache/Microsoft/DeveloperTools/.onnxruntime/deviceid` under its throwaway `XDG_CACHE_HOME`. The startup-opt-out and fixed runs created none. |
 | Setting the variable before starting the process fixes it | **Confirmed on both runtimes.** Direct-worker controls launched with `ORT_DISABLE_TELEMETRY=1` showed native `getenv=1`, no outbound attempt, and no device ID. |
-| macOS can use the same telemetry path | **Supported by source, not runtime-tested.** The POSIX telemetry sources and non-Windows 1DS linking include Apple builds when telemetry is enabled (`cmake/onnxruntime_common.cmake:61-70,271-368`). The generic CMake option defaults off (`cmake/CMakeLists.txt:169-175`); the privacy documentation says official builds enable it. No particular macOS artifact was inspected or executed. |
+| macOS can use the same telemetry path | **Confirmed on macOS arm64 in the follow-up below.** Source includes Apple builds in the POSIX telemetry path (`cmake/onnxruntime_common.cmake:61-70,271-368`). The generic CMake option defaults off; the executed Node-package artifact included the uploader and created a device ID in the positive control. |
 
 The reported assignment comes from the installed Transformers **4.3.0** source,
 `src/backends/onnx-node.js:7-10`, not tracked Magic Context source. It is bundled
@@ -149,9 +149,144 @@ model loads through the provider passed.
 
 ## Limits
 
-Linux arm64, macOS execution, and Windows execution were unavailable. Stock
-OpenCode 1/2, Pi, and OMP were not launched; their shared embedding source and all
-published build trees were checked, plus a compiled-Bun host probe. The exact
-reported HTTP method/SDK header and a downloaded default trained model were not
-reproduced. The privacy defect and suppression were demonstrated with an offline
-native ONNX model, without sending actual telemetry.
+Linux arm64 and Windows execution remain unavailable. Stock OpenCode 1/2, Pi,
+and OMP were not launched; their shared embedding source and all published build
+trees were checked, plus a compiled-Bun host probe. The exact reported HTTP
+method/SDK header was not captured because DNS was denied. The follow-up below
+adds macOS execution, the default trained model's Linux benchmark, native-model
+host-death checks, and actual npm package file-list comparisons.
+
+## Follow-up: macOS, cost, failure handling, and package contents
+
+### macOS native execution
+
+`bash scripts/probe-onnx-telemetry-macos.sh` ran **locally**, on Darwin 27 arm64,
+with Bun **1.4.2**, Node **26.10.0**, and Apple clang **21.0.0**. Each case had a
+throwaway HOME, XDG_CACHE_HOME, and TMPDIR. A dyld interposer logged native getenv
+calls and blocked DNS/IP connections; a Seatbelt profile additionally denied
+outbound networking and writes under the real home.
+
+| Case | Native ORT getenv | Inference | Device IDs after load | Device IDs after 65 s |
+| --- | --- | --- | --- | --- |
+| Bun original direct worker | unset | native `[1]` | 1 | 1 |
+| Bun subprocess | 1 | native `[1]` | 0 | 0 |
+| Node subprocess | 1 | native `[1]` | 0 | 0 |
+
+The positive control attempted `mobile.events.data.microsoft.com`, which the
+interposer blocked. It created
+`HOME/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime/deviceid`.
+This **macOS artifact does include the uploader**. ORT's Apple path uses absolute
+HOME and appends `Library/Application Support`, ignoring XDG_CACHE_HOME on Apple
+(`posix/device_id.cc:280-317`, `device_id.h:62-64`). Neither fixed case made an
+outbound attempt. Native process-start observations were distinguished by PID
+from ORT's later getenv calls, so the child, not just the host, was observed.
+
+The enabled SDK's Cocoa cache initialization attempted the real user's generic
+Bun HTTP-cache directory; Seatbelt denied those writes. No live OpenCode or Magic
+Context stores were opened. All generated telemetry files were disposable.
+
+### Linux cost: default trained model
+
+`bash scripts/probe-embedding-transport.sh` ran on `linux,4c`, x86_64, with Bun
+1.4.2, Node 24.21.0, and ORT 1.30.0. The default **Xenova/all-MiniLM-L6-v2 fp32**
+model was downloaded locally and copied into the offline job, not fetched by the
+Linux runner. Its ONNX file is 90,387,606 bytes, SHA-256
+`759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e`.
+Both transports returned actual 384-dimensional embeddings.
+
+Each fresh scenario measured owner creation to first embedding, followed by five
+warm-ups and **200 sequential batches of two typical memory/message texts**.
+The baseline directly starts the same embedding worker, so model code and
+inference options are shared. Telemetry was disabled at process birth for both.
+
+| Runtime / transport | Cold to first embedding (ms) | Batch p50 (ms) | Batch p95 (ms) | Parent RSS (MiB) | Model child RSS (MiB) | Total RSS (MiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bun / direct worker | 414.00 | 78.60 | 109.41 | 320.29 | 0 | 320.29 |
+| Bun / subprocess | 498.62 | 85.90 | 113.15 | 42.36 | 344.91 | 387.27 |
+| Node / direct worker | 482.21 | 75.87 | 99.00 | 324.11 | 0 | 324.11 |
+| Node / subprocess | 477.36 | 76.67 | 104.22 | 53.24 | 352.76 | 406.00 |
+
+The final run's subprocess deltas are **+7.30 ms p50 / +3.73 ms p95 / +66.99 MiB
+RSS for Bun**, and **+0.80 ms p50 / +5.22 ms p95 / +81.88 MiB RSS for Node**.
+Cold latency was noisy: an earlier exploratory run measured Bun 441.33 vs 451.49
+ms, and Node 448.07 vs 477.11 ms. Do not infer a stable Node cold-start speedup
+from the final sample, or treat these single-run deltas as a statistical bound.
+
+These are process-cold, not disk-cold, measurements; host program startup,
+parent-side module imports, and downloads are excluded. RSS was sampled after
+batch 200, sums both processes, and double-counts shared pages rather than
+measuring unique physical memory/PSS. Default ORT threading was retained; the
+four-vCPU sandbox emitted CPU-affinity warnings. Reproducible summary numbers
+are retained in `issue-672-transport-benchmark.json`. The extra runtime's memory
+cost is material and should be considered when many providers are loaded.
+
+### Crashes, kills, and host death
+
+The transport probe passed **five checks per runtime on both Linux and macOS**:
+
+1. A worker exit with code 7 rejects both outstanding requests; the next request
+   lazily creates a replacement and returns a valid result.
+2. SIGKILL of the model subprocess rejects both outstanding requests; the next
+   request restarts successfully. The follow-up improves the diagnostic from
+   `exited (null)` to `exited (SIGKILL)` and adds a focused regression test.
+3. Normal idle host exit leaves no live model subprocess.
+4. Explicit `process.exit(0)` leaves no live model subprocess.
+5. SIGKILL of the host leaves no live model subprocess.
+
+Host-death cases loaded and inferred with the **trained native model** before
+exiting/killing the host. Both Bun and Node model owners stopped within the
+probe's first ~0–23 ms observation interval after host exit, well inside its
+five-second deadline. Linux zombies, if present pending init reaping, are treated
+as stopped, not live runtimes; the test does not claim a PID has been reaped merely
+because it stopped running.
+
+The kernel closes the host's IPC endpoint on death. The existing child-side
+`disconnect` handler exits the whole model process, including its worker thread.
+**No SIGKILL-surviving live orphan was observed**, so no additional parent-death
+polling/watch was introduced. If a future runtime loses IPC-disconnect delivery,
+the fallback would compare `process.ppid` with the expected parent PID captured
+at launch, exiting on reparenting, alongside the IPC check; a simple `kill(pid,0)`
+watch alone is insufficient because of PID reuse.
+
+Non-vacuity control: the source changes were first staged to save the verified
+implementation in Git's index, leaving the unstaged diff empty. Then
+the disconnect handler was temporarily neutralized. The unstaged diff showed one
+file, one insertion and one deletion. **`host-death idle (bun)` failed**, naming a
+surviving native model subprocess after five seconds. `subprocess-death crash`
+and `subprocess-death SIGKILL` still passed; later host cases and the Node phase
+were not reached. The probe killed the intentional orphan. The handler was
+restored with checkout plus touch, the unstaged diff returned to empty, and all
+lifecycle cases passed afterward.
+
+### Manifest changes and actual npm file lists
+
+The original privacy fix changes only build/clean scripts, not dependencies,
+exports, package versions, or `files` allowlists:
+
+- Plugin `build`: adds `embedding-worker-process.ts` as an explicit entry so
+  `dist/embedding-worker-process.js` is emitted beside the v1 worker.
+- Plugin `build:v2`: adds the same entry for `dist/v2`, and adds its output to the
+  pre-build cleanup list so a stale subprocess entry is not retained.
+- Plugin `clean`: removes the subprocess entry from both v1 and v2 output trees.
+- Pi plugin `build`: adds the shared subprocess source as an entry, and cleans a
+  previous `dist/embedding-worker-process.js` before regenerating it.
+- Pi plugin `clean`: removes that output alongside the embedding worker.
+
+`ORT_PACK_REPORT_DIR=docs/reports bash scripts/probe-embedding-pack.sh` performed
+clean builds in disposable directories **inside this worktree**, using Git
+archives rather than switching branches. It ran `npm pack --dry-run --json`
+with npm **11.19.1** for each package at the baseline and updated source: four
+actual dry runs. Fresh trees avoid counting stale content-hashed chunks left by
+normal development builds.
+
+| Package | Baseline files | Updated files | Raw paths added / removed | Added stable paths |
+| --- | ---: | ---: | --- | --- |
+| OpenCode plugin | 1763 | 1767 | 51 / 47 | `dist/embedding-worker-process.js`, `dist/v2/embedding-worker-process.js`, `dist/features/magic-context/memory/embedding-worker-process.d.ts`, `.d.ts.map` |
+| Pi/OMP plugin | 77 | 78 | 14 / 13 | `dist/embedding-worker-process.js` |
+
+There are no removed stable paths. Other raw changes are content-hashed split
+chunk renames, which are expected when the transport source changes. Full added
+and removed path lists are committed in `issue-672-pack-plugin.json` and
+`issue-672-pack-pi-plugin.json`; the script explicitly asserts all three published
+subprocess entry paths. The unchanged `files: ["dist", ...]` allowlists include
+them, and the prepublish-only hook is not substituted for an actual pack dry run.

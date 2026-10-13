@@ -1,10 +1,27 @@
 import { Worker } from "node:worker_threads";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { EmbeddingWorkerClient } from "../../packages/plugin/src/features/magic-context/memory/embedding-worker-client";
 import { LocalEmbeddingProvider, __setLocalEmbeddingTestHooks } from "../../packages/plugin/src/features/magic-context/memory/embedding-local";
 
 const model = process.env.ORT_PROBE_MODEL ?? process.argv[2];
 const mode = process.env.ORT_PROBE_MODE ?? process.argv[3];
 if (!model) throw new Error("a throwaway local model path is required");
+
+function checkpoint(phase: string): void {
+    const root = process.env.ORT_PROBE_SCAN_ROOT;
+    if (!root) return;
+    const paths: string[] = [];
+    function visit(directory: string): void {
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+            const path = join(directory, entry.name);
+            if (entry.isDirectory()) visit(path);
+            else if (entry.name === "deviceid" && directory.endsWith(".onnxruntime")) paths.push(path);
+        }
+    }
+    visit(root);
+    console.log("DEVICE_ID_CHECKPOINT", JSON.stringify({ phase, count: paths.length, paths }));
+}
 if (mode === "baseline") {
     // Start an embedding worker directly; Transformers writes process.env only inside that thread.
     const worker = new Worker(new URL("./embedding-worker.js", import.meta.url), {
@@ -25,8 +42,10 @@ if (mode === "baseline") {
     });
     console.log("LOAD", JSON.stringify(reply));
     if (!reply.loaded || reply.vectors?.[0]?.[0] !== 1) process.exitCode = 1;
+    checkpoint("after-load");
     // Wait for the SDK's batched initialization upload to reach the egress blocker.
     await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORT_PROBE_WAIT_MS ?? 3000)));
+    checkpoint("after-wait");
     await worker.terminate();
 } else {
     __setLocalEmbeddingTestHooks({ modelCacheDir: () => process.env.XDG_CACHE_HOME!, workerFactory: (data) => new EmbeddingWorkerClient(data) });
@@ -35,7 +54,9 @@ if (mode === "baseline") {
         const vector = await provider.embed("hello world");
         console.log("LOAD", JSON.stringify({ loaded: provider.isLoaded(), vector: vector && Array.from(vector), failure: provider.getLastFailureReason() }));
         if (!provider.isLoaded() || vector?.[0] !== 1) process.exitCode = 1;
+        checkpoint("after-load");
         await new Promise((resolve) => setTimeout(resolve, Number(process.env.ORT_PROBE_WAIT_MS ?? 3000)));
+        checkpoint("after-wait");
     } finally {
         await provider.dispose();
     }

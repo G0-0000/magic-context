@@ -160,6 +160,26 @@ describe("embedding worker transport", () => {
         }
     });
 
+    test("killed subprocess rejects every in-flight request and restarts lazily", async () => {
+        const client = new EmbeddingWorkerClient({}, entry);
+        try {
+            const pid = (await client.request(["pid"])).vectors?.[0]?.[0];
+            expect(pid).toBeDefined();
+            const requests = [client.request(["hang-a"]), client.request(["hang-b"])];
+            const settled = Promise.allSettled(requests);
+            process.kill(pid!, "SIGKILL");
+            for (const result of await settled) {
+                expect(result.status).toBe("rejected");
+                if (result.status === "rejected") {
+                    expect(String(result.reason)).toContain("embedding worker exited (SIGKILL)");
+                }
+            }
+            expect((await client.request(["recovered"])).vectors?.[0]?.[0]).toBe(9);
+        } finally {
+            await client.dispose();
+        }
+    });
+
     test("unresponsive worker times out all pending callers and restarts on the next request", async () => {
         const client = new EmbeddingWorkerClient({}, entry, 1000);
         try {

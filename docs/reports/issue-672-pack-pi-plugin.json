@@ -1,0 +1,43 @@
+{
+  "package": "@cortexkit/pi-magic-context",
+  "baseFiles": 77,
+  "newFiles": 78,
+  "entries": [
+    "dist/embedding-worker-process.js"
+  ],
+  "semanticAdded": [
+    "dist/embedding-worker-process.js"
+  ],
+  "semanticRemoved": [],
+  "added": [
+    "dist/embedding-backfill-wb0fj6wy.js",
+    "dist/embedding-worker-process.js",
+    "dist/index-1gzxmsnh.js",
+    "dist/index-9c1k1mvx.js",
+    "dist/index-9vs81ecg.js",
+    "dist/index-50cya079.js",
+    "dist/index-ayd6f4pn.js",
+    "dist/index-g2nzwqcc.js",
+    "dist/index-n9yjq8hp.js",
+    "dist/index-rnjtrs00.js",
+    "dist/index-zdedeaps.js",
+    "dist/message-index-bounded-mcnsy5k9.js",
+    "dist/project-embedding-registry-mrjcf1nr.js",
+    "dist/search-1c98fb9v.js"
+  ],
+  "removed": [
+    "dist/embedding-backfill-dk9b55gn.js",
+    "dist/index-0ca2r3m3.js",
+    "dist/index-1h3wwtjh.js",
+    "dist/index-07h6af7m.js",
+    "dist/index-405dq1gq.js",
+    "dist/index-dcag5x8v.js",
+    "dist/index-edhcwz5h.js",
+    "dist/index-pcgqc3yp.js",
+    "dist/index-rmdqvg10.js",
+    "dist/index-wcjfnf09.js",
+    "dist/message-index-bounded-e3czs7vm.js",
+    "dist/project-embedding-registry-nptwfzvx.js",
+    "dist/search-ymbtefgp.js"
+  ]
+}

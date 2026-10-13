@@ -13,11 +13,13 @@ parentPort?.on("message", (request: { id: number; texts?: string[] }) => {
         // A synchronous CPU-bound batch makes accidental host-thread execution observable.
     }
     const vectors = request.texts?.map((text) =>
-        text === "native-env"
-            ? new Float32Array([nativeEnv === "1" ? 1 : 0])
-            : text === "special-floats"
-              ? new Float32Array([-0, NaN, Infinity, -Infinity])
-              : new Float32Array([text.length, 0.125, -0.25]),
+        text === "pid"
+            ? new Float32Array([process.pid])
+            : text === "native-env"
+              ? new Float32Array([nativeEnv === "1" ? 1 : 0])
+              : text === "special-floats"
+                ? new Float32Array([-0, NaN, Infinity, -Infinity])
+                : new Float32Array([text.length, 0.125, -0.25]),
     );
     parentPort?.postMessage(
         { id: request.id, loaded: true, vectors },
