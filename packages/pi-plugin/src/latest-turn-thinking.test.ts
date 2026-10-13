@@ -1102,7 +1102,7 @@ test("Pi empty message shells do not relax signed-prefix target protection", asy
 	}
 });
 
-test("Pi unheld idle expiry carries queued work and all-thinking stripping in one cache-safe pass", async () => {
+test("Pi unheld idle expiry preserves queued work and completed thinking until a priced rewrite", async () => {
 	const db = createTestDb();
 	const sessionId = "pi-unheld-idle-riders";
 	getOrCreateSessionMeta(db, sessionId);
@@ -1170,7 +1170,7 @@ test("Pi unheld idle expiry carries queued work and all-thinking stripping in on
 	};
 	try {
 		await serve(true);
-		await serve();
+		const baseline = JSON.stringify(await serve());
 		const old = getTagsBySession(db, sessionId).find((tag) =>
 			tag.messageId.startsWith("old-body"),
 		)!;
@@ -1179,11 +1179,17 @@ test("Pi unheld idle expiry carries queued work and all-thinking stripping in on
 			lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
 		});
 		const cold = JSON.stringify(await serve());
-		expect(getPendingOps(db, sessionId)).toHaveLength(0);
-		expect(cold).not.toContain("RECLAIM_OLD");
-		expect(cold).not.toContain("old-complete");
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+		expect(cold).toBe(baseline);
+		expect(cold).toContain("RECLAIM_OLD");
+		expect(cold).toContain("old-complete");
 		updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
 		expect(JSON.stringify(await serve())).toBe(cold);
+		signalPiPendingMaterialization(sessionId);
+		const flushed = JSON.stringify(await serve());
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(flushed).not.toContain("RECLAIM_OLD");
+		expect(flushed).not.toContain("old-complete");
 	} finally {
 		clearContextHandlerSession(sessionId);
 		db.close();

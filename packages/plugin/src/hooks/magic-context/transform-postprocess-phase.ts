@@ -2366,7 +2366,13 @@ export async function runPostTransformPhase(
     // A retry after an aborted idle fold is still provider-cold even though its
     // persisted pair needs no second fold. Any newly queued work belongs on that
     // retry, not on the warm tool step after the provider finally answers.
-    const idleExpiryRebuild = args.m0M1?.hardSignals?.cacheExpired === true;
+    const heldIdleExpiryRebuild =
+        activeThinkingPrefixHold && args.m0M1?.hardSignals?.cacheExpired === true;
+    // An expired timer alone cannot authorize cleanup when an unresolved project
+    // directory requires replaying cached m[0]/m[1]. Unfinished signed turns
+    // retain their separately protected opportunity to edit the suffix.
+    const idleExpiryRebuild =
+        (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold: foldBustsServedPrefixThisPass || firstRenderBust || idleExpiryRebuild,
@@ -2405,7 +2411,7 @@ export async function runPostTransformPhase(
             // without creating an independent prefix rewrite.
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
-            idleExpiryRebuild ||
+            heldIdleExpiryRebuild ||
             // the derived force band emergency floor for BOTH primary and subagent. For a primary
             // this coincides with forceMaterialization (fullFeatureMode && the derived force band);
             // for a subagent (no forceMaterialization) it's the only path that
@@ -2752,7 +2758,7 @@ export async function runPostTransformPhase(
                 pendingOpsDidMutate ||
                 foldBustsServedPrefixThisPass ||
                 firstRenderBust ||
-                idleExpiryRebuild ||
+                heldIdleExpiryRebuild ||
                 args.historyRebuiltThisPass ||
                 args.compartmentInjectionRebuiltFromDb ||
                 args.rebuiltHistoryFromInitialPrepare;
@@ -4333,7 +4339,7 @@ export async function runPostTransformPhase(
     }
     const prefixEditBesidesReasoningTrim =
         firstRenderBust ||
-        idleExpiryRebuild ||
+        heldIdleExpiryRebuild ||
         materializationRequested ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully ||

@@ -8302,13 +8302,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!protectedSignedPrefix && hasPendingMaterialization(args.sessionId);
 	// Subagents have no history fold to ride. Their execute pass admits every
 	// eligible cleanup lane together, without rewriting bytes when none acts.
+	// Idle expiry admits eligible edits after kept thinking only while a signed
+	// turn is unfinished. Otherwise, expiry adds no cleanup permission beyond
+	// the existing history rebuild, explicit flush and pressure-relief rules.
+	const heldIdleExpiryRebuild =
+		protectedSignedPrefix && piHardSignals?.cacheExpired === true;
 	const rideSignals = {
 		subagentExecute:
 			args.sessionMeta.isSubagent && args.schedulerDecision === "execute",
 		hardFold:
-			foldBustsServedPrefixThisPass ||
-			firstRenderBust ||
-			piHardSignals?.cacheExpired === true,
+			foldBustsServedPrefixThisPass || firstRenderBust || heldIdleExpiryRebuild,
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
 			(args.contextUsage.percentage >= 95 ||
@@ -8329,7 +8332,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let prefixMutationAllowed =
 		!protectedSignedPrefix ||
 		firstRenderBust ||
-		piHardSignals?.cacheExpired === true ||
+		heldIdleExpiryRebuild ||
 		emergencyDropEligible;
 	let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals);
 	let publishedWorkDrainAllowed = isCacheBustingPass;
@@ -8357,7 +8360,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// reductions may ride it without causing an independent bust.
 			foldBustsServedPrefixThisPass ||
 			firstRenderBust ||
-			piHardSignals?.cacheExpired === true ||
+			heldIdleExpiryRebuild ||
 			rideSignals.subagentExecute ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 	let unavoidableCarriedIdentityRebuild = false;
@@ -9132,7 +9135,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				foldBustsServedPrefixThisPass ||
 				identityRebuild ||
 				firstRenderBust ||
-				piHardSignals?.cacheExpired === true;
+				heldIdleExpiryRebuild;
 			// Applied work, new identity numbers or a missing/cold cache already
 			// cost a rebuild. Under force pressure, reset the saved emergency
 			// sample so accumulated cleanup joins this pass. Restoring previously
@@ -10196,8 +10199,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		prefixMutationAllowed,
 		strictThinkingKept: protectedSignedPrefix,
 		signedPrefixRewritten: rewritingSignedPrefix,
-		prefixRebuildAlreadyPriced:
-			firstRenderBust || piHardSignals?.cacheExpired === true,
+		prefixRebuildAlreadyPriced: firstRenderBust || heldIdleExpiryRebuild,
 		identityRebuilt: identityRebuild,
 		servedTagNumbers,
 		heuristicsExecuted,

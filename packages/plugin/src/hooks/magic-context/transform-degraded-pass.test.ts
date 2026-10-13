@@ -438,7 +438,7 @@ describe("a pass that falls back to the launch directory", () => {
         return JSON.stringify(messages.filter((message) => message.info.syntheticHead === true));
     }
 
-    it("directory fallback freezes injection but drains an execute-threshold queued drop", async () => {
+    const checkDirectoryReclaim = async (origin: "explicit flush" | "idle expiry") => {
         useTempDataHome("mc-directory-reclaim-");
         const sessionDirectory = createTestTempDir("mc-reclaim-session-dir-").dir;
         const launchDirectory = createTestTempDir("mc-reclaim-launch-dir-").dir;
@@ -498,14 +498,32 @@ describe("a pass that falls back to the launch directory", () => {
         const tool = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool")!;
         expect(tool.status).toBe("active");
         queuePendingOp(db, sessionId, tool.tagNumber, "drop");
-        updateSessionMeta(db, sessionId, { systemPromptHash: "directory-lookup-held-hash" });
-        flush.add(sessionId);
+        if (origin === "explicit flush") {
+            updateSessionMeta(db, sessionId, {
+                systemPromptHash: "directory-lookup-held-hash",
+            });
+            flush.add(sessionId);
+        } else {
+            updateSessionMeta(db, sessionId, {
+                cacheTtl: "13h",
+                lastResponseTime: Date.now() - 14 * 60 * 60 * 1000,
+            });
+        }
         hostDirectory = undefined;
         usage.set(sessionId, {
             usage: { percentage: 66, inputTokens: 132_000 },
             updatedAt: Date.now(),
         });
         const reclaimed = await pass();
+        if (origin === "idle expiry") {
+            expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            expect(
+                getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === tool.tagNumber)
+                    ?.status,
+            ).toBe("active");
+            expect(JSON.stringify(reclaimed)).toBe(JSON.stringify(baseline));
+            return;
+        }
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
         expect(
             getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === tool.tagNumber)?.status,
@@ -516,6 +534,14 @@ describe("a pass that falls back to the launch directory", () => {
         expect(m0m1(reclaimed)).toBe(pair);
         expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash).toBe(systemHash);
         expect(flush.has(sessionId)).toBe(true);
+    };
+
+    it("directory fallback freezes injection but drains an execute-threshold queued drop", async () => {
+        await checkDirectoryReclaim("explicit flush");
+    }, 30_000);
+
+    it("directory fallback and unheld idle expiry do not authorize a queued drop", async () => {
+        await checkDirectoryReclaim("idle expiry");
     }, 30_000);
 
     it("replays the frozen m[0]/m[1] when it would otherwise rebuild, and a resolved pass rebuilds", async () => {
