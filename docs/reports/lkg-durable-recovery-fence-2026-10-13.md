@@ -167,3 +167,42 @@ A fleet-wide upgrade of AFT's shared database format (reader version 17 required
 temporarily blocked commands before any
 Linux gate ran. Work was held uncommitted until the parent explicitly released
 it; no toolkit store was modified or downgraded.
+
+## Resumed final verification
+
+The interrupted run preserved an unfinished process-cache scaffold in
+`lkg-recovery-fence.ts`. Its lookup function had no callers. The scaffold was
+removed, restoring that source file byte-for-byte to the verified implementation
+in `eadcb52a5a`; no fence caching optimization is included in this delivery.
+The durability cost above still applies.
+
+Fresh typecheck, lint, build and test runs after that restoration all used Linux
+with `runon: "linux,4c"`,
+Bun 1.4.2, TypeScript 5.9.3 and Biome 2.5.1:
+
+- Pi typecheck passed both compiler gates; lint checked 320 files with the same
+  67 warnings. The full serial suite passed 2139 tests, skipped 39 and failed
+  none, with 162766 assertions across 219 files.
+- OpenCode typecheck passed all three compiler gates; lint checked 1400 files
+  with 11 warnings and six infos. Root build passed and its TUI generation
+  checked nine outputs without rewriting any.
+- The built full OpenCode suite passed 7960 tests, skipped 33 and failed one,
+  with 273398 assertions across 793 files. The sole failure was the previously
+  reproduced baseline fixture `Node WASM Transformers fixture > builds with
+  real fs and persists a model for offline reuse`: its throwaway bundle could
+  not resolve `onnxruntime-web/webgpu`. No LKG or host recovery test failed.
+- AFT's fresh file diagnostics for the restored fence reported no
+  errors, warnings, infos or hints; call-graph analysis was unavailable.
+
+An independent fault-injection run verified that the complete-byte reproduction
+detects tag prefixes added to already-served raw messages. Changing
+`recoveryNormalized` in `packages/pi-plugin/src/context-handler.ts` to true on
+every healthy recovery pass, marked `NON-VACUITY BREAK`, made exactly
+`Pi context handler LKG replay > preserves complete busy recovery bytes on
+healthy passes (prose and result)` fail: the complete-array comparison found
+new `§2§` and `§3§` prefixes. There were zero passes, one failure and 30 filtered
+tests; no other test failed. The staged live state had an empty unstaged diff;
+the applied mutation showed one file with two insertions and three deletions.
+After `git checkout -- packages/pi-plugin/src/context-handler.ts` and touching
+the restored file, the unstaged diff was empty. The subsequent full Pi suite
+above includes the restored reproduction and both raw-tail shapes.

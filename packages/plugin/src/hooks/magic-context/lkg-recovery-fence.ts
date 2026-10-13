@@ -3,7 +3,6 @@ import { lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getMagicContextStorageDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
-import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { withStorageFileMutex } from "../../shared/storage-file-mutex";
 import {
     syncStorageDirectorySync,
@@ -31,24 +30,6 @@ export class LkgRecoveryFenceError extends Error {
 }
 let platform: NodeJS.Platform = process.platform;
 let observer: ((phase: "dirty" | "committed" | "temp-synced" | "clean") => void) | undefined;
-type CachedFence = { state: "clean" | "dirty" | "invalid"; record: Fence | null; base?: string };
-const cached = new BoundedSessionMap<CachedFence>(1000);
-let ioObserver: ((operation: "read" | "write" | "mutex") => void) | undefined;
-const cacheKey = (sessionId: string) => `${getMagicContextStorageDir()}\0${getHarness()}\0${sessionId}`;
-function remember(sessionId: string, value: CachedFence): CachedFence { cached.set(cacheKey(sessionId), value); return value; }
-function known(sessionId: string): CachedFence {
-    const prior = cached.get(cacheKey(sessionId));
-    if (prior) return prior;
-    if (!durableFencesSupported()) return remember(sessionId, { state: "invalid", record: null });
-    const record = read(sessionId);
-    if (record) return remember(sessionId, { state: record.state, record });
-    try { lstatSync(lkgRecoveryFencePath(sessionId)); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return remember(sessionId, { state: "clean", record: null }); }
-    return remember(sessionId, { state: "invalid", record: null });
-}
-export function clearLkgFenceProcessState(sessionId?: string): void {
-    if (sessionId) cached.delete(cacheKey(sessionId)); else cached.clear();
-}
 
 // Node has no proven Windows directory-fsync primitive. Never trust a restart
 // certificate there: retain process-local BUSY replay, then refuse after restart
@@ -100,7 +81,6 @@ function payload(record: Omit<Fence, "checksum">) {
     ];
 }
 function publishRecord(record: Omit<Fence, "checksum">): void {
-    ioObserver?.("write");
     try {
         writeStorageFileDurableAtomicSync(
             lkgRecoveryFencePath(record.sessionId),
@@ -108,7 +88,6 @@ function publishRecord(record: Omit<Fence, "checksum">): void {
             () => observer?.("temp-synced"),
         );
         observer?.(record.state);
-        remember(record.sessionId, { state: record.state, record: { ...record, checksum: hash(JSON.stringify(payload(record))) } });
     } catch (error) {
         const visible = read(record.sessionId);
         if (
@@ -124,7 +103,6 @@ function publishRecord(record: Omit<Fence, "checksum">): void {
     }
 }
 function read(sessionId: string): Fence | null {
-    ioObserver?.("read");
     try {
         const path = lkgRecoveryFencePath(sessionId);
         const stat = lstatSync(path);
@@ -182,7 +160,6 @@ function publish(sessionId: string, slot: LkgSlot, state: Fence["state"], revisi
     publishRecord(record);
 }
 function locked<T>(sessionId: string, work: () => T): T {
-    ioObserver?.("mutex");
     return withStorageFileMutex(`${lkgRecoveryFencePath(sessionId)}.locks`, () => {
         const path = lkgRecoveryFencePath(sessionId);
         for (const name of readdirSync(dirname(path))) {
