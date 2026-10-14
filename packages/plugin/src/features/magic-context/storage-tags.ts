@@ -669,20 +669,36 @@ export function getAllStatusTagTokenTotalsFlat(
         // Floating-point addition depends on row order. Replay the full query's
         // index order for the selected rows, including after ANALYZE changes its
         // plan, so calibrated totals remain bit-for-bit identical.
-        const plan = db
-            .prepare(
-                `EXPLAIN QUERY PLAN SELECT ${columns} FROM tags WHERE session_id = ?${floor > 0 ? " AND tag_number >= ?" : ""}`,
-            )
-            .all(sessionId, ...(floor > 0 ? [floor] : [])) as Array<{ detail: string }>;
+        const planStatement = db.prepare(
+            `EXPLAIN QUERY PLAN SELECT ${columns} FROM tags WHERE session_id = ?${floor > 0 ? " AND tag_number >= ?" : ""}`,
+        );
+        let plan: Array<{ detail: string }>;
+        try {
+            plan = planStatement.all(sessionId, ...(floor > 0 ? [floor] : [])) as Array<{
+                detail: string;
+            }>;
+        } finally {
+            // Bun's metadata cursors can retain a read snapshot even in
+            // autocommit mode. Release the plan before later context writes.
+            (planStatement as unknown as { finalize?: () => void }).finalize?.();
+        }
         const index = plan
             .map((row) => /USING (?:COVERING )?INDEX (\S+)/.exec(row.detail)?.[1])
             .find(Boolean);
         if (index) {
-            const keys = db
-                .prepare(
-                    "SELECT name, coll, desc FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno",
-                )
-                .all(index) as Array<{ name: string | null; coll: string; desc: number }>;
+            const keyStatement = db.prepare(
+                "SELECT name, coll, desc FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno",
+            );
+            let keys: Array<{ name: string | null; coll: string; desc: number }>;
+            try {
+                keys = keyStatement.all(index) as Array<{
+                    name: string | null;
+                    coll: string;
+                    desc: number;
+                }>;
+            } finally {
+                (keyStatement as unknown as { finalize?: () => void }).finalize?.();
+            }
             scanOrder = [
                 ...keys.map(
                     (key) =>

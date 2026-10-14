@@ -173,6 +173,45 @@ type TagRow = {
     reasoning_token_count: number | null;
 };
 
+it("scoped token preload releases metadata snapshots before peer updates and local writes", () => {
+    const f = fixture();
+    const path = join(f.dir, "context.db");
+    const db = contextStore(path);
+    const peer = new Database(path);
+    try {
+        db.prepare(
+            "INSERT INTO tags(session_id,message_id,type,tag_number,token_count) VALUES (?,'owner:p0','message',1,1)",
+        ).run(SESSION);
+        expect(
+            getAllStatusTagTokenTotalsFlat(db, SESSION, 0, undefined, ["owner"]).totals.get(
+                "owner",
+            ),
+        ).toBe(1);
+        peer.prepare("UPDATE tags SET token_count=9 WHERE session_id=?").run(SESSION);
+        expect(
+            getAllStatusTagTokenTotalsFlat(db, SESSION, 0, undefined, ["owner"]).totals.get(
+                "owner",
+            ),
+        ).toBe(9);
+        expect(() =>
+            db
+                .transaction(() =>
+                    db.prepare("UPDATE tags SET token_count=10 WHERE session_id=?").run(SESSION),
+                )
+                .immediate(),
+        ).not.toThrow();
+        expect(
+            getAllStatusTagTokenTotalsFlat(db, SESSION, 0, undefined, ["owner"]).totals.get(
+                "owner",
+            ),
+        ).toBe(10);
+    } finally {
+        peer.close();
+        db.close();
+        f.cleanup();
+    }
+});
+
 // Preserve the original full-history SELECT and summation as an independent
 // oracle: calibrated floating-point sums depend on the database's row order.
 function fullTokenOracle(
