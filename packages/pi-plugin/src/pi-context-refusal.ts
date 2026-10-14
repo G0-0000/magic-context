@@ -729,7 +729,10 @@ export function registerPiGuardedContext(
 			);
 			if (result?.messages) {
 				active.managedSignature = piManagedSignature(result.messages);
-				active.preparedStructure = piPreparedStructure(result.messages);
+				active.preparedStructure = piPreparedStructure(
+					result.messages,
+					fenceEnabled ? ctx.model : undefined,
+				);
 				budget.completed = true;
 				active.ready = true;
 				// Oh My Pi persists the new prompt concurrently with preparation; its

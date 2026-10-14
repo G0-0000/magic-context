@@ -1,3 +1,8 @@
+import {
+	type PiChatHistoryModel,
+	piChatHistoryPlan,
+	piMatchesChatImages,
+} from "./pi-dispatch-chat-history";
 import { piGoogleConversation } from "./pi-dispatch-google";
 
 interface MessageStructure {
@@ -7,11 +12,16 @@ interface MessageStructure {
 	callNames?: string[];
 	resultNames?: string[];
 	timestamp?: number;
+	exactText?: string;
+	exactImages?: readonly string[];
+	wireContent?: unknown;
+	wireRole?: unknown;
 }
 
 /** Transport-independent roles and ordered tool IDs, captured before text transforms. */
 export interface PiPreparedStructure {
 	messages: readonly MessageStructure[];
+	chatMessages?: readonly MessageStructure[];
 }
 
 const MAX_MESSAGES = 100_000;
@@ -59,11 +69,14 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 
 export function piPreparedStructure(
 	messages: readonly unknown[],
+	model?: PiChatHistoryModel,
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
 	const toolNames = new Map<string, string>();
-	for (const message of messages) {
+	const byIndex = new Map<number, MessageStructure>();
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
 		const source = object(message);
 		if (
 			(source?.role === "bashExecution" ||
@@ -79,8 +92,26 @@ export function piPreparedStructure(
 		if (row.results.length)
 			row.resultNames = row.results.map((id) => toolNames.get(id) ?? "");
 		rows.push(row);
+		byIndex.set(index, row);
 	}
-	return { messages: rows };
+	const plan = piChatHistoryPlan(messages, model);
+	const chatMessages = plan?.flatMap((step): MessageStructure[] => {
+		if (step.kind === "source") {
+			const row = byIndex.get(step.index);
+			return row ? [row] : [];
+		}
+		return [
+			{
+				role: "user",
+				calls: [],
+				results: [],
+				...(step.kind === "note"
+					? { exactText: step.text }
+					: { exactImages: step.urls }),
+			},
+		];
+	});
+	return { messages: rows, ...(chatMessages ? { chatMessages } : {}) };
 }
 
 function payloadStructure(payload: unknown): MessageStructure[] | undefined {
@@ -170,6 +201,8 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 		}
 		const row = messageStructure(message);
 		if (!row) return undefined;
+		row.wireContent = message.content;
+		row.wireRole = message.role;
 		if (bedrock && row.role === "assistant" && Array.isArray(message.content)) {
 			for (const block of message.content) {
 				if (!block?.toolUse) continue;
@@ -267,7 +300,8 @@ type StructureComparison =
 	| "result id"
 	| "name"
 	| "count"
-	| "timestamp";
+	| "timestamp"
+	| "content";
 
 function safeRole(
 	row: MessageStructure | undefined,
@@ -306,10 +340,20 @@ export function piPreparedStructureMismatch(
 ): string | undefined {
 	try {
 		const rows = payloadStructure(payload);
-		const expectedRows = prepared?.messages;
+		const body = object(payload);
+		const chat =
+			!!body &&
+			Array.isArray(body.messages) &&
+			body.system === undefined &&
+			body.input === undefined &&
+			body.inferenceConfig === undefined;
+		const expectedRows =
+			chat && prepared?.chatMessages
+				? prepared.chatMessages
+				: prepared?.messages;
 		if (!rows || !expectedRows)
 			return structureDetail(0, expectedRows, rows, "count");
-		const body = payload as Record<string, unknown>;
+		if (!body) return structureDetail(0, expectedRows, rows, "count");
 		const google = !!piGoogleConversation(payload);
 		const anthropic =
 			google ||
@@ -322,6 +366,20 @@ export function piPreparedStructureMismatch(
 			const actual = rows[i];
 			if (actual.role !== expected.role)
 				return structureDetail(i, expectedRows, rows, "role");
+			if (
+				expected.exactText !== undefined ||
+				expected.exactImages !== undefined
+			) {
+				if (actual.wireRole !== "user")
+					return structureDetail(i, expectedRows, rows, "role");
+				if (
+					(expected.exactText !== undefined &&
+						actual.wireContent !== expected.exactText) ||
+					(expected.exactImages !== undefined &&
+						!piMatchesChatImages(actual.wireContent, expected.exactImages))
+				)
+					return structureDetail(i, expectedRows, rows, "content");
+			}
 			if (
 				actual.calls.length !== expected.calls.length ||
 				actual.results.length !== expected.results.length

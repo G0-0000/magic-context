@@ -42,7 +42,28 @@ if (version !== "18.10.4")
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";
-if (mode !== "managed" && mode !== "raw") throw new Error("unknown mode");
+if (mode !== "managed" && mode !== "raw" && mode !== "managed-then-raw")
+	throw new Error("unknown mode");
+const historyCase = process.argv[4] ?? "fresh";
+if (
+	![
+		"fresh",
+		"tool-arc",
+		"resume",
+		"user-image",
+		"tool-image",
+		"thinking",
+		"consecutive-users",
+		"empty-assistant",
+		"aborted-assistant",
+		"removed-tool",
+		"orphan-result",
+		"missing-result",
+		"summary",
+		"mixed",
+	].includes(historyCase)
+)
+	throw new Error("unknown history case");
 const audit = (value: object) =>
 	appendFileSync(
 		join(root, "audit.jsonl"),
@@ -62,6 +83,19 @@ const mock = Bun.serve({
 			return Response.json({ data: [] });
 		wires++;
 		audit({ phase: "wire", url: request.url, body: await request.text() });
+		if (historyCase === "mixed") {
+			const chunk = (delta: object, finish_reason: string | null) =>
+				`data: ${JSON.stringify({ id: "chatcmpl-history683", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 } })}\n\n`;
+			return new Response(
+				chunk(
+					{ role: "assistant", content: "HISTORY683 provider reply" },
+					null,
+				) +
+					chunk({}, "stop") +
+					"data: [DONE]\n\n",
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		}
 		// A terminal mock error stops inference after transport admission. The probe
 		// checks the fence, not response parsing or the model's answer.
 		return Response.json(
@@ -181,7 +215,7 @@ export default async pi => {
       const result=await handler(event,wrapped);
       if(name==='context') {
         log({phase:'prepared',messages:result?.messages});
-        if(${JSON.stringify(mode)}==='raw') return {messages:raw};
+        if(${JSON.stringify(mode)}==='raw' || globalThis.__mc683Raw) return {messages:raw};
       }
       return result;
     });
@@ -235,11 +269,241 @@ writeFileSync(
 audit({ phase: "catalog-model", selector, model });
 let session: any;
 try {
+	const { SessionManager } = await import(
+		join(host, "src/session/session-manager.ts")
+	);
+	let historyManager: any;
+	if (historyCase !== "fresh") {
+		const stamp = Date.now() - 10000;
+		const png =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1kAAAAASUVORK5CYII=";
+		const user = (text: string, timestamp: number) => ({
+			role: "user",
+			content: [{ type: "text", text }],
+			timestamp,
+		});
+		const assistant = (
+			content: unknown[],
+			timestamp: number,
+			stopReason = "stop",
+		) => ({
+			role: "assistant",
+			content,
+			timestamp,
+			stopReason,
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		const toolName =
+			historyCase === "removed-tool" ? "legacy_tool_removed_683" : "Read";
+		const call = assistant(
+			[
+				{
+					type: "toolCall",
+					id: "history_call_683",
+					name: toolName,
+					arguments: { path: "seed.txt" },
+				},
+			],
+			stamp + 1,
+			"toolUse",
+		);
+		const result = {
+			role: "toolResult",
+			toolCallId: "history_call_683",
+			toolName,
+			content: [{ type: "text", text: "HISTORY683 tool output" }] as unknown[],
+			isError: false,
+			timestamp: stamp + 2,
+		};
+		const reply = assistant(
+			[{ type: "text", text: "HISTORY683 previous reply" }],
+			stamp + 3,
+		);
+		let history: any[];
+		switch (historyCase) {
+			case "consecutive-users":
+				history = [
+					user("HISTORY683 first user", stamp),
+					user("HISTORY683 consecutive user", stamp + 1),
+				];
+				break;
+			case "empty-assistant":
+				history = [
+					user("HISTORY683 first user", stamp),
+					assistant([], stamp + 1),
+				];
+				break;
+			case "aborted-assistant":
+				history = [
+					user("HISTORY683 first user", stamp),
+					assistant(
+						[
+							{
+								type: "thinking",
+								thinking: "HISTORY683 interrupted reasoning",
+							},
+						],
+						stamp + 1,
+						"aborted",
+					),
+				];
+				break;
+			case "thinking":
+				history = [
+					user("HISTORY683 first user", stamp),
+					assistant(
+						[{ type: "thinking", thinking: "HISTORY683 prior reasoning" }],
+						stamp + 1,
+					),
+				];
+				break;
+			case "user-image":
+				history = [
+					{
+						...user("HISTORY683 image", stamp),
+						content: [
+							{ type: "text", text: "HISTORY683 image" },
+							{ type: "image", data: png, mimeType: "image/png" },
+						],
+					},
+					reply,
+				];
+				break;
+			case "tool-image":
+				result.content.push({
+					type: "image",
+					data: png,
+					mimeType: "image/png",
+				});
+				history = [user("HISTORY683 first user", stamp), call, result, reply];
+				break;
+			case "orphan-result":
+				history = [user("HISTORY683 first user", stamp), result, reply];
+				break;
+			case "missing-result":
+				history = [user("HISTORY683 first user", stamp), call, reply];
+				break;
+			case "mixed":
+				history = [
+					user("HISTORY683 first user", stamp),
+					call,
+					result,
+					reply,
+					assistant(
+						[
+							{
+								type: "toolCall",
+								id: "normal_call_683",
+								name: "Read",
+								arguments: {},
+							},
+							{
+								type: "toolCall",
+								id: "second_call_683",
+								name: "Read",
+								arguments: {},
+							},
+						],
+						stamp + 4,
+						"toolUse",
+					),
+					{
+						...result,
+						toolCallId: "normal_call_683",
+						content: [
+							...result.content,
+							{ type: "image", data: png, mimeType: "image/png" },
+						],
+						timestamp: stamp + 5,
+					},
+					{ ...result, toolCallId: "second_call_683", timestamp: stamp + 6 },
+					assistant(
+						[{ type: "text", text: "HISTORY683 normal arc complete" }],
+						stamp + 7,
+					),
+					user("HISTORY683 followup one", stamp + 8),
+					user("HISTORY683 followup two", stamp + 9),
+					assistant([], stamp + 10),
+					assistant(
+						[
+							{
+								type: "thinking",
+								thinking: "HISTORY683 unsupported reasoning",
+							},
+						],
+						stamp + 11,
+					),
+					assistant(
+						[{ type: "thinking", thinking: "HISTORY683 aborted reasoning" }],
+						stamp + 12,
+						"aborted",
+					),
+					{
+						...result,
+						toolCallId: "orphan_call_683",
+						toolName: "legacy_tool_removed_683",
+						timestamp: stamp + 13,
+					},
+				];
+				break;
+			default:
+				history = [user("HISTORY683 first user", stamp), call, result, reply];
+		}
+		historyManager = SessionManager.create(
+			root,
+			join(isolated.PI_CODING_AGENT_DIR, "sessions/history-probe"),
+		);
+		const entries: string[] = [];
+		for (const message of history)
+			entries.push(await historyManager.appendMessage(message));
+		if (historyCase === "summary" || historyCase === "mixed")
+			historyManager.appendCompaction(
+				"HISTORY683 replayed summary",
+				undefined,
+				entries[2],
+				1000,
+			);
+		await historyManager.ensureOnDisk();
+		await historyManager.flush();
+		const file = historyManager.getSessionFile();
+		if (!file || !historyManager.isSessionOnDisk())
+			throw new Error("history was not persisted");
+		if (
+			historyCase === "resume" ||
+			historyCase === "summary" ||
+			historyCase === "mixed"
+		) {
+			await historyManager.close();
+			historyManager = await SessionManager.open(file, undefined, undefined, {
+				throwIfMissing: true,
+				initialCwd: root,
+			});
+		}
+		audit({
+			phase: "history-seed",
+			historyCase,
+			rows: history.length,
+			file,
+			restoredRows: historyManager.buildSessionContext().messages.length,
+			history,
+		});
+	}
 	({ session } = await createAgentSession({
 		cwd: root,
 		agentDir: isolated.PI_CODING_AGENT_DIR,
 		model,
 		getApiKey: async () => apiKey,
+		...(historyManager ? { sessionManager: historyManager } : {}),
 		additionalExtensionPaths: [probe],
 		disableExtensionDiscovery: true,
 	}));
@@ -265,7 +529,47 @@ try {
 		audit({ phase: "isolation", label, pid: process.pid, stores });
 	};
 	isolation("start");
-	await session.prompt("PROVIDER683 first prepared turn");
+	const managedTurns = historyCase === "mixed" && mode !== "raw" ? 3 : 1;
+	const managedOutcomes: object[] = [];
+	for (let i = 0; i < managedTurns; i++) {
+		const before = wires;
+		await session.prompt(`PROVIDER683 prepared turn ${i + 1}`);
+		if (historyCase === "mixed" && mode !== "raw") {
+			const turnHooks = readFileSync(join(root, "hooks.jsonl"), "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const refused = turnHooks.some(
+				(event) =>
+					event.phase === "entry" &&
+					event.type === "magic-context-turn-refused",
+			);
+			const last = session.agent.state.messages.at(-1);
+			const ok =
+				!refused &&
+				wires === before + 1 &&
+				last?.role === "assistant" &&
+				last.stopReason === "stop" &&
+				last.content.some(
+					(part: any) =>
+						part.type === "text" && part.text === "HISTORY683 provider reply",
+				);
+			managedOutcomes.push({
+				turn: i + 1,
+				passed: ok,
+				wires: wires - before,
+				stopReason: last?.stopReason,
+			});
+			if (!ok)
+				throw new Error(
+					`cline-pass mixed managed turn ${i + 1} did not complete`,
+				);
+		}
+	}
+	if (mode === "managed-then-raw") {
+		(globalThis as any).__mc683Raw = true;
+		await session.prompt("PROVIDER683 raw final turn in the same session");
+	}
 	await session.flushToDisk();
 	isolation("end");
 	const hooks = readFileSync(join(root, "hooks.jsonl"), "utf8")
@@ -280,6 +584,9 @@ try {
 		phase: "summary",
 		api,
 		mode,
+		managedTurns,
+		managedOutcomes,
+		historyCase,
 		wires,
 		attempts: attempts.length,
 		refusals,
@@ -287,13 +594,21 @@ try {
 		bun: Bun.version,
 	});
 	const name =
-		mode === "raw"
-			? `${selector}: raw request refused before transport`
-			: `${selector}: prepared first turn admitted`;
+		mode === "managed-then-raw"
+			? `${selector}: mixed managed history turns admit and raw final turn refuses`
+			: mode === "raw"
+				? `${selector}: raw request refused before transport`
+				: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
 	const ok =
-		mode === "raw"
-			? attempts.length > 0 && wires === 0 && refusals.length === 1
-			: attempts.length > 0 && wires > 0 && refusals.length === 0;
+		mode === "managed-then-raw"
+			? managedOutcomes.length === managedTurns &&
+				attempts.length === managedTurns + 1 &&
+				wires === managedTurns &&
+				refusals.length === 1 &&
+				refusals[0].data.message.includes("missing current receipt signature")
+			: mode === "raw"
+				? attempts.length > 0 && wires === 0 && refusals.length === 1
+				: attempts.length > 0 && wires > 0 && refusals.length === 0;
 	console.log(
 		`Bun ${Bun.version}; OMP ${version}; ${ok ? "PASS" : "FAIL"} ${name}; attempts=${attempts.length} wires=${wires} refusals=${refusals.length}; evidence=${root}`,
 	);
