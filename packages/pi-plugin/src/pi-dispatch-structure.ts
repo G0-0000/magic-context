@@ -78,6 +78,14 @@ export function piPreparedStructure(
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		const source = object(message);
+		// History injection and the provider renderer both put instructions before
+		// conversation turns. Ignore only that leading system/developer prefix on
+		// both sides; a system message inside the conversation remains invalid.
+		if (
+			rows.length === 0 &&
+			(source?.role === "system" || source?.role === "developer")
+		)
+			continue;
 		if (
 			(source?.role === "bashExecution" ||
 				source?.role === "pythonExecution") &&
