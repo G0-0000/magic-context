@@ -501,18 +501,20 @@ describe("Pi context handler LKG replay", () => {
 					],
 					{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
 				);
-			let writerStderr = "";
-			writer.stderr.on("data", (chunk) => {
-				writerStderr += String(chunk);
-			});
-			const exited = new Promise<void>((resolve, reject) => {
-				writer.once("error", reject);
-				writer.once("exit", (code) =>
-					code === 0
-						? resolve()
-						: reject(new Error(`writer exit ${code}: ${writerStderr.trim()}`)),
-				);
-			});
+				let writerStderr = "";
+				writer.stderr.on("data", (chunk) => {
+					writerStderr += String(chunk);
+				});
+				const exited = new Promise<void>((resolve, reject) => {
+					writer.once("error", reject);
+					writer.once("exit", (code) =>
+						code === 0
+							? resolve()
+							: reject(
+									new Error(`writer exit ${code}: ${writerStderr.trim()}`),
+								),
+					);
+				});
 				try {
 					await new Promise<void>((resolve, reject) => {
 						writer.stdout.once("data", () => resolve());
