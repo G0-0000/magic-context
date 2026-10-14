@@ -24,6 +24,7 @@ import {
     resolveRustLkgReplayParticipant,
 } from "../hooks/magic-context/rust-lkg-freeze-registry";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
+import { retirePendingSystemPromptDelivery } from "../hooks/magic-context/system-prompt-delivery";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
 import { replayRustModeBindingMismatchStrips } from "../hooks/magic-context/transform-postprocess-phase";
 import { UnmanagedOverWindowError } from "../hooks/magic-context/unmanaged-over-window";
@@ -329,6 +330,7 @@ export function tryMessagesTransformLkgReplay(args: {
                     replayBlocked = true;
                     sessionLog(sessionId, "lkg_replay_does_not_fit");
                 } else if (replay.ok) {
+                    retirePendingSystemPromptDelivery(sessionId);
                     args.onLkgReplay?.();
                     replaceMessagesInPlace(
                         output,

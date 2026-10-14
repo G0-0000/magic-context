@@ -1,57 +1,52 @@
 /// <reference types="bun-types" />
+
 import { expect, it } from "bun:test";
-import goldenDigests from "./system-delivery-unheld-digests.json";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../packages/plugin/src/features/magic-context/migrations";
-import { createScheduler } from "../packages/plugin/src/features/magic-context/scheduler";
-import {
-    getPendingOps,
-    getTagsBySession,
-    queuePendingOp,
-} from "../packages/plugin/src/features/magic-context/storage";
-import { openDatabase } from "../packages/plugin/src/features/magic-context/storage-db";
-import {
-    getOrCreateSessionMeta,
-    updateSessionMeta,
-} from "../packages/plugin/src/features/magic-context/storage-meta";
-import { createTagger } from "../packages/plugin/src/features/magic-context/tagger";
-import {
-    beginV2LkgRequest,
-    clearLkgMeasuredRequest,
-    noteLkgProviderResponse,
-} from "../packages/plugin/src/hooks/magic-context/lkg-measured-request";
-import { requestPendingMaterialization } from "../packages/plugin/src/hooks/magic-context/pending-materialization";
-import {
-    bindSystemDateRequestIdentity,
-    registerSystemDateRefresh,
-} from "../packages/plugin/src/hooks/magic-context/system-date-refresh";
-import { createSystemPromptHashHandler } from "../packages/plugin/src/hooks/magic-context/system-prompt-hash";
-import {
-    createTransform,
-    type TransformDeps,
-} from "../packages/plugin/src/hooks/magic-context/transform";
-import type { MessageLike } from "../packages/plugin/src/hooks/magic-context/transform-operations";
-import * as piContext from "../packages/pi-plugin/src/context-handler";
-import { persistPiPressureFromMessageEnd } from "../packages/pi-plugin/src/index";
+import * as piContext from "../../../../pi-plugin/src/context-handler";
+import { persistPiPressureFromMessageEnd } from "../../../../pi-plugin/src/index";
 import {
     clearPiSystemPromptSession,
     processSystemPromptForCache,
-} from "../packages/pi-plugin/src/system-prompt";
+} from "../../../../pi-plugin/src/system-prompt";
 import {
     assistantMessage,
     createFakePi,
     fakeContext,
+    type PiMessage,
     toolResultMessage,
     userMessage,
-    type PiMessage,
-} from "../packages/pi-plugin/src/test-utils.test";
+} from "../../../../pi-plugin/src/test-utils.test";
+import { runMigrations } from "../../features/magic-context/migrations";
+import { createScheduler } from "../../features/magic-context/scheduler";
+import {
+    getPendingOps,
+    getTagsBySession,
+    queuePendingOp,
+} from "../../features/magic-context/storage";
+import { openDatabase } from "../../features/magic-context/storage-db";
+import {
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta";
+import { createTagger } from "../../features/magic-context/tagger";
+import type { StoreRow } from "../../v2/store-reader";
+import goldenDigests from "./fixtures/system-delivery-unheld-digests.json";
+import {
+    beginV2LkgRequest,
+    clearLkgMeasuredRequest,
+    noteLkgProviderResponse,
+} from "./lkg-measured-request";
+import { requestPendingMaterialization } from "./pending-materialization";
+import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
+import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import { createTransform, type TransformDeps } from "./transform";
+import type { MessageLike } from "./transform-operations";
 
-// Explicitly invoked review harness: it is outside every package's normal test root.
-// Both revisions run the same event stream and hash the served system plus complete
-// provider-relevant content, never cached metadata or the code being compared.
+// Hash the outgoing system instructions, messages, tool calls and results in
+// both revisions, not stored cache markers or the source files being compared.
 const seeds = [19, 773, 20261014, 0xdeadbeef];
 const passes = Number(process.env.REVIEW_PASSES ?? 80);
 const fixedClock = 1_800_000_000_000;
@@ -110,6 +105,10 @@ function eventsFor(seed: number) {
 }
 
 async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, active = false) {
+    const bindV2 = existsSync(join(import.meta.dir, "system-prompt-delivery.ts"))
+        ? (await import("../../v2/hooks/system-prompt-response.ts")).bindV2SystemPromptResponse
+        : undefined;
+    const responseRows: StoreRow<"assistant">[] = [];
     const sessionId = `review-${host}-${signed}-${active ? "active-" : ""}${seed}`;
     const home = mkdtempSync(join(tmpdir(), "delivery-review-"));
     const db = openDatabase(join(home, "context.db"))!;
@@ -270,7 +269,8 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
                 updatedAt: now,
             });
             const key = `${model.providerID}/${model.modelID}`;
-            if (host === "oc2") beginV2LkgRequest(sessionId, key, `response-${e.pass - 1}`);
+            if (host === "oc2")
+                beginV2LkgRequest(sessionId, key, `response-${e.pass - 1}`, responseRows.length);
             else
                 noteLkgProviderResponse({
                     sessionId,
@@ -307,6 +307,22 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
                     }),
                 );
                 const markerBefore = getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash;
+                if (host === "oc2") {
+                    responseRows.push({
+                        id: `response-${e.pass}`,
+                        session_id: sessionId,
+                        type: "assistant",
+                        seq: responseRows.length + 1,
+                        data: {
+                            model: { providerID: model.providerID, id: model.modelID },
+                            time: { created: now + 1 },
+                        },
+                    });
+                    bindV2?.(sessionId, {
+                        assistantSince: (_session, after) =>
+                            responseRows.filter((row) => row.seq > after),
+                    });
+                }
                 noteLkgProviderResponse({
                     sessionId,
                     responseId: `response-${e.pass}`,
@@ -314,7 +330,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
                     inputTokens: 2000,
                     finish: e.tool ? "tool-calls" : "stop",
                     completedAt: now + 1,
-                    createdAt: now,
+                    createdAt: now + 1,
                     v2: host === "oc2",
                 });
                 // The base revision (9382158d) never writes cachedM0SystemHash from a
@@ -483,6 +499,12 @@ async function pi(signed: boolean, seed: number, active = false) {
                 }
             }
             const messages = structuredClone(source);
+            const parentId = ids.at(-1) ?? null;
+            const branch: unknown[] = ids.map((id, index) => ({
+                type: "message",
+                id,
+                message: messages[index],
+            }));
             const ctx = {
                 ...fakeContext(
                     sessionId,
@@ -490,6 +512,11 @@ async function pi(signed: boolean, seed: number, active = false) {
                     [...ids],
                     messages,
                 ),
+                sessionManager: {
+                    getSessionId: () => sessionId,
+                    getLeafId: () => parentId,
+                    getBranch: () => branch,
+                },
                 getSystemPrompt: () => prompt.systemPrompt,
                 model: {
                     provider: "anthropic",
@@ -522,18 +549,25 @@ async function pi(signed: boolean, seed: number, active = false) {
                     }),
                 );
                 const markerBefore = getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash;
+                const response = {
+                    role: "assistant",
+                    timestamp: now + 1,
+                    provider: "anthropic",
+                    model,
+                    stopReason: e.tool ? "toolUse" : "stop",
+                    usage: { input: 2000, output: 10, cacheRead: 2000, cacheWrite: 0 },
+                };
+                branch.push({
+                    type: "message",
+                    id: `response-${e.pass}`,
+                    parentId,
+                    message: response,
+                });
                 await persistPiPressureFromMessageEnd({
                     db,
                     sessionId,
                     piContextWindow: 200000,
-                    message: {
-                        role: "assistant",
-                        timestamp: now + 1,
-                        provider: "anthropic",
-                        model,
-                        stopReason: e.tool ? "toolUse" : "stop",
-                        usage: { input: 2000, output: 10, cacheRead: 2000, cacheWrite: 0 },
-                    },
+                    message: response,
                 });
                 if (getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash !== markerBefore) {
                     acks++;
@@ -589,7 +623,7 @@ it("independent differential matches unheld provider bodies to master", () => {
     if (process.env.REVIEW_OUT)
         require("node:fs").writeFileSync(process.env.REVIEW_OUT, JSON.stringify(summaries));
     expect(summaries).toHaveLength(seeds.length * 9);
-    if (passes === 80)
+    if (passes === 80 && !process.env.REVIEW_OUT)
         for (const row of summaries.filter((row) => !row.active)) {
             const key = `${row.host}-${row.signed}-${row.seed}` as keyof typeof goldenDigests;
             const hash = createHash("sha256").update(row.bodies.join("\n")).digest("hex");

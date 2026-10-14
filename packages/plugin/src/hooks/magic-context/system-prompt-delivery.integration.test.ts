@@ -22,6 +22,8 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { recordToolDefinition } from "../../features/magic-context/tool-definition-tokens";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { bindV2SystemPromptResponse } from "../../v2/hooks/system-prompt-response";
+import type { StoreRow } from "../../v2/store-reader";
 import {
     beginV2LkgRequest,
     clearLkgMeasuredRequest,
@@ -254,12 +256,14 @@ async function fixture(mode: "rust" | "ts" = "rust", generation: "v1" | "v2" = "
     });
     const tsTransform = mode === "ts" ? createTransform(deps) : undefined;
     let reply = 0;
+    const responseRows: StoreRow<"assistant">[] = [];
     const serve = async (text = "base", order = "system-first", date = "2026-10-13") => {
         const responseId = `reply-${++reply}`;
         messagesPrepared = false;
         const activeModel = deps.liveModelBySession!.get(sessionId)!;
         const key = `${activeModel.providerID}/${activeModel.modelID}`;
-        if (generation === "v2") beginV2LkgRequest(sessionId, key, `reply-${reply - 1}`);
+        if (generation === "v2")
+            beginV2LkgRequest(sessionId, key, `reply-${reply - 1}`, responseRows.length);
         else noteLkgProviderResponse({ sessionId, responseId, modelKey: key, inputTokens: 0 });
         const input = structuredClone(source);
         const output = { messages: structuredClone(input) as unknown[] };
@@ -285,7 +289,25 @@ async function fixture(mode: "rust" | "ts" = "rust", generation: "v1" | "v2" = "
             system: outputSystem.system,
             response: responses.at(-1)!,
             request: requests.at(-1)!,
-            accept: (finish = "tool-calls") =>
+            accept: (finish = "tool-calls") => {
+                const createdAt = Date.now() + 1;
+                if (generation === "v2") {
+                    responseRows.push({
+                        id: responseId,
+                        session_id: sessionId,
+                        type: "assistant",
+                        seq: responseRows.length + 1,
+                        data: {
+                            model: { providerID: activeModel.providerID, id: activeModel.modelID },
+                            time: { created: createdAt },
+                            finish,
+                        },
+                    });
+                    bindV2SystemPromptResponse(sessionId, {
+                        assistantSince: (_session, after) =>
+                            responseRows.filter((row) => row.seq > after),
+                    });
+                }
                 noteLkgProviderResponse({
                     sessionId,
                     responseId,
@@ -294,8 +316,9 @@ async function fixture(mode: "rust" | "ts" = "rust", generation: "v1" | "v2" = "
                     completedAt: Date.now(),
                     finish,
                     v2: generation === "v2",
-                    createdAt: Date.now(),
-                }),
+                    createdAt,
+                });
+            },
         };
     };
     const hold = () =>

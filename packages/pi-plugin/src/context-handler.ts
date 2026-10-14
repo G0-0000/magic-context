@@ -729,6 +729,8 @@ export function signalPiSystemHashChange(
 		sessionId,
 		hash,
 		!historyRefreshSessions.has(sessionId),
+		historyRefreshSessions,
+		pendingMaterializationSessions,
 	);
 	signalPiHistoryRefresh(sessionId);
 	signalPiSystemPromptRefresh(sessionId);
@@ -4235,8 +4237,17 @@ export function registerPiContextHandler(
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
 			const deliveryModelKey = resolvePiContextModelKey(ctx);
-			if (!budget.sideTurn && deliveryModelKey)
-				beginPiSystemPromptRequest(options.db, sessionId, deliveryModelKey);
+			if (!budget.sideTurn && deliveryModelKey) {
+				const parentId = ctx.sessionManager.getLeafId?.();
+				beginPiSystemPromptRequest(
+					options.db,
+					sessionId,
+					deliveryModelKey,
+					parentId === null || typeof parentId === "string"
+						? { parentId, readBranch: () => ctx.sessionManager.getBranch() }
+						: undefined,
+				);
+			}
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
 			lkgCompactionOff = options.compactionOff === true;

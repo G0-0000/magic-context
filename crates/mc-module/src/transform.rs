@@ -47334,3 +47334,7 @@ mod user_answer_marker_tests {
         assert!(items.iter().any(|item| item.user_answer));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/system_delivery_mixed_inputs.rs"]
+mod system_delivery_mixed_inputs;

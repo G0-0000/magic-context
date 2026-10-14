@@ -11,7 +11,13 @@ import type { MessageLike } from "./transform-operations";
 
 export type LkgRequestIdentity =
     | { kind: "v1"; responseId: string; modelKey: string }
-    | { kind: "v2"; previousResponseId: string | undefined; startedAt: number; modelKey: string };
+    | {
+          kind: "v2";
+          previousResponseId: string | undefined;
+          startedAt: number;
+          modelKey: string;
+          responseAfterSequence?: number;
+      };
 
 const requests = new BoundedSessionMap<LkgRequestIdentity>(1000);
 const claimedRequests = new WeakSet<LkgRequestIdentity>();
@@ -72,8 +78,15 @@ export function beginV2LkgRequest(
     sessionId: string,
     modelKey: string,
     previousResponseId?: string,
+    responseAfterSequence?: number,
 ): void {
-    requests.set(sessionId, { kind: "v2", previousResponseId, startedAt: Date.now(), modelKey });
+    requests.set(sessionId, {
+        kind: "v2",
+        previousResponseId,
+        startedAt: Date.now(),
+        modelKey,
+        responseAfterSequence,
+    });
 }
 
 /** Take the request identity when the request is prepared, not when its saved

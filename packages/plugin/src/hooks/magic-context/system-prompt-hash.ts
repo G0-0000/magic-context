@@ -601,6 +601,8 @@ export function createSystemPromptHashHandler(deps: {
             currentHash,
             deps.db,
             previousHash !== currentHash ? !deps.historyRefreshSessions.has(sessionId) : undefined,
+            deps.historyRefreshSessions,
+            deps.pendingMaterializationSessions,
         );
 
         // Reuse sessionMetaEarly from Step 1 — no code path between that read

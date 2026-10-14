@@ -1,9 +1,5 @@
-// This module is deliberately not wired into Cargo's normal suite. To run it
-// against the reviewed tip, temporarily append the following to transform.rs:
-// #[cfg(test)]
-// #[path = "../../../review-tests/system-delivery-mixed-inputs.rs"]
-// mod independent_delivery_review;
-// Restore transform.rs after cargo test -p mc-module --lib independent_delivery_review.
+// Updating the external system hash must not hide model, renderer or workspace
+// changes, or consume queued history and memory edits before another rebuild.
 use super::tests::{item, pctx, req, store};
 use super::*;
 

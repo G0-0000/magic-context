@@ -19,19 +19,40 @@ interface PreparedSystemDelivery {
     held: boolean;
     ownsHistoryRefresh?: boolean;
     deferRefresh?: (ownsHistoryRefresh: boolean) => void;
+    response?: { id: string; createdAt: number };
 }
 const pending = new BoundedSessionMap<PreparedSystemDelivery>(1000);
-const refreshOwners = new BoundedSessionMap<{ hash: string; ownsHistoryRefresh: boolean }>(1000);
+const retiredRequests = new WeakSet<LkgRequestIdentity>();
+const heldRequests = new WeakSet<LkgRequestIdentity>();
+const refreshOwners = new BoundedSessionMap<{
+    hash: string;
+    ownsHistoryRefresh: boolean;
+    history?: Set<string>;
+}>(1000);
 
 export function recordSystemRefreshOwnership(
     sessionId: string,
     hash: string,
     ownsHistoryRefresh: boolean,
+    history?: Set<string>,
+    materialization?: Set<string>,
 ): void {
-    refreshOwners.set(sessionId, { hash, ownsHistoryRefresh });
+    const previous = refreshOwners.get(sessionId);
+    const inherited =
+        previous?.ownsHistoryRefresh === true &&
+        previous.history === history &&
+        history?.has(sessionId) === true &&
+        materialization !== undefined &&
+        hasOnlySystemHashMaterialization(materialization, sessionId);
+    refreshOwners.set(sessionId, {
+        hash,
+        ownsHistoryRefresh: ownsHistoryRefresh || inherited,
+        history,
+    });
 }
 
 function preparation(sessionId: string, request: LkgRequestIdentity) {
+    if (retiredRequests.has(request)) return;
     const previous = pending.get(sessionId);
     if (previous?.request === request) return previous;
     const next: PreparedSystemDelivery = { request, held: false };
@@ -47,12 +68,21 @@ export function recordSystemPromptForRequest(
     hash: string,
     db: ContextDatabase,
     ownsHistoryRefresh?: boolean,
+    history?: Set<string>,
+    materialization?: Set<string>,
 ): void {
     if (!request || !hash) return;
     if (ownsHistoryRefresh !== undefined)
-        recordSystemRefreshOwnership(sessionId, hash, ownsHistoryRefresh);
+        recordSystemRefreshOwnership(sessionId, hash, ownsHistoryRefresh, history, materialization);
+    const previous = pending.get(sessionId);
+    if (previous?.request === request && previous.held && previous.hash && previous.hash !== hash) {
+        retirePendingSystemPromptDelivery(sessionId);
+        return;
+    }
+    const saved = preparation(sessionId, request);
+    if (!saved) return;
     const owner = refreshOwners.get(sessionId);
-    Object.assign(preparation(sessionId, request), {
+    Object.assign(saved, {
         hash,
         db,
         ownsHistoryRefresh: owner?.hash === hash && owner.ownsHistoryRefresh,
@@ -64,7 +94,35 @@ export function recordHeldHeadForRequest(
     request: LkgRequestIdentity | undefined,
     deferRefresh?: (ownsHistoryRefresh: boolean) => void,
 ): void {
-    if (request) Object.assign(preparation(sessionId, request), { held: true, deferRefresh });
+    const saved = request && preparation(sessionId, request);
+    if (saved) {
+        heldRequests.add(saved.request);
+        Object.assign(saved, { held: true, deferRefresh });
+    }
+}
+
+/** The host must first identify the assistant row created for the prepared call,
+ * or the exact SDK message appended after its saved input entry. A later reply
+ * with the same model and a newer timestamp cannot establish that link itself. */
+export function bindSystemPromptResponse(
+    sessionId: string,
+    request: LkgRequestIdentity | undefined,
+    response: { responseId: string; createdAt: number; modelKey?: string },
+): void {
+    const saved = pending.get(sessionId);
+    if (
+        !saved ||
+        saved.request !== request ||
+        request?.kind !== "v2" ||
+        !response.responseId ||
+        response.responseId === request.previousResponseId ||
+        response.modelKey !== request.modelKey ||
+        !Number.isFinite(response.createdAt) ||
+        response.createdAt <= request.startedAt
+    )
+        return;
+    if (saved.response && saved.response.id !== response.responseId) return;
+    saved.response = { id: response.responseId, createdAt: response.createdAt };
 }
 
 export function isHeldHeadForRequest(
@@ -72,7 +130,10 @@ export function isHeldHeadForRequest(
     request: LkgRequestIdentity | undefined,
 ): boolean {
     const saved = pending.get(sessionId);
-    return saved?.request === request && saved?.held === true;
+    return (
+        (saved?.request === request && saved?.held === true) ||
+        (request !== undefined && retiredRequests.has(request) && heldRequests.has(request))
+    );
 }
 
 /** Signed thinking can require the synthetic m[0]/m[1] messages to stay unchanged
@@ -101,15 +162,18 @@ export function acknowledgeSystemPromptDelivery(args: {
         !args.v2 ||
         request.previousResponseId === args.responseId ||
         args.createdAt === undefined ||
-        args.createdAt < request.startedAt
+        !Number.isFinite(args.createdAt) ||
+        args.createdAt <= request.startedAt ||
+        saved.response?.id !== args.responseId ||
+        saved.response.createdAt !== args.createdAt
     )
         return;
     if (providerResponseFailed(args)) {
-        pending.delete(args.sessionId);
+        retirePendingSystemPromptDelivery(args.sessionId);
         return;
     }
     if (!isSuccessfulProviderCompletion(args)) return;
-    pending.delete(args.sessionId);
+    retirePendingSystemPromptDelivery(args.sessionId);
     if (saved.held && saved.hash && saved.db) {
         try {
             updateSessionMeta(saved.db, args.sessionId, { cachedM0SystemHash: saved.hash });
@@ -150,6 +214,14 @@ export function deferDeliveredSystemRefresh(
 }
 
 export function clearSystemPromptDelivery(sessionId: string): void {
-    pending.delete(sessionId);
+    retirePendingSystemPromptDelivery(sessionId);
     refreshOwners.delete(sessionId);
+}
+
+/** A replay sends older instructions; keep its queued refresh work, but discard
+ * the prepared hash and prevent late callbacks from reviving that preparation. */
+export function retirePendingSystemPromptDelivery(sessionId: string): void {
+    const saved = pending.get(sessionId);
+    if (saved) retiredRequests.add(saved.request);
+    pending.delete(sessionId);
 }

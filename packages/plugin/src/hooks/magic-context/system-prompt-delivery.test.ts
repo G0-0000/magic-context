@@ -9,6 +9,7 @@ import type { LkgRequestIdentity } from "./lkg-measured-request";
 import { requestPendingMaterialization } from "./pending-materialization";
 import {
     acknowledgeSystemPromptDelivery,
+    bindSystemPromptResponse,
     clearSystemPromptDelivery,
     deferDeliveredSystemRefresh,
     recordHeldHeadForRequest,
@@ -33,6 +34,12 @@ function prepared(kind: "v1" | "v2" = "v1", held = true) {
             : { kind, previousResponseId: "previous", startedAt: 100, modelKey: "anthropic/opus" };
     recordSystemPromptForRequest(sessionId, request, "sent", db);
     if (held) recordHeldHeadForRequest(sessionId, request);
+    if (kind === "v2")
+        bindSystemPromptResponse(sessionId, request, {
+            responseId: "reply",
+            modelKey: "anthropic/opus",
+            createdAt: 101,
+        });
     const response = {
         sessionId,
         request,

@@ -240,7 +240,10 @@ import {
 	composeMagicContextSystemPrompt,
 	processSystemPromptForCache,
 } from "./system-prompt";
-import { acknowledgePiSystemPromptResponse } from "./system-prompt-delivery-pi";
+import {
+	acknowledgePiPendingSystemPromptResponses,
+	acknowledgePiSystemPromptResponse,
+} from "./system-prompt-delivery-pi";
 import { withTimeout } from "./timeout";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./tools";
 import {
@@ -2638,6 +2641,9 @@ async function startPiMagicContextRuntime(
 	// Headless Pi exits after agent_end. The context handler leaves eligible
 	// history queued rather than launching a child that would outlive Pi.
 	pi.on("agent_end", (event, ctx) => {
+		acknowledgePiPendingSystemPromptResponses(
+			ctx.sessionManager.getSessionId(),
+		);
 		setEmbeddingSessionBusy(ctx.sessionManager.getSessionId(), false);
 		// Synchronous return — DO NOT await background work here.
 		// awaitInFlightHistorians()/awaitInFlightDreamers() are still

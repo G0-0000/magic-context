@@ -1,46 +1,44 @@
 /// <reference types="bun-types" />
-import { expect, it } from "bun:test";
+import { expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../packages/plugin/src/features/magic-context/migrations";
-import { createScheduler } from "../packages/plugin/src/features/magic-context/scheduler";
+import { runMigrations } from "../../features/magic-context/migrations";
+import { createScheduler } from "../../features/magic-context/scheduler";
+import * as storage from "../../features/magic-context/storage";
 import {
     getPendingOps,
     getTagsBySession,
     queuePendingOp,
-} from "../packages/plugin/src/features/magic-context/storage";
-import { openDatabase } from "../packages/plugin/src/features/magic-context/storage-db";
+} from "../../features/magic-context/storage";
+import { openDatabase } from "../../features/magic-context/storage-db";
 import {
     getOrCreateSessionMeta,
     updateSessionMeta,
-} from "../packages/plugin/src/features/magic-context/storage-meta";
-import { recordDetectedContextLimit } from "../packages/plugin/src/features/magic-context/storage-meta-persisted";
-import { createTagger } from "../packages/plugin/src/features/magic-context/tagger";
-import { createEventHandler } from "../packages/plugin/src/hooks/magic-context/event-handler";
+} from "../../features/magic-context/storage-meta";
+import { recordDetectedContextLimit } from "../../features/magic-context/storage-meta-persisted";
+import { createTagger } from "../../features/magic-context/tagger";
+import { recordToolDefinition } from "../../features/magic-context/tool-definition-tokens";
+import { createMessagesTransformHandler } from "../../plugin/messages-transform";
+import { bindV2SystemPromptResponse } from "../../v2/hooks/system-prompt-response";
+import type { StoreRow } from "../../v2/store-reader";
+import { createEventHandler } from "./event-handler";
 import {
     beginV2LkgRequest,
     clearLkgMeasuredRequest,
-    noteLkgProviderResponse,
+    currentLkgRequestIdentity,
     type LkgRequestIdentity,
-} from "../packages/plugin/src/hooks/magic-context/lkg-measured-request";
-import {
-    bindSystemDateRequestIdentity,
-    registerSystemDateRefresh,
-} from "../packages/plugin/src/hooks/magic-context/system-date-refresh";
-import { createSystemPromptHashHandler } from "../packages/plugin/src/hooks/magic-context/system-prompt-hash";
-import {
-    createTransform,
-    type TransformDeps,
-} from "../packages/plugin/src/hooks/magic-context/transform";
-import type { MessageLike } from "../packages/plugin/src/hooks/magic-context/transform-operations";
-import { persistPiPressureFromMessageEnd } from "../packages/pi-plugin/src/index";
+    noteLkgProviderResponse,
+} from "./lkg-measured-request";
+import { captureLkgSlot } from "./lkg-replay";
+import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
+import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import { createTransform, type TransformDeps } from "./transform";
+import type { MessageLike } from "./transform-operations";
 
-// Run explicitly against fdd2c367 with REVIEW_RECEIPTS=1. Dynamic loading lets the
-// report-only tests coexist with master, where the receipt module does not exist.
-const test = process.env.REVIEW_RECEIPTS === "1" ? it : it.skip;
-const deliveryPath = "../packages/plugin/src/hooks/magic-context/system-prompt-delivery.ts";
-const piDeliveryPath = "../packages/pi-plugin/src/system-prompt-delivery-pi.ts";
+// Exercise preparation and lifecycle callbacks against isolated stores.
+const test = it;
+const deliveryPath = "./system-prompt-delivery.ts";
 let sequence = 0;
 type HostMessage = MessageLike & { info: MessageLike["info"] & Record<string, unknown> };
 async function dbFixture() {
@@ -72,7 +70,7 @@ async function dbFixture() {
 }
 
 for (const timestamp of [100, 101])
-    test(`review repro: OC2 unrelated completion at ${timestamp} cannot acknowledge undispatched bytes`, async () => {
+    test(`system delivery: OC2 unrelated completion at ${timestamp} cannot acknowledge undispatched bytes`, async () => {
         const f = await dbFixture();
         const originalNow = Date.now;
         Date.now = () => 100;
@@ -80,7 +78,7 @@ for (const timestamp of [100, 101])
             beginV2LkgRequest(f.sessionId, "anthropic/claude-opus-5-5", "previous");
             // These are the public preparation callbacks used by the real producer
             // and transform. No provider call for this hash has been dispatched.
-            const lkgPath = "../packages/plugin/src/hooks/magic-context/lkg-measured-request.ts";
+            const lkgPath = "./lkg-measured-request.ts";
             const lkg = await import(lkgPath);
             const request = lkg.currentLkgRequestIdentity(f.sessionId);
             f.delivery.recordSystemPromptForRequest(f.sessionId, request, "undispatched-new", f.db);
@@ -102,7 +100,7 @@ for (const timestamp of [100, 101])
         }
     });
 
-test("review control: OC2 missing timestamp does not acknowledge", async () => {
+test("system delivery: OC2 missing timestamp does not acknowledge", async () => {
     const f = await dbFixture();
     try {
         const request: LkgRequestIdentity = {
@@ -127,7 +125,7 @@ test("review control: OC2 missing timestamp does not acknowledge", async () => {
     }
 });
 
-test("review control: 400 retires the exact request before a later successful update", async () => {
+test("system delivery: 400 retires the exact request before a later successful update", async () => {
     const f = await dbFixture();
     try {
         const request: LkgRequestIdentity = {
@@ -155,7 +153,7 @@ test("review control: 400 retires the exact request before a later successful up
     }
 });
 
-test("review control: a differently routed model cannot acknowledge", async () => {
+test("system delivery: a differently routed model cannot acknowledge", async () => {
     const f = await dbFixture();
     try {
         const request: LkgRequestIdentity = {
@@ -174,65 +172,6 @@ test("review control: a differently routed model cannot acknowledge", async () =
         });
         expect(f.hash()).toBe("old");
     } finally {
-        f.close();
-    }
-});
-
-test("review repro: Pi same-model side reply cannot acknowledge undispatched primary bytes", async () => {
-    const f = await dbFixture();
-    const piDelivery = await import(piDeliveryPath);
-    const originalNow = Date.now;
-    Date.now = () => 100;
-    try {
-        updateSessionMeta(f.db, f.sessionId, { systemPromptHash: "undispatched-new" });
-        piDelivery.beginPiSystemPromptRequest(f.db, f.sessionId, "anthropic/claude-opus-5-5");
-        piDelivery.recordPiHeldSystemHead(f.sessionId, () => {});
-        // message_end carries model/time, but no primary/steer request identity.
-        await persistPiPressureFromMessageEnd({
-            db: f.db,
-            sessionId: f.sessionId,
-            piContextWindow: 200000,
-            message: {
-                role: "assistant",
-                timestamp: 101,
-                provider: "anthropic",
-                model: "claude-opus-5-5",
-                stopReason: "stop",
-                usage: { input: 1000, output: 10, cacheRead: 0, cacheWrite: 0 },
-            },
-        });
-        expect(f.hash()).toBe("old");
-    } finally {
-        Date.now = originalNow;
-        piDelivery.clearPiSystemPromptDelivery(f.sessionId);
-        f.close();
-    }
-});
-
-test("review control: Pi model mismatch and session deletion reject a late reply", async () => {
-    const f = await dbFixture();
-    const piDelivery = await import(piDeliveryPath);
-    try {
-        updateSessionMeta(f.db, f.sessionId, { systemPromptHash: "new" });
-        piDelivery.beginPiSystemPromptRequest(f.db, f.sessionId, "anthropic/claude-opus-5-5");
-        piDelivery.recordPiHeldSystemHead(f.sessionId, () => {});
-        const response = {
-            role: "assistant",
-            timestamp: Date.now() + 1,
-            provider: "anthropic",
-            model: "claude-opus-5-4",
-            stopReason: "stop",
-        };
-        piDelivery.acknowledgePiSystemPromptResponse(f.sessionId, response);
-        expect(f.hash()).toBe("old");
-        piDelivery.clearPiSystemPromptDelivery(f.sessionId);
-        piDelivery.acknowledgePiSystemPromptResponse(f.sessionId, {
-            ...response,
-            model: "claude-opus-5-5",
-        });
-        expect(f.hash()).toBe("old");
-    } finally {
-        piDelivery.clearPiSystemPromptDelivery(f.sessionId);
         f.close();
     }
 });
@@ -317,10 +256,12 @@ async function heldFixture(generation: "v1" | "v2") {
     });
     const transform = createTransform(deps);
     let reply = 0;
+    const responseRows: StoreRow<"assistant">[] = [];
     async function serve(text: string, order: "system-first" | "messages-first" = "system-first") {
         const responseId = `reply-${++reply}`;
         const key = `${model.providerID}/${model.modelID}`;
-        if (generation === "v2") beginV2LkgRequest(f.sessionId, key, `reply-${reply - 1}`);
+        if (generation === "v2")
+            beginV2LkgRequest(f.sessionId, key, `reply-${reply - 1}`, responseRows.length);
         else
             noteLkgProviderResponse({
                 sessionId: f.sessionId,
@@ -347,7 +288,25 @@ async function heldFixture(generation: "v1" | "v2") {
         return {
             output,
             prompt,
-            accept: () =>
+            accept: () => {
+                const createdAt = Date.now() + 1;
+                if (generation === "v2") {
+                    responseRows.push({
+                        id: responseId,
+                        session_id: f.sessionId,
+                        type: "assistant",
+                        seq: responseRows.length + 1,
+                        data: {
+                            model: { providerID: model.providerID, id: model.modelID },
+                            time: { created: createdAt },
+                            finish: "tool-calls",
+                        },
+                    });
+                    bindV2SystemPromptResponse(f.sessionId, {
+                        assistantSince: (_session, after) =>
+                            responseRows.filter((row) => row.seq > after),
+                    });
+                }
                 noteLkgProviderResponse({
                     sessionId: f.sessionId,
                     responseId,
@@ -355,9 +314,10 @@ async function heldFixture(generation: "v1" | "v2") {
                     inputTokens: 1000,
                     finish: "tool-calls",
                     completedAt: Date.now(),
-                    createdAt: Date.now(),
+                    createdAt,
                     v2: generation === "v2",
-                }),
+                });
+            },
         };
     }
     (await serve("base instructions")).accept();
@@ -409,7 +369,7 @@ async function heldFixture(generation: "v1" | "v2") {
 }
 
 for (const generation of ["v1", "v2"] as const)
-    test(`review repro: ${generation} two held edits retain system-owned history as ride-only work`, async () => {
+    test(`system delivery: ${generation} two held edits retain system-owned history as ride-only work`, async () => {
         const f = await heldFixture(generation);
         try {
             const before = f.pair();
@@ -431,7 +391,7 @@ for (const generation of ["v1", "v2"] as const)
     });
 
 for (const order of ["system-first", "messages-first"] as const)
-    test(`review control: accepted ${order} receipt preserves queued drops until an independent flush`, async () => {
+    test(`system delivery: accepted ${order} receipt preserves queued drops until an independent flush`, async () => {
         const f = await heldFixture("v1");
         try {
             const before = f.pair();
@@ -443,8 +403,7 @@ for (const order of ["system-first", "messages-first"] as const)
             f.wake();
             await f.serve("new instructions");
             expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
-            const pendingPath =
-                "../packages/plugin/src/hooks/magic-context/pending-materialization.ts";
+            const pendingPath = "./pending-materialization.ts";
             const pending = await import(pendingPath);
             pending.requestPendingMaterialization(
                 f.deps.pendingMaterializationSessions,
@@ -462,7 +421,7 @@ for (const order of ["system-first", "messages-first"] as const)
     });
 
 for (const generation of ["v1", "v2"] as const)
-    test(`review control: ${generation} second accepted held edit does not drain queued drops on wake`, async () => {
+    test(`system delivery: ${generation} second accepted held edit does not drain queued drops on wake`, async () => {
         const f = await heldFixture(generation);
         try {
             await f.serve("first edit awaiting response");
@@ -477,41 +436,102 @@ for (const generation of ["v1", "v2"] as const)
         }
     });
 
-for (const generation of ["v1", "v2"] as const) test(`review repro: ${generation} session deletion must retire delivery before a late reply`, async () => {
-    const f = await dbFixture();
-    try {
-        const key = "anthropic/claude-opus-5-5";
-        if (generation === "v2") beginV2LkgRequest(f.sessionId, key, "previous");
-        else noteLkgProviderResponse({ sessionId: f.sessionId, responseId: "reply", modelKey: key, inputTokens: 0 });
-        const lkgPath = "../packages/plugin/src/hooks/magic-context/lkg-measured-request.ts";
-        const lkg = await import(lkgPath);
-        const request = lkg.currentLkgRequestIdentity(f.sessionId);
-        f.delivery.recordSystemPromptForRequest(f.sessionId, request, "sent-before-delete", f.db);
-        f.delivery.recordHeldHeadForRequest(f.sessionId, request);
-        const system = createSystemPromptHashHandler({ db: f.db, dreamerEnabled: false, memoryEnabled: false, historyRefreshSessions: new Set(), pendingMaterializationSessions: new Set(), systemPromptRefreshSessions: new Set(), lastHeuristicsTurnId: new Map() });
-        const events = createEventHandler({ db: f.db, tagger: createTagger(), contextUsageMap: new Map(), config: { cache_ttl: "never" }, compactionHandler: {} as never, onSessionDeleted: (sessionId) => system.clearSession(sessionId) });
-        await events({ event: { type: "session.deleted", properties: { info: { id: f.sessionId } } } } as never);
-        const row = () => f.db.prepare("SELECT COUNT(*) AS count FROM session_meta WHERE session_id=?").get(f.sessionId) as { count: number };
-        expect(row().count).toBe(0);
-        noteLkgProviderResponse({ sessionId: f.sessionId, responseId: "reply", modelKey: key, inputTokens: 1000, finish: "stop", completedAt: Date.now() + 1, v2: generation === "v2", createdAt: Date.now() + 1 });
-        expect(row().count).toBe(0);
-    } finally { f.close(); }
-});
+for (const generation of ["v1", "v2"] as const)
+    test(`system delivery: ${generation} session deletion must retire delivery before a late reply`, async () => {
+        const f = await dbFixture();
+        try {
+            const key = "anthropic/claude-opus-5-5";
+            if (generation === "v2") beginV2LkgRequest(f.sessionId, key, "previous");
+            else
+                noteLkgProviderResponse({
+                    sessionId: f.sessionId,
+                    responseId: "reply",
+                    modelKey: key,
+                    inputTokens: 0,
+                });
+            const lkgPath = "./lkg-measured-request.ts";
+            const lkg = await import(lkgPath);
+            const request = lkg.currentLkgRequestIdentity(f.sessionId);
+            f.delivery.recordSystemPromptForRequest(
+                f.sessionId,
+                request,
+                "sent-before-delete",
+                f.db,
+            );
+            f.delivery.recordHeldHeadForRequest(f.sessionId, request);
+            const createdAt = Date.now() + 1;
+            if (generation === "v2")
+                f.delivery.bindSystemPromptResponse(f.sessionId, request, {
+                    responseId: "reply",
+                    modelKey: key,
+                    createdAt,
+                });
+            const system = createSystemPromptHashHandler({
+                db: f.db,
+                dreamerEnabled: false,
+                memoryEnabled: false,
+                historyRefreshSessions: new Set(),
+                pendingMaterializationSessions: new Set(),
+                systemPromptRefreshSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+            });
+            const events = createEventHandler({
+                db: f.db,
+                tagger: createTagger(),
+                contextUsageMap: new Map(),
+                config: { cache_ttl: "never" },
+                compactionHandler: {} as never,
+                onSessionDeleted: (sessionId) => system.clearSession(sessionId),
+            });
+            await events({
+                event: { type: "session.deleted", properties: { info: { id: f.sessionId } } },
+            } as never);
+            const row = () =>
+                f.db
+                    .prepare("SELECT COUNT(*) AS count FROM session_meta WHERE session_id=?")
+                    .get(f.sessionId) as { count: number };
+            expect(row().count).toBe(0);
+            noteLkgProviderResponse({
+                sessionId: f.sessionId,
+                responseId: "reply",
+                modelKey: key,
+                inputTokens: 1000,
+                finish: "stop",
+                completedAt: Date.now() + 1,
+                v2: generation === "v2",
+                createdAt,
+            });
+            expect(row().count).toBe(0);
+        } finally {
+            f.close();
+        }
+    });
 
-test("review repro: real OC2 producer and held transform cannot accept a foreign terminal row", async () => {
+test("system delivery: real OC2 producer and held transform cannot accept a foreign terminal row", async () => {
     const f = await heldFixture("v2");
     try {
         const before = f.hash();
         await f.serve("prepared new instructions never dispatched");
         expect(f.hash()).toBe(before);
-        noteLkgProviderResponse({ sessionId: f.sessionId, responseId: "foreign-terminal-row", modelKey: "anthropic/claude-opus-5-5", inputTokens: 1000, finish: "stop", completedAt: Date.now() + 1, createdAt: Date.now() + 1, v2: true });
+        noteLkgProviderResponse({
+            sessionId: f.sessionId,
+            responseId: "foreign-terminal-row",
+            modelKey: "anthropic/claude-opus-5-5",
+            inputTokens: 1000,
+            finish: "stop",
+            completedAt: Date.now() + 1,
+            createdAt: Date.now() + 1,
+            v2: true,
+        });
         expect(f.hash()).toBe(before);
-    } finally { f.close(); }
+    } finally {
+        f.close();
+    }
 });
 
 for (const generation of ["v1", "v2"] as const)
     for (const edits of [1, 2] as const)
-        test(`review control: ${generation} ${edits} held edit(s) then accepted reply do not rebuild on wake`, async () => {
+        test(`system delivery: ${generation} ${edits} held edit(s) then accepted reply do not rebuild on wake`, async () => {
             const f = await heldFixture(generation);
             try {
                 const before = f.pair();
@@ -559,7 +579,12 @@ async function independentCause(edited: boolean, cause: IndependentCause) {
             recordDetectedContextLimit(f.db, f.sessionId, 200000, "anthropic/claude-sonnet-4-6");
         }
         f.source.push({
-            info: { id: "after-cause", role: "user", sessionID: f.sessionId, model: { ...f.model } },
+            info: {
+                id: "after-cause",
+                role: "user",
+                sessionID: f.sessionId,
+                model: { ...f.model },
+            },
             parts: [{ type: "text", text: "after cause" }],
         });
         const served = await f.serve(text);
@@ -583,7 +608,7 @@ async function independentCause(edited: boolean, cause: IndependentCause) {
 
 for (const cause of ["ttl", "model"] as const)
     for (const edited of [false, true] as const)
-        test(`review control: v1 ${edited ? "accepted held edit" : "no edit"} leaves queued drop for one independent ${cause} rebuild`, async () => {
+        test(`system delivery: v1 ${edited ? "accepted held edit" : "no edit"} leaves queued drop for one independent ${cause} rebuild`, async () => {
             // Idle expiry or a model change is a rebuild cause unrelated to the system
             // edit, so the queued drop must be applied on this pass.
             expect((await independentCause(edited, cause)).pending).toBe(0);
@@ -592,14 +617,14 @@ for (const cause of ["ttl", "model"] as const)
 // This fixture's pressure passes do not drain the queued drop even without an
 // edit, so the claim checked here is equivalence with that baseline.
 for (const cause of ["force-85", "emergency-95"] as const)
-    test(`review control: v1 accepted held edit leaves the ${cause} pass identical to the no-edit baseline`, async () => {
+    test(`system delivery: v1 accepted held edit leaves the ${cause} pass identical to the no-edit baseline`, async () => {
         const baseline = await independentCause(false, cause);
         const edited = await independentCause(true, cause);
         expect(edited.pending).toBe(baseline.pending);
         expect(edited.messages.map((m) => m.parts)).toEqual(baseline.messages.map((m) => m.parts));
     });
 
-test("review repro: a second producer hash under a stale v1 identity replaces the delivered one", async () => {
+test("system delivery: a conflicting producer hash under a held identity cannot replace its delivery", async () => {
     const f = await dbFixture();
     try {
         const request: LkgRequestIdentity = {
@@ -624,6 +649,183 @@ test("review repro: a second producer hash under a stale v1 identity replaces th
         // stay at its previous value ("old") or become h1, never the unsent h2.
         expect(["old", "h1-sent-by-r"]).toContain(f.hash() ?? "");
     } finally {
+        f.close();
+    }
+});
+
+it("system delivery: replay after held preparation cannot acknowledge replaced instructions", async () => {
+    const f = await heldFixture("v2");
+    const database = spyOn(storage, "openDatabase").mockReturnValue(f.db);
+    recordToolDefinition("anthropic", "claude-opus-5-5", undefined, "read", "Read", {
+        type: "object",
+    });
+    f.source.forEach((message, index) => {
+        message.info.time = { created: index + 1 };
+    });
+    const signed = f.source.pop();
+    if (!signed) throw new Error("missing signed tool-loop message");
+    const baseline = await f.serve("base instructions");
+    baseline.accept();
+    expect(
+        captureLkgSlot({
+            sessionId: f.sessionId,
+            input: f.source,
+            output: baseline.output.messages,
+            modelKey: "anthropic/claude-opus-5-5",
+            providerKey: "anthropic",
+            systemPromptTokens: getOrCreateSessionMeta(f.db, f.sessionId).systemPromptTokens,
+        }),
+    ).toBe(true);
+    f.source.push(signed);
+    const oldHash = f.hash();
+    const record = f.delivery.recordHeldHeadForRequest;
+    const failure = spyOn(f.delivery, "recordHeldHeadForRequest").mockImplementation(
+        (...args: Parameters<typeof record>) => {
+            record(...args);
+            throw new Error("failure after held head preparation");
+        },
+    );
+    let replayed = false;
+    try {
+        const wrapper = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {
+                    await f.serve("prepared instructions never sent");
+                },
+            },
+            replayFits: () => true,
+            onLkgReplay: () => {
+                replayed = true;
+            },
+        });
+        await wrapper({}, { messages: structuredClone(f.source) } as never);
+        expect(replayed).toBe(true);
+        const request = currentLkgRequestIdentity(f.sessionId);
+        const createdAt = Date.now() + 1;
+        f.delivery.bindSystemPromptResponse(f.sessionId, request, {
+            responseId: "replayed-response",
+            createdAt,
+            modelKey: "anthropic/claude-opus-5-5",
+        });
+        noteLkgProviderResponse({
+            sessionId: f.sessionId,
+            responseId: "replayed-response",
+            modelKey: "anthropic/claude-opus-5-5",
+            inputTokens: 1000,
+            createdAt,
+            completedAt: createdAt + 1,
+            finish: "stop",
+            v2: true,
+        });
+        expect(f.hash()).toBe(oldHash);
+        expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
+    } finally {
+        failure.mockRestore();
+        database.mockRestore();
+        f.close();
+    }
+}, 120_000);
+
+it("system delivery: OC2 latest foreign row cannot own the first response", async () => {
+    const f = await dbFixture();
+    const now = Date.now;
+    Date.now = () => 100;
+    try {
+        const modelKey = "anthropic/claude-opus-5-5";
+        beginV2LkgRequest(f.sessionId, modelKey, "previous", 10);
+        const request = currentLkgRequestIdentity(f.sessionId);
+        f.delivery.recordSystemPromptForRequest(f.sessionId, request, "new", f.db);
+        f.delivery.recordHeldHeadForRequest(f.sessionId, request);
+        const rows: StoreRow<"assistant">[] = [
+            {
+                id: "primary",
+                session_id: f.sessionId,
+                type: "assistant",
+                seq: 11,
+                data: {
+                    model: { providerID: "anthropic", id: "claude-opus-5-5" },
+                    time: { created: 101 },
+                },
+            },
+            {
+                id: "foreign-latest",
+                session_id: f.sessionId,
+                type: "assistant",
+                seq: 12,
+                data: {
+                    model: { providerID: "anthropic", id: "claude-opus-5-5" },
+                    time: { created: 102 },
+                },
+            },
+        ];
+        bindV2SystemPromptResponse(f.sessionId, {
+            assistantSince: (_session, after) => rows.filter((row) => row.seq > after),
+        });
+        noteLkgProviderResponse({
+            sessionId: f.sessionId,
+            responseId: "foreign-latest",
+            modelKey,
+            inputTokens: 1000,
+            createdAt: 102,
+            completedAt: 200,
+            finish: "stop",
+            v2: true,
+        });
+        expect(f.hash()).toBe("old");
+        noteLkgProviderResponse({
+            sessionId: f.sessionId,
+            responseId: "primary",
+            modelKey,
+            inputTokens: 1000,
+            createdAt: 101,
+            completedAt: 200,
+            finish: "stop",
+            v2: true,
+        });
+        expect(f.hash()).toBe("new");
+    } finally {
+        Date.now = now;
+        f.close();
+    }
+});
+
+it("system delivery: OC2 equal-millisecond first response cannot acknowledge", async () => {
+    const f = await dbFixture();
+    const now = Date.now;
+    Date.now = () => 100;
+    try {
+        const modelKey = "anthropic/claude-opus-5-5";
+        beginV2LkgRequest(f.sessionId, modelKey, "previous", 10);
+        const request = currentLkgRequestIdentity(f.sessionId);
+        f.delivery.recordSystemPromptForRequest(f.sessionId, request, "new", f.db);
+        f.delivery.recordHeldHeadForRequest(f.sessionId, request);
+        bindV2SystemPromptResponse(f.sessionId, {
+            assistantSince: () => [
+                {
+                    id: "primary",
+                    session_id: f.sessionId,
+                    type: "assistant",
+                    seq: 11,
+                    data: {
+                        model: { providerID: "anthropic", id: "claude-opus-5-5" },
+                        time: { created: 100 },
+                    },
+                },
+            ],
+        });
+        noteLkgProviderResponse({
+            sessionId: f.sessionId,
+            responseId: "primary",
+            modelKey,
+            inputTokens: 1000,
+            createdAt: 100,
+            completedAt: 200,
+            finish: "stop",
+            v2: true,
+        });
+        expect(f.hash()).toBe("old");
+    } finally {
+        Date.now = now;
         f.close();
     }
 });

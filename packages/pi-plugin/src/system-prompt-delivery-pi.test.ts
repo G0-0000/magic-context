@@ -117,8 +117,19 @@ async function fixture() {
 		if (prompt.hashChanged)
 			signalPiSystemHashChange(sessionId, prompt.currentHash);
 		const messages = structuredClone(source);
+		const parentId = ids.at(-1) ?? null;
+		const branch: unknown[] = ids.map((id, index) => ({
+			type: "message",
+			id,
+			message: messages[index],
+		}));
 		const ctx = {
 			...fakeContext(sessionId, process.cwd(), [...ids], messages),
+			sessionManager: {
+				getSessionId: () => sessionId,
+				getLeafId: () => parentId,
+				getBranch: () => branch,
+			},
 			getSystemPrompt: () => prompt.systemPrompt,
 			model: {
 				provider: "anthropic",
@@ -140,20 +151,28 @@ async function fixture() {
 		return {
 			...served,
 			prompt,
-			accept: async (finish = "toolUse") =>
-				persistPiPressureFromMessageEnd({
+			accept: async (finish = "toolUse") => {
+				const message = {
+					role: "assistant",
+					timestamp: Date.now() + 1,
+					provider: "anthropic",
+					model,
+					stopReason: finish,
+					usage: { input: 1000, output: 10, cacheRead: 1000, cacheWrite: 0 },
+				};
+				branch.push({
+					type: "message",
+					id: `response-${message.timestamp}`,
+					parentId,
+					message,
+				});
+				return persistPiPressureFromMessageEnd({
 					db,
 					sessionId,
 					piContextWindow: 200000,
-					message: {
-						role: "assistant",
-						timestamp: Date.now(),
-						provider: "anthropic",
-						model,
-						stopReason: finish,
-						usage: { input: 1000, output: 10, cacheRead: 1000, cacheWrite: 0 },
-					},
-				}),
+					message,
+				});
+			},
 		};
 	};
 	const hold = () => {
