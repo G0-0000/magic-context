@@ -15,8 +15,13 @@ import {
     resolveBoundaryContext,
     resolveProtectedTailBoundary,
 } from "../packages/plugin/src/hooks/magic-context/protected-tail-boundary";
+import { prewarmRawSessionOrdinalsForDb } from "../packages/plugin/src/hooks/magic-context/raw-ordinal-warmup";
 import { withRawMessageProvider } from "../packages/plugin/src/hooks/magic-context/read-session-chunk";
-import type { Database } from "../packages/plugin/src/shared/sqlite";
+import {
+    RawOrdinalsNotReady,
+    readRawSessionSummaryCandidateBasis,
+} from "../packages/plugin/src/hooks/magic-context/read-session-raw";
+import { Database } from "../packages/plugin/src/shared/sqlite";
 import {
     contextStore,
     fixture,
@@ -94,6 +99,65 @@ it("marker cleanup deletes the frozen lineage set including equal, skewed and mi
             expect(db.prepare("SELECT 1 FROM message WHERE id=?").get(id)).not.toBeNull();
     } finally {
         closeCompactionMarkerDb();
+        db.close();
+        process.env.XDG_DATA_HOME = oldHome;
+        f.cleanup();
+    }
+});
+
+it("marker candidate discovery refuses a peer import until its complete summary set is rebuilt", async () => {
+    const f = fixture();
+    const oldHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = f.dir;
+    mkdirSync(join(f.dir, "opencode"));
+    const path = join(f.dir, "opencode/opencode.db");
+    const db = hostStore(path, 1100);
+    const peer = new Database(path);
+    const boundary = messageId(1098);
+    try {
+        expect(
+            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
+                acceptMs: 60000,
+                resultMs: 120000,
+            }),
+        ).toBe("warm");
+        peer.prepare("INSERT INTO message VALUES (?,?,?,?,?)").run(
+            "imported-summary",
+            SESSION,
+            null,
+            400,
+            JSON.stringify({ summary: true, finish: "stop", parentID: boundary }),
+        );
+        peer.prepare("INSERT INTO part VALUES (?,?,?,?,?,?)").run(
+            "imported-part",
+            "imported-summary",
+            SESSION,
+            400,
+            400,
+            JSON.stringify({ type: "text", text: "summary" }),
+        );
+        expect(() => readRawSessionSummaryCandidateBasis(db, SESSION)).toThrow(RawOrdinalsNotReady);
+        expect(
+            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
+                acceptMs: 60000,
+                resultMs: 120000,
+            }),
+        ).toBe("warm");
+        expect(readRawSessionSummaryCandidateBasis(db, SESSION).ids).toContain("imported-summary");
+        expect(
+            injectCompactionMarker({
+                sessionId: SESSION,
+                endMessageId: boundary,
+                endOrdinal: 1099,
+                summaryText: "summary",
+                directory: f.dir,
+                resolvedBoundary: { id: boundary, timeCreated: 366 },
+            }),
+        ).not.toBeNull();
+        expect(peer.prepare("SELECT id FROM message WHERE id='imported-summary'").get()).toBeNull();
+    } finally {
+        closeCompactionMarkerDb();
+        peer.close();
         db.close();
         process.env.XDG_DATA_HOME = oldHome;
         f.cleanup();

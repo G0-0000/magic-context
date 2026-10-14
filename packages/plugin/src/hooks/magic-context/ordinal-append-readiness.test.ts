@@ -127,7 +127,7 @@ function foreignWrite(root: string): void {
 }
 
 test(
-    "append preparation stays warm for 120 commits and ctx_expand serves the active session",
+    "append preparation rebuilds for 120 commits and ctx_expand serves current-DB ordinals",
     async () => {
         await fixture(async (source, reader, context, root, length) => {
             const log = spyOn(logger, "log");
@@ -166,7 +166,9 @@ test(
                         .run(`part-${index}`);
                     foreignWrite(root);
                     const started = performance.now();
-                    expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(true);
+                    // A commit does not prove that only the tail changed. The
+                    // read-only host has no mutation journal, so rebuild off-thread.
+                    expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(false);
                     expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
                     timings.push(performance.now() - started);
                     const ownersStarted = performance.now();
@@ -192,7 +194,7 @@ test(
                 expect(expanded).not.toContain("warming in the background");
                 expect(
                     log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-                ).toHaveLength(1);
+                ).toHaveLength(121);
                 expect(getRawSessionSummaryFullScansForTest()).toBe(0);
                 console.info(
                     JSON.stringify({
@@ -200,7 +202,7 @@ test(
                         messages: length,
                         passes: timings.length,
                         ready: true,
-                        warmups: 1,
+                        warmups: 121,
                         prepareAverageMs: timings.reduce((a, b) => a + b, 0) / timings.length,
                         prepareMaxMs: Math.max(...timings),
                         ownerPrepareAverageMs:
@@ -231,7 +233,7 @@ test(
     stressRoot ? 600_000 : 30_000,
 );
 
-test("revert truncates checkpoints without rescanning the surviving prefix", async () => {
+test("revert and append rebuild current-DB checkpoint ranks off-thread", async () => {
     await fixture(async (source, reader, _context, _root, length) => {
         const log = spyOn(logger, "log");
         try {
@@ -256,14 +258,14 @@ test("revert truncates checkpoints without rescanning the surviving prefix", asy
             );
             expect(
                 log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-            ).toHaveLength(1);
+            ).toHaveLength(3);
         } finally {
             log.mockRestore();
         }
     });
 });
 
-test("excluded marker appends preserve durable ordinals", async () => {
+test("excluded marker appends preserve ordinal values after a fresh worker snapshot", async () => {
     await fixture(async (source, reader, _context, _root, length) => {
         const log = spyOn(logger, "log");
         try {
@@ -292,7 +294,7 @@ test("excluded marker appends preserve durable ordinals", async () => {
             );
             expect(
                 log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-            ).toHaveLength(1);
+            ).toHaveLength(2);
         } finally {
             log.mockRestore();
         }

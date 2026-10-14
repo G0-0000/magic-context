@@ -31,11 +31,13 @@ import type { HarnessId } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import { type Database, getSqliteDatabasePath, releaseIndexOwner } from "../../shared/sqlite";
 import {
+    captureRawOrdinalScanProof,
     countRawSessionMessageOrdinalsFromDb,
     getRawSessionSummaryEpoch,
     installRawSessionSummaryScan,
     isRawSessionSummaryWarm,
     type RawMessage,
+    type RawOrdinalScanProof,
     type RawSessionSummaryScan,
     rawOrdinalSummarySeed,
 } from "./read-session-raw";
@@ -208,10 +210,14 @@ export function runSessionWarmupWorker(
  * scanning the session on the host thread. The worker records prefix counts
  * every 256 stored messages so later lookups need only a bounded suffix read.
  *
- * Already warm: extends those checkpoints and returns. Cold file stores always
+ * Already warm: reuses ranks only while the serving snapshot is unchanged.
+ * Any peer commit or local write invalidates them and requires a full rebuild;
+ * the read-only host store has no session mutation journal to prove a safe append.
+ * Cold file stores always
  * use the worker, including sessions opened long after process startup. Memory
  * stores use the direct path because another connection cannot see them.
- * Tail deletion from a revert truncates to the last surviving checkpoint.
+ * Prefix edits, backdated inserts, summary completion and suffix reverts all
+ * rebuild rather than trusting a surviving checkpoint's old rank.
  * Concurrent requests on the same database handle share one worker; separate
  * handles keep separate caches because session ids can repeat across stores.
  * Explicit cache resets during a scan allow an immediate retry. Worker failures
@@ -248,6 +254,8 @@ export function prewarmRawSessionOrdinalsForDb(
         if (failed !== undefined && Date.now() - failed < FAILURE_BACKOFF_MS)
             return Promise.resolve("failed");
         const epoch = getRawSessionSummaryEpoch(sessionId);
+        const proof = captureRawOrdinalScanProof(db);
+        if (!proof) return Promise.resolve("failed");
         const started = performance.now();
         // A worker failure is recorded once, however many connections await it.
         const result = runSessionWarmupWorker(
@@ -262,7 +270,7 @@ export function prewarmRawSessionOrdinalsForDb(
             .finally(() => {
                 if (inFlight.get(key) === scan) inFlight.delete(key);
             });
-        const scan: SharedScan = { epoch, started, result };
+        const scan: SharedScan = { epoch, started, result, proof };
         inFlight.set(key, scan);
         shared = scan;
     }
@@ -271,7 +279,16 @@ export function prewarmRawSessionOrdinalsForDb(
     return awaited.result.then((result): RawOrdinalWarmupOutcome => {
         if (!("scan" in result)) return "failed";
         try {
-            if (installRawSessionSummaryScan(db, sessionId, result.scan, awaited.epoch, true)) {
+            if (
+                installRawSessionSummaryScan(
+                    db,
+                    sessionId,
+                    result.scan,
+                    awaited.epoch,
+                    true,
+                    awaited.proof,
+                )
+            ) {
                 failedAt.delete(key);
                 log(
                     `[magic-context] canonical ordinals of ${sessionId} warmed off-thread (${result.scan.sessionRows} messages, ${Math.round(performance.now() - awaited.started)} ms)`,
@@ -285,7 +302,7 @@ export function prewarmRawSessionOrdinalsForDb(
             key,
             sessionId,
             "superseded",
-            `session removed during scan: epoch=${awaited.epoch}/${getRawSessionSummaryEpoch(sessionId)}`,
+            `store changed or session invalidated during scan: epoch=${awaited.epoch}/${getRawSessionSummaryEpoch(sessionId)}`,
         );
         return "failed";
     });
@@ -301,6 +318,7 @@ type WorkerResult =
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */
 interface SharedScan {
+    proof: RawOrdinalScanProof;
     /** The session's summary epoch when the scan started; a later epoch makes it stale. */
     epoch: number;
     started: number;

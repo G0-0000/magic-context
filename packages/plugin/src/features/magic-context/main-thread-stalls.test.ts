@@ -11,6 +11,7 @@ import { withRawMessageProvider } from "../../hooks/magic-context/read-session-c
 import {
     getRawSessionOrdinalRowsVisitedForTest,
     readRawSessionMessageIdOrdinalsForRangeFromDb,
+    readRawSessionSummaryCandidateBasis,
     resetRawSessionOrdinalRowsVisitedForTest,
 } from "../../hooks/magic-context/read-session-raw";
 import { setHarness } from "../../shared/harness";
@@ -26,6 +27,7 @@ import {
 } from "./__tests__/stall-fixture";
 import {
     closeCompactionMarkerDb,
+    getOpenCodeDbPath,
     injectCompactionMarker,
     LEGACY_MARKER_LINEAGE_SQL,
 } from "./compaction-marker";
@@ -47,7 +49,7 @@ afterEach(() => {
     for (const path of dirs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-it("legacy marker cleanup preserves the old deletion set and seeks from the boundary", () => {
+it("legacy marker cleanup preserves the old deletion set with primary-key candidate probes", async () => {
     const dir = fixtureDir();
     process.env.XDG_DATA_HOME = dir;
     const db = createStallHost(join(dir, "opencode", "opencode.db"), 4096, 12800);
@@ -82,10 +84,38 @@ it("legacy marker cleanup preserves the old deletion set and seeks from the boun
             .prepare(OLD_LEGACY_MARKER_SQL)
             .all(STALL_SESSION, "canonical", boundary, "summary") as { id: string }[];
         expect(oldIds.map((r) => r.id).sort()).toEqual(["legacy-after", "legacy-at"]);
-        const plan = db
-            .prepare(`EXPLAIN QUERY PLAN ${LEGACY_MARKER_LINEAGE_SQL}`)
-            .all(STALL_SESSION, 4080, "canonical", boundary, "summary") as { detail: string }[];
-        expect(plan.some((r) => r.detail.includes("session_id=? AND time_created>?"))).toBe(true);
+        expect(await prewarmRawSessionOrdinalsForDb(db, STALL_SESSION)).toBe("warm");
+        const candidates = readRawSessionSummaryCandidateBasis(db, STALL_SESSION).ids;
+        for (const row of oldIds) expect(candidates).toContain(row.id);
+        expect(getOpenCodeDbPath()).toBe(join(dir, "opencode", "opencode.db"));
+        expect(db.inTransaction).toBe(false);
+        expect(
+            (
+                db
+                    .prepare(LEGACY_MARKER_LINEAGE_SQL)
+                    .all(
+                        STALL_SESSION,
+                        JSON.stringify(candidates),
+                        "canonical",
+                        boundary,
+                        "summary",
+                    ) as { id: string }[]
+            )
+                .map((row) => row.id)
+                .sort(),
+        ).toEqual(oldIds.map((row) => row.id).sort());
+        const planStatement = db.prepare(`EXPLAIN QUERY PLAN ${LEGACY_MARKER_LINEAGE_SQL}`);
+        const plan = planStatement.all(
+            STALL_SESSION,
+            JSON.stringify(candidates),
+            "canonical",
+            boundary,
+            "summary",
+        ) as { detail: string }[];
+        // Bun's EXPLAIN cursor over json_each retains a read snapshot until it
+        // is finalized; release it before observing the marker writer's commit.
+        (planStatement as unknown as { finalize(): void }).finalize();
+        expect(plan.some((r) => r.detail.includes("sqlite_autoindex_message_1 (id=?)"))).toBe(true);
         expect(plan.some((r) => r.detail.includes("part_message_id_id_idx"))).toBe(true);
         const result = injectCompactionMarker({
             sessionId: STALL_SESSION,
@@ -96,6 +126,13 @@ it("legacy marker cleanup preserves the old deletion set and seeks from the boun
             resolvedBoundary: { id: boundary, timeCreated: 4080 },
         });
         expect(result).not.toBeNull();
+        const peer = new Database(join(dir, "opencode", "opencode.db"));
+        try {
+            for (const row of oldIds)
+                expect(peer.prepare("SELECT id FROM message WHERE id=?").get(row.id)).toBeNull();
+        } finally {
+            peer.close();
+        }
         for (const row of oldIds) {
             expect(db.prepare("SELECT id FROM message WHERE id=?").get(row.id)).toBeNull();
             expect(db.prepare("SELECT id FROM part WHERE message_id=?").get(row.id)).toBeNull();
@@ -140,6 +177,7 @@ it("late ID ranges use worker ranks and preserve numeric summaries and malformed
         expect(getRawSessionOrdinalRowsVisitedForTest()).toBeGreaterThan(0);
         expect(getRawSessionOrdinalRowsVisitedForTest()).toBeLessThan(to - from + 1 + 512);
         db.prepare("DELETE FROM message WHERE time_created>=4000").run();
+        expect(await prewarmRawSessionOrdinalsForDb(db, STALL_SESSION)).toBe("warm");
         const remaining = db
             .prepare(OLD_ID_RANGE_SQL)
             .all(STALL_SESSION, to - from + 1, from - 1) as { id: string; data: string }[];

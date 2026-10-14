@@ -24,7 +24,11 @@ import {
     getAllStatusTagTokenTotalsFlat,
 } from "../../src/features/magic-context/storage-tags.ts";
 import { prewarmRawSessionOrdinalsForDb } from "../../src/hooks/magic-context/raw-ordinal-warmup.ts";
-import { readRawSessionMessageIdOrdinalsForRangeFromDb } from "../../src/hooks/magic-context/read-session-raw.ts";
+import {
+    RawOrdinalsNotReady,
+    readRawSessionMessageIdOrdinalsForRangeFromDb,
+    readRawSessionSummaryCandidateBasis,
+} from "../../src/hooks/magic-context/read-session-raw.ts";
 import { setHarness } from "../../src/shared/harness.ts";
 import { Database } from "../../src/shared/sqlite.ts";
 
@@ -109,6 +113,40 @@ try {
         ),
         expected,
     );
+    const peer = new Database(join(dir, "opencode", "opencode.db"));
+    peer.prepare("DELETE FROM message WHERE id=?").run(stallMessageId(10));
+    peer.close();
+    measure("prefix mutation validity check/refusal", () =>
+        assert.throws(
+            () => readRawSessionMessageIdOrdinalsForRangeFromDb(host, STALL_SESSION, from, to),
+            RawOrdinalsNotReady,
+        ),
+    );
+    assert.equal(
+        await heartbeat("prefix mutation full rebuild off-thread", () =>
+            prewarmRawSessionOrdinalsForDb(host, STALL_SESSION),
+        ),
+        "warm",
+    );
+    const currentRows = host.prepare(OLD_ID_RANGE_SQL).all(STALL_SESSION, to - from + 1, from - 1);
+    const currentExpected = new Map(
+        currentRows.flatMap((row, index) => {
+            try {
+                const parsed = JSON.parse(row.data);
+                return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                    ? [[row.id, from + index]]
+                    : [];
+            } catch {
+                return [];
+            }
+        }),
+    );
+    assert.deepEqual(
+        measure("id-range after current-DB rebuild", () =>
+            readRawSessionMessageIdOrdinalsForRangeFromDb(host, STALL_SESSION, from, to),
+        ),
+        currentExpected,
+    );
     // Invalid JSON is a reader fixture, not a valid marker candidate. The old writer rejects it.
     host.prepare("UPDATE message SET data='{}' WHERE json_valid(data)=0").run();
     const boundary = stallMessageId(count - 32),
@@ -138,11 +176,20 @@ try {
     const oldMarkers = measure("legacy marker select before", () =>
         host.prepare(OLD_LEGACY_MARKER_SQL).all(STALL_SESSION, "canonical", boundary, "summary"),
     );
+    assert.equal(
+        await heartbeat("marker summary discovery off-thread", () =>
+            prewarmRawSessionOrdinalsForDb(host, STALL_SESSION),
+        ),
+        "warm",
+    );
+    const basis = measure("marker candidate proof", () =>
+        readRawSessionSummaryCandidateBasis(host, STALL_SESSION),
+    );
     assert.deepEqual(
         measure("legacy marker select after", () =>
             host
                 .prepare(LEGACY_MARKER_LINEAGE_SQL)
-                .all(STALL_SESSION, time, "canonical", boundary, "summary"),
+                .all(STALL_SESSION, JSON.stringify(basis.ids), "canonical", boundary, "summary"),
         ),
         oldMarkers,
     );

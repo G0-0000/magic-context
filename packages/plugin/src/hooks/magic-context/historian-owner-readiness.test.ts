@@ -179,7 +179,7 @@ test("an owner readiness deadline warns and leaves the worker able to finish", a
     });
 });
 
-test("cold ordinal preparation truncates a tail removed while the worker ran", async () => {
+test("cold ordinal preparation rejects a changed snapshot and retries after a tail removal", async () => {
     await fixture(async (_db, path) => {
         const raw = new Database(join(dirname(path), "absent-opencode.db"));
         raw.exec("PRAGMA journal_mode=WAL");
@@ -200,9 +200,9 @@ test("cold ordinal preparation truncates a tail removed while the worker ran", a
             async (...args) => {
                 const result = originalPrepare(...args);
                 if (++attempts === 1) {
-                    // Simulate an undo that deletes a message while the cold off-thread scan is
-                    // still running. The scan must repair its result by truncating at the
-                    // deleted message, not by starting the whole-session scan again.
+                    // Remove a row while the worker runs. Checkpoint identity
+                    // cannot prove the remaining prefix is unchanged, so reject
+                    // this result and let preparation retry on the new snapshot.
                     raw.prepare("DELETE FROM message WHERE id = 'raw-2'").run();
                     observeOpenCodeTurnEvent("message.removed", {
                         sessionID: SESSION,
@@ -216,8 +216,8 @@ test("cold ordinal preparation truncates a tail removed while the worker ran", a
         );
         try {
             expect(await prepareRawSessionOrdinals(SESSION)).toBe(true);
-            expect(firstOutcome).toBe("warm");
-            expect(attempts).toBe(1);
+            expect(firstOutcome).toBe("failed");
+            expect(attempts).toBe(2);
             expect(getRawSessionMessageOrdinalCount(SESSION)).toBe(2);
         } finally {
             prepare.mockRestore();

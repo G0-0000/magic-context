@@ -105,7 +105,7 @@ for (const session of ["ses-r2-unaccepted", "ses-r2-silent"]) {
     });
 }
 
-test("excluded summary writes preserve delayed checkpoints; sessions warm independently", async () => {
+test("summary writes reject delayed checkpoints; sessions prepare independently", async () => {
     await withStore(async (path, first, second) => {
         const sessions = ["ses-r2-one", "ses-r2-two"];
         for (const s of sessions) seed(first, s);
@@ -122,7 +122,7 @@ test("excluded summary writes preserve delayed checkpoints; sessions warm indepe
                 .run(`${s}-summary`);
             writeFileSync(`${path}.${s}.release`, "go");
         }
-        expect(await Promise.all(pending)).toEqual(["warm", "warm"]);
+        expect(await Promise.all(pending)).toEqual(["failed", "failed"]);
         for (const s of sessions)
             expect(await prewarmRawSessionOrdinalsForDb(first, s)).toBe("warm");
         resetRawSessionOrdinalJsonRowsReadForTest();

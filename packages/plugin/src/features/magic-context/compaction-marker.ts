@@ -29,7 +29,12 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { noteRawSessionSummaryRowWritten } from "../../hooks/magic-context/read-session-raw";
+import {
+    isRawOrdinalScanProofCurrent,
+    noteRawSessionSummaryRowWritten,
+    RawOrdinalsNotReady,
+    readRawSessionSummaryCandidateBasis,
+} from "../../hooks/magic-context/read-session-raw";
 import { harnessOwnsOpenCodeStore } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import {
@@ -494,7 +499,7 @@ export interface InjectCompactionMarkerArgs {
 
 export const LEGACY_MARKER_LINEAGE_SQL = `SELECT m.id
     FROM message m
-    WHERE m.session_id = ? AND m.time_created >= ? AND m.id <> ?
+    WHERE +m.session_id = ? AND m.id IN (SELECT value FROM json_each(?)) AND m.id <> ?
       AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
       AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
       AND COALESCE(json_extract(m.data, '$.parentID'), '') = ?
@@ -508,19 +513,22 @@ function removeLegacyMarkerLineageRows(
     args: {
         sessionId: string;
         boundaryMessageId: string;
-        boundaryTimeCreated: number;
+        candidateIds: readonly string[];
         summaryText: string;
         summaryMessageId: string;
         compactionPartId: string;
     },
 ): void {
-    // A summary is created after its parent boundary. The session/time index
-    // excludes older history before SQLite inspects the summary's JSON.
+    // Earlier injectCompactionMarker implementations wrote the summary's
+    // time_created as boundaryTime + 1, but imported or rewritten legacy rows
+    // can be skewed or lack a timestamp.
+    // Discover summary IDs off-thread and probe their primary keys; timestamp
+    // causality is not a deletion predicate.
     const legacySummaries = db
         .prepare(LEGACY_MARKER_LINEAGE_SQL)
         .all(
             args.sessionId,
-            args.boundaryTimeCreated,
+            JSON.stringify(args.candidateIds),
             args.summaryMessageId,
             args.boundaryMessageId,
             args.summaryText,
@@ -557,6 +565,13 @@ function removeLegacyMarkerLineageRows(
  */
 export function injectCompactionMarker(
     args: InjectCompactionMarkerArgs,
+): CompactionMarkerState | null {
+    return injectCompactionMarkerFromBasis(args);
+}
+
+function injectCompactionMarkerFromBasis(
+    args: InjectCompactionMarkerArgs,
+    validatedBasis?: ReturnType<typeof readRawSessionSummaryCandidateBasis>,
 ): CompactionMarkerState | null {
     // Verify OpenCode's schema still matches what our INSERTs expect BEFORE we
     // try to write. If OpenCode shipped a breaking schema change, bail cleanly
@@ -603,13 +618,20 @@ export function injectCompactionMarker(
     });
 
     try {
+        const basis = validatedBasis ?? readRawSessionSummaryCandidateBasis(db, args.sessionId);
         runMarkerWriteTransaction(db, "compaction-marker-inject", () => {
+            // Candidate IDs were read before acquiring the host writer lock.
+            // Recheck their snapshot before cleanup. Atomic replacement already
+            // checked it before deleting its old marker rows, so its supplied
+            // candidate set is still complete except for those known deletions.
+            if (!validatedBasis && !isRawOrdinalScanProofCurrent(db, basis.proof))
+                throw new RawOrdinalsNotReady();
             // A committed insert can outlive a failed context-state write. Remove
             // any stale lineage in the transaction that writes the canonical rows.
             removeLegacyMarkerLineageRows(db, {
                 sessionId: args.sessionId,
                 boundaryMessageId: boundary.id,
-                boundaryTimeCreated: boundaryTime,
+                candidateIds: basis.ids,
                 summaryText: args.summaryText,
                 summaryMessageId: summaryMsgId,
                 compactionPartId,
@@ -704,14 +726,16 @@ export function replaceCompactionMarker(
     try {
         const db = getWritableOpenCodeDb();
         connection = db;
+        const basis = readRawSessionSummaryCandidateBasis(db, args.sessionId);
         const marker = runMarkerWriteTransaction(db, "compaction-marker-replace", () => {
             entered = true;
+            if (!isRawOrdinalScanProofCurrent(db, basis.proof)) throw new RawOrdinalsNotReady();
             if (existing) {
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);
                 db.prepare("DELETE FROM message WHERE id = ?").run(existing.summaryMessageId);
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.compactionPartId);
             }
-            const replacement = injectCompactionMarker(args);
+            const replacement = injectCompactionMarkerFromBasis(args, basis);
             if (!replacement) {
                 throw new Error(
                     `failed to inject replacement marker at ordinal ${args.endOrdinal}`,

@@ -2,8 +2,9 @@
 
 These tests use synthetic stores only, under
 `$TMPDIR/magic-context/host-stalls-five-review/`. They assert contracts, not the
-current implementation's output. A failing assertion is intentionally retained
-when it reproduces a review finding; these are not part of the package test glob.
+current implementation's output. The plugin's `host-stalls-review.test.ts`
+imports these contracts into the normal package suite; the standalone commands
+below remain useful for focused verification.
 
 Reviewed commit: `d355645ff5f470a9e0d6db10edb1dfd4005ae17b`.
 Comparison base: `baaebec0f389163214d696de84ef8462405e0a3f`.
