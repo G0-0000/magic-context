@@ -32,6 +32,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { gunzipSync } from "node:zlib";
 import { confirm, isPromptCancelledError, log, type PromptLog } from "./prompts";
 
 const execFileAsync = promisify(execFile);
@@ -110,8 +111,8 @@ export type DashboardChoice = "ask" | "install" | "skip-flag" | "skip-noninterac
 
 /**
  * `--no-dashboard` always wins, `--dashboard` installs without asking, and
- * otherwise the question is asked only when a person can answer it: `--yes`,
- * `-y`, CI and non-TTY runs skip the offer.
+ * otherwise the question is asked only when a person can answer it (see
+ * `isInteractiveTerminal`): CI and non-TTY runs skip the offer.
  */
 export function resolveDashboardChoice(
     argv: readonly string[],
@@ -119,10 +120,7 @@ export function resolveDashboardChoice(
 ): DashboardChoice {
     if (argv.includes("--no-dashboard")) return "skip-flag";
     if (argv.includes("--dashboard")) return "install";
-    if (!interactive || argv.includes("--yes") || argv.includes("-y")) {
-        return "skip-noninteractive";
-    }
-    return "ask";
+    return interactive ? "ask" : "skip-noninteractive";
 }
 
 /** The asset this machine installs, or null when no build exists for it. */
@@ -407,6 +405,125 @@ function isWritableDir(path: string): boolean {
     }
 }
 
+function unsafeArchivePath(path: string): boolean {
+    if (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:/.test(path)) return true;
+    return path.split(/[/\\]/).some((segment) => segment === "..");
+}
+
+function tarString(block: Buffer, start: number, length: number): string {
+    const field = block.subarray(start, start + length);
+    const end = field.indexOf(0);
+    return field.subarray(0, end === -1 ? field.length : end).toString("utf8");
+}
+
+function tarSize(block: Buffer): number {
+    const field = block.subarray(124, 136);
+    // GNU base-256 encoding: high bit set, big-endian value in the remaining bytes.
+    if ((field[0] ?? 0) & 0x80) {
+        let value = (field[0] ?? 0) & 0x7f;
+        for (const byte of field.subarray(1)) value = value * 256 + byte;
+        return value;
+    }
+    const text = tarString(block, 124, 12).trim();
+    return text === "" ? 0 : Number.parseInt(text, 8);
+}
+
+function paxRecords(data: Buffer): Map<string, string> {
+    const records = new Map<string, string>();
+    let offset = 0;
+    while (offset < data.length) {
+        const space = data.indexOf(0x20, offset);
+        if (space === -1) break;
+        const length = Number.parseInt(data.subarray(offset, space).toString("utf8"), 10);
+        if (!Number.isFinite(length) || length <= 0) break;
+        const record = data.subarray(space + 1, offset + length - 1).toString("utf8");
+        const equals = record.indexOf("=");
+        if (equals !== -1) records.set(record.slice(0, equals), record.slice(equals + 1));
+        offset += length;
+    }
+    return records;
+}
+
+/**
+ * Refuse a tar archive (already gunzipped) that could write outside the
+ * directory it is extracted into, or null when every entry is safe.
+ *
+ * The app archive is signed, so this guards against a broken or hostile build
+ * rather than a network attacker. Entry names and hard-link targets must be
+ * relative with no `..` segment. Symbolic-link targets must also be relative
+ * with no `..` segment: such a link can only point further down from its own
+ * directory, so even a chain of links stays inside. Only files, directories,
+ * links and the PAX/GNU long-name records that rename them are accepted; the
+ * long names are applied before checking, as `tar` applies them.
+ */
+export function findUnsafeTarEntry(tar: Buffer): string | null {
+    const globalPax = new Map<string, string>();
+    let nextPax = new Map<string, string>();
+    let longName: string | null = null;
+    let longLink: string | null = null;
+    let offset = 0;
+    while (offset + 512 <= tar.length) {
+        const header = tar.subarray(offset, offset + 512);
+        if (header.every((byte) => byte === 0)) return null;
+        const size = tarSize(header);
+        if (!Number.isFinite(size) || size < 0) return "an entry has an unreadable size";
+        const dataStart = offset + 512;
+        const data = tar.subarray(dataStart, dataStart + size);
+        offset = dataStart + Math.ceil(size / 512) * 512;
+        const type = String.fromCharCode(header[156] ?? 0);
+
+        if (type === "x" || type === "g") {
+            const records = paxRecords(data);
+            const target = type === "g" ? globalPax : nextPax;
+            for (const [key, value] of records) target.set(key, value);
+            continue;
+        }
+        if (type === "L" || type === "K") {
+            const value = tarString(data, 0, data.length);
+            if (type === "L") longName = value;
+            else longLink = value;
+            continue;
+        }
+
+        const prefix = tarString(header, 345, 155);
+        const isUstar = header.subarray(257, 262).toString("latin1") === "ustar";
+        const headerName = tarString(header, 0, 100);
+        const name =
+            nextPax.get("path") ??
+            longName ??
+            globalPax.get("path") ??
+            (isUstar && prefix ? `${prefix}/${headerName}` : headerName);
+        const link =
+            nextPax.get("linkpath") ??
+            longLink ??
+            globalPax.get("linkpath") ??
+            tarString(header, 157, 100);
+        nextPax = new Map();
+        longName = null;
+        longLink = null;
+
+        if (unsafeArchivePath(name)) return `entry "${name}" points outside the archive`;
+        switch (type) {
+            case "0":
+            case "\0":
+            case "7":
+            case "5":
+                break;
+            case "1":
+            case "2":
+                if (link === "" || unsafeArchivePath(link)) {
+                    return `link "${name}" -> "${link}" points outside the archive`;
+                }
+                break;
+            default:
+                return `entry "${name}" has unsupported type "${type}"`;
+        }
+    }
+    // Running out of bytes before the end-of-archive marker: accept only a clean
+    // entry boundary, so a truncated entry is refused.
+    return offset === tar.length ? null : "the archive is truncated";
+}
+
 async function installMac(
     data: Buffer,
     deps: DashboardInstallDeps,
@@ -423,6 +540,8 @@ async function installMac(
             `${deps.macSystemApplicationsDir} is not writable, so the app goes to ${destinationDir} (setup never asks for sudo).`,
         );
     }
+    const unsafe = findUnsafeTarEntry(gunzipSync(data));
+    if (unsafe) throw new Error(`the app archive is unsafe to extract: ${unsafe}`);
     mkdirSync(destinationDir, { recursive: true });
     // Stage inside the destination so the final move is a same-volume rename.
     const staging = mkdtempSync(join(destinationDir, ".magic-context-dashboard-"));
@@ -589,9 +708,15 @@ async function runOffer(
     deps.log.success(`Installed Magic Context Dashboard v${release.version} → ${location}`);
 }
 
-function isCi(env: NodeJS.ProcessEnv): boolean {
-    const value = env.CI?.trim().toLowerCase();
-    return value !== undefined && value !== "" && value !== "0" && value !== "false";
+/** A person can answer a prompt: stdin and stdout are terminals and `CI` is unset or false. */
+export function isInteractiveTerminal(
+    stdinIsTTY: boolean | undefined,
+    stdoutIsTTY: boolean | undefined,
+    env: NodeJS.ProcessEnv,
+): boolean {
+    const ci = env.CI?.trim().toLowerCase();
+    const isCi = ci !== undefined && ci !== "" && ci !== "0" && ci !== "false";
+    return Boolean(stdinIsTTY && stdoutIsTTY) && !isCi;
 }
 
 const WINDOWS_UNINSTALL_KEY = `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${DASHBOARD_PRODUCT_NAME}`;
@@ -622,7 +747,7 @@ export function defaultDashboardInstallDeps(): DashboardInstallDeps {
     return {
         log,
         confirm: (message, defaultYes) => confirm(message, defaultYes),
-        interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) && !isCi(process.env),
+        interactive: isInteractiveTerminal(process.stdin.isTTY, process.stdout.isTTY, process.env),
         platform: process.platform,
         arch: process.arch,
         homeDir: homedir(),

@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { gzipSync } from "node:zlib";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     compareVersions,
@@ -20,7 +21,9 @@ import {
     DASHBOARD_MAC_APP_NAME,
     DASHBOARD_UPDATER_PUBLIC_KEY,
     type DashboardInstallDeps,
+    findUnsafeTarEntry,
     type InstalledDashboard,
+    isInteractiveTerminal,
     offerDashboardInstall,
     resolveDashboardChoice,
     selectDashboardTarget,
@@ -144,6 +147,87 @@ afterEach(() => {
 
 function payload(label: string): Buffer {
     return Buffer.from(`fake dashboard build: ${label}\n`.repeat(64));
+}
+
+// ── Tar archive builders (ustar headers, as `tar` writes them) ───────────────────
+
+interface TarSpec {
+    name: string;
+    type?: string;
+    link?: string;
+    prefix?: string;
+    data?: Buffer;
+}
+
+function tarEntry(spec: TarSpec): Buffer {
+    const header = Buffer.alloc(512);
+    const data = spec.data ?? Buffer.alloc(0);
+    header.write(spec.name, 0, 100, "utf8");
+    header.write("0000644\0", 100, "latin1");
+    header.write("0000000\0", 108, "latin1");
+    header.write("0000000\0", 116, "latin1");
+    header.write(`${data.length.toString(8).padStart(11, "0")}\0`, 124, "latin1");
+    header.write("00000000000\0", 136, "latin1");
+    header.write(spec.type ?? "0", 156, "latin1");
+    header.write(spec.link ?? "", 157, 100, "utf8");
+    header.write("ustar\0", 257, "latin1");
+    header.write("00", 263, "latin1");
+    header.write(spec.prefix ?? "", 345, 155, "utf8");
+    header.fill(0x20, 148, 156);
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, "latin1");
+    const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
+    return Buffer.concat([header, data, padding]);
+}
+
+function paxEntry(records: Record<string, string>): Buffer {
+    let body = "";
+    for (const [key, value] of Object.entries(records)) {
+        const rest = ` ${key}=${value}\n`;
+        let length = rest.length + 1;
+        while (`${length}${rest}`.length !== length) length += 1;
+        body += `${length}${rest}`;
+    }
+    return tarEntry({ name: "PaxHeader", type: "x", data: Buffer.from(body) });
+}
+
+function tarArchive(entries: Buffer[]): Buffer {
+    return Buffer.concat([...entries, Buffer.alloc(1024)]);
+}
+
+const APP = DASHBOARD_MAC_APP_NAME;
+
+function safeAppEntries(label: string): Buffer[] {
+    return [
+        tarEntry({ name: `${APP}/`, type: "5" }),
+        tarEntry({ name: `${APP}/Contents/`, type: "5" }),
+        tarEntry({ name: `${APP}/Contents/Info.plist`, data: Buffer.from(label) }),
+        tarEntry({
+            name: `${APP}/Contents/Frameworks/X.framework/Versions/A/X`,
+            data: payload(label),
+        }),
+        tarEntry({
+            name: `${APP}/Contents/Frameworks/X.framework/Versions/Current`,
+            type: "2",
+            link: "A",
+        }),
+        tarEntry({
+            name: `${APP}/Contents/Frameworks/X.framework/X`,
+            type: "2",
+            link: "Versions/Current/X",
+        }),
+        tarEntry({
+            name: `${APP}/Contents/Info-copy.plist`,
+            type: "1",
+            link: `${APP}/Contents/Info.plist`,
+        }),
+    ];
+}
+
+/** A gzipped app archive with only safe entries. */
+function macArchive(label: string): Buffer {
+    return gzipSync(tarArchive(safeAppEntries(label)));
 }
 
 /** A release whose `assetName` is signed by `signer` (the release key by default). */
@@ -313,9 +397,14 @@ describe("dashboard offer: prompt and flags", () => {
         expect(h.lines.join("\n")).toContain("Pass --dashboard to install it");
     });
 
-    it("treats --yes like a non-interactive run, and --no-dashboard wins over --dashboard", () => {
-        expect(resolveDashboardChoice(["--yes"], true)).toBe("skip-noninteractive");
-        expect(resolveDashboardChoice(["-y"], true)).toBe("skip-noninteractive");
+    it("treats a CI or non-TTY run as non-interactive, and --no-dashboard wins over --dashboard", () => {
+        expect(isInteractiveTerminal(true, true, {})).toBe(true);
+        expect(isInteractiveTerminal(true, true, { CI: "true" })).toBe(false);
+        expect(isInteractiveTerminal(true, true, { CI: "1" })).toBe(false);
+        expect(isInteractiveTerminal(true, true, { CI: "false" })).toBe(true);
+        expect(isInteractiveTerminal(false, true, {})).toBe(false);
+        expect(isInteractiveTerminal(true, undefined, {})).toBe(false);
+        expect(resolveDashboardChoice([], false)).toBe("skip-noninteractive");
         expect(resolveDashboardChoice(["--dashboard", "--no-dashboard"], true)).toBe("skip-flag");
         expect(resolveDashboardChoice([], true)).toBe("ask");
     });
@@ -477,7 +566,7 @@ describe("dashboard offer: platform selection", () => {
     });
 
     it("macOS: extracts the verified archive into the Applications directory", async () => {
-        const data = payload("mac install");
+        const data = macArchive("mac install");
         publishRelease("0.20.0", "magic-context-dashboard-darwin-arm64.app.tar.gz", data);
         const extracted: Buffer[] = [];
         const h = harness({
@@ -505,7 +594,7 @@ describe("dashboard offer: platform selection", () => {
         publishRelease(
             "0.20.0",
             "magic-context-dashboard-darwin-x64.app.tar.gz",
-            payload("mac home"),
+            macArchive("mac home"),
         );
         const h = harness({
             platform: "darwin",
@@ -566,5 +655,73 @@ describe("dashboard offer: platform selection", () => {
         await offerDashboardInstall([], h.deps);
         expect(requests).toEqual([]);
         expect(h.lines.join("\n")).toContain("https://github.com/cortexkit/magic-context/releases");
+    });
+});
+
+describe("dashboard offer: macOS archive safety", () => {
+    it("accepts files, directories and links that stay inside the archive", () => {
+        expect(findUnsafeTarEntry(tarArchive(safeAppEntries("ok")))).toBeNull();
+    });
+
+    it("refuses absolute paths, .. segments and escaping links", () => {
+        const cases: Array<[string, Buffer[]]> = [
+            ["absolute name", [tarEntry({ name: "/etc/evil" })]],
+            ["leading ..", [tarEntry({ name: "../evil" })]],
+            ["inner ..", [tarEntry({ name: `${APP}/../../evil` })]],
+            ["ustar prefix ..", [tarEntry({ name: "evil", prefix: "../outside" })]],
+            ["absolute symlink", [tarEntry({ name: `${APP}/l`, type: "2", link: "/etc" })]],
+            ["symlink ..", [tarEntry({ name: `${APP}/l`, type: "2", link: "../../outside" })]],
+            ["hardlink ..", [tarEntry({ name: `${APP}/h`, type: "1", link: "../outside" })]],
+            ["hardlink absolute", [tarEntry({ name: `${APP}/h`, type: "1", link: "/etc/passwd" })]],
+            ["PAX path ..", [paxEntry({ path: "../evil" }), tarEntry({ name: `${APP}/fine` })]],
+            [
+                "PAX linkpath ..",
+                [
+                    paxEntry({ linkpath: "../../x" }),
+                    tarEntry({ name: `${APP}/l`, type: "2", link: "ok" }),
+                ],
+            ],
+            [
+                "GNU long name ..",
+                [
+                    tarEntry({ name: "././@LongLink", type: "L", data: Buffer.from("../evil\0") }),
+                    tarEntry({ name: `${APP}/fine` }),
+                ],
+            ],
+            ["device node", [tarEntry({ name: `${APP}/dev`, type: "3" })]],
+        ];
+        for (const [label, entries] of cases) {
+            const verdict = findUnsafeTarEntry(tarArchive(entries)) ?? "accepted";
+            // Name the case in a failure, and require the path/type reason rather
+            // than an unrelated refusal such as truncation.
+            expect(`${label}: ${verdict}`).toMatch(/: .*(outside the archive|unsupported type)/);
+        }
+        const truncated = tarEntry({ name: `${APP}/big`, data: payload("big") }).subarray(0, 700);
+        expect(findUnsafeTarEntry(truncated)).toBe("the archive is truncated");
+    });
+
+    it("refuses a signed archive with an escaping link before extracting anything", async () => {
+        const data = gzipSync(
+            tarArchive([
+                ...safeAppEntries("hostile"),
+                tarEntry({ name: `${APP}/Contents/escape`, type: "2", link: "../../../../etc" }),
+            ]),
+        );
+        publishRelease("0.20.0", "magic-context-dashboard-darwin-arm64.app.tar.gz", data);
+        let extractCalls = 0;
+        const h = harness({
+            platform: "darwin",
+            arch: "arm64",
+            answer: true,
+            overrides: {
+                extractTarGz: async () => {
+                    extractCalls += 1;
+                },
+            },
+        });
+        await offerDashboardInstall([], h.deps);
+        expect(extractCalls).toBe(0);
+        expect(readdirSync(h.applications)).toEqual([]);
+        expect(h.lines.join("\n")).toContain("the app archive is unsafe to extract");
     });
 });
