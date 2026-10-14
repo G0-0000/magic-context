@@ -13,11 +13,13 @@ const names = ["applyDeferredCompactionMarker", "reconcileMarkerRepresentation",
 async function instrument() {
     const root = mkdtempSync(join(tmpdir(), "mc-s3-markers-"));
     const trace = join(root, "calls.jsonl");
+    const phaseTrace = join(root, "publication.jsonl");
     writeFileSync(trace, "");
+    writeFileSync(phaseTrace, "");
     symlinkSync(resolve(import.meta.dir, "../../../plugin/node_modules"), join(root, "node_modules"), "dir");
     writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", main: "index.js" }));
     const found = new Set<string>();
-    const build = await Bun.build({ entrypoints: [join(import.meta.dir, "marker-s3-plugin.ts")], outdir: root, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["@opencode-ai/plugin", "onnxruntime-node", "onnxruntime-web", "sharp", "bun:sqlite", "node:sqlite"], plugins: [{ name: "marker-counters", setup(builder) {
+    const build = await Bun.build({ entrypoints: [join(import.meta.dir, "marker-s3-plugin.ts")], outdir: root, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"', "process.env.MC_S3_PHASE_TRACE": JSON.stringify(phaseTrace) }, external: ["@opencode-ai/plugin", "onnxruntime-node", "onnxruntime-web", "sharp", "bun:sqlite", "node:sqlite"], plugins: [{ name: "marker-counters", setup(builder) {
         builder.onLoad({ filter: /(?:compaction-marker-manager|transform-postprocess-phase|storage-meta-persisted)\.ts$/ }, async ({ path }) => {
             let source = readFileSync(path, "utf8");
             const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -38,7 +40,7 @@ async function instrument() {
     const worker = await Bun.build({ entrypoints: [join(import.meta.dir, "../../../plugin/src/hooks/magic-context/raw-ordinal-warmup-worker.ts")], outdir: root, naming: "raw-ordinal-warmup-worker.js", target: "node", format: "esm", external: ["bun:sqlite", "node:sqlite"] });
     if (!worker.success) throw new Error(worker.logs.join("\n"));
     expect([...found].sort()).toEqual([...names].sort());
-    return { root, calls: (sessionID: string) => readFileSync(trace, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(call => call.sessionID === sessionID) };
+    return { root, calls: (sessionID: string) => readFileSync(trace, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(call => call.sessionID === sessionID), phases: (sessionId: string) => readFileSync(phaseTrace, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(row => row.sessionId === sessionId).map(row => row.phase) };
 }
 const usage = { input_tokens: 100, output_tokens: 10 };
 function historian(body: unknown) {
@@ -104,12 +106,10 @@ test("I10 real-host counters: v2 fold plus historian publication plus ten turns 
         v1.mock.setDefault({ text: "normal", usage });
         await v1.sendPrompt(session, "Consume published marker");
         for(let index=0;index<10;index++) await v1.sendPrompt(session, `control defer ${index}`);
-        // "Consume published marker" observes the prior high usage and can start
-        // another historian. Wait for it to release the session's publication
-        // lock so the direct control tool does not fail to acquire that lock.
-        await until(() => (v1.contextDb().prepare("SELECT count(*) AS n FROM compartment_state_lease WHERE session_id = ? AND expires_at > ?").get(session, Date.now()) as {n:number}).n === 0, "background historian did not release its publication lease");
         await v1.sendPrompt(session, "Run direct marker control");
         expect(directRequested).toBe(true);
+        expect(fixture.phases(session)).toEqual(["ready", "published", "complete"]);
+        expect((v1.contextDb().prepare("SELECT count(*) AS n FROM compartment_state_lease WHERE session_id = ? AND expires_at > ?").get(session, Date.now()) as {n:number}).n).toBe(0);
         const called = new Set(fixture.calls(session).map(call => call.name));
         expect([...called].sort()).toEqual([...names].sort());
         const counts = Object.fromEntries(names.map(name => [name, fixture.calls(session).filter(call => call.name === name).length]));

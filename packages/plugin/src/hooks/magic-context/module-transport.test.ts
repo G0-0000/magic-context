@@ -2,7 +2,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { SingleStoreMigrationRequiredError } from "./single-store-refusal";
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -844,6 +844,24 @@ describe("SubcModuleTransport", () => {
     });
 
     it("fails a completed-series deadline without reconnecting or retrying", async () => {
+        let now = 1_000;
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        const scheduled = Promise.withResolvers<void>();
+        let expire!: () => void;
+        const realTimeout = globalThis.setTimeout;
+        const schedule = ((
+            callback: (...args: unknown[]) => void,
+            ms?: number,
+            ...args: unknown[]
+        ) => {
+            if (ms !== 25) return realTimeout(callback, ms, ...args);
+            expire = () => callback(...args);
+            scheduled.resolve();
+            const handle = realTimeout(() => {}, 0);
+            clearTimeout(handle);
+            return handle;
+        }) as typeof setTimeout;
+        const timer = spyOn(globalThis, "setTimeout").mockImplementation(schedule);
         const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 1_000);
         const route = { channel: 8, epoch: 88 } as RouteHandle;
         let requestCount = 0;
@@ -874,8 +892,8 @@ describe("SubcModuleTransport", () => {
             generation: 0,
         });
 
-        await expect(
-            transport.call({
+        try {
+            const pending = transport.call({
                 sessionId: "session-execute-timeout",
                 projectRoot: "/workspace/project",
                 method: "transform",
@@ -883,11 +901,20 @@ describe("SubcModuleTransport", () => {
                 generationSensitive: true,
                 attemptClass: "transform_series_execute",
                 timeoutMs: 25,
-            }),
-        ).rejects.toMatchObject({ code: "ETIMEDOUT" });
-        expect(requestCount).toBe(1);
-        expect(closeCount).toBe(0);
-        expect(internals.client).toBe(client);
+            });
+            void pending.catch(() => {});
+            await scheduled.promise;
+            expect(requestCount).toBe(1);
+            now += 25;
+            expire();
+            await expect(pending).rejects.toMatchObject({ code: "ETIMEDOUT" });
+            expect(requestCount).toBe(1);
+            expect(closeCount).toBe(0);
+            expect(internals.client).toBe(client);
+        } finally {
+            timer.mockRestore();
+            clock.mockRestore();
+        }
     });
 
     it.each([
