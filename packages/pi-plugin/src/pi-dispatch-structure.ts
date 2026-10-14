@@ -261,15 +261,54 @@ function wireId(
 	return id;
 }
 
-/** Check the latest turn as well as every preceding role and ordered tool ID. */
-export function piMatchesPreparedStructure(
+type StructureComparison =
+	| "role"
+	| "call id"
+	| "result id"
+	| "name"
+	| "count"
+	| "timestamp";
+
+function safeRole(
+	row: MessageStructure | undefined,
+	readable: boolean,
+): string {
+	if (!readable) return "unreadable";
+	if (!row) return "missing";
+	return ["user", "assistant", "toolResult"].includes(row.role)
+		? row.role
+		: "unknown";
+}
+
+function safeCount(value: number | undefined): number | "unreadable" {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: "unreadable";
+}
+
+function structureDetail(
+	index: number,
+	expected: readonly MessageStructure[] | undefined,
+	actual: readonly MessageStructure[] | undefined,
+	comparison: StructureComparison,
+): string {
+	const expectedRow = expected?.[index];
+	const actualRow = actual?.[index];
+	// Only enum roles and numeric counts may leave the comparator. IDs, names,
+	// message text and exception messages must never enter refusal diagnostics.
+	return `row=${index} expectedRows=${safeCount(expected?.length)} actualRows=${safeCount(actual?.length)} expectedRole=${safeRole(expectedRow, !!expected)} actualRole=${safeRole(actualRow, !!actual)} expectedCalls=${safeCount(expected ? (expectedRow?.calls.length ?? 0) : undefined)} actualCalls=${safeCount(actual ? (actualRow?.calls.length ?? 0) : undefined)} expectedResults=${safeCount(expected ? (expectedRow?.results.length ?? 0) : undefined)} actualResults=${safeCount(actual ? (actualRow?.results.length ?? 0) : undefined)} comparison=${comparison}`;
+}
+
+/** Return metadata for the first differing zero-based normalized row, or no mismatch. */
+export function piPreparedStructureMismatch(
 	payload: unknown,
 	prepared: PiPreparedStructure | undefined,
-): boolean {
+): string | undefined {
 	try {
 		const rows = payloadStructure(payload);
-		if (!rows || !prepared || rows.length !== prepared.messages.length)
-			return false;
+		const expectedRows = prepared?.messages;
+		if (!rows || !expectedRows)
+			return structureDetail(0, expectedRows, rows, "count");
 		const body = payload as Record<string, unknown>;
 		const google = !!piGoogleConversation(payload);
 		const anthropic =
@@ -278,17 +317,21 @@ export function piMatchesPreparedStructure(
 			typeof body.system === "string" ||
 			Array.isArray(body.system);
 		const responses = body.messages === undefined && Array.isArray(body.input);
-		for (let i = 0; i < rows.length; i++) {
-			const expected = prepared.messages[i];
+		for (let i = 0; i < Math.min(rows.length, expectedRows.length); i++) {
+			const expected = expectedRows[i];
 			const actual = rows[i];
+			if (actual.role !== expected.role)
+				return structureDetail(i, expectedRows, rows, "role");
 			if (
-				actual.role !== expected.role ||
 				actual.calls.length !== expected.calls.length ||
-				actual.results.length !== expected.results.length ||
-				(actual.timestamp !== undefined &&
-					actual.timestamp !== expected.timestamp)
+				actual.results.length !== expected.results.length
 			)
-				return false;
+				return structureDetail(i, expectedRows, rows, "count");
+			if (
+				actual.timestamp !== undefined &&
+				actual.timestamp !== expected.timestamp
+			)
+				return structureDetail(i, expectedRows, rows, "timestamp");
 			for (let j = 0; j < actual.calls.length; j++)
 				if (
 					google && actual.calls[j] === ""
@@ -297,7 +340,12 @@ export function piMatchesPreparedStructure(
 						: actual.calls[j] !==
 							wireId(expected.calls[j], anthropic, responses)
 				)
-					return false;
+					return structureDetail(
+						i,
+						expectedRows,
+						rows,
+						google && actual.calls[j] === "" ? "name" : "call id",
+					);
 			for (let j = 0; j < actual.results.length; j++)
 				if (
 					google && actual.results[j] === ""
@@ -306,10 +354,31 @@ export function piMatchesPreparedStructure(
 						: actual.results[j] !==
 							wireId(expected.results[j], anthropic, responses)
 				)
-					return false;
+					return structureDetail(
+						i,
+						expectedRows,
+						rows,
+						google && actual.results[j] === "" ? "name" : "result id",
+					);
 		}
-		return true;
+		if (rows.length !== expectedRows.length)
+			return structureDetail(
+				Math.min(rows.length, expectedRows.length),
+				expectedRows,
+				rows,
+				"count",
+			);
+		return undefined;
 	} catch {
-		return false;
+		// Unreadable payloads still fail closed without exposing a getter's error.
+		return structureDetail(0, undefined, undefined, "count");
 	}
+}
+
+/** Check the latest turn as well as every preceding role and ordered tool ID. */
+export function piMatchesPreparedStructure(
+	payload: unknown,
+	prepared: PiPreparedStructure | undefined,
+): boolean {
+	return piPreparedStructureMismatch(payload, prepared) === undefined;
 }

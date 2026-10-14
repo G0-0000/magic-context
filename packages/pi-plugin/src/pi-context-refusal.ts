@@ -31,8 +31,8 @@ import {
 } from "./pi-dispatch-identity";
 import {
 	type PiPreparedStructure,
-	piMatchesPreparedStructure,
 	piPreparedStructure,
+	piPreparedStructureMismatch,
 } from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
@@ -589,9 +589,13 @@ export function registerPiGuardedContext(
 				// The provider renderer may rewrite text and images, but a first send
 				// must still contain this pass's turns and ordered tool IDs. A generic
 				// managed delimiter alone also appears in older prepared conversations.
-				if (!piMatchesPreparedStructure(payload, active.preparedStructure))
+				const structureMismatch = piPreparedStructureMismatch(
+					payload,
+					active.preparedStructure,
+				);
+				if (structureMismatch)
 					throw new Error(
-						"provider request does not match this pass's managed dispatch (prepared turn structure)",
+						`provider request does not match this pass's managed dispatch (prepared turn structure); ${structureMismatch}`,
 					);
 				if (active.dispatched) {
 					if (
