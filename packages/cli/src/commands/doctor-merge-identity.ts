@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { resolveProjectIdentityStrict } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
     projectDirectoryKey,
     readRememberedGitIdentity,
@@ -151,6 +152,12 @@ function canonicalIdentity(directory: string, storageDir: string): string | unde
     );
 }
 
+interface PersistedIdentityAllowance {
+    directory: string;
+    reason: string;
+    liveIdentity?: string;
+}
+
 /**
  * Refuse a merge that would move data the wrong way. Runs for the preview and again on
  * the writable handle immediately before `--apply` writes, and `--force` does not
@@ -162,7 +169,8 @@ function assertMergePairSafe(
     storageDir: string,
     from: string,
     to: string,
-): void {
+): PersistedIdentityAllowance[] {
+    const allowances: PersistedIdentityAllowance[] = [];
     // Every checkout and worktree of a repository shares its git: identity, so folding
     // it into one directory's identity would take the whole repository's pool with it.
     if (from.startsWith("git:") && !to.startsWith("git:"))
@@ -181,15 +189,77 @@ function assertMergePairSafe(
         if (!involved.length) continue;
         const persisted = readRememberedGitIdentity(row.directory, storageDir);
         if (!persisted) continue;
-        if (persisted === from)
+        if (persisted === from) {
+            let live: string | undefined;
+            let orphaned = false;
+            try {
+                statSync(row.directory);
+            } catch (error) {
+                orphaned = (error as NodeJS.ErrnoException).code === "ENOENT";
+            }
+            if (!orphaned) {
+                try {
+                    live = resolveProjectIdentityStrict(row.directory, undefined, { cache: false });
+                } catch {
+                    // A failed probe is not evidence that a persisted identity is stale.
+                }
+            }
+            if (orphaned || live === to) {
+                allowances.push({
+                    directory: row.directory,
+                    reason: orphaned ? "orphaned" : `live root now resolves to ${to}`,
+                    liveIdentity: live,
+                });
+                continue;
+            }
             throw new Error(
                 `Refusing merge: ${from} is the identity the plugin persisted for ${row.directory}; merging away from it would contradict the plugin's own resolution of that path.`,
             );
+        }
         if (persisted !== to)
             throw new Error(
                 `Refusing merge: the plugin persisted ${persisted} for ${row.directory}, where ${involved.map((item) => item.identity).join(" and ")} was observed. That persisted identity is canonical for the path; merge into ${persisted} instead of ${to}.`,
             );
     }
+    return allowances;
+}
+
+function assertMergeDirectoriesSafe(
+    db: Database,
+    from: string,
+    to: string,
+    sourceDirs: string[],
+    targetDirs: string[],
+    allowances: PersistedIdentityAllowance[],
+): void {
+    const alreadyMerged =
+        auditIdentityMerge(db, from, to).changedRows === 0 &&
+        db
+            .prepare(
+                "SELECT 1 FROM v22_identity_rekey_map WHERE old_project_path = ? AND new_project_path = ?",
+            )
+            .get(from, to);
+    const allowedDirs = new Set(allowances.map((item) => item.directory));
+    // A changed root can leave old sessions in one checkout and new sessions in others.
+    // Only proven stale source pins can justify relaxing the same-directory requirement.
+    const staleSourcePins =
+        allowedDirs.size > 0 &&
+        sourceDirs.every(
+            (directory) => targetDirs.includes(directory) || allowedDirs.has(directory),
+        );
+    if (
+        !alreadyMerged &&
+        from.startsWith("git:") &&
+        to.startsWith("git:") &&
+        (!sourceDirs.length ||
+            !targetDirs.length ||
+            (!staleSourcePins &&
+                (sourceDirs.some((dir) => !targetDirs.includes(dir)) ||
+                    targetDirs.some((dir) => !sourceDirs.includes(dir)))))
+    )
+        throw new Error(
+            `Refusing different directories for ${from} (${sourceDirs.join(", ") || "unknown"}) and ${to} (${targetDirs.join(", ") || "unknown"})`,
+        );
 }
 
 /** Print one observed directory's suggestion, applying the same rules as an explicit merge. */
@@ -309,7 +379,7 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
         }
         if (options.from === options.to)
             throw new Error(`Source and target identities must differ: ${options.from}`);
-        assertMergePairSafe(db, observed, storageDir, options.from, options.to);
+        const allowances = assertMergePairSafe(db, observed, storageDir, options.from, options.to);
         for (const identity of [options.from, options.to]) {
             const known =
                 auditIdentityMerge(db, identity, options.to).changedRows > 0 ||
@@ -327,35 +397,32 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
             .filter((row) => row.identities.some((item) => item.identity === options.to))
             .map((row) => row.directory);
         directories = [...new Set([...sourceDirs, ...targetDirs])];
-        const alreadyMerged =
-            auditIdentityMerge(db, options.from, options.to).changedRows === 0 &&
-            db
-                .prepare(
-                    "SELECT 1 FROM v22_identity_rekey_map WHERE old_project_path = ? AND new_project_path = ?",
-                )
-                .get(options.from, options.to);
-        if (
-            !alreadyMerged &&
-            options.from.startsWith("git:") &&
-            options.to.startsWith("git:") &&
-            (!sourceDirs.length ||
-                !targetDirs.length ||
-                sourceDirs.some((dir) => !targetDirs.includes(dir)) ||
-                targetDirs.some((dir) => !sourceDirs.includes(dir)))
-        )
-            throw new Error(
-                `Refusing different directories for ${options.from} (${sourceDirs.join(", ") || "unknown"}) and ${options.to} (${targetDirs.join(", ") || "unknown"})`,
-            );
+        assertMergeDirectoriesSafe(
+            db,
+            options.from,
+            options.to,
+            sourceDirs,
+            targetDirs,
+            allowances,
+        );
         if (
             !options.force &&
             !directories.some(
-                (directory) => canonicalIdentity(directory, storageDir) === options.to,
+                (directory) =>
+                    canonicalIdentity(directory, storageDir) === options.to ||
+                    allowances.some(
+                        (item) => item.directory === directory && item.liveIdentity === options.to,
+                    ),
             )
         )
             throw new Error(
                 `Target ${options.to} does not resolve for any observed directory on this machine; use --force only after reviewing the identity.`,
             );
         const preview = mergeProjectIdentities(db, options.from, options.to, { dryRun: true });
+        for (const item of allowances)
+            console.log(
+                `  Sidecar for ${item.directory}: overwrite with ${options.to} (${item.reason}; sidecar will be rewritten).`,
+            );
         printReport(preview);
         if (options.dryRun) return 0;
     } finally {
@@ -405,7 +472,16 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
         // Rows may have moved since the read-only preview; check the pair again on the
         // handle that is about to write.
         configureContextDatabasePragmas(db);
-        assertMergePairSafe(db, observed, storageDir, from, to);
+        observed = observations(db, hostPath, storageDir);
+        const allowances = assertMergePairSafe(db, observed, storageDir, from, to);
+        const sourceDirs = observed
+            .filter((row) => row.identities.some((item) => item.identity === from))
+            .map((row) => row.directory);
+        const targetDirs = observed
+            .filter((row) => row.identities.some((item) => item.identity === to))
+            .map((row) => row.directory);
+        assertMergeDirectoriesSafe(db, from, to, sourceDirs, targetDirs, allowances);
+        directories = [...new Set([...sourceDirs, ...targetDirs])];
         printReport(mergeProjectIdentities(db, from, to));
     } finally {
         db.close();
