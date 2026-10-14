@@ -1,14 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 let directory: string;
 let sourcePath: string;
 
 beforeAll(async () => {
-	directory = await mkdtemp(join(tmpdir(), "pi-context-liveness-"));
+	directory = createTestTempDirFromPath(join(tmpdir(), "pi-context-liveness-"));
 	sourcePath = join(directory, "guards.js");
 	const transpiler = new Bun.Transpiler({ loader: "ts", target: "node" });
 	const sources = await Promise.all(
@@ -84,7 +85,7 @@ async function run(
 			sourcePath,
 			mode,
 		],
-		{ stdout: "pipe", stderr: "pipe" },
+		{ stdout: "pipe", stderr: "pipe", windowsHide: true },
 	);
 	const [stdout, stderr, exit] = await Promise.all([
 		new Response(subprocess.stdout).text(),
