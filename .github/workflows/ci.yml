@@ -18,6 +18,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+  actions: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # Separate differential parity cases by name; when absent, lib shards cover the entire library.
@@ -25,6 +29,7 @@ env:
 
 # Pipeline shape on every push to master/main:
 #
+#   Consumers check out/install immediately, then wait for verified same-attempt artifacts.
 #   preflight (layout, manifest, fmt, typecheck, lint, complete dists)
 #        ├─ unit suites and packaging smokes
 #        ├─ Docker install smokes (independent of unit/host results)
@@ -58,6 +63,7 @@ jobs:
   preflight:
     name: Preflight (checks and dists)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -78,11 +84,12 @@ jobs:
           bash scripts/check-docs-layout.test.sh
           python3 scripts/cargo-lock-pins.py --self-test
           python3 scripts/check-nextest-inventory.py --self-test
+          python3 scripts/wait-ci-artifact.py --self-test
           timeout 180s python3 scripts/check-cargo-path-dependencies.py
           timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
           bun packages/e2e-tests/scripts/validate-mode-manifest.ts
           cd packages/e2e-tests
-          bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/ci-workflow.test.ts
+          bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts
       - name: Format check
         if: ${{ !cancelled() }}
         run: cargo fmt --check
@@ -112,6 +119,7 @@ jobs:
         run: |
           bun run --cwd packages/plugin check:tui-compiled
           bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
+          bun test packages/e2e-tests/scripts/ci-dists.test.ts
       - name: Package same-commit dists
         run: |
           tar -czf ci-dists.tar.gz packages/plugin/dist packages/pi-plugin/dist packages/cli/dist packages/retina-local-fs/dist packages/dashboard/dist tests/docker/.generated
@@ -119,7 +127,7 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" > ci-dists.commit
       - uses: actions/upload-artifact@v4
         with:
-          name: ci-dists-${{ github.sha }}
+          name: ci-dists-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ci-dists.tar.gz
             ci-dists.sha256
@@ -141,10 +149,9 @@ jobs:
       - name: Exercise planted layout violations
         run: bash scripts/check-docs-layout.test.sh
 
-  check-plugin:
-    name: Check (plugin)
+  check-plugin-compat:
+    name: Check (CLI, retina and packaging)
     runs-on: ubuntu-latest
-    needs: [preflight]
     steps:
       - uses: actions/checkout@v5
 
@@ -164,17 +171,15 @@ jobs:
       - uses: ./.github/actions/restore-ci-dists
         id: dists
 
-      - name: Test (normal and debug assertions, all packages)
+      - name: Test (CLI and retina, normal and debug assertions)
         # Bun has no --no-fail-fast flag. Collect package/mode statuses explicitly;
         # each package wrapper still owns its preload, JSC flags and timeout.
         run: |
           status=0
-          for package in plugin cli retina-local-fs; do
+          for package in cli retina-local-fs; do
             bun run --cwd "packages/$package" test || status=1
           done
-          for package in plugin cli; do
-            MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd "packages/$package" test || status=1
-          done
+          MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/cli test || status=1
           MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/retina-local-fs test --timeout=60000 || status=1
           exit "$status"
 
@@ -217,10 +222,15 @@ jobs:
         if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
         run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts --skip-build
 
-  check-pi-plugin:
-    name: Check (pi-plugin)
+  unit-plugin:
+    name: Unit (plugin ${{ matrix.mode }} ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    needs: [preflight]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, assertions]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v5
 
@@ -232,14 +242,90 @@ jobs:
         run: bun install --frozen-lockfile
 
       - uses: ./.github/actions/restore-ci-dists
-      - name: Test (normal and debug assertions)
-        # Run serially so full-content assertion walks do not compete with Pi's
-        # full-runtime tests, whose existing per-test budgets remain 15 seconds.
+      - name: Run whole-file plugin shard
+        env:
+          UNIT_MODE: ${{ matrix.mode }}
         run: |
-          status=0
-          bun run --cwd packages/pi-plugin test || status=1
-          MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/pi-plugin test --parallel=1 --timeout=60000 || status=1
-          exit "$status"
+          bun packages/e2e-tests/scripts/select-unit-shard.ts plugin "$UNIT_MODE" "${{ matrix.shard }}/4" > "$RUNNER_TEMP/unit-files.txt"
+          mapfile -t files < "$RUNNER_TEMP/unit-files.txt"
+          test "${#files[@]}" -gt 0
+          printf '%s\n' "${files[@]}"
+          if [[ "$UNIT_MODE" == assertions ]]; then export MAGIC_CONTEXT_DEBUG_ASSERTIONS=1; fi
+          bun run --cwd packages/plugin test --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-plugin-${{ matrix.mode }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: unit-junit.xml
+          if-no-files-found: error
+
+  unit-pi-plugin:
+    name: Unit (pi-plugin ${{ matrix.mode }} ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, assertions]
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - uses: ./.github/actions/restore-ci-dists
+      - name: Run whole-file Pi shard
+        env:
+          UNIT_MODE: ${{ matrix.mode }}
+        # Assertion shards keep one worker and the existing 60-second timeout.
+        run: |
+          bun packages/e2e-tests/scripts/select-unit-shard.ts pi-plugin "$UNIT_MODE" "${{ matrix.shard }}/4" > "$RUNNER_TEMP/unit-files.txt"
+          mapfile -t files < "$RUNNER_TEMP/unit-files.txt"
+          test "${#files[@]}" -gt 0
+          printf '%s\n' "${files[@]}"
+          if [[ "$UNIT_MODE" == assertions ]]; then
+            MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun run --cwd packages/pi-plugin test --parallel=1 --timeout=60000 --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
+          else
+            bun run --cwd packages/pi-plugin test --reporter=junit --reporter-outfile "$GITHUB_WORKSPACE/unit-junit.xml" "${files[@]}"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-pi-plugin-${{ matrix.mode }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: unit-junit.xml
+          if-no-files-found: error
+
+  check-plugin:
+    name: Check (plugin)
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: [unit-plugin, check-plugin-compat]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Require plugin unit and packaging legs
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: bun packages/e2e-tests/scripts/check-ci-results.ts check-plugin
+
+  check-pi-plugin:
+    name: Check (pi-plugin)
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: [unit-pi-plugin]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Require Pi unit legs
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: bun packages/e2e-tests/scripts/check-ci-results.ts check-pi-plugin
 
   check-dashboard:
     name: Check (dashboard)
@@ -266,7 +352,6 @@ jobs:
   e2e-opencode:
     name: E2E (OpenCode, Docker)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
@@ -293,7 +378,6 @@ jobs:
   e2e-opencode2:
     name: E2E (OpenCode 2.0.22, Docker)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -315,7 +399,6 @@ jobs:
   e2e-pi:
     name: E2E (Pi, Docker)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
@@ -345,7 +428,6 @@ jobs:
   e2e-omp:
     name: E2E (Oh My Pi, real Docker)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
@@ -372,7 +454,6 @@ jobs:
   e2e-host-opencode:
     name: E2E (OpenCode, host behavior ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    needs: [preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -439,7 +520,6 @@ jobs:
   e2e-host-pi:
     name: E2E (Pi, host behavior)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
@@ -491,7 +571,6 @@ jobs:
   e2e-host-opencode2:
     name: E2E (OpenCode 2.0.22, host behavior ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
-    needs: [preflight]
     strategy:
       fail-fast: false
       matrix:
@@ -558,7 +637,6 @@ jobs:
   e2e-host-omp:
     name: E2E (Oh My Pi, host behavior)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
@@ -603,10 +681,10 @@ jobs:
     # Keep daemon tests under libtest: its process-local build locks must not be
     # multiplied by nextest's process-per-test execution model.
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 45
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
 
@@ -676,11 +754,16 @@ jobs:
   rust-workspace-crates:
     name: Rust (remaining crates)
     runs-on: ubuntu-latest
-    needs: [preflight]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install workspace dependencies for migration-oracle tests
+        run: bun install --frozen-lockfile
+      - uses: ./.github/actions/restore-ci-dists
       - name: Test the remaining workspace crates
         run: cargo test --locked --workspace --exclude mc-module --no-fail-fast
 
@@ -714,7 +797,7 @@ jobs:
           sha256sum ci-rust-lib/archive.tar.zst > ci-rust-lib/archive.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-lib-${{ github.sha }}
+          name: rust-lib-${{ github.sha }}-${{ github.run_attempt }}
           path: ci-rust-lib/
           compression-level: 0
           if-no-files-found: error
@@ -723,8 +806,8 @@ jobs:
   rust-mc-module-lib:
     name: Rust (mc-module lib ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    needs: [preflight, rust-lib-archive]
-    timeout-minutes: 45
+    # The cap includes at most 45 minutes waiting plus the original execution allowance.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -735,9 +818,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.138
+      - uses: ./.github/actions/wait-ci-artifact
+        id: archive
+        with:
+          artifact: rust-lib-${{ github.sha }}
+          producer: Rust (mc-module lib archive)
+          timeout-minutes: "45"
       - uses: actions/download-artifact@v4
         with:
-          name: rust-lib-${{ github.sha }}
+          artifact-ids: ${{ steps.archive.outputs.artifact-id }}
+          merge-multiple: true
           path: ci-rust-lib
       - name: Verify archive provenance
         run: |
@@ -745,7 +835,7 @@ jobs:
           sha256sum --check ci-rust-lib/archive.sha256
           rustc -vV | diff - ci-rust-lib/rustc.txt
       - name: Run lib partition
-        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "not ($MC_PARITY_FILTER)"
+        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --failure-output immediate-final --partition "hash:${{ matrix.shard }}/4" -E "not ($MC_PARITY_FILTER)"
       - name: Check every selected test executed
         if: ${{ !cancelled() }}
         run: python3 scripts/check-nextest-inventory.py --junit ci-rust-lib "lib-${{ matrix.shard }}" target/nextest/ci/junit.xml
@@ -759,17 +849,23 @@ jobs:
   rust-mc-module-parity:
     name: Rust (mc-module parity differential)
     runs-on: ubuntu-latest
-    needs: [preflight, rust-lib-archive]
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.138
+      - uses: ./.github/actions/wait-ci-artifact
+        id: archive
+        with:
+          artifact: rust-lib-${{ github.sha }}
+          producer: Rust (mc-module lib archive)
+          timeout-minutes: "45"
       - uses: actions/download-artifact@v4
         with:
-          name: rust-lib-${{ github.sha }}
+          artifact-ids: ${{ steps.archive.outputs.artifact-id }}
+          merge-multiple: true
           path: ci-rust-lib
       - name: Verify archive provenance
         run: |
@@ -779,7 +875,7 @@ jobs:
       - name: Run parity groups from the shared lib archive
         # Only parity permits an empty selection. The lib archive job compares the
         # disjoint lib/parity union to Cargo discovery, including ignored tests.
-        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --no-tests=pass -E "$MC_PARITY_FILTER"
+        run: cargo nextest run --archive-file ci-rust-lib/archive.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --profile ci --no-fail-fast --failure-output immediate-final --no-tests=pass -E "$MC_PARITY_FILTER"
       - name: Check every selected parity test executed
         if: ${{ !cancelled() }}
         run: python3 scripts/check-nextest-inventory.py --junit ci-rust-lib parity target/nextest/ci/junit.xml
@@ -900,25 +996,32 @@ jobs:
           cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
           (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
           cp "$target/release/ck-subc" "$target/prebuilt/ckdev-subc"
+          printf '%s\n' "$GITHUB_SHA" > "$target/prebuilt/commit.txt"
+          tar -czf "$RUNNER_TEMP/rust-hermetic-binaries.tar.gz" -C "$target/prebuilt" .
+          (cd "$RUNNER_TEMP" && sha256sum rust-hermetic-binaries.tar.gz > rust-hermetic-binaries.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-hermetic-binaries
-          path: packages/e2e-tests/.cache/rust-e2e-cargo-target/prebuilt/
+          name: rust-hermetic-binaries-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/rust-hermetic-binaries.tar.gz
+            ${{ runner.temp }}/rust-hermetic-binaries.sha256
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
 
   e2e-rust-hermetic:
     name: E2E (Rust hermetic ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    needs: [preflight, e2e-rust-hermetic-build]
-    timeout-minutes: 60
+    # Waiting is capped at the producer's 120 minutes; tests retain their own timeouts.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -927,17 +1030,31 @@ jobs:
           bun-version: latest
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: rust-hermetic-binaries
-          path: packages/e2e-tests/.cache/prebuilt
-      - name: Make downloaded binaries executable
-        run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ckdev-subc
       - name: Install pinned OpenCode
         run: |
           OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
       - uses: ./.github/actions/restore-ci-dists
+      - uses: ./.github/actions/wait-ci-artifact
+        id: binaries
+        with:
+          artifact: rust-hermetic-binaries-${{ github.sha }}
+          producer: E2E (Rust hermetic build)
+          timeout-minutes: "120"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.binaries.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/hermetic-artifact
+      - name: Restore executable and auxiliary binaries
+        run: |
+          (cd "$RUNNER_TEMP/hermetic-artifact" && sha256sum --check rust-hermetic-binaries.sha256)
+          mkdir -p packages/e2e-tests/.cache/prebuilt
+          tar -xzf "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.tar.gz" -C packages/e2e-tests/.cache/prebuilt
+          test "$(cat packages/e2e-tests/.cache/prebuilt/commit.txt)" = "$GITHUB_SHA"
+          for binary in ckdev-mc-e2e ckdev-mc-e2e-drive-fault ckdev-subc; do
+            test -x "packages/e2e-tests/.cache/prebuilt/$binary"
+          done
       - name: Run manifest shard
         env:
           MC_E2E_SHARD: ${{ matrix.shard }}/4
@@ -950,7 +1067,7 @@ jobs:
     name: CI (required)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic]
+    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

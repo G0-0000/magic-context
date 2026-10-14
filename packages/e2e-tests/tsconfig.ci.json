@@ -5,6 +5,7 @@
         "scripts/select-*-shard*.ts",
         "scripts/validate-mode-manifest.ts",
         "scripts/check-ci-results.ts",
-        "scripts/ci-workflow.test.ts"
+        "scripts/ci-workflow.test.ts",
+        "scripts/ci-dists.test.ts"
     ]
 }
