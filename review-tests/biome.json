@@ -1,0 +1,6 @@
+{
+    "extends": ["../packages/plugin/biome.json"],
+    "files": {
+        "includes": ["**/*.ts", "**/*.json"]
+    }
+}
