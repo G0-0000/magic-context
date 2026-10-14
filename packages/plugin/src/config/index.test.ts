@@ -8,12 +8,10 @@ import { resolveDreamerTaskModel, resolveHistorianModel } from "../shared/model-
 import { Database } from "../shared/sqlite";
 import { createTestTempDir, createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
-    getWindowOverlay,
-    reloadWindowOverlay,
-    setWindowOverlayPath,
-} from "../shared/window-geometry";
+    MURAL_MODEL_DEPRECATION_WARNING,
+    WINDOW_OVERLAY_PATH_DEPRECATION_WARNING,
+} from "./deprecated-config";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
-import { MURAL_MODEL_DEPRECATION_WARNING } from "./mural-model-deprecation";
 import { resolveConfigProfile } from "./profiles";
 import { getProtectedTokensTierOverrides } from "./project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
@@ -123,39 +121,19 @@ function loadWithUserAndProjectConfig(
     }
 }
 
-describe("loadPluginConfig — Fusiform overlay reload", () => {
-    it("does not invalidate a same-path overlay during routine config reads", () => {
-        const overlayDir = createTestTempDirFromPath(join(tmpdir(), "mc-config-overlay-"));
-        const overlayPath = join(overlayDir, "window-overlay.json");
-        const configText = JSON.stringify({ models: { window_overlay_path: overlayPath } });
-        const writeOverlay = (modelId: string) =>
-            writeFileSync(
-                overlayPath,
-                JSON.stringify({
-                    schema: "fusiform-window-overlay/v1",
-                    generated_at: "2026-09-01T00:00:00Z",
-                    minted_provider_ids: [],
-                    cells: [{ provider_id: "hunt-provider", model_id: modelId, facts: {} }],
-                }),
-            );
+describe("loadPluginConfig — retired Fusiform window path", () => {
+    it("parses the old key but warns once that it is ignored", () => {
+        const path = "/tmp/retired-fusiform-window.json";
+        const config = loadWithUserConfig(
+            JSON.stringify({ models: { window_overlay_path: path } }),
+        );
 
-        try {
-            writeOverlay("before-rewrite");
-            loadWithUserConfig(configText);
-            expect(getWindowOverlay()?.cells[0]?.model_id).toBe("before-rewrite");
-
-            writeOverlay("after-rewrite");
-            expect(getWindowOverlay()?.cells[0]?.model_id).toBe("before-rewrite");
-
-            loadWithUserConfig(configText);
-            expect(getWindowOverlay()?.cells[0]?.model_id).toBe("before-rewrite");
-
-            reloadWindowOverlay(overlayPath);
-            expect(getWindowOverlay()?.cells[0]?.model_id).toBe("after-rewrite");
-        } finally {
-            setWindowOverlayPath(undefined);
-            rmSync(overlayDir, { recursive: true, force: true });
-        }
+        expect(config.models?.window_overlay_path).toBe(path);
+        const warnings = config.configWarnings?.filter((message) =>
+            message.includes("models.window_overlay_path"),
+        );
+        expect(warnings).toHaveLength(1);
+        expect(warnings?.[0]).toContain(WINDOW_OVERLAY_PATH_DEPRECATION_WARNING);
     });
 });
 

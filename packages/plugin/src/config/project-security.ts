@@ -327,8 +327,8 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *  - `debug_rpc` — a repo must not enable process heap capture or memory diagnostics.
  *  - `allow_home_project` — only the user may opt a home-directory session
  *    into a durable project identity.
- *  - `output_reserve` / `models.window_overlay_path` — only the user may change
- *    process-wide window geometry inputs.
+ *  - `output_reserve` — only the user may change process-wide window geometry.
+ *    The deprecated `models.window_overlay_path` field is ignored at every tier.
  *  - `language`: a repo must not inject prompt text through a user preference.
  *  - `sqlite` — `sqlite.cache_size_mb` / `mmap_size_mb` become PRAGMAs on the
  *    process-global shared DB handle (one connection across every project in the
@@ -425,7 +425,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
     if (isPlainObject(models) && "window_overlay_path" in models) {
         delete models.window_overlay_path;
         warnings.push(
-            "Ignoring models.window_overlay_path from project config (security: only user-level config may select model geometry metadata).",
+            "Ignoring models.window_overlay_path from project config (deprecated; this setting no longer changes model window geometry).",
         );
     }
 

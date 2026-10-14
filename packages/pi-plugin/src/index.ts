@@ -122,7 +122,6 @@ import {
 	providerResponseFailed,
 } from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
-import { reloadWindowOverlay } from "@magic-context/core/shared/window-geometry";
 import { registerStandalonePluginMarker } from "@magic-context/core/standalone-plugin-marker";
 import { startHostStallProfilerSwitch } from "../../plugin/src/shared/host-stall-profiler";
 import packageMetadata from "../package.json";
@@ -1163,7 +1162,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		info("plugin DISABLED via config (enabled: false) — skipping registration");
 		return;
 	}
-	reloadWindowOverlay(bootConfig.config.models?.window_overlay_path);
 	setStoragePrivatePermissionEnforcement(
 		bootConfig.config.storage.enforce_private_permissions,
 	);

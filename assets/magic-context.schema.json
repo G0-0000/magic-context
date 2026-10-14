@@ -2172,12 +2172,12 @@
       ]
     },
     "models": {
-      "description": "User-only Fusiform window-overlay settings. The path defaults to <dataDir>/fusiform/window-overlay.json.",
+      "description": "Deprecated user-only Fusiform window-overlay settings; ignored.",
       "type": "object",
       "properties": {
         "window_overlay_path": {
-          "type": "string",
-          "minLength": 1
+          "description": "Deprecated: ignored. Fusiform no longer publishes window-overlay data, so this setting no longer changes model window geometry. Remove this key.",
+          "deprecated": true
         }
       }
     },
