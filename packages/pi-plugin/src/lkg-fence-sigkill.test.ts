@@ -91,15 +91,44 @@ throw new Error('Did not reach selected kill boundary');
 					expect(readFileSync(join(root, "model-saw.json"), "utf8")).toContain(
 						'"text":"new raw tail that the model saw"',
 					);
+				// Keep the restart writer live across the awaited pass. An unused
+				// connection can be collected and closed, silently releasing its lock.
 				const restart = run(`
 const slot = getSlot(id);
 isolate();
 const trusted = hasCleanLkgRecoveryFence(id, slot);
 const locker = new Database(root + '/context.db');
 locker.exec('BEGIN IMMEDIATE');
+const mainFile = handle => handle.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file;
+const handlerFile = mainFile(db);
+const lockerFile = mainFile(locker);
+if (!handlerFile || handlerFile !== lockerFile) throw new Error('Fixture writer and handler use different databases');
+const assertWriterBlocked = phase => {
+ db.exec('PRAGMA busy_timeout=0');
+ try {
+  db.exec('BEGIN IMMEDIATE');
+ } catch (error) {
+  if (/SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(String(error.code) + ' ' + error.message)) return;
+  throw error;
+ }
+ db.exec('ROLLBACK');
+ throw new Error('Fixture writer lock is not held ' + phase);
+};
+assertWriterBlocked('before restart pass');
+const collector = setInterval(() => Bun.gc(true), 25);
 let result; let refused = false;
-try { result = await pass([...raw,userMessage('next user',3)]); } catch { refused = true; }
-console.log('RESTART ' + JSON.stringify({trusted, refused, saved: slot?.jsonPrefix, result}));
+try {
+ try { result = await pass([...raw,userMessage('next user',3)]); } catch { refused = true; }
+} finally {
+ clearInterval(collector);
+ try {
+  assertWriterBlocked('after restart pass');
+ } finally {
+  locker.exec('ROLLBACK');
+  locker.close();
+ }
+}
+console.log('RESTART ' + JSON.stringify({trusted, refused, handlerFile, lockerFile, saved: slot?.jsonPrefix, result}));
 `);
 				expect(restart.status, restart.stderr).toBe(0);
 				const line = restart.stdout
@@ -107,6 +136,7 @@ console.log('RESTART ' + JSON.stringify({trusted, refused, saved: slot?.jsonPref
 					.find((line) => line.startsWith("RESTART "));
 				if (!line) throw new Error(restart.stdout + restart.stderr);
 				const proof = JSON.parse(line.slice(8));
+				expect(proof.handlerFile).toBe(proof.lockerFile);
 				const shouldTrust =
 					point === "before-dirty" ||
 					point === "temp-synced" ||
@@ -114,7 +144,7 @@ console.log('RESTART ' + JSON.stringify({trusted, refused, saved: slot?.jsonPref
 				expect(proof.trusted, killed.stdout + JSON.stringify(proof)).toBe(
 					shouldTrust,
 				);
-				expect(proof.refused).toBe(!shouldTrust);
+				expect(proof.refused, JSON.stringify(proof)).toBe(!shouldTrust);
 				if (point === "committed")
 					expect(proof.saved).toContain("§2§ new raw tail that the model saw");
 				console.log(

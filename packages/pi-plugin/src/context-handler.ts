@@ -5799,6 +5799,40 @@ export function registerPiContextHandler(
 			}
 			logTransformTiming(sessionId, "thinkingBinding", tThinkingBinding);
 
+			// Restore previously sent recovery bytes before counting the returned
+			// content for nudge decisions and work totals. The content-unchanged
+			// assertion must also compare that final array, not the temporary
+			// renderer output which the provider never receives.
+			if (recovery.prefix && !result.recoveryNormalized) {
+				const priorIds = new Set(
+					recovery.prefix.inputs.map((input) => input.id),
+				);
+				const newIds = new Set(
+					snapshot.inputs
+						.filter((input) => !priorIds.has(input.id))
+						.map((input) => input.id),
+				);
+				const suffix = outputMessages.filter((message) => {
+					const id =
+						result.postCommitEntryIdByRef.get(message) ??
+						result.lkgEntryIdByRef.get(message);
+					return id !== undefined && newIds.has(id);
+				});
+				const prefix = JSON.parse(recovery.prefix.json) as PiAgentMessage[];
+				const recoveredEntryIds = new Map(result.postCommitEntryIdByRef);
+				prefix.forEach((message, index) => {
+					const id = recovery.prefix?.outputEntryIds[index];
+					if (id) recoveredEntryIds.set(message, id);
+				});
+				result.postCommitEntryIdByRef = recoveredEntryIds;
+				outputMessages = [...prefix, ...suffix];
+				result.syntheticLeadingCount = recovery.prefix.outputEntryIds.findIndex(
+					(id) => id !== null,
+				);
+				if (result.syntheticLeadingCount < 0)
+					result.syntheticLeadingCount = prefix.length;
+			}
+
 			// Walk Pi's final rendered entry stream once to calculate both nudge-channel
 			// totals. A cache-busting pass replaces the saved baseline; a deferred pass
 			// keeps it and adds only newly appended content and protection-boundary moves.
@@ -6023,35 +6057,6 @@ export function registerPiContextHandler(
 				sessionId,
 				`transform completed in ${transformElapsedMs.toFixed(1)}ms (${outputMessages.length} messages, ${result.targetCount} targets, watermark: ${result.reasoningWatermark})`,
 			);
-			if (recovery.prefix && !result.recoveryNormalized) {
-				const priorIds = new Set(
-					recovery.prefix.inputs.map((input) => input.id),
-				);
-				const newIds = new Set(
-					snapshot.inputs
-						.filter((input) => !priorIds.has(input.id))
-						.map((input) => input.id),
-				);
-				const suffix = outputMessages.filter((message) => {
-					const id =
-						result.postCommitEntryIdByRef.get(message) ??
-						result.lkgEntryIdByRef.get(message);
-					return id !== undefined && newIds.has(id);
-				});
-				const prefix = JSON.parse(recovery.prefix.json) as PiAgentMessage[];
-				const recoveredEntryIds = new Map(result.postCommitEntryIdByRef);
-				prefix.forEach((message, index) => {
-					const id = recovery.prefix?.outputEntryIds[index];
-					if (id) recoveredEntryIds.set(message, id);
-				});
-				result.postCommitEntryIdByRef = recoveredEntryIds;
-				outputMessages = [...prefix, ...suffix];
-				result.syntheticLeadingCount = recovery.prefix.outputEntryIds.findIndex(
-					(id) => id !== null,
-				);
-				if (result.syntheticLeadingCount < 0)
-					result.syntheticLeadingCount = prefix.length;
-			}
 			runPiDebugAssertion(assertTailHygieneLastWriter);
 			if (
 				!options.compactionOff &&
