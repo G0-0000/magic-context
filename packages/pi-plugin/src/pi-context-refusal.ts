@@ -359,6 +359,7 @@ export function registerPiGuardedContext(
 		const message = identityConflict
 			? `${identityConflict.message}. ${budget.diagnostic()}`
 			: `${RETRY_MESSAGE} ${budget.diagnostic()} (${reason instanceof Error ? reason.message : String(reason)})`;
+		log("[magic-context][pi] CONTEXT REFUSED", message);
 		try {
 			ctx.ui?.notify(message, "error");
 		} catch (error) {

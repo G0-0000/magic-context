@@ -145,3 +145,23 @@ test("dispatch structure: unknown or missing representations fail closed", () =>
 	expect(matches({ messages: [{ role: "unknown" }] })).toBe(false);
 	expect(piMatchesPreparedStructure(wire, undefined)).toBe(false);
 });
+
+test("dispatch structure: chat instruction messages are only an ordered leading prefix", () => {
+	for (const role of ["system", "developer"]) {
+		const prefix = [
+			{ role, content: "First instruction" },
+			{ role, content: "Second instruction" },
+		];
+		expect(matches({ messages: [...prefix, ...prepared] })).toBe(true);
+		expect(
+			matches({
+				messages: [prepared[0], ...prefix, ...prepared.slice(1)],
+			}),
+		).toBe(false);
+	}
+	expect(
+		matches({
+			input: [{ role: "system", content: "instruction" }, ...prepared],
+		}),
+	).toBe(false);
+});

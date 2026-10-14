@@ -84,6 +84,16 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 	for (const value of messages) {
 		const message = object(value);
 		if (!message) return undefined;
+		// Chat completions renders context.systemPrompt before context.messages,
+		// using system or developer roles. Those leading instructions are not
+		// prepared turns. piConversationFields keeps the original instruction rows
+		// for exact comparison with the first admitted request on later dispatches.
+		if (
+			!responses &&
+			rows.length === 0 &&
+			(message.role === "system" || message.role === "developer")
+		)
+			continue;
 		// Responses emits reasoning/text/calls as separate items for one assistant
 		// turn. Only its call/result IDs survive every supported replay mode.
 		if (responses && message.type === "reasoning") continue;

@@ -99,6 +99,58 @@ afterEach(() => {
 	__setPiHarnessKindForTesting(undefined);
 });
 
+test("issue 673 print: first chat-completions dispatch admits the renderer instruction prefix without prior capture", async () => {
+	for (const role of ["system", "developer"]) {
+		const h = harness([userMessage("Say hello once and then stop.", 10)]);
+		h.emit("agent_start");
+		await h.emit("context", {
+			messages: [userMessage("Say hello once and then stop.", 10)],
+		});
+		const messages = (h.payload().messages as ContextEvent["messages"]).map(
+			({ role, content }) => ({ role, content }),
+		);
+		h.dispatch({
+			model: "mock-model",
+			stream: true,
+			messages: [{ role, content: "Reply once, then stop." }, ...messages],
+		});
+		expect(h.aborts).toBe(0);
+		expect(h.refusals).toEqual([]);
+	}
+});
+
+test("issue 673 print: a chat instruction prefix cannot hide a missing prepared turn", async () => {
+	const h = harness();
+	h.emit("agent_start");
+	await h.emit("context", { messages: structuredClone(input) });
+	h.dispatch({
+		messages: [
+			{ role: "system", content: "Reply once, then stop." },
+			...(h.payload().messages as unknown[]).slice(0, -1),
+		],
+	});
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("prepared turn structure");
+});
+
+test("issue 673 print: retained chat dispatch still binds the instruction prefix content", async () => {
+	const h = harness();
+	const first = await h.prepare((body) => ({
+		messages: [
+			{ role: "system", content: "Reply once, then stop." },
+			...(body.messages as unknown[]),
+		],
+	}));
+	h.retain();
+	h.dispatch(first);
+	expect(h.aborts).toBe(0);
+	const changed = structuredClone(first);
+	(changed.messages as { content: string }[])[0].content = "Different system";
+	h.dispatch(changed);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("managed dispatch");
+});
+
 test("review safety: retained Responses instructions and conversation are bound", async () => {
 	for (const field of ["instructions", "conversation"]) {
 		const h = harness();
