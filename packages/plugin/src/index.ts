@@ -104,7 +104,6 @@ import { closeQuietly } from "./shared/sqlite-helpers";
 import { importPluginModule } from "./shared/stale-plugin-build";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { applyHiddenSubagentTemperature } from "./shared/subagent-temperature";
-import { reloadWindowOverlay } from "./shared/window-geometry";
 import { registerStandalonePluginMarker } from "./standalone-plugin-marker";
 import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
 import { setup } from "./v2/server";
@@ -158,7 +157,6 @@ const server: Plugin = async (ctx) => {
         pluginConfig,
         () => liveConfigReader.poll().effective,
     );
-    reloadWindowOverlay(pluginConfig.models?.window_overlay_path);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode",
         directory: ctx.directory,

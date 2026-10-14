@@ -103,12 +103,13 @@ for (const cancellation of ["successor", "signal"] as const) {
 				)
 				.all(sessionId);
 			expect({ result, oldRows }).toEqual({
-				result: {
-					error:
-						cancellation === "successor"
-							? "Pi context pass superseded: no longer valid for this operation"
-							: "host cancelled after admission",
-				},
+				result:
+					cancellation === "successor"
+						? {
+								error:
+									"Pi context pass superseded: no longer valid for this operation",
+							}
+						: { value: undefined },
 				oldRows: [],
 			});
 		} finally {

@@ -142,9 +142,7 @@ test("Pi writer wait honours a supplied host abort signal before writes", async 
 		);
 		const started = performance.now();
 		try {
-			await expect(handler({ messages: raw }, ctx)).rejects.toThrow(
-				"host cancelled",
-			);
+			expect(await handler({ messages: raw }, ctx)).toBeUndefined();
 		} finally {
 			clearTimeout(abort);
 		}

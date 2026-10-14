@@ -792,7 +792,7 @@ const BaseEmbeddingConfigSchema = z
             .enum(["auto", "native", "wasm"])
             .default("auto")
             .describe(
-                "Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Inference runs in a dedicated worker. On Bun before 1.4.0, even explicit 'native' uses WASM because native worker teardown can crash the process. Set 'wasm' to avoid loading the native addon on newer hosts too.",
+                "Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Inference runs in a dedicated worker after disabling POSIX telemetry in the native process environment. Compiled Bun hosts and hosts without a verified in-process opt-out use a subprocess instead. Windows native ONNX emits OS-controlled ETW diagnostics, not direct uploads. On Bun before 1.4.0, even explicit 'native' uses WASM because native worker teardown can crash the process. Set 'wasm' to avoid loading the native addon on newer hosts too.",
             ),
         local_dtype: z
             .enum([
@@ -953,8 +953,8 @@ export interface MagicContextConfig {
     prompt_surface: PromptSurfaceConfig;
     /** User-only output-token reservation override. Zero disables reservation. */
     output_reserve?: number | { default: number; [modelKey: string]: number };
-    /** User-only model metadata inputs. */
-    models?: { window_overlay_path?: string };
+    /** Deprecated user-only window metadata path; parsed only so loaders can warn and ignore it. */
+    models?: { window_overlay_path?: unknown };
     /** TUI toast lifetime in milliseconds for Magic Context notifications. Default: 5000. */
     toast_duration_ms?: number;
     execute_threshold_percentage: number | { default: number; [modelKey: string]: number };
@@ -1220,12 +1220,16 @@ export const MagicContextConfigSchema = z
             ),
         models: z
             .object({
-                window_overlay_path: z.string().trim().min(1).optional(),
+                window_overlay_path: z
+                    .unknown()
+                    .optional()
+                    .describe(
+                        "Deprecated: ignored. Fusiform no longer publishes window-overlay data, so this setting no longer changes model window geometry. Remove this key.",
+                    )
+                    .meta({ deprecated: true }),
             })
             .optional()
-            .describe(
-                "User-only Fusiform window-overlay settings. The path defaults to <dataDir>/fusiform/window-overlay.json.",
-            ),
+            .describe("Deprecated user-only Fusiform window-overlay settings; ignored."),
         toast_duration_ms: z
             .number()
             .min(0)

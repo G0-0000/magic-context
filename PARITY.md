@@ -221,7 +221,6 @@ This does not change the OpenCode 2 results above.
 | --- | --- |
 | Whole-system cache stability | OMP 18.2.6's request-body `cch` attestation changes `system[0]`; cache-stability and long-session phase 1 are declared host-imposed divergences, not relaxed assertions. [Evidence](packages/pi-plugin/PARITY.md#35-omp-provider-attestation-prevents-whole-system-byte-parity). |
 | Historian, todo, memory, compaction-off and pressure fixtures | OMP configuration filenames, shared config location, tool transport and macOS cwd spelling required harness corrections; real-host assertions remain enabled. [Adjudication](packages/pi-plugin/PARITY.md#36-omp-parity-fixtures-use-native-configuration-and-wire-conventions). |
-| Same-path window overlay | Pi/OMP product fix classifies the host model window as catalog metadata; observed overlay limits take precedence. Pi hot-reloads; OMP RPC restarts and resumes because its reload callback is a no-op. |
 
 ## Static tokenizer decision calibration
 

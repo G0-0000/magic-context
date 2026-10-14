@@ -5773,13 +5773,19 @@ fn apply_once(
         // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
     });
-    // Attachment restoration, todo insertion and an expired retry's new tail reductions do not need a coverage
-    // anchor: neither moves the frozen m0/m1 boundary. The generic classifier requires
-    // an anchor for history deltas, so promote only an ordinary defer here, after the
-    // independent bust gate has priced the work. Reconcile defers remain untouched.
+    let boundaryless_explicit_flush = loaded.meta.soft_refresh_pending
+        && !signed_head_frozen
+        && loaded.core.boundary_id.is_empty()
+        && loaded.meta.coverage_ordinal.is_none();
+    // Attachment restoration, todo insertion, an expired retry's new tail reductions,
+    // and an explicit flush of an uncovered baseline need no existing covered-history
+    // boundary. The generic classifier requires that boundary for history deltas,
+    // so promote only Defer here, after a separate cache-busting reason grants permission.
+    // A missing or returning boundary under reconciliation still follows its normal repair plan.
     if (attachment_upgrade.is_some()
         || todo_injection_pending
-        || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
+        || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now)
+        || boundaryless_explicit_flush)
         && bust_opportunity
         && !loaded.core.reconcile_pending
         && matches!(plan, PassPlan::Defer)
