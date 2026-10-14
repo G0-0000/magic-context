@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <strong>Türkçe</strong> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · **Türkçe** · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*Bu bir topluluk çevirisidir. İngilizce [README.md](./README.md) doğruluk kaynağıdır ve daha güncel olabilir.*
+*Bu bir topluluk çevirisidir. İngilizce [README.md](../../README.md) doğruluk kaynağıdır ve daha güncel olabilir.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#pekiştirme">Pekiştirme</a> ·
   <a href="#hatırlama">Hatırlama</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Her proje için bir oturum çalıştır ve haftalar, aylar veya yıllar boyunca 
 
 Etkileşimli kurulum sihirbazını çalıştır. Modellerini algılar, her şeyi yapılandırır ve uyumluluğu ele alır.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**Ya da doğrudan çalıştır (her OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ Sihirbaz hangi harnesses bulunduğunu (OpenCode, Pi veya ikisi) otomatik algıla
 
 > **Yerleşik compaction neden kapatılır?** Magic Context bağlamı kendisi yönetir. Host compaction, cache-aware ertelenmiş işlemlerine karışır ve iki kez sıkıştırır.
 
-**Elle kurulum** (OpenCode): `opencode.json` içinde plugin ekle ve compaction kapat, sonra `<project>/.cortexkit/` içine bir `magic-context.jsonc` bırak (kullanıcı geneli varsayılanlar için `~/.config/cortexkit/`). [Yapılandırma başvurusuna](./CONFIGURATION.md) bak.
+**Elle kurulum** (OpenCode): `opencode.json` içinde plugin ekle ve compaction kapat, sonra `<project>/.cortexkit/` içine bir `magic-context.jsonc` bırak (kullanıcı geneli varsayılanlar için `~/.config/cortexkit/`). [Yapılandırma başvurusuna](../../CONFIGURATION.md) bak.
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Doğrudan Magic Context SQLite veritabanından okur. Ek sunucu yok, API yok. Oto
 
 ## Yapılandırma
 
-Ayarlar `magic-context.jsonc` içinde yaşar. Her şeyin makul varsayılanları vardır; proje yapılandırması kullanıcı geneli ayarların üstüne birleşir. Tam başvuru, cache TTL ayarı, model başına execute eşikleri, historian ve dreamer model seçimi, embedding providers ve bellek ayarları için **[CONFIGURATION.md](./CONFIGURATION.md)** veya **[docs.cortexkit.io üzerindeki yapılandırma başvurusu](https://docs.cortexkit.io/magic-context/reference/configuration/)** bölümüne bak.
+Ayarlar `magic-context.jsonc` içinde yaşar. Her şeyin makul varsayılanları vardır; proje yapılandırması kullanıcı geneli ayarların üstüne birleşir. Tam başvuru, cache TTL ayarı, model başına execute eşikleri, historian ve dreamer model seçimi, embedding providers ve bellek ayarları için **[CONFIGURATION.md](../../CONFIGURATION.md)** veya **[docs.cortexkit.io üzerindeki yapılandırma başvurusu](https://docs.cortexkit.io/magic-context/reference/configuration/)** bölümüne bak.
 
 **Yapılandırma konumları** (tek paylaşılan CortexKit konumu, proje kullanıcıyı geçersiz kılar):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports ve pull requests memnuniyetle karşılanır. Daha büyük değişikl
 
 ## Lisans
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

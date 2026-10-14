@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <strong>ไทย</strong> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · **ไทย** · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*นี่คือคำแปลจากชุมชน ไฟล์ [README.md](./README.md) ภาษาอังกฤษเป็นแหล่งอ้างอิงหลักและอาจอัปเดตกว่า*
+*นี่คือคำแปลจากชุมชน ไฟล์ [README.md](../../README.md) ภาษาอังกฤษเป็นแหล่งอ้างอิงหลักและอาจอัปเดตกว่า*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#การรวบรวมความจำ">การรวบรวมความจำ</a> ·
   <a href="#การเรียกคืน">การเรียกคืน</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context มอบสิ่งนั้นให้พวกเขา ม�
 
 รันตัวช่วยตั้งค่าแบบโต้ตอบ มันตรวจพบโมเดลของคุณ กำหนดค่าทุกอย่าง และจัดการความเข้ากันได้.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**หรือรันโดยตรง (ทุก OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **ทำไมต้องปิด compaction ในตัว?** Magic Context จัดการบริบทเอง compaction ของโฮสต์จะรบกวนงานที่เลื่อนเวลาและรับรู้ cache ของมัน และจะบีบอัดซ้ำสองครั้ง.
 
-**ตั้งค่าด้วยตนเอง** (OpenCode): เพิ่ม plugin และปิด compaction ใน `opencode.json` จากนั้นวาง `magic-context.jsonc` ใน `<project>/.cortexkit/` (หรือ `~/.config/cortexkit/` สำหรับค่าเริ่มต้นระดับผู้ใช้) ดู [คู่มือการกำหนดค่า](./CONFIGURATION.md).
+**ตั้งค่าด้วยตนเอง** (OpenCode): เพิ่ม plugin และปิด compaction ใน `opencode.json` จากนั้นวาง `magic-context.jsonc` ใน `<project>/.cortexkit/` (หรือ `~/.config/cortexkit/` สำหรับค่าเริ่มต้นระดับผู้ใช้) ดู [คู่มือการกำหนดค่า](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## การกำหนดค่า
 
-การตั้งค่าอยู่ใน `magic-context.jsonc` ทุกอย่างมีค่าเริ่มต้นที่เหมาะสม config ของโปรเจกต์จะ merge ทับการตั้งค่าระดับผู้ใช้ สำหรับอ้างอิงเต็ม รวมถึงการปรับ cache TTL, execute thresholds ต่อโมเดล, การเลือกโมเดล historian และ dreamer, embedding providers และการตั้งค่าหน่วยความจำ ดู **[CONFIGURATION.md](./CONFIGURATION.md)** หรือ **[อ้างอิงการกำหนดค่าบน docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+การตั้งค่าอยู่ใน `magic-context.jsonc` ทุกอย่างมีค่าเริ่มต้นที่เหมาะสม config ของโปรเจกต์จะ merge ทับการตั้งค่าระดับผู้ใช้ สำหรับอ้างอิงเต็ม รวมถึงการปรับ cache TTL, execute thresholds ต่อโมเดล, การเลือกโมเดล historian และ dreamer, embedding providers และการตั้งค่าหน่วยความจำ ดู **[CONFIGURATION.md](../../CONFIGURATION.md)** หรือ **[อ้างอิงการกำหนดค่าบน docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **ตำแหน่ง config** (ตำแหน่ง CortexKit ร่วมหนึ่งแห่ง โปรเจกต์ทับผู้ใช้):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ bun run format      # Format (Biome)
 
 ## ใบอนุญาต
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <strong>বাংলা</strong> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · **বাংলা** · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*এটি একটি কমিউনিটি অনুবাদ। ইংরেজি [README.md](./README.md) সত্যের উৎস এবং এটি আরও হালনাগাদ হতে পারে।*
+*এটি একটি কমিউনিটি অনুবাদ। ইংরেজি [README.md](../../README.md) সত্যের উৎস এবং এটি আরও হালনাগাদ হতে পারে।*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#সংহতি">সংহতি</a> ·
   <a href="#স্মরণ">স্মরণ</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context তাদের একটি দেয়। এটি কোড�
 
 ইন্টারঅ্যাকটিভ সেটআপ উইজার্ড চালান। এটি আপনার মডেল শনাক্ত করে, সবকিছু কনফিগার করে এবং সামঞ্জস্য সামলায়।
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**অথবা সরাসরি চালান (যেকোনো OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **built-in compaction কেন বন্ধ করবেন?** Magic Context নিজেই প্রসঙ্গ পরিচালনা করে। host-এর compaction তার cache-aware deferred operations-এ বাধা দেবে এবং দ্বিগুণ কমপ্রেস করবে।
 
-**ম্যানুয়াল সেটআপ** (OpenCode): `opencode.json`-এ plugin যোগ করুন ও compaction বন্ধ করুন, তারপর `<project>/.cortexkit/`-এ `magic-context.jsonc` রাখুন (অথবা user-wide defaults-এর জন্য `~/.config/cortexkit/`)। [configuration reference](./CONFIGURATION.md) দেখুন।
+**ম্যানুয়াল সেটআপ** (OpenCode): `opencode.json`-এ plugin যোগ করুন ও compaction বন্ধ করুন, তারপর `<project>/.cortexkit/`-এ `magic-context.jsonc` রাখুন (অথবা user-wide defaults-এর জন্য `~/.config/cortexkit/`)। [configuration reference](../../CONFIGURATION.md) দেখুন।
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## কনফিগারেশন
 
-Settings থাকে `magic-context.jsonc`-এ। সবকিছুর sensible defaults আছে; project config user-wide settings-এর ওপর merge হয়। পূর্ণ reference, cache TTL tuning, per-model execute thresholds, historian ও dreamer model selection, embedding providers এবং memory settings-এর জন্য **[CONFIGURATION.md](./CONFIGURATION.md)** অথবা **[docs.cortexkit.io-এর configuration reference](https://docs.cortexkit.io/magic-context/reference/configuration/)** দেখুন।
+Settings থাকে `magic-context.jsonc`-এ। সবকিছুর sensible defaults আছে; project config user-wide settings-এর ওপর merge হয়। পূর্ণ reference, cache TTL tuning, per-model execute thresholds, historian ও dreamer model selection, embedding providers এবং memory settings-এর জন্য **[CONFIGURATION.md](../../CONFIGURATION.md)** অথবা **[docs.cortexkit.io-এর configuration reference](https://docs.cortexkit.io/magic-context/reference/configuration/)** দেখুন।
 
 **Config locations** (একটি shared CortexKit location, project user-কে override করে):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports এবং pull requests স্বাগত। বড় পরিব
 
 ## লাইসেন্স
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

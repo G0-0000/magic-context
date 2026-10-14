@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <strong>简体中文</strong> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · **简体中文** · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*这是社区翻译。英文 [README.md](./README.md) 是权威来源，内容可能更新。*
+*这是社区翻译。英文 [README.md](../../README.md) 是权威来源，内容可能更新。*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#巩固">巩固</a> ·
   <a href="#回忆">回忆</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context 给它们补上这一部分。它是编码代理的**海马体**�
 
 运行交互式安装向导。它会检测你的模型，配置所有内容，并处理兼容性。
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**或直接运行（任何 OS）：**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **为什么关闭内置压缩？** Magic Context 自己管理上下文。宿主的压缩会干扰它的缓存感知延迟操作，并造成双重压缩。
 
-**手动设置**（OpenCode）：在 `opencode.json` 中添加插件并关闭压缩，然后把 `magic-context.jsonc` 放到 `<project>/.cortexkit/`（或把用户级默认配置放到 `~/.config/cortexkit/`）。参见[配置参考](./CONFIGURATION.md)。
+**手动设置**（OpenCode）：在 `opencode.json` 中添加插件并关闭压缩，然后把 `magic-context.jsonc` 放到 `<project>/.cortexkit/`（或把用户级默认配置放到 `~/.config/cortexkit/`）。参见[配置参考](../../CONFIGURATION.md)。
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## 配置
 
-设置位于 `magic-context.jsonc`。所有内容都有合理默认值；项目配置会叠加到用户级设置之上。完整参考，包括缓存 TTL 调优、按模型设置的 execute 阈值、historian 和 dreamer 模型选择、嵌入提供商以及记忆设置，请参见 **[CONFIGURATION.md](./CONFIGURATION.md)** 或 **[docs.cortexkit.io 上的配置参考](https://docs.cortexkit.io/magic-context/reference/configuration/)**。
+设置位于 `magic-context.jsonc`。所有内容都有合理默认值；项目配置会叠加到用户级设置之上。完整参考，包括缓存 TTL 调优、按模型设置的 execute 阈值、historian 和 dreamer 模型选择、嵌入提供商以及记忆设置，请参见 **[CONFIGURATION.md](../../CONFIGURATION.md)** 或 **[docs.cortexkit.io 上的配置参考](https://docs.cortexkit.io/magic-context/reference/configuration/)**。
 
 **配置位置**（一个共享的 CortexKit 位置，项目覆盖用户）：
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Dream 执行需要一个正在运行的 OpenCode 服务器（dreamer 会创建�
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)
