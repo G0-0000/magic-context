@@ -310,6 +310,8 @@ export function applyPiProactiveThinkingStrip(args: {
 	stripActiveTurn?: boolean;
 	/** Record omissions now; remove parts after transcript commit so replay uses the same part indices. */
 	persistOnly?: boolean;
+	/** A declared rebuild must refuse if any thinking omission cannot be persisted. */
+	requirePersistence?: boolean;
 	report?: (message: string) => void;
 }): PiProactiveThinkingStrip | null {
 	if (!args.cacheBustingPass) return null;
@@ -322,7 +324,14 @@ export function applyPiProactiveThinkingStrip(args: {
 	for (let index = 0; index < args.messages.length; index += 1) {
 		if (protectedMessages.has(args.messages[index])) continue;
 		const entryId = args.entryIds[index];
-		if (!entryId || !hasThinkingPart(args.messages[index])) continue;
+		if (!hasThinkingPart(args.messages[index])) continue;
+		if (!entryId) {
+			if (args.requirePersistence)
+				throw new Error(
+					"Cannot persist thinking omission without a stable entry id",
+				);
+			continue;
+		}
 		entryIds.push(entryId);
 		indices.push(index);
 	}
@@ -340,6 +349,10 @@ export function applyPiProactiveThinkingStrip(args: {
 		persisted = false;
 	}
 	if (!persisted) {
+		if (args.requirePersistence)
+			throw new Error(
+				"Cannot persist thinking omissions before recovery prefix rebuild",
+			);
 		reportBindingRecovery(
 			args.sessionId,
 			args.report,

@@ -3,9 +3,11 @@ import { createHash } from "node:crypto";
 import { assembleLkgPrefix, layoutLkgPrefix } from "../../features/magic-context/lkg-prefix-chunks";
 import { isRustMarkerAdmissionFenced } from "../../features/magic-context/storage-replay-document";
 import { drainBackgroundBatches } from "../../shared/background-batch-drain";
+import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { clearLkgRecoveryFence, commitLkgWithRecoveryFence } from "./lkg-recovery-fence";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
 
 /**
@@ -214,15 +216,17 @@ function slotFingerprint(slot: LkgSlot): string {
  * of slices past the new count, and the metadata row (with the count, length and
  * hash a load verifies) commit in one transaction.
  */
-export function saveLkgSlotToDb(
+function persistLkgSlot(
     db: Database,
     sessionId: string,
     slot: LkgSlot,
     publishMetadata?: () => void,
 ): boolean {
     const fingerprint = slotFingerprint(slot);
-    if (!publishMetadata && persistedFingerprints.get(db)?.get(sessionId) === fingerprint)
-        return true;
+    if (!publishMetadata && persistedFingerprints.get(db)?.get(sessionId) === fingerprint) {
+        const durable = loadPersistedLkgSlot(db, sessionId);
+        if (durable && slotFingerprint(durable) === fingerprint) return true;
+    }
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
         db.transaction(() => {
@@ -304,6 +308,28 @@ export function saveLkgSlotToDb(
     }
 }
 
+export function saveLkgSlotToDb(
+    db: Database,
+    sessionId: string,
+    slot: LkgSlot,
+    publishMetadata?: () => void,
+    fence: {
+        rebuild?: boolean;
+        retainDirtyRevision?: string;
+        ownDirtyRevision?: string;
+        requiredRevision?: string;
+        cleanDigest?: string;
+    } = {},
+): boolean {
+    return commitLkgWithRecoveryFence({
+        sessionId,
+        slot,
+        ...fence,
+        load: () => loadPersistedLkgSlot(db, sessionId, true),
+        commit: () => persistLkgSlot(db, sessionId, slot, publishMetadata),
+    });
+}
+
 export function clearPersistedLkgSlot(db: Database, sessionId: string): void {
     try {
         clearPersistedLkgSlotStrict(db, sessionId);
@@ -314,15 +340,26 @@ export function clearPersistedLkgSlot(db: Database, sessionId: string): void {
 
 /** A cut must not commit when durable old-representation invalidation failed. */
 export function clearPersistedLkgSlotStrict(db: Database, sessionId: string): void {
-    db.transaction(() => {
-        db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
-        db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
-    }).immediate();
+    clearLkgRecoveryFence(sessionId, () =>
+        db
+            .transaction(() => {
+                db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
+                db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
+            })
+            .immediate(),
+    );
     persistedFingerprints.get(db)?.delete(sessionId);
 }
 
-export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot | undefined {
-    if (isRustMarkerAdmissionFenced(db, sessionId)) return undefined;
+export function loadPersistedLkgSlot(
+    db: Database,
+    sessionId: string,
+    forPublication = false,
+): LkgSlot | undefined {
+    // Publication verifies the row just committed, even while a history cut is
+    // fenced. Ordinary readers still cannot hydrate that row for replay.
+    const rustHost = getHarness() === "opencode" || getHarness() === "opencode2";
+    if (rustHost && !forPublication && isRustMarkerAdmissionFenced(db, sessionId)) return undefined;
     type ChunkRow = { chunk?: unknown; hash?: unknown; body?: unknown };
     let row: Record<string, unknown> | undefined;
     let chunkRows: ChunkRow[];
@@ -393,25 +430,34 @@ function pruneStaleLkgSlotsBatch(db: Database, now: number): { slots: number; ch
     try {
         db.exec("PRAGMA busy_timeout = 0");
         let transactionStartedAt = 0;
-        const changes = db
-            .transaction(() => {
-                transactionStartedAt = performance.now();
-                const removed = slot
-                    ? db
-                          .prepare(`DELETE FROM lkg_slots WHERE session_id = ? AND ${stale}`)
-                          .run(slot.session_id, cutoff, cutoff).changes
-                    : 0;
-                const removeChunk =
-                    db.prepare(`DELETE FROM lkg_slot_chunks WHERE rowid = ? AND NOT EXISTS (
+        const remove = () =>
+            db
+                .transaction(() => {
+                    transactionStartedAt = performance.now();
+                    const removed = slot
+                        ? db
+                              .prepare(`DELETE FROM lkg_slots WHERE session_id = ? AND ${stale}`)
+                              .run(slot.session_id, cutoff, cutoff).changes
+                        : 0;
+                    const removeChunk =
+                        db.prepare(`DELETE FROM lkg_slot_chunks WHERE rowid = ? AND NOT EXISTS (
                 SELECT 1 FROM lkg_slots s WHERE s.session_id = lkg_slot_chunks.session_id
             )`);
-                let removedChunks = 0;
-                for (const { rowid } of chunks) removedChunks += removeChunk.run(rowid).changes;
-                return { slots: removed, chunks: removedChunks };
-            })
-            .immediate();
+                    let removedChunks = 0;
+                    for (const { rowid } of chunks) removedChunks += removeChunk.run(rowid).changes;
+                    return { slots: removed, chunks: removedChunks };
+                })
+                .immediate();
+        const changes = slot
+            ? (clearLkgRecoveryFence(slot.session_id, remove, (result) => !!result?.slots) ?? {
+                  slots: 0,
+                  chunks: 0,
+              })
+            : remove();
         logSlowWriteTransaction("lkg_stale_gc", transactionStartedAt);
-        if (changes.slots && slot) persistedFingerprints.get(db)?.delete(slot.session_id);
+        if (changes.slots && slot) {
+            persistedFingerprints.get(db)?.delete(slot.session_id);
+        }
         return changes;
     } finally {
         db.exec(`PRAGMA busy_timeout = ${Number(previousTimeout.timeout) || 0}`);
