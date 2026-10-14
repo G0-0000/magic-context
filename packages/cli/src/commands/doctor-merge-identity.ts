@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveProjectIdentityStrict } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
     projectDirectoryKey,
@@ -26,6 +26,7 @@ import {
     openExistingContextDatabase,
     openExistingDatabase,
 } from "../lib/database-access";
+import { availableDiskBytes, checkDiskSpace, existingDirectoryAncestor } from "../lib/disk-space";
 import {
     findIdentitySplits,
     type IdentitySplit,
@@ -35,6 +36,7 @@ import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import {
     copyDatabaseBundle,
     type DatabaseHolderInspection,
+    databaseBundleSizeBytes,
     defaultInspectHolders,
 } from "./doctor-repair-db";
 
@@ -47,6 +49,7 @@ export interface MergeIdentityCliOptions {
     verbose: boolean;
     dbPath?: string;
     hostPath?: string;
+    backupRoot?: string;
 }
 
 export function parseMergeIdentityArgs(args: string[]): MergeIdentityCliOptions {
@@ -54,7 +57,7 @@ export function parseMergeIdentityArgs(args: string[]): MergeIdentityCliOptions 
     const switches = new Set(["--apply", "--force", "--dry-run", "--yes", "--verbose"]);
     for (let i = 0; i < args.length; i++) {
         const flag = args[i];
-        if (["--from", "--to", "--db", "--host-db"].includes(flag)) {
+        if (["--from", "--to", "--db", "--host-db", "--backup-root"].includes(flag)) {
             const value = args[++i];
             if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
             if (values[flag]) throw new Error(`Repeated option: ${flag}`);
@@ -72,6 +75,7 @@ export function parseMergeIdentityArgs(args: string[]): MergeIdentityCliOptions 
         to: values["--to"],
         dbPath: values["--db"],
         hostPath: values["--host-db"],
+        backupRoot: values["--backup-root"],
         dryRun: !apply,
         yes: apply,
         force: args.includes("--force"),
@@ -387,6 +391,7 @@ function observations(db: Database, hostPath: string, storageDir: string): Ident
 export interface MergeIdentityDeps {
     inspectHolders: (storageDir: string) => DatabaseHolderInspection;
     probe: typeof probeHostProcessesUsing;
+    freeBytes: (path: string) => number;
 }
 
 export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityDeps> = {}): number {
@@ -474,28 +479,45 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
         throw new Error(
             `Refusing merge: close OpenCode, Pi, OpenCode 2 and ck-mc. ${holders.blockers.join(", ")} ${holders.uncertainty ?? ""} ${probe.status === "in_use" ? `context.db holders: ${probe.pids.join(", ")}` : probe.status === "unknown" ? probe.reason : ""}`,
         );
-    const backup = mkdtempSync(join(storageDir, "identity-merge-backup-"));
+    const backupRoot = resolve(options.backupRoot ?? storageDir);
+    const backupVolume = existingDirectoryAncestor(backupRoot);
+    const sidecarRoot = join(storageDir, "project-identities");
+    const sidecarEntries = existsSync(sidecarRoot)
+        ? readdirSync(sidecarRoot).filter((entry) => entry.endsWith(".json"))
+        : [];
+    const sidecarBytes = sidecarEntries.reduce(
+        (size, entry) => size + statSync(join(sidecarRoot, entry)).size,
+        0,
+    );
+    const diskSpace = checkDiskSpace(
+        backupVolume,
+        databaseBundleSizeBytes(dbPath) + sidecarBytes,
+        deps.freeBytes ?? availableDiskBytes,
+    );
+    if (!diskSpace.sufficient)
+        throw new Error(
+            `merge_identity_disk_space: refusing identity merge: backup needs ${diskSpace.requiredBytes} bytes; have ${diskSpace.availableBytes} bytes on ${backupVolume}. Use --backup-root <dir> to choose a volume with enough free space.`,
+        );
+    ensureStorageDirectorySync(backupRoot, true);
+    const backup = mkdtempSync(join(backupRoot, "identity-merge-backup-"));
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
     console.log(`Backup directory: ${backup}`);
     console.log(
         `Restore with hosts closed: rm -f ${quote(`${dbPath}-wal`)} ${quote(`${dbPath}-shm`)}; cp ${quote(join(backup, "context.db"))} ${quote(dbPath)}; if test -f ${quote(join(backup, "context.db-wal"))}; then cp ${quote(join(backup, "context.db-wal"))} ${quote(`${dbPath}-wal`)}; fi`,
     );
-    const sidecarRoot = join(storageDir, "project-identities");
     const sidecarBackup = join(backup, "project-identities");
-    ensureStorageDirectorySync(sidecarBackup);
-    if (existsSync(sidecarRoot)) {
-        for (const entry of readdirSync(sidecarRoot)) {
-            if (!entry.endsWith(".json")) continue;
-            writeStorageFileAtomicSync(
-                join(sidecarBackup, entry),
-                readFileSync(join(sidecarRoot, entry)),
-            );
-        }
+    ensureStorageDirectorySync(sidecarBackup, true);
+    let backupBytes = 0;
+    for (const entry of sidecarEntries) {
+        const content = readFileSync(join(sidecarRoot, entry));
+        writeStorageFileAtomicSync(join(sidecarBackup, entry), content, true);
+        backupBytes += content.byteLength;
     }
     console.log(
         `Restore identity sidecars too: rm -rf ${quote(sidecarRoot)}; cp -R ${quote(sidecarBackup)} ${quote(sidecarRoot)}`,
     );
-    copyDatabaseBundle(dbPath, join(backup, "context.db"));
+    const copiedDatabaseFiles = copyDatabaseBundle(dbPath, join(backup, "context.db"), true);
+    backupBytes += copiedDatabaseFiles.reduce((size, path) => size + statSync(path).size, 0);
     // The read-only open already checked the schema version. Use the raw writable opener
     // because the context opener may create store metadata before the merge transaction.
     db = openExistingDatabase(dbPath, { readonly: false });
@@ -531,5 +553,7 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
                 JSON.stringify({ directory: projectDirectoryKey(directory), identity: options.to }),
             );
         }
+    console.log(`Backup: ${backup} (${backupBytes} bytes)`);
+    console.log("This backup can be deleted once the merge has been confirmed.");
     return 0;
 }
