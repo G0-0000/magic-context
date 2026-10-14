@@ -21,6 +21,9 @@ import {
     indexSingleMessage,
     isMessageIndexReconciledThrough,
     isMessageIndexSourceCurrent,
+    type MessageHistoryOrphanSweepOptions,
+    type MessageHistoryOrphanSweepResult,
+    sweepOrphanedOpenCodeMessageIndexes,
 } from "./message-index";
 import type { IndexWorkerMeasurements } from "./message-index-bounded";
 
@@ -449,6 +452,40 @@ export async function indexSingleMessageOffThread(
             );
     }
     return result.inserted;
+}
+
+/** Candidate scans, cascaded deletes and FTS commits belong on a worker, not a timer's event loop. */
+export async function sweepOrphanedOpenCodeMessageIndexesOffThread(
+    db: Database,
+    openSource: () => Database | null,
+    options: MessageHistoryOrphanSweepOptions = {},
+): Promise<MessageHistoryOrphanSweepResult> {
+    const path = getSqliteDatabasePath(db);
+    if (!path || getHarness() !== "opencode")
+        return sweepOrphanedOpenCodeMessageIndexes(db, openSource, options);
+    let source: Database | null = null;
+    let sourcePath: string | null = null;
+    try {
+        source = openSource();
+        if (source) sourcePath = getSqliteDatabasePath(source);
+    } catch {
+        // An unavailable source needs only the persisted probe cooldown below,
+        // not the expensive candidate scan or deletion work delegated to a worker.
+    } finally {
+        if (sourcePath) source?.close();
+    }
+    if (!sourcePath) return sweepOrphanedOpenCodeMessageIndexes(db, () => source, options);
+    const reply = await runSessionWarmupWorker(
+        {
+            path,
+            sessionId: "",
+            harness: getHarness(),
+            orphanSweep: { sourcePath, options },
+        },
+        {},
+    );
+    if (!("orphanSweep" in reply)) throw new Error("message history orphan sweep worker failed");
+    return reply.orphanSweep;
 }
 
 export function scheduleClearAndReindex(

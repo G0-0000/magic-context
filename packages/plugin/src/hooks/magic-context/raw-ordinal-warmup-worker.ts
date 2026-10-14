@@ -20,11 +20,33 @@ const [{ Database }, { scanRawSessionSummaryRows }] = await Promise.all([
 let db: InstanceType<typeof Database> | undefined;
 let reply: RawOrdinalWarmupReply;
 try {
-    db = input.indexMessage
-        ? new Database(input.path)
-        : new Database(input.path, { readonly: true });
+    db =
+        input.indexMessage || input.orphanSweep
+            ? new Database(input.path)
+            : new Database(input.path, { readonly: true });
     db.exec("PRAGMA busy_timeout = 250");
-    if (input.indexMessage) {
+    if (input.orphanSweep) {
+        const [
+            { setHarness },
+            { sweepOrphanedOpenCodeMessageIndexes },
+            { configureContextDatabasePragmas },
+        ] = await Promise.all([
+            import("../../shared/harness"),
+            import("../../features/magic-context/message-index"),
+            import("../../shared/sqlite-context-pragmas"),
+        ]);
+        setHarness(input.harness ?? "opencode");
+        configureContextDatabasePragmas(db);
+        const sourcePath = input.orphanSweep.sourcePath;
+        reply = {
+            kind: "orphan-sweep",
+            result: sweepOrphanedOpenCodeMessageIndexes(
+                db,
+                () => (sourcePath ? new Database(sourcePath, { readonly: true }) : null),
+                input.orphanSweep.options,
+            ),
+        };
+    } else if (input.indexMessage) {
         const { setHarness } = await import("../../shared/harness");
         setHarness(input.harness ?? "opencode");
         const [

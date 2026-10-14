@@ -492,36 +492,35 @@ export interface InjectCompactionMarkerArgs {
     resolvedBoundary?: BoundaryUserMessage;
 }
 
+export const LEGACY_MARKER_LINEAGE_SQL = `SELECT m.id
+    FROM message m
+    WHERE m.session_id = ? AND m.time_created >= ? AND m.id <> ?
+      AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
+      AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
+      AND COALESCE(json_extract(m.data, '$.parentID'), '') = ?
+      AND EXISTS (SELECT 1 FROM part p
+        WHERE +p.session_id = m.session_id AND p.message_id = m.id
+          AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
+          AND COALESCE(json_extract(p.data, '$.text'), '') = ?)`;
+
 function removeLegacyMarkerLineageRows(
     db: Database,
     args: {
         sessionId: string;
         boundaryMessageId: string;
+        boundaryTimeCreated: number;
         summaryText: string;
         summaryMessageId: string;
         compactionPartId: string;
     },
 ): void {
+    // A summary is created after its parent boundary. The session/time index
+    // excludes older history before SQLite inspects the summary's JSON.
     const legacySummaries = db
-        .prepare(
-            `SELECT m.id
-             FROM message m
-             WHERE m.session_id = ?
-               AND m.id <> ?
-               AND COALESCE(json_extract(m.data, '$.summary'), 0) = 1
-               AND COALESCE(json_extract(m.data, '$.finish'), '') = 'stop'
-               AND COALESCE(json_extract(m.data, '$.parentID'), '') = ?
-               AND EXISTS (
-                   SELECT 1
-                   FROM part p
-                   WHERE +p.session_id = m.session_id
-                     AND p.message_id = m.id
-                     AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
-                     AND COALESCE(json_extract(p.data, '$.text'), '') = ?
-               )`,
-        )
+        .prepare(LEGACY_MARKER_LINEAGE_SQL)
         .all(
             args.sessionId,
+            args.boundaryTimeCreated,
             args.summaryMessageId,
             args.boundaryMessageId,
             args.summaryText,
@@ -610,6 +609,7 @@ export function injectCompactionMarker(
             removeLegacyMarkerLineageRows(db, {
                 sessionId: args.sessionId,
                 boundaryMessageId: boundary.id,
+                boundaryTimeCreated: boundaryTime,
                 summaryText: args.summaryText,
                 summaryMessageId: summaryMsgId,
                 compactionPartId,

@@ -48,7 +48,7 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "../features/magic-context/memory/project-identity";
-import { sweepOrphanedOpenCodeMessageIndexes } from "../features/magic-context/message-index";
+import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "../features/magic-context/message-index-async";
 import {
     drainCommitBacklogForProject,
     drainProjectEmbeddingIdentityMaintenance,
@@ -480,7 +480,7 @@ async function runMessageHistoryMaintenance(db: Database): Promise<void> {
         }
     }
 
-    const sweep = sweepOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb);
+    const sweep = await sweepOrphanedOpenCodeMessageIndexesOffThread(db, openOpenCodeDb);
     if (sweep.reason) log(`[message-index] orphan sweep parked: ${sweep.reason}`);
     if (sweep.deleted > 0) {
         log(

@@ -65,14 +65,15 @@ export interface ResolvedBoundaryContext {
     cacheNamespace: string;
     createdAt?: number;
     /**
-     * Durable per-message token totals (sum of the message's active tag
+     * Durable per-message token totals (sum of the message's all-status tag
      * token_counts), keyed by real message id. When present, the boundary's
      * token index reads these instead of re-tokenizing the raw session — the
      * restart-durable fast path. A message missing here (or with a NULL-count
-     * tag) falls back to live tokenization. Built once in resolveBoundaryContext
-     * from the tag store; omitted (→ all-live) when the caller has no tag store.
+     * tag) falls back to live tokenization. Explicit maps support callers with
+     * their own token source; store-backed callers load only the requested owners.
      */
     storedTokenTotals?: Map<string, number>;
+    storedTokenTotalsForMessages?: (messageIds: string[]) => Map<string, number> | undefined;
     calibration?: ReturnType<typeof sessionDecisionCalibration>;
 }
 
@@ -528,7 +529,8 @@ export function resolveProtectedTailBoundary(
         Math.max(1, offset - 1),
         absoluteMessageCount,
     );
-    const storedTotals = ctx.storedTokenTotals;
+    const storedTotals =
+        ctx.storedTokenTotalsForMessages?.(messages.map((m) => m.id)) ?? ctx.storedTokenTotals;
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
@@ -891,21 +893,26 @@ export function resolveBoundaryContext(args: {
     // a cold pass (the 16s→ms win). Best-effort: a store failure just falls back
     // to all-live tokenization.
     const calibration = sessionDecisionCalibration(args.db, args.sessionId);
-    let storedTokenTotals: Map<string, number> | undefined;
-    try {
-        storedTokenTotals = getAllStatusTagTokenTotalsFlat(
-            args.db,
-            args.sessionId,
-            args.taggerFloor ?? 0,
-            calibration,
-        ).totals;
-    } catch (error) {
-        sessionLog(
-            args.sessionId,
-            "protected-tail stored-token map unavailable (live fallback):",
-            error,
-        );
-    }
+    // Only messages above the compartment boundary enter the token index. Load
+    // their owners by index, rather than materializing compacted tag history.
+    const storedTokenTotalsForMessages = (messageIds: string[]) => {
+        try {
+            return getAllStatusTagTokenTotalsFlat(
+                args.db,
+                args.sessionId,
+                args.taggerFloor ?? 0,
+                calibration,
+                messageIds,
+            ).totals;
+        } catch (error) {
+            sessionLog(
+                args.sessionId,
+                "protected-tail stored-token map unavailable (live fallback):",
+                error,
+            );
+            return undefined;
+        }
+    };
     return {
         sessionId: args.sessionId,
         mode: args.mode,
@@ -922,7 +929,7 @@ export function resolveBoundaryContext(args: {
         emergencyTailScale: args.emergencyTailScale,
         providerShapeVersion: args.providerShapeVersion ?? "opencode-v1",
         cacheNamespace: args.cacheNamespace ?? `opencode:${args.sessionId}`,
-        storedTokenTotals,
+        storedTokenTotalsForMessages,
         calibration,
     };
 }
@@ -950,14 +957,16 @@ export function resolveWrapupProtectedTailBoundary(
         Math.max(1, offset - 1),
         absoluteMessageCount,
     );
+    const storedTotals =
+        ctx.storedTokenTotalsForMessages?.(messages.map((m) => m.id)) ?? ctx.storedTokenTotals;
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
         calibration: ctx.calibration,
         absoluteMessageCount,
-        storedTotalForMessage: ctx.storedTokenTotals
+        storedTotalForMessage: storedTotals
             ? (m) => {
-                  const value = ctx.storedTokenTotals?.get(m.id);
+                  const value = storedTotals?.get(m.id);
                   return value === undefined ? null : value;
               }
             : undefined,
