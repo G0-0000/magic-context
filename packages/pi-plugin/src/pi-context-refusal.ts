@@ -24,6 +24,11 @@ import {
 	PiContextBudget,
 	PiContextDeadlineError,
 } from "./pi-context-budget";
+import {
+	piConversationFields as conversationFields,
+	piHasManagedSignature,
+	piManagedSignature,
+} from "./pi-dispatch-identity";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
 const ENTRY_TYPE = "magic-context-turn-refused";
@@ -58,6 +63,7 @@ interface Operation {
 		messages: readonly LkgInputSnapshot[];
 	};
 	dispatchFields?: readonly LkgContentField[];
+	managedSignature?: string;
 	retainedAfterEnd: boolean;
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
@@ -127,42 +133,6 @@ function messageSnapshots(messages: unknown[]): LkgInputSnapshot[] | undefined {
 		snapshots.push({ id, fields });
 	}
 	return snapshots.length ? snapshots : undefined;
-}
-
-function conversationFields(
-	payload: unknown,
-): readonly LkgContentField[] | undefined {
-	try {
-		if (!payload || typeof payload !== "object") return undefined;
-		const body = payload as {
-			messages?: unknown;
-			system?: unknown;
-			input?: unknown;
-			instructions?: unknown;
-			previous_response_id?: unknown;
-			conversation?: unknown;
-		};
-		// After ignoring a delayed end, compare messages and system text with the
-		// first managed dispatch. Retry controls/tools may change independently;
-		// an unknown conversation representation cannot establish that match.
-		if (Array.isArray(body.messages) && body.input === undefined)
-			return (
-				lkgContentFields({ messages: body.messages, system: body.system }) ??
-				undefined
-			);
-		if (Array.isArray(body.input) && body.messages === undefined)
-			return (
-				lkgContentFields({
-					input: body.input,
-					instructions: body.instructions,
-					previous_response_id: body.previous_response_id,
-					conversation: body.conversation,
-				}) ?? undefined
-			);
-	} catch {
-		return undefined;
-	}
-	return undefined;
 }
 
 function inputBranch(
@@ -546,7 +516,11 @@ export function registerPiGuardedContext(
 					budget.abandoned
 				)
 					throw new Error("context pass ran without a managed context receipt");
-				if (active.retainedAfterEnd) {
+				if (!piHasManagedSignature(payload, active.managedSignature))
+					throw new Error(
+						"provider request does not match this pass's managed dispatch (missing current receipt signature)",
+					);
+				if (active.dispatched) {
 					const fields = conversationFields(payload);
 					if (
 						!fields ||
@@ -628,6 +602,7 @@ export function registerPiGuardedContext(
 		active.inputMessages = undefined;
 		active.inputBranch = undefined;
 		active.dispatchFields = undefined;
+		active.managedSignature = undefined;
 		active.retainedAfterEnd = false;
 		active.dispatched = false;
 		active.ready = false;
@@ -676,6 +651,7 @@ export function registerPiGuardedContext(
 				),
 			);
 			if (result?.messages) {
+				active.managedSignature = piManagedSignature(result.messages);
 				budget.completed = true;
 				active.ready = true;
 				// Oh My Pi persists the new prompt concurrently with preparation; its

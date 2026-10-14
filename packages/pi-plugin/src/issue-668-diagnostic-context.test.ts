@@ -221,7 +221,12 @@ test("issue 668: real conflict fallback and retries refuse without revoking the 
 	);
 	h.emit("before_provider_request", { payload: { messages: newer } });
 	expect(h.aborts).toBe(2);
-	h.emit("before_provider_request", { payload: { input: text.slice(0, -1) } });
+	h.emit("before_provider_request", {
+		payload: {
+			messages: newer,
+			metadata: { nonceFragment: text.slice(0, -1) },
+		},
+	});
 	expect(h.aborts).toBe(2);
 	await h.emit("context", { messages: [userMessage("later clean pass", 3)] });
 	h.emit("before_provider_request", { payload: { input: "later clean pass" } });
@@ -278,11 +283,12 @@ test("issue 668: nonce-free sessions never serialize the provider payload", asyn
 	// serialize its payload.
 	expect(() => h.emit("before_provider_request", { payload })).not.toThrow();
 	expect(h.aborts).toBe(0);
-	h.emit("before_provider_request", { payload: { messages: other } });
+	const candidate = await prepareNonceCandidate(h, other);
+	h.emit("before_provider_request", { payload: { messages: candidate } });
 	expect(h.aborts).toBe(0);
 	h.emit(
 		"before_provider_request",
-		{ payload: { messages: other } },
+		{ payload: { messages: candidate } },
 		"issue-668-other",
 	);
 	expect(h.aborts).toBe(1);
@@ -294,20 +300,22 @@ test("issue 668: each session retains exactly its newest 32 unsendable nonces", 
 	for (let index = 0; index < 33; index++)
 		raw.push(await markedFallback(h, index));
 	const other = await markedFallback(h, 100, "issue-668-other");
-	await h.emit("context", { messages: [userMessage("managed")] });
-	h.emit("before_provider_request", { payload: { messages: raw[0] } });
+	const retired = await prepareNonceCandidate(h, raw[0]);
+	h.emit("before_provider_request", { payload: { messages: retired } });
 	expect(h.aborts).toBe(0);
-	for (const messages of raw.slice(1))
-		h.emit("before_provider_request", { payload: { messages } });
+	for (const messages of raw.slice(1)) {
+		const candidate = await prepareNonceCandidate(h, messages);
+		h.emit("before_provider_request", { payload: { messages: candidate } });
+	}
 	expect(h.aborts).toBe(32);
 	await h.emit(
 		"context",
-		{ messages: [userMessage("managed")] },
+		{ messages: [userMessage("managed"), ...other] },
 		"issue-668-other",
 	);
 	h.emit(
 		"before_provider_request",
-		{ payload: { messages: other } },
+		{ payload: { messages: [userMessage("managed"), ...other] } },
 		"issue-668-other",
 	);
 	expect(h.aborts).toBe(33);
@@ -323,10 +331,11 @@ test("issue 668: receipt cleanup also clears only that session's nonces", async 
 		"issue-668-other",
 	);
 	clearPiContextReceipt("issue-668");
-	await h.emit("context", { messages: [userMessage("managed")] });
-	h.emit("before_provider_request", { payload: { messages: raw } });
+	const candidate = await prepareNonceCandidate(h, raw);
+	h.emit("before_provider_request", { payload: { messages: candidate } });
 	expect(h.aborts).toBe(0);
 	const payload = {
+		messages: candidate,
 		toJSON() {
 			throw new Error("cleared session serialized the payload");
 		},
@@ -335,11 +344,22 @@ test("issue 668: receipt cleanup also clears only that session's nonces", async 
 	expect(h.aborts).toBe(0);
 	h.emit(
 		"before_provider_request",
-		{ payload: { messages: other } },
+		{ payload: { messages: [userMessage("managed"), ...other] } },
 		"issue-668-other",
 	);
 	expect(h.aborts).toBe(1);
 });
+
+async function prepareNonceCandidate(
+	h: ReturnType<typeof nonceHarness>,
+	messages: ReturnType<typeof userMessage>[],
+) {
+	// Return the candidate from a fresh pass so this test isolates which nonce
+	// markers are retained, without an unrelated raw body borrowing its receipt.
+	const candidate = [userMessage("managed"), ...messages];
+	await h.emit("context", { messages: candidate });
+	return candidate;
+}
 
 for (const kind of [
 	"pi",

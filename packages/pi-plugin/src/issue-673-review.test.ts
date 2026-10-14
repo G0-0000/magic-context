@@ -4,6 +4,10 @@ import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
 } from "./pi-context-refusal";
+import {
+	piHasManagedSignature,
+	piManagedSignature,
+} from "./pi-dispatch-identity";
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	assistantMessage,
@@ -165,8 +169,8 @@ test("review compatibility: actual tool-loop followup needs no new start", async
 	expect(h.refusals).toEqual([]);
 });
 
-// Witnesses record current fence behavior, including defects, not desired contracts.
-test("review witness: dropping Anthropic cache breakpoints refuses unchanged text", async () => {
+// The four independent defect witnesses now require safe admission or refusal.
+test("review regression: dropping Anthropic cache breakpoints admits unchanged text", async () => {
 	const h = harness();
 	const body = await h.prepare((managed) => ({
 		...managed,
@@ -182,11 +186,11 @@ test("review witness: dropping Anthropic cache breakpoints refuses unchanged tex
 	const retry = structuredClone(body);
 	delete (retry.system as Body[])[0].cache_control;
 	h.dispatch(retry);
-	expect(h.aborts).toBe(1);
-	expect(h.refusals[0]).toContain("does not match");
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
 });
 
-test("review witness: retained Responses receipt ignores a changed prompt template", async () => {
+test("review regression: retained Responses receipt refuses a changed prompt template", async () => {
 	const h = harness();
 	const body = await h.prepare((managed) => ({
 		input: (managed.messages as Body[]).map((message) => ({
@@ -206,13 +210,13 @@ test("review witness: retained Responses receipt ignores a changed prompt templa
 		...body,
 		prompt: { id: "pmpt_other", variables: { transcript: "RAW_UNPREPARED" } },
 	});
-	expect(h.aborts).toBe(0);
-	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("does not match");
 	h.dispatch({
 		...body,
 		input: [{ role: "user", content: "changed raw input" }],
 	});
-	expect(h.aborts).toBe(1);
+	expect(h.aborts).toBe(2);
 	expect(h.refusals[0]).toContain("does not match");
 });
 
@@ -237,7 +241,7 @@ test("review witness: retained receipt is not rechecked after native branch repl
 	expect(h.aborts).toBe(0);
 });
 
-test("review witness: a completed overlapping pass authorizes the prior raw request", async () => {
+test("review regression: a completed overlapping pass refuses the prior raw request", async () => {
 	const h = harness();
 	await h.prepare();
 	const next = [...input, userMessage("different next run", 40)];
@@ -245,11 +249,11 @@ test("review witness: a completed overlapping pass authorizes the prior raw requ
 	h.emit("agent_start");
 	await h.emit("context", { messages: structuredClone(next) });
 	h.dispatch({ messages: structuredClone(input) });
-	expect(h.aborts).toBe(0);
-	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("missing current receipt signature");
 });
 
-test("review witness: equivalent message object key order is refused", async () => {
+test("review regression: equivalent message object key order is admitted", async () => {
 	const h = harness();
 	const body = await h.prepare();
 	h.retain();
@@ -258,8 +262,8 @@ test("review witness: equivalent message object key order is refused", async () 
 		Object.fromEntries(Object.entries(message).reverse()),
 	);
 	h.dispatch(retry);
-	expect(h.aborts).toBe(1);
-	expect(h.refusals[0]).toContain("does not match");
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
 });
 
 test.skipIf(!process.env.MC673_REVIEW_BENCH)(
@@ -294,6 +298,10 @@ test.skipIf(!process.env.MC673_REVIEW_BENCH)(
 			};
 		};
 		const ordinary = measure(() => h.dispatch(body));
+		const signature = piManagedSignature(body.messages as unknown[]);
+		const signature_only = measure(() => {
+			piHasManagedSignature(body, signature);
+		});
 		const endStart = performance.now();
 		h.retain();
 		const end_ms = performance.now() - endStart;
@@ -315,6 +323,7 @@ test.skipIf(!process.env.MC673_REVIEW_BENCH)(
 				context_ms,
 				first_dispatch_ms,
 				ordinary,
+				signature_only,
 				end_ms,
 				retained_same_objects,
 				retained_distinct_strings,

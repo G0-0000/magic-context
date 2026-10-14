@@ -1,0 +1,18 @@
+{
+  "tool": "Bun 1.4.2; Linux four CPUs; TypeScript 5.9.3",
+  "fixture": { "messages": 1000, "body_utf8_bytes": 5299891, "text": "indexed user messages, 350 repetitions of review history per message" },
+  "method": "Actual registered hooks; 10 warmups and 100 samples; independent JSON-parsed bodies prepared outside timing; signature-only measures the production bounded scanner directly. No nonce scan, HTTP, DB, or stringify in timed dispatch. stringify is a separate baseline.",
+  "results": {
+    "context_ms": 8.263963,
+    "first_dispatch_ms": 2.096215,
+    "ordinary": {"count":100,"median_ms":0.786974,"p95_ms":5.407455,"max_ms":9.026752},
+    "signature_only": {"count":100,"median_ms":0.000340,"p95_ms":0.001783,"max_ms":0.210213},
+    "end_ms":3.730295,
+    "retained_same_objects":{"count":100,"median_ms":0.444732,"p95_ms":0.963333,"max_ms":3.142154},
+    "retained_distinct_strings":{"count":100,"median_ms":2.139345,"p95_ms":5.794459,"max_ms":12.469258},
+    "stringify":{"count":100,"median_ms":1.258897,"p95_ms":7.921072,"max_ms":21.408826}
+  },
+  "gate": "106 pass, 5 opt-in skips, 0 fail, 421 assertions, 111 tests across 15 files",
+  "limits": "100000 inspected nodes, 128 levels, 32 Mi UTF-16 string/key units; signature scan 8 message entries x 32 text blocks x 4096-character prefixes",
+  "limitations": "One final run under parallel load; tails include JSC warmup/GC/runner variation, not a wall-clock guarantee. No RSS measurement. The signature is a managed-prefix witness, not full first-body cryptographic provenance."
+}

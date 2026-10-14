@@ -31,6 +31,8 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const refusals: string[] = [];
 	let aborts = 0;
+	let managedMessages: unknown[] = [];
+	let generation = 0;
 	registerPiGuardedContext(
 		{
 			on: (name: string, fn: (...args: unknown[]) => unknown) =>
@@ -38,7 +40,13 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 			appendEntry: (_type: string, data: { message: string }) =>
 				refusals.push(data.message),
 		} as never,
-		handler,
+		async (event, ctx, budget) => {
+			const pass = ++generation;
+			const result = await handler(event, ctx, budget);
+			if (pass === generation && result?.messages)
+				managedMessages = structuredClone(result.messages);
+			return result;
+		},
 	);
 	const ctx = {
 		...fakeContext(SESSION),
@@ -58,7 +66,7 @@ function harness(handler: Parameters<typeof registerPiGuardedContext>[1]) {
 		emit,
 		dispatch: () =>
 			emit("before_provider_request", {
-				payload: { messages: [{ role: "user", content: "managed" }] },
+				payload: { messages: structuredClone(managedMessages) },
 			}),
 	};
 }

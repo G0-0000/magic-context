@@ -45,11 +45,20 @@ if (
 	throw new Error(`expected pinned OMP ${expectedVersion}, got ${version}`);
 const mode = process.argv[2] ?? "late-retry";
 if (
-	!["normal", "late-retry", "goal-late-retry", "goal-raw-retry"].includes(mode)
+	![
+		"normal",
+		"late-retry",
+		"goal-late-retry",
+		"goal-raw-retry",
+		"goal-cache-retry",
+		"transform-proof",
+	].includes(mode)
 )
 	throw new Error("unknown mode");
 const goalMode = mode.startsWith("goal-");
 const rawRetry = mode === "goal-raw-retry";
+const cacheRetry = mode === "goal-cache-retry";
+const transformProof = mode === "transform-proof";
 if (goalMode && version !== "18.10.3")
 	throw new Error("goal probe requires OMP 18.10.3");
 const audit = (value: unknown) =>
@@ -109,7 +118,9 @@ mock.addMatcher((body) => {
 			error: {
 				status: 400,
 				type: "invalid_request_error",
-				message: "structured_outputs not supported",
+				message: cacheRetry
+					? "cache_control is not supported"
+					: "structured_outputs not supported",
 			},
 		};
 	}
@@ -129,6 +140,11 @@ writeFileSync(
 		autolearn: { enabled: false },
 		retry: { enabled: false },
 		goal: { enabled: true, continuationModes: ["rpc"] },
+		secrets: { enabled: transformProof },
+		snapcompact: {
+			systemPrompt: transformProof ? "all" : "none",
+			toolResults: transformProof,
+		},
 		quietStartup: true,
 		enableInstallTelemetry: false,
 	}),
@@ -145,10 +161,11 @@ writeFileSync(
 					{
 						id: "mock-model",
 						name: "Mock Model",
-						input: ["text"],
+						input: transformProof ? ["text", "image"] : ["text"],
 						contextWindow: 1000000,
 						maxTokens: 8192,
 						reasoning: false,
+						...(transformProof ? { tokenizer: "o200k" } : {}),
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					},
 				],
@@ -169,6 +186,19 @@ writeFileSync(
 const plugin =
 	process.env.MC673_PLUGIN ??
 	resolve(import.meta.dir, "../packages/pi-plugin/dist/index.js");
+const proofSecret = "FAKE_PROOF_SECRET_673_abcdefghijklmnopqrstuvwxyz";
+if (transformProof)
+	writeFileSync(
+		join(isolated.PI_CODING_AGENT_DIR, "secrets.yml"),
+		JSON.stringify([
+			{
+				type: "plain",
+				content: proofSecret,
+				mode: "obfuscate",
+				friendlyName: "PROOF",
+			},
+		]),
+	);
 const probe = join(root, "probe.mjs");
 writeFileSync(
 	probe,
@@ -183,7 +213,7 @@ export default async pi => {
   const delivered=new Promise(resolve=>{endDelivered=resolve;});
   globalThis.__mc673ReleaseEnd=releaseEnd;
   pi.on('agent_end',async event=>{
-    if(++ends===1 && ${JSON.stringify(mode)}!=='normal') {
+    if(++ends===1 && ${JSON.stringify(mode)}!=='normal' && !${transformProof}) {
       log({phase:'held-earlier-end',messages:event.messages});
       await heldEnd;
     }
@@ -221,6 +251,34 @@ const { prepareContextDatabase } = await import(
 prepareContextDatabase(isolated.XDG_DATA_HOME);
 process.title = "omp";
 const { createAgentSession } = await import(join(host, "src/sdk.ts"));
+if (transformProof) {
+	const { SnapcompactInlineTransformer, estimateInlineSavings } = await import(
+		join(host, "src/session/snapcompact-inline.ts")
+	);
+	const original = SnapcompactInlineTransformer.prototype.transform;
+	SnapcompactInlineTransformer.prototype.transform = async function (
+		context: any,
+		model: any,
+	) {
+		const options = {
+			renderSystemPrompt: this.options.renderSystemPrompt,
+			renderToolResults: this.options.renderToolResults,
+			shape: this.options.shape,
+		};
+		audit({
+			phase: "native-snapcompact-plan",
+			options,
+			modelInput: model.input,
+			estimate: estimateInlineSavings({
+				options,
+				model,
+				systemPrompt: context.systemPrompt,
+				messages: context.messages,
+			}),
+		});
+		return await original.call(this, context, model);
+	};
+}
 const { initializeExtensions } = await import(
 	join(host, "src/modes/runtime-init.ts")
 );
@@ -238,6 +296,11 @@ try {
 		agentDir: isolated.PI_CODING_AGENT_DIR,
 		additionalExtensionPaths: [probe],
 		disableExtensionDiscovery: true,
+		...(transformProof
+			? {
+					systemPrompt: `Proof instructions and dense reference data: ${Array.from({ length: 1500 }, (_, i) => ((i * 2654435761) >>> 0).toString(16).padStart(8, "0")).join("")}`,
+				}
+			: {}),
 	}));
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -254,6 +317,70 @@ try {
 			audit({ phase: "public-" + event.type, messages: event.messages });
 	});
 	isolation("start");
+	if (transformProof) {
+		const png =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1kAAAAASUVORK5CYII=";
+		const stamp = Date.now() - 10000;
+		const assistant = (id: string, timestamp: number) => ({
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id, name: "bash", arguments: { command: "proof" } },
+			],
+			api: "anthropic-messages",
+			provider: "mock",
+			model: "mock-model",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp,
+		});
+		const history = [
+			{ role: "user", content: "TRANSFORM_SEED", timestamp: stamp },
+			assistant("proof-large", stamp + 1),
+			{
+				role: "toolResult",
+				toolCallId: "proof-large",
+				toolName: "bash",
+				isError: false,
+				content: [
+					{
+						type: "text",
+						text: Array.from({ length: 1500 }, (_, i) =>
+							((i * 2246822519) >>> 0).toString(16).padStart(8, "0"),
+						).join(""),
+					},
+					{ type: "image", data: png, mimeType: "image/png" },
+				],
+				timestamp: stamp + 2,
+			},
+			assistant("proof-recent", stamp + 3),
+			{
+				role: "toolResult",
+				toolCallId: "proof-recent",
+				toolName: "bash",
+				isError: false,
+				content: [{ type: "text", text: "recent result" }],
+				timestamp: stamp + 4,
+			},
+			{
+				role: "user",
+				content: "TRANSFORM_STEER",
+				steering: true,
+				attribution: "agent",
+				timestamp: stamp + 5,
+			},
+		];
+		for (const message of history) {
+			await session.sessionManager.appendMessage(message);
+			session.agent.appendMessage(message);
+		}
+	}
 	if (goalMode) {
 		if (rawRetry) {
 			const { convertToLlm } = await import(
@@ -308,8 +435,8 @@ try {
 		await session.waitForIdle();
 		await goalController.settled();
 	} else {
-		await session.prompt("FIRST673");
-		await session.prompt("SECOND673");
+		await session.prompt(`FIRST673${transformProof ? ` ${proofSecret}` : ""}`);
+		await session.prompt(`SECOND673${transformProof ? ` ${proofSecret}` : ""}`);
 	}
 	await session.flushToDisk();
 	isolation("end");
@@ -338,7 +465,7 @@ try {
 				: /§\d+§ (?:FIRST|SECOND)673/.test(JSON.stringify(e.body)),
 		),
 	);
-	if (mode !== "normal") {
+	if (mode !== "normal" && !transformProof) {
 		check(
 			"retried context pass publishes a durable LKG slot before dispatch",
 			hooks.filter((e) => e.phase === "lkg-publication").at(-1)?.rows.length ===
@@ -395,12 +522,16 @@ try {
 		check(
 			rawRetry
 				? "raw retry carries no Magic Context managed prefix"
-				: "strict fallback reuses exactly the same managed messages",
+				: cacheRetry
+					? "cache fallback preserves managed conversation text"
+					: "strict fallback reuses exactly the same managed messages",
 			rawRetry
 				? !JSON.stringify(attempts[1].payload.messages).includes(
 						"<session-history>",
 					)
-				: wires.length === (goalMode ? 4 : 3) &&
+				: cacheRetry
+					? wires.length === 4
+					: wires.length === (goalMode ? 4 : 3) &&
 						JSON.stringify(wires[goalMode ? 2 : 1].body.messages) ===
 							JSON.stringify(wires[goalMode ? 3 : 2].body.messages),
 		);
@@ -426,8 +557,44 @@ try {
 					),
 		);
 	}
+	if (transformProof) {
+		const serialized = JSON.stringify(wires.map((e) => e.body));
+		check(
+			"secret obfuscation changes fake secret without losing managed signature",
+			hooks.some(
+				(e) =>
+					e.phase === "context" &&
+					JSON.stringify(e.messages).includes(proofSecret),
+			) && !serialized.includes(proofSecret),
+		);
+		check(
+			"native steering is wrapped after context",
+			serialized.includes("TRANSFORM_STEER") &&
+				serialized.includes("User interjection during work: priority"),
+		);
+		check(
+			"date cwd reminder reaches the managed wire",
+			serialized.includes("Today:") && serialized.includes(root),
+		);
+		check(
+			"snapcompact renders system prompt into frames",
+			serialized.includes("Full operating instructions: PNG"),
+		);
+		check(
+			"snapcompact renders historical tool output and preserves image content",
+			serialized.includes("compacted PNG frame") &&
+				serialized.includes("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"),
+		);
+		check(
+			"all transformed first sends remain admitted",
+			wires.length === 2 &&
+				!hooks.some(
+					(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
+				),
+		);
+	}
 	console.log(
-		`Bun ${Bun.version}; OMP ${version}; ${rawRetry ? 8 : goalMode ? 7 : mode === "late-retry" ? 5 : 1} checks passed; evidence ${root}`,
+		`Bun ${Bun.version}; OMP ${version}; ${transformProof ? 7 : rawRetry ? 8 : goalMode ? 7 : mode === "late-retry" ? 5 : 1} checks passed; evidence ${root}`,
 	);
 } finally {
 	await session?.dispose();
