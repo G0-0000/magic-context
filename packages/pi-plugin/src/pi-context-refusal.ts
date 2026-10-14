@@ -29,6 +29,11 @@ import {
 	piHasManagedSignature,
 	piManagedSignature,
 } from "./pi-dispatch-identity";
+import {
+	type PiPreparedStructure,
+	piMatchesPreparedStructure,
+	piPreparedStructure,
+} from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
 const ENTRY_TYPE = "magic-context-turn-refused";
@@ -64,6 +69,7 @@ interface Operation {
 	};
 	dispatchFields?: readonly LkgContentField[];
 	managedSignature?: string;
+	preparedStructure?: PiPreparedStructure;
 	retainedAfterEnd: boolean;
 	// Whether the dispatch fence has already admitted a request for the latest pass.
 	dispatched: boolean;
@@ -520,10 +526,20 @@ export function registerPiGuardedContext(
 					throw new Error(
 						"provider request does not match this pass's managed dispatch (missing current receipt signature)",
 					);
+				const fields = conversationFields(payload);
+				if (!fields)
+					throw new Error(
+						"provider conversation identity could not be established",
+					);
+				// The provider renderer may rewrite text and images, but a first send
+				// must still contain this pass's turns and ordered tool IDs. A generic
+				// managed delimiter alone also appears in older prepared conversations.
+				if (!piMatchesPreparedStructure(payload, active.preparedStructure))
+					throw new Error(
+						"provider request does not match this pass's managed dispatch (prepared turn structure)",
+					);
 				if (active.dispatched) {
-					const fields = conversationFields(payload);
 					if (
-						!fields ||
 						!active.dispatchFields ||
 						exactReusablePrefix(
 							[{ id: "conversation", fields }],
@@ -553,8 +569,7 @@ export function registerPiGuardedContext(
 					)
 						active.inputBranch = persisted;
 				}
-				if (!active.dispatched)
-					active.dispatchFields = conversationFields(payload);
+				if (!active.dispatched) active.dispatchFields = fields;
 				active.dispatched = true;
 			} catch (error) {
 				active.refused = true;
@@ -603,6 +618,7 @@ export function registerPiGuardedContext(
 		active.inputBranch = undefined;
 		active.dispatchFields = undefined;
 		active.managedSignature = undefined;
+		active.preparedStructure = undefined;
 		active.retainedAfterEnd = false;
 		active.dispatched = false;
 		active.ready = false;
@@ -652,6 +668,7 @@ export function registerPiGuardedContext(
 			);
 			if (result?.messages) {
 				active.managedSignature = piManagedSignature(result.messages);
+				active.preparedStructure = piPreparedStructure(result.messages);
 				budget.completed = true;
 				active.ready = true;
 				// Oh My Pi persists the new prompt concurrently with preparation; its

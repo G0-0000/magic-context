@@ -253,6 +253,58 @@ test("review regression: a completed overlapping pass refuses the prior raw requ
 	expect(h.refusals[0]).toContain("missing current receipt signature");
 });
 
+test("review regression: an older managed body cannot be the replacement pass's first send", async () => {
+	const h = harness();
+	const earlier = await h.prepare();
+	const next = [...input, userMessage("newest user turn", 40)];
+	h.native = structuredClone(next);
+	h.emit("agent_start");
+	await h.emit("context", { messages: structuredClone(next) });
+	h.dispatch(earlier);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("does not match");
+});
+
+test("review regression: first-send tool IDs bind the newest tool result", async () => {
+	const messages = [
+		userMessage("tool prompt", 10),
+		assistantToolCall("latest-call", "Read", { path: "example" }, 20),
+		toolResultMessage("latest-call", "latest result", 30),
+	];
+	const h = harness(messages);
+	h.emit("agent_start");
+	await h.emit("context", { messages: structuredClone(messages) });
+	const stale = h.payload();
+	const rows = stale.messages as Body[];
+	rows[rows.length - 1].toolCallId = "older-call";
+	h.dispatch(stale);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("prepared turn structure");
+});
+
+test("review regression: a first send with unreadable comparison data fails closed", async () => {
+	const h = harness();
+	h.emit("agent_start");
+	await h.emit("context", { messages: structuredClone(input) });
+	const body = h.payload();
+	const messages = body.messages as Body[];
+	messages[messages.length - 1].metadata = body;
+	h.dispatch(body);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("identity could not be established");
+});
+
+test("review regression: ordinary retries compare the full conversation without a delayed end", async () => {
+	const h = harness();
+	const body = await h.prepare();
+	const retry = structuredClone(body);
+	const messages = retry.messages as Body[];
+	messages[messages.length - 1].content = "changed newest user turn";
+	h.dispatch(retry);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain("does not match");
+});
+
 test("review regression: equivalent message object key order is admitted", async () => {
 	const h = harness();
 	const body = await h.prepare();
@@ -297,6 +349,21 @@ test.skipIf(!process.env.MC673_REVIEW_BENCH)(
 				max_ms: times.at(-1),
 			};
 		};
+		const firstTimes: number[] = [];
+		for (let i = 0; i < 30; i++) {
+			await h.emit("context", { messages: structuredClone(large) });
+			const candidate = h.payload();
+			const start = performance.now();
+			h.dispatch(candidate);
+			if (i >= 10) firstTimes.push(performance.now() - start);
+		}
+		firstTimes.sort((a, b) => a - b);
+		const first_sends = {
+			count: firstTimes.length,
+			median_ms: firstTimes[Math.floor(firstTimes.length / 2)],
+			p95_ms: firstTimes[Math.floor(firstTimes.length * 0.95)],
+			max_ms: firstTimes.at(-1),
+		};
 		const ordinary = measure(() => h.dispatch(body));
 		const signature = piManagedSignature(body.messages as unknown[]);
 		const signature_only = measure(() => {
@@ -322,6 +389,7 @@ test.skipIf(!process.env.MC673_REVIEW_BENCH)(
 				messages: large.length,
 				context_ms,
 				first_dispatch_ms,
+				first_sends,
 				ordinary,
 				signature_only,
 				end_ms,

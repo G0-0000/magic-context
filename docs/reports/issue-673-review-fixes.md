@@ -1,5 +1,7 @@
 # Issue 673 review follow-up: four findings addressed
 
+This is the preserved pre-structural receipt. [The structural first-send follow-up](issue-673-structural-dispatch.md) strengthens its generic-prefix witness, reruns the exact hosts and mutations, and states the remaining same-structure/text-only limit. The cache, prompt and object-order changes below remain in effect.
+
 The independent review commit `6096e6d6fc036f96d340f894e80dfde4546b79da` was cherry-picked as `b3288ff7b0d3ea599b42af15966f5466e3d4935a`. Its historical report/receipts remain intact; its four defect witnesses now assert the repaired behavior.
 
 ## Changes

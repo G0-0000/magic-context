@@ -10,6 +10,10 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import {
+	piMatchesPreparedStructure,
+	piPreparedStructure,
+} from "../packages/pi-plugin/src/pi-dispatch-structure";
 
 const root = realpathSync(process.env.MC673_RUN_ROOT!);
 if (!root.includes("/magic-context/issue-673/"))
@@ -52,13 +56,15 @@ if (
 		"goal-raw-retry",
 		"goal-cache-retry",
 		"transform-proof",
+		"transform-stale-first",
 	].includes(mode)
 )
 	throw new Error("unknown mode");
 const goalMode = mode.startsWith("goal-");
 const rawRetry = mode === "goal-raw-retry";
 const cacheRetry = mode === "goal-cache-retry";
-const transformProof = mode === "transform-proof";
+const staleFirst = mode === "transform-stale-first";
+const transformProof = mode === "transform-proof" || staleFirst;
 if (goalMode && version !== "18.10.3")
 	throw new Error("goal probe requires OMP 18.10.3");
 const audit = (value: unknown) =>
@@ -208,7 +214,7 @@ import { Database } from 'bun:sqlite';
 import magic from ${JSON.stringify(plugin)};
 const log = value => appendFileSync(${JSON.stringify(join(root, "hooks.jsonl"))}, JSON.stringify({at:Date.now(),...value})+'\\n');
 export default async pi => {
-  let ends=0, attempts=0, releaseEnd, endDelivered;
+  let ends=0, attempts=0, providerPayloads=0, firstPayload, releaseEnd, endDelivered;
   const heldEnd=new Promise(resolve=>{releaseEnd=resolve;});
   const delivered=new Promise(resolve=>{endDelivered=resolve;});
   globalThis.__mc673ReleaseEnd=releaseEnd;
@@ -221,7 +227,11 @@ export default async pi => {
   const proxy = new Proxy(pi, {get(target,key) {
     if(key==='on') return (name,handler)=>target.on(name,async (event,ctx)=>{
       if(name==='before_provider_request' && JSON.stringify(event.payload).includes(${JSON.stringify(goalMode ? "GOAL674" : "SECOND673")}) && ++attempts===${goalMode ? 4 : 2} && ${JSON.stringify(mode)}!=='normal') await delivered;
-      if(name==='context') globalThis.__mc674Raw=structuredClone(event.messages);
+       if(name==='context') globalThis.__mc674Raw=structuredClone(event.messages);
+       if(name==='before_provider_request') {
+         if(++providerPayloads===1) firstPayload=structuredClone(event.payload);
+         else if(${staleFirst}) {event.payload=structuredClone(firstPayload);log({phase:'stale-first-substituted'});}
+       }
       if(name==='before_provider_request' && attempts===4 && ${rawRetry}) event.payload.messages=(await globalThis.__mc674BuildRaw()).messages;
       if(['agent_start','agent_end','context','before_provider_request'].includes(name)) log({phase:name,messages:event.messages,payload:event.payload,willContinue:event.willContinue,idle:ctx.isIdle(),agent:ctx.agent,sessionId:ctx.sessionManager.getSessionId(),branch:name!=='agent_start'?ctx.sessionManager.getBranch():undefined});
       const wrapped = Object.defineProperties(Object.create(ctx), {
@@ -557,6 +567,45 @@ try {
 					),
 		);
 	}
+	let preparedMessages: unknown[] | undefined;
+	let structureMatches = true;
+	const structureEvidence: unknown[] = [];
+	for (const hook of hooks) {
+		if (hook.phase === "context-end" && Array.isArray(hook.messages))
+			preparedMessages = hook.messages;
+		if (hook.phase !== "before_provider_request" || !preparedMessages) continue;
+		const matches = piMatchesPreparedStructure(
+			hook.payload,
+			piPreparedStructure(preparedMessages),
+		);
+		structureMatches &&= matches;
+		structureEvidence.push({
+			at: hook.at,
+			prepared: piPreparedStructure(preparedMessages),
+			matches,
+		});
+	}
+	audit({ phase: "prepared-structure-proof", attempts: structureEvidence });
+	if (staleFirst)
+		check(
+			"an older managed body is refused as the replacement pass's first send before HTTP",
+			wires.length === 1 &&
+				structureEvidence.length === 2 &&
+				!structureMatches &&
+				hooks.filter(
+					(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
+				).length === 1 &&
+				hooks.some(
+					(e) =>
+						e.phase === "entry" &&
+						e.data?.message?.includes("prepared turn structure"),
+				),
+		);
+	else if (!rawRetry)
+		check(
+			"every first send and retry preserves prepared turns and ordered tool IDs",
+			structureMatches && structureEvidence.length === wires.length,
+		);
 	if (transformProof) {
 		const serialized = JSON.stringify(wires.map((e) => e.body));
 		check(
@@ -586,15 +635,20 @@ try {
 				serialized.includes("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"),
 		);
 		check(
-			"all transformed first sends remain admitted",
-			wires.length === 2 &&
-				!hooks.some(
-					(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
-				),
+			staleFirst
+				? "the transformed initial send is admitted and stale replacement is not"
+				: "all transformed first sends remain admitted",
+			staleFirst
+				? wires.length === 1
+				: wires.length === 2 &&
+						!hooks.some(
+							(e) =>
+								e.phase === "entry" && e.type === "magic-context-turn-refused",
+						),
 		);
 	}
 	console.log(
-		`Bun ${Bun.version}; OMP ${version}; ${transformProof ? 7 : rawRetry ? 8 : goalMode ? 7 : mode === "late-retry" ? 5 : 1} checks passed; evidence ${root}`,
+		`Bun ${Bun.version}; OMP ${version}; ${transformProof ? 8 : rawRetry ? 8 : goalMode ? 8 : mode === "late-retry" ? 6 : 2} checks passed; evidence ${root}`,
 	);
 } finally {
 	await session?.dispose();

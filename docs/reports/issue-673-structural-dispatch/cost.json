@@ -1,0 +1,15 @@
+{
+  "tool": "Bun 1.4.2; remote Linux,4c; BUN_JSC_useOMGJIT=0 bun test --parallel=4 --timeout 30000",
+  "fixture": {"messages": 1000, "provider_body_bytes": 5299891},
+  "method": "Actual registered dispatch hook. First sends: 10 warmups and 20 measurements, context preparation/cloning outside timing. Other conditions: 10 warmups and 100 measurements. Independently JSON-parsed payload copies prepared outside timing. No nonce scan, DB or HTTP in the benchmark.",
+  "cold_first_dispatch_ms": 1.897121,
+  "first_sends": {"count": 20, "median_ms": 0.803514, "p95_ms": 1.588783, "max_ms": 1.588783},
+  "ordinary_callbacks": {"count": 100, "median_ms": 0.811539, "p95_ms": 2.961042, "max_ms": 9.579679},
+  "retained_same_objects": {"count": 100, "median_ms": 0.487683, "p95_ms": 0.753541, "max_ms": 1.089950},
+  "retained_distinct_strings": {"count": 100, "median_ms": 1.769061, "p95_ms": 4.046272, "max_ms": 5.010537},
+  "managed_prefix_only": {"count": 100, "median_ms": 0.000330, "p95_ms": 0.000601, "max_ms": 0.010750},
+  "whole_body_stringify_baseline": {"count": 100, "median_ms": 0.896869, "p95_ms": 3.379145, "max_ms": 12.506064},
+  "end_attribution_ms": 0.962902,
+  "regression_selection": "118 pass, 5 skip, 0 fail; 446 assertions; 123 tests across 16 files",
+  "limits": "Observed medians meet the 2–3 ms target; this is not a maximum-latency guarantee. GC/load affect tails. The existing nonempty issue-668 nonce scan still serializes; nonce-free callbacks do not."
+}

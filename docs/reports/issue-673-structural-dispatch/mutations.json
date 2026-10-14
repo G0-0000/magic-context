@@ -1,0 +1,107 @@
+{
+  "tool": "Bun 1.4.2; Linux,4c; BUN_JSC_useOMGJIT=0 bun test --parallel=4 --timeout 30000",
+  "procedure": "The live files were staged and git diff --stat was empty before each NON-VACUITY BREAK. Every mutation produced a nonempty diff. After each test the specific file was restored with git checkout -- <path> && touch <path>; git diff --stat was empty. No other test failed in any selected run.",
+  "controls": [
+    {
+      "control": "Disable Anthropic cache-only normalization",
+      "path": "packages/pi-plugin/src/pi-dispatch-identity.ts",
+      "selector": "dropping Anthropic cache breakpoints|top-level controls and tool ordering",
+      "expected_red": "review regression: dropping Anthropic cache breakpoints admits unchanged text",
+      "green": "review compatibility: top-level controls and tool ordering can change",
+      "captured_output": "(fail) review regression: dropping Anthropic cache breakpoints admits unchanged text; Expected 0, Received 1. (pass) review compatibility: top-level controls and tool ordering can change. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Omit the Responses prompt template",
+      "path": "packages/pi-plugin/src/pi-dispatch-identity.ts",
+      "selector": "changed prompt template|instructions and conversation are bound",
+      "expected_red": "review regression: retained Responses receipt refuses a changed prompt template",
+      "green": "review safety: retained Responses instructions and conversation are bound",
+      "captured_output": "(fail) review regression: retained Responses receipt refuses a changed prompt template; Expected 1, Received 0. (pass) review safety: retained Responses instructions and conversation are bound. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Disable the current prepared-structure dispatch gate",
+      "path": "packages/pi-plugin/src/pi-context-refusal.ts",
+      "selector": "older managed body|actual tool-loop followup",
+      "expected_red": "review regression: an older managed body cannot be the replacement pass's first send",
+      "green": "review compatibility: actual tool-loop followup needs no new start",
+      "captured_output": "(fail) review regression: an older managed body cannot be the replacement pass's first send; Expected 1, Received 0. (pass) review compatibility: actual tool-loop followup needs no new start. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Keep object insertion order instead of canonical key sorting",
+      "path": "packages/pi-plugin/src/pi-dispatch-identity.ts",
+      "selector": "equivalent message object key order|top-level controls and tool ordering",
+      "expected_red": "review regression: equivalent message object key order is admitted",
+      "green": "review compatibility: top-level controls and tool ordering can change",
+      "captured_output": "(fail) review regression: equivalent message object key order is admitted; Expected 0, Received 1. (pass) review compatibility: top-level controls and tool ordering can change. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Omit the newest-turn message-count comparison",
+      "path": "packages/pi-plugin/src/pi-dispatch-structure.ts",
+      "selector": "older managed body|ordinary retries compare",
+      "expected_red": "review regression: an older managed body cannot be the replacement pass's first send",
+      "green": "review regression: ordinary retries compare the full conversation without a delayed end",
+      "captured_output": "(fail) review regression: an older managed body cannot be the replacement pass's first send; Expected 1, Received 0. (pass) review regression: ordinary retries compare the full conversation without a delayed end. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Omit ordered tool-result IDs including the newest result",
+      "path": "packages/pi-plugin/src/pi-dispatch-structure.ts",
+      "selector": "first-send tool IDs|actual tool-loop followup",
+      "expected_red": "review regression: first-send tool IDs bind the newest tool result",
+      "green": "review compatibility: actual tool-loop followup needs no new start",
+      "captured_output": "(fail) review regression: first-send tool IDs bind the newest tool result; Expected 1, Received 0. (pass) review compatibility: actual tool-loop followup needs no new start. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Skip full-content comparison on ordinary callbacks",
+      "path": "packages/pi-plugin/src/pi-context-refusal.ts",
+      "selector": "ordinary retries compare|actual tool-loop followup",
+      "expected_red": "review regression: ordinary retries compare the full conversation without a delayed end",
+      "green": "review compatibility: actual tool-loop followup needs no new start",
+      "captured_output": "(fail) review regression: ordinary retries compare the full conversation without a delayed end; Expected 1, Received 0. (pass) review compatibility: actual tool-loop followup needs no new start. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Admit unreadable first-send comparison data",
+      "path": "packages/pi-plugin/src/pi-context-refusal.ts",
+      "selector": "unreadable comparison data|dropping Anthropic cache breakpoints",
+      "expected_red": "review regression: a first send with unreadable comparison data fails closed",
+      "green": "review regression: dropping Anthropic cache breakpoints admits unchanged text",
+      "captured_output": "(fail) review regression: a first send with unreadable comparison data fails closed; Expected 1, Received 0. (pass) review regression: dropping Anthropic cache breakpoints admits unchanged text. 1 pass, 1 fail, 13 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Ignore prepared role order",
+      "path": "packages/pi-plugin/src/pi-dispatch-structure.ts",
+      "selector": "count and role order|text transforms and packed",
+      "expected_red": "dispatch structure: count and role order include the newest user turn",
+      "green": "dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn",
+      "captured_output": "(fail) dispatch structure: count and role order include the newest user turn; Expected false, Received true. (pass) dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn. 1 pass, 1 fail, 6 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Ignore ordered assistant tool-call IDs",
+      "path": "packages/pi-plugin/src/pi-dispatch-structure.ts",
+      "selector": "every tool call and result ID|text transforms and packed",
+      "expected_red": "dispatch structure: every tool call and result ID remains ordered",
+      "green": "dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn",
+      "captured_output": "(fail) dispatch structure: every tool call and result ID remains ordered; Expected false, Received true. (pass) dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn. 1 pass, 1 fail, 6 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 1 deletion(-)", "after_stat": "empty", "outcome": "reddened"
+    },
+    {
+      "control": "Ignore preserved native timestamps",
+      "path": "packages/pi-plugin/src/pi-dispatch-structure.ts",
+      "selector": "preserved timestamps|text transforms and packed",
+      "expected_red": "dispatch structure: preserved timestamps bind native message identities when present",
+      "green": "dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn",
+      "captured_output": "(fail) dispatch structure: preserved timestamps bind native message identities when present; Expected false, Received true. (pass) dispatch structure: text transforms and packed Anthropic result runs preserve every prepared turn. 1 pass, 1 fail, 6 filtered.",
+      "during_stat": "1 file changed, 1 insertion(+), 3 deletions(-)", "after_stat": "empty", "outcome": "reddened"
+    }
+  ],
+  "command": "cd packages/pi-plugin && BUN_JSC_useOMGJIT=0 bun test --parallel=4 --timeout 30000 src/issue-673-review.test.ts -t '<selector>'; last three controls use src/pi-dispatch-structure.test.ts instead",
+  "restored_hosts": "OMP 18.10.3: goal-late-retry 4 HTTP/8 checks/0 refusals; goal-cache-retry 4 HTTP/8 checks/0 refusals; transform-proof 2 HTTP/8 checks/0 refusals; transform-stale-first 1 HTTP/8 checks/1 intended structure refusal"
+}
