@@ -31,7 +31,7 @@ for (const [name, url, script, entry] of [
     });
 }
 
-it("a built bundle missing its marker worker visibly defers without scanning or deleting", async () => {
+it("a built bundle missing its marker worker logs once and visibly defers without scanning or deleting", async () => {
     const root = join(tmpdir(), "magic-context", `marker-missing-worker-${crypto.randomUUID()}`);
     mkdirSync(root, { recursive: true });
     const harness = join(root, "harness.ts");
@@ -46,8 +46,10 @@ it("a built bundle missing its marker worker visibly defers without scanning or 
         import {flushLogger} from ${JSON.stringify(logger)};
         const db=new Database(process.env.CASE_DB);db.exec('CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,data TEXT)');
         db.prepare('INSERT INTO message VALUES (?,?,?)').run('legacy','s','{"summary":true,"finish":"stop"}');
-        const ready=await prepareMarkerCandidateBasis(db,'s');
-        if(ready||readMarkerCandidateBasis(db,'s'))throw Error('missing worker must not certify candidates');
+        for(let attempt=0;attempt<2;attempt++) {
+            const ready=await prepareMarkerCandidateBasis(db,'s');
+            if(ready||readMarkerCandidateBasis(db,'s'))throw Error('missing worker must not certify candidates');
+        }
         if((db.prepare('SELECT count(*) AS n FROM message').get()).n!==1)throw Error('missing worker deleted state');
         flushLogger();db.close();console.log('visible deferral, retained 1 row');`,
     );
@@ -71,6 +73,7 @@ it("a built bundle missing its marker worker visibly defers without scanning or 
         const child = Bun.spawn([process.execPath, join(root, "harness.js")], {
             stdout: "pipe",
             stderr: "pipe",
+            windowsHide: true,
             env: {
                 ...process.env,
                 NODE_ENV: "production",
@@ -89,8 +92,10 @@ it("a built bundle missing its marker worker visibly defers without scanning or 
             .split("\n")
             .filter((line) => line.includes("missing candidate worker"));
         expect(lines).toHaveLength(1);
-        const visiblePath = process.env.HOME && missing.startsWith(`${process.env.HOME}/`)
-            ? `~${missing.slice(process.env.HOME.length)}` : missing;
+        const visiblePath =
+            process.env.HOME && missing.startsWith(`${process.env.HOME}/`)
+                ? `~${missing.slice(process.env.HOME.length)}`
+                : missing;
         expect(lines[0]).toContain(visiblePath);
         expect(lines[0]).toContain("marker unchanged, advancement deferred");
     } finally {

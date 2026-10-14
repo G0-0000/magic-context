@@ -28,6 +28,7 @@ export type MarkerCandidateReply =
 const candidates = new WeakMap<Database, Map<string, MarkerCandidateBasis>>();
 const pending = new WeakMap<Database, Map<string, Promise<boolean>>>();
 const workers = new Set<Worker>();
+const missingWorkerWarnings = new Set<string>();
 let exitRegistered = false;
 
 function markerStamp(db: Database): MarkerStamp | undefined {
@@ -64,10 +65,11 @@ export function readMarkerCandidateBasis(
     return undefined;
 }
 
-/** The receipt records the marker connection's versions before worker discovery.
- * It certifies only that marker write's complete candidate set, never ordinal
- * readiness or checkpoints. A mismatch keeps the existing marker; discovery is
- * retried only when a later context-history rebuild requests another advance. */
+/** Capture peer commits, local writes and schema changes on the marker's SQLite
+ * connection before scanning on a worker. Reuse the discovered summary IDs only
+ * if those counters still match; they do not certify message-number assignments.
+ * A mismatch leaves the existing marker intact. A later history rebuild retries
+ * discovery when it requests a marker advance, rather than retrying every turn. */
 export function prepareMarkerCandidateBasis(
     db: Database,
     sessionId: string,
@@ -83,9 +85,12 @@ export function prepareMarkerCandidateBasis(
     if (!before) return Promise.resolve(false);
     const entry = options.entry ?? markerWorkerEntry();
     if (entry.protocol === "file:" && !existsSync(fileURLToPath(entry))) {
-        log(
-            `[magic-context] compaction-marker: missing candidate worker ${fileURLToPath(entry)}; marker unchanged, advancement deferred`,
-        );
+        if (!missingWorkerWarnings.has(entry.href)) {
+            missingWorkerWarnings.add(entry.href);
+            log(
+                `[magic-context] compaction-marker: missing candidate worker ${fileURLToPath(entry)}; marker unchanged, advancement deferred`,
+            );
+        }
         return Promise.resolve(false);
     }
     const preparation = runCandidateWorker(path, sessionId, options)
@@ -180,9 +185,10 @@ function runCandidateWorker(
     });
 }
 
-/** Discover all summary-flagged rows on a worker. Before deleting, the marker
- * write transaction checks their parent ID, finish status and exact text by
- * primary key; timestamp order never excludes imported or rewritten rows. */
+/** Find all messages with the summary flag on a worker. Marker cleanup then
+ * checks each ID's parent, completion status and exact text before deleting it.
+ * Do not filter by creation time: imported or rewritten legacy summaries can
+ * precede their parent even though the original writer used later timestamps. */
 export function scanMarkerSummaryCandidates(db: Database, sessionId: string): string[] {
     db.exec("BEGIN");
     try {

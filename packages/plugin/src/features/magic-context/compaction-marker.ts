@@ -571,8 +571,9 @@ export function injectCompactionMarker(
     return injectCompactionMarkerFromBasis(args);
 }
 
-/** Candidate preparation is a marker optimization, not an ordinal readiness
- * check. False means keep the existing marker and serve the rebuilding turn. */
+/** Prepare summary IDs for marker cleanup independently of message-number lookup.
+ * If discovery is unavailable or the store changes during it, return false:
+ * callers keep the existing marker but can still serve the rebuilt history. */
 export async function prepareCompactionMarkerCandidates(
     sessionId: string,
     options: MarkerCandidatePreparationOptions = {},
@@ -588,7 +589,8 @@ export async function prepareCompactionMarkerCandidates(
     }
 }
 
-/** Snapshot-complete IDs for diagnostics and the marker's primary-key query. */
+/** Return every summary ID discovered for this session, only while the store is
+ * unchanged. Cleanup probes these primary keys; diagnostics can inspect them. */
 export function getPreparedCompactionMarkerSummaryIds(
     sessionId: string,
 ): readonly string[] | undefined {
