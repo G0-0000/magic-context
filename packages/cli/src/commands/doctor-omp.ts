@@ -23,7 +23,13 @@ import {
     type GhCommandResult,
     submitGithubIssue,
 } from "../lib/github-issue";
-import { formatLogFileInspection, inspectMagicContextLogs } from "../lib/log-lines";
+import {
+    capBodyToGithubLimit,
+    extractRecentErrors,
+    filterLogLinesBySession,
+    getLogSessionIds,
+} from "../lib/issue-body";
+import { formatLogFileInspection, inspectMagicContextLogs, readLogLines } from "../lib/log-lines";
 import {
     detectOmpBinary,
     getOmpSetting,
@@ -60,6 +66,9 @@ interface RepairPlan {
 interface HealthReport {
     results: CheckResult[];
     repairPlan: RepairPlan;
+    pluginVersion: string | null;
+    ompVersion: string | null;
+    logFiles: ReturnType<DoctorDeps["inspectMagicContextLogs"]>;
     pass: number;
     warn: number;
     fail: number;
@@ -174,6 +183,8 @@ async function runHealthChecks(options: {
     quiet?: boolean;
 }): Promise<HealthReport> {
     const results: CheckResult[] = [];
+    let pluginVersion: string | null = null;
+    let ompVersion: string | null = null;
     const repairPlan: RepairPlan = {
         installPlugin: false,
         disableCompaction: false,
@@ -185,11 +196,13 @@ async function runHealthChecks(options: {
         add(results, "fail", "OMP binary not found on PATH or in standard user bin directories");
     } else {
         const version = options.deps.getOmpVersion(omp.path);
+        ompVersion = version;
         const plugins = options.deps.listOmpPlugins(omp.path);
         if (!plugins) {
             add(results, "fail", "`omp plugin list --json` failed or returned invalid JSON");
         } else {
             const plugin = plugins.find((entry) => entry.name === OMP_PLUGIN_PACKAGE);
+            pluginVersion = plugin?.version ?? null;
             if (!plugin) {
                 add(
                     results,
@@ -354,6 +367,9 @@ async function runHealthChecks(options: {
     return {
         results,
         repairPlan,
+        pluginVersion,
+        ompVersion,
+        logFiles,
         pass: results.filter((result) => result.status === "pass").length,
         warn: results.filter((result) => result.status === "warn").length,
         fail: results.filter((result) => result.status === "fail").length,
@@ -420,18 +436,64 @@ function timestamp(date: Date): string {
         .replace(/\.\d{3}Z$/, "Z");
 }
 
-function ompIssueBody(description: string, report: HealthReport): string {
+function ompIssueBody(
+    description: string,
+    report: HealthReport,
+    logLines: string[],
+    sessionFilter: string | null,
+): string {
+    const LOG_TAIL_LINES = 400;
+    const filteredLogLines = filterLogLinesBySession(logLines, sessionFilter);
+    const recentLog = sanitizeDiagnosticText(
+        filteredLogLines.slice(-LOG_TAIL_LINES).join("\n"),
+    ).trim();
+    const errorScanWindow = sanitizeDiagnosticText(filteredLogLines.slice(-4000).join("\n"));
+    const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
+
     return [
         "## Description",
         sanitizeDiagnosticText(description),
         "",
+        "## Environment",
+        `- Magic Context plugin: ${report.pluginVersion ? `v${sanitizeDiagnosticText(report.pluginVersion)}` : "not installed"}`,
+        `- Oh My Pi: ${report.ompVersion ? sanitizeDiagnosticText(report.ompVersion) : "not detected"}`,
+        `- OS: ${process.platform} ${process.arch}`,
+        `- Runtime: Node.js ${process.version}`,
+        "",
         "## OMP diagnostics",
-        `- Magic Context CLI: ${selfVersion()}`,
+        `- Magic Context CLI: v${selfVersion()}`,
         ...report.results.map(
             (result) =>
                 `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
         ),
+        "",
+        "## Recent errors (last 20, sanitized)",
+        recentErrorLines.length === 0
+            ? "_No error-shaped log lines found in recent history._"
+            : ["```", recentErrorLines.join("\n"), "```"].join("\n"),
+        "",
+        `## Log (last ${LOG_TAIL_LINES} lines, sanitized)`,
+        "```",
+        recentLog || "<no log output>",
+        "```",
     ].join("\n");
+}
+
+function writeOmpIssueReport(
+    path: string,
+    fullBodyMarkdown: string,
+): {
+    path: string;
+    bodyMarkdown: string;
+    fullPath?: string;
+    truncated: boolean;
+} {
+    const bodyMarkdown = capBodyToGithubLimit(fullBodyMarkdown);
+    const truncated = bodyMarkdown !== fullBodyMarkdown;
+    writeFileAtomic(path, `${bodyMarkdown}\n`);
+    const fullPath = truncated ? `${path}.full.md` : undefined;
+    if (fullPath) writeFileAtomic(fullPath, `${fullBodyMarkdown}\n`);
+    return { path, bodyMarkdown, ...(fullPath ? { fullPath } : {}), truncated };
 }
 
 function runGhCommandWithDeps(deps: DoctorDeps, args: string[]): GhCommandResult {
@@ -477,11 +539,20 @@ async function runIssueFlow(options: {
         const path = isAbsolute(options.reportPath)
             ? options.reportPath
             : join(options.cwd, options.reportPath);
-        writeFileAtomic(
+        const bundle = writeOmpIssueReport(
             path,
-            `${ompIssueBody("Generated non-interactively by `doctor --issue --report`.", report)}\n`,
+            ompIssueBody(
+                "Generated non-interactively by `doctor --issue --report`.",
+                report,
+                readLogLines(report.logFiles),
+                null,
+            ),
         );
-        options.prompts.log.success(`Sanitized report written to ${path}`);
+        options.prompts.log.success(
+            bundle.fullPath
+                ? `Sanitized report written to ${bundle.path}; full report at ${bundle.fullPath}`
+                : `Sanitized report written to ${bundle.path}`,
+        );
         return 0;
     }
 
@@ -494,21 +565,47 @@ async function runIssueFlow(options: {
         validate: (value) => (value.trim() ? undefined : "Description is required"),
     });
     const report = await runHealthChecks({ ...options, quiet: true });
+    const logLines = readLogLines(report.logFiles);
+    const sessionIds = getLogSessionIds(logLines);
+    let sessionFilter: string | null = null;
+    if (sessionIds.length > 1) {
+        const choice = await options.prompts.selectOne(
+            "Which OMP session is this issue about? (filters log lines from other sessions)",
+            [
+                ...sessionIds.map((sessionId, index) => ({
+                    label: `${sessionId}${index === 0 ? " (most recent)" : ""}`,
+                    value: sessionId,
+                })),
+                { label: "All sessions (no filtering)", value: "__all__" },
+            ],
+        );
+        sessionFilter = choice === "__all__" ? null : choice;
+    }
+
     const path = join(options.cwd, `magic-context-omp-issue-${timestamp(options.deps.now())}.md`);
-    writeFileAtomic(path, `${ompIssueBody(description, report)}\n`);
-    options.prompts.log.success(`Sanitized report written to ${path}`);
+    const bundle = writeOmpIssueReport(
+        path,
+        ompIssueBody(description, report, logLines, sessionFilter),
+    );
+    options.prompts.log.success(
+        bundle.fullPath
+            ? `Sanitized report written to ${bundle.path}; full report at ${bundle.fullPath}`
+            : `Sanitized report written to ${bundle.path}`,
+    );
     if (await options.prompts.confirm("Submit this issue on GitHub now?", false)) {
-        const result = submitGithubIssue(`[omp] ${title}`, path, (args) =>
+        const result = submitGithubIssue(`[omp] ${title}`, bundle.path, (args) =>
             runGhCommandWithDeps(options.deps, args),
         );
         if (result.ok) {
             options.prompts.log.success(result.output);
         } else {
-            options.prompts.log.warn(formatGithubIssueFallback(result, path));
+            options.prompts.log.warn(
+                formatGithubIssueFallback(result, bundle.fullPath ?? bundle.path),
+            );
         }
     }
     options.prompts.log.info(
-        `Open https://github.com/cortexkit/magic-context/issues/new and drag ${path} into the issue`,
+        `Open https://github.com/cortexkit/magic-context/issues/new and drag ${bundle.fullPath ?? bundle.path} into the issue`,
     );
     return 0;
 }

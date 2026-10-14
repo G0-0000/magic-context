@@ -6,8 +6,8 @@ import {
     renderDiagnosticsMarkdown,
     sanitizeString,
 } from "./diagnostics-pi";
-import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
-import { parseLogLine, readLogLines } from "./log-lines";
+import { capBodyToGithubLimit, extractRecentErrors, filterLogLinesBySession } from "./issue-body";
+import { readLogLines } from "./log-lines";
 
 export function sanitizeLogContent(content: string): string {
     return sanitizeString(content);
@@ -33,25 +33,6 @@ export interface BundledIssueReport {
     /** Full sanitized markdown when the GitHub body had to be capped. */
     fullPath?: string;
     truncated: boolean;
-}
-
-/**
- * Drop log lines that reference a session ID OTHER than `sessionId`.
- * See logs-opencode.ts for the rationale; this Pi variant uses the same
- * approach because Pi historian logs include the OpenCode-style `ses_*`
- * shape for its own child sessions and that's what the picker presents.
- */
-function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
-    if (!sessionId) return lines;
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
-    return lines.filter((line) => {
-        const parsed = parseLogLine(line);
-        if (parsed?.session && parsed.session !== sessionId) return false;
-        const matches =
-            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
-        if (!matches) return true;
-        return matches.every((id) => id === sessionId);
-    });
 }
 
 export async function bundleIssueReport(
