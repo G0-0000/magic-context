@@ -83,6 +83,50 @@ export function clearPiContextReceipt(sessionId: string): void {
 	for (const receipts of receiptMaps) receipts.delete(sessionId);
 }
 
+// Keep ownership guards outside the context callback's scope: a receipt can
+// outlive that callback, but must not keep its event or message history alive.
+function createPiContextOwnershipGuards(
+	operations: Map<string | object, Operation>,
+	key: string | object,
+	active: Operation,
+	budget: PiContextBudget,
+	owner: Operation | undefined,
+): {
+	isOwned: () => boolean;
+	isCurrent: () => boolean;
+	assertOwner: () => void;
+} {
+	const sideTurn = budget.sideTurn;
+	const signal = budget.signal;
+	const isOwned = () =>
+		sideTurn
+			? operations.get(key) === owner
+			: operations.get(key) === active && active.pass === budget;
+	const isCurrent = () => isOwned() && (sideTurn || !active.ended);
+	const assertOwner = () => {
+		if (!isCurrent())
+			throw new PiContextSupersededError(
+				"Pi context pass superseded: no longer valid for this operation",
+				active.ended
+					? "agent_end"
+					: operations.get(key) !== (sideTurn ? owner : active)
+						? "operation replacement or cache eviction"
+						: "newer context pass",
+			);
+		signal?.throwIfAborted();
+	};
+	return { isOwned, isCurrent, assertOwner };
+}
+
+function releasePiOperationPayloads(operation: Operation): void {
+	operation.inputKeys = undefined;
+	operation.inputMessages = undefined;
+	operation.inputBranch = undefined;
+	operation.dispatchFields = undefined;
+	operation.managedSignature = undefined;
+	operation.preparedStructure = undefined;
+}
+
 function operationKey(ctx: ExtensionContext): string | object {
 	return (
 		ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager ?? "no-session"
@@ -430,6 +474,9 @@ export function registerPiGuardedContext(
 				}
 				operation.ended = true;
 				operation.ready = false;
+				// A completed run is no longer dispatchable. Keep its small lifecycle
+				// and budget state for diagnostics, not its conversation snapshots.
+				releasePiOperationPayloads(operation);
 			}
 		});
 		// OMP supplies session identity, but no provider-attempt ID. The latest
@@ -623,7 +670,9 @@ export function registerPiGuardedContext(
 					`[magic-context][pi] OMP dispatch fence disabled for session ${String(key)}: verified ephemeral context; session-wide abort cannot distinguish provider operations (side_contexts=${counts.sides} context_passes=${counts.contexts})`,
 				);
 		}
-		const owner = operations.get(key);
+		// Only a side turn compares against the main operation it started beside.
+		// Native passes must never retain their predecessor through this guard.
+		const owner = budget.sideTurn ? operations.get(key) : undefined;
 		let operation = operations.get(key);
 		if (budget.sideTurn || !operation || operation.ended || !fenceEnabled) {
 			operation = newOperation();
@@ -631,12 +680,7 @@ export function registerPiGuardedContext(
 		}
 		const active = operation;
 		active.pass = budget;
-		active.inputKeys = undefined;
-		active.inputMessages = undefined;
-		active.inputBranch = undefined;
-		active.dispatchFields = undefined;
-		active.managedSignature = undefined;
-		active.preparedStructure = undefined;
+		releasePiOperationPayloads(active);
 		active.retainedAfterEnd = false;
 		active.dispatched = false;
 		active.ready = false;
@@ -644,23 +688,14 @@ export function registerPiGuardedContext(
 		// operation (its run's start or the previous end not delivered yet) is
 		// new work and earns its own receipt; the refused pass stays abandoned.
 		active.refused = false;
-		const isOwned = () =>
-			budget.sideTurn
-				? operations.get(key) === owner
-				: operations.get(key) === active && active.pass === budget;
-		const isCurrent = () => isOwned() && (budget.sideTurn || !active.ended);
-		budget.assertOwner = () => {
-			if (!isCurrent())
-				throw new PiContextSupersededError(
-					"Pi context pass superseded: no longer valid for this operation",
-					active.ended
-						? "agent_end"
-						: operations.get(key) !== (budget.sideTurn ? owner : active)
-							? "operation replacement or cache eviction"
-							: "newer context pass",
-				);
-			budget.signal?.throwIfAborted();
-		};
+		const { isOwned, isCurrent, assertOwner } = createPiContextOwnershipGuards(
+			operations,
+			key,
+			active,
+			budget,
+			owner,
+		);
+		budget.assertOwner = assertOwner;
 		try {
 			// Do not start storage work for the post-tool context hook that Pi may
 			// invoke while the cancelled run is unwinding.
@@ -757,6 +792,10 @@ export function registerPiGuardedContext(
 			active.refused = true;
 			refuse(ctx, budget, error, isOwned);
 			return { messages: event.messages };
+		} finally {
+			// Side turns have no dispatch receipt. Native Pi has no dispatch
+			// fence; only OMP's live main operation needs these payload snapshots.
+			if (!fenceEnabled || budget.sideTurn) releasePiOperationPayloads(active);
 		}
 	});
 }

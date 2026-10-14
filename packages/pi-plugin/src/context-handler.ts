@@ -770,6 +770,32 @@ const routinePressureAppliedBySession = new Map<string, boolean>();
 const firstContextPassSeenBySession = new Set<string>();
 const contextPassGeneration = new Map<string, symbol>();
 
+// The budget may remain reachable after preparation. Capture only generation
+// and cancellation state here, never the handler's event or message history.
+function createPiContextGenerationGuard(
+	assertOperation: () => void,
+	passSessionId: string | undefined,
+	generation: symbol,
+	sideTurn: boolean,
+	signal: AbortSignal | undefined,
+): () => void {
+	return () => {
+		assertOperation();
+		// Supersession takes precedence over cancellation: the old context's
+		// abort API belongs to the session and could cancel its replacement.
+		if (
+			!sideTurn &&
+			passSessionId &&
+			contextPassGeneration.get(passSessionId) !== generation
+		)
+			throw new PiContextSupersededError(
+				"Pi context pass superseded by a newer context generation",
+				"context generation",
+			);
+		signal?.throwIfAborted();
+	};
+}
+
 class PiLkgAdmissionReplay extends Error {
 	constructor(
 		readonly messages: unknown[],
@@ -4159,22 +4185,13 @@ export function registerPiContextHandler(
 		if (passSessionId && !budget.sideTurn)
 			contextPassGeneration.set(passSessionId, generation);
 		const signal = budget.signal;
-		const assertOperation = budget.assertOwner;
-		budget.assertOwner = () => {
-			assertOperation();
-			// Supersession takes precedence over cancellation: the old context's
-			// abort API belongs to the session and could cancel its replacement.
-			if (
-				!budget.sideTurn &&
-				passSessionId &&
-				contextPassGeneration.get(passSessionId) !== generation
-			)
-				throw new PiContextSupersededError(
-					"Pi context pass superseded by a newer context generation",
-					"context generation",
-				);
-			signal?.throwIfAborted();
-		};
+		budget.assertOwner = createPiContextGenerationGuard(
+			budget.assertOwner,
+			passSessionId,
+			generation,
+			budget.sideTurn,
+			signal,
+		);
 		let assertCurrentPass = budget.assert;
 		const guardAwait = budget.wait;
 		const passGuard = { assert: assertCurrentPass, wait: guardAwait };
