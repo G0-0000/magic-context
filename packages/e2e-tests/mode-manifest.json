@@ -2698,26 +2698,6 @@
             ]
         },
         {
-            "path": "tests/window-overlay-reload.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "one manifest-driven host behavior scenario runs from the shared HostHarness contract",
-            "contract_refs": [
-                "OVERLAY-SAME-PATH-AUTO-REFRESH",
-                "PI-EXTENSION-RELOAD"
-            ],
-            "hosts": [
-                "opencode",
-                "opencode2",
-                "pi",
-                "omp"
-            ],
-            "behavior": true
-        },
-        {
             "path": "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tier": "excluded",
             "invocation": {

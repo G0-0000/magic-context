@@ -8,9 +8,12 @@ import {
 import "@magic-context/core/config/prune-config-leaf";
 import { existsSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
+import {
+	warnDeprecatedMuralModel,
+	warnDeprecatedWindowOverlayPath,
+} from "@magic-context/core/config/deprecated-config";
 import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
-import { warnDeprecatedMuralModel } from "@magic-context/core/config/mural-model-deprecation";
 import { resolveConfigProfile } from "@magic-context/core/config/profiles";
 import {
 	attachProtectedTokensTierOverrides,
@@ -39,7 +42,6 @@ import {
 } from "@magic-context/core/shared/jsonc-parser";
 import { setOutputReserveConfig } from "@magic-context/core/shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "@magic-context/core/shared/prompt-surface";
-import { setWindowOverlayPath } from "@magic-context/core/shared/window-geometry";
 
 export interface LoadPiConfigOptions {
 	cwd?: string;
@@ -333,6 +335,7 @@ function parsePiConfig(
 		preMigrationWarnings,
 	);
 	warnDeprecatedMuralModel(migratedExperimental, preMigrationWarnings);
+	warnDeprecatedWindowOverlayPath(migratedExperimental, preMigrationWarnings);
 	const migrated = migrateDreamerV2(migratedExperimental, preMigrationWarnings);
 	const parsed = MagicContextConfigSchema.safeParse(migrated);
 	if (parsed.success) {
@@ -699,7 +702,6 @@ export function loadPiConfigDetailed(
 		parsed.config.profile = profileResolution.activeProfile;
 	if (applyRuntimeGlobals) {
 		setOutputReserveConfig(parsed.config.output_reserve);
-		setWindowOverlayPath(parsed.config.models?.window_overlay_path);
 	}
 	warnings.push(
 		...parsed.warnings.map((warning) => `[merged config] ${warning}`),

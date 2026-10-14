@@ -261,7 +261,7 @@ Behavior tuning most installs never need to touch.
 |---|---|---|---|
 | `smart_notes.enabled` | boolean | `true` | Enable smart-note authoring and condition evaluation. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface. |
 | `smart_notes.retina_handoff` | boolean | `false` | When true, dreamer skips smart notes whose surface conditions compiled to retina provider configs at authoring time. Default false keeps both paths active until the retina consumer is deployed. |
-| `models.window_overlay_path` | string | — |  |
+| `models.window_overlay_path` | unknown | — | Deprecated: ignored. Fusiform no longer publishes window-overlay data, so this setting no longer changes model window geometry. Remove this key. |
 | `toast_duration_ms` **Live** | number (0–60000) | `5000` | TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000) |
 | `subc.connection_file` | string | — | Path to the owner-only subc connection file. |
 | `debug_rpc` | boolean | `false` | Developer-only: enable authenticated loopback RPCs for memory counters and heap snapshots. Disabled by default. USER-LEVEL ONLY and requires a restart. |
