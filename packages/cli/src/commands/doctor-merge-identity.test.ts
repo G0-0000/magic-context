@@ -154,10 +154,14 @@ describe("offline identity command", () => {
     }, 30_000);
     it("different git directories refuse even with force", () => {
         const { path } = fixture();
+        const sourceDirectory = tempDir();
+        const targetDirectory = tempDir();
         const db = new Database(path);
         db.exec(`INSERT INTO project_state(project_path) VALUES ('git:source');
-            INSERT INTO workspaces VALUES (1,'shared',1,1,'[]');
-            INSERT INTO workspace_members VALUES (1,'git:source','source','/different/source',1),(1,'git:target','target','/different/target',1)`);
+            INSERT INTO workspaces VALUES (1,'shared',1,1,'[]')`);
+        db.prepare(
+            "INSERT INTO workspace_members VALUES (1,'git:source','source',?,1),(1,'git:target','target',?,1)",
+        ).run(sourceDirectory, targetDirectory);
         db.close();
         expect(() =>
             runMergeIdentityCli([

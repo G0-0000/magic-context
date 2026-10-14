@@ -44,13 +44,14 @@ export interface MergeIdentityCliOptions {
     dryRun: boolean;
     yes: boolean;
     force: boolean;
+    verbose: boolean;
     dbPath?: string;
     hostPath?: string;
 }
 
 export function parseMergeIdentityArgs(args: string[]): MergeIdentityCliOptions {
     const values: Record<string, string> = {};
-    const switches = new Set(["--apply", "--force", "--dry-run", "--yes"]);
+    const switches = new Set(["--apply", "--force", "--dry-run", "--yes", "--verbose"]);
     for (let i = 0; i < args.length; i++) {
         const flag = args[i];
         if (["--from", "--to", "--db", "--host-db"].includes(flag)) {
@@ -74,6 +75,7 @@ export function parseMergeIdentityArgs(args: string[]): MergeIdentityCliOptions 
         dryRun: !apply,
         yes: apply,
         force: args.includes("--force"),
+        verbose: args.includes("--verbose"),
     };
 }
 
@@ -158,6 +160,15 @@ interface PersistedIdentityAllowance {
     liveIdentity?: string;
 }
 
+function directoryDoesNotExist(directory: string): boolean {
+    try {
+        statSync(directory);
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    return false;
+}
+
 /**
  * Refuse a merge that would move data the wrong way. Runs for the preview and again on
  * the writable handle immediately before `--apply` writes, and `--force` does not
@@ -191,12 +202,7 @@ function assertMergePairSafe(
         if (!persisted) continue;
         if (persisted === from) {
             let live: string | undefined;
-            let orphaned = false;
-            try {
-                statSync(row.directory);
-            } catch (error) {
-                orphaned = (error as NodeJS.ErrnoException).code === "ENOENT";
-            }
+            const orphaned = directoryDoesNotExist(row.directory);
             if (!orphaned) {
                 try {
                     live = resolveProjectIdentityStrict(row.directory, undefined, { cache: false });
@@ -231,7 +237,7 @@ function assertMergeDirectoriesSafe(
     sourceDirs: string[],
     targetDirs: string[],
     allowances: PersistedIdentityAllowance[],
-): void {
+): string[] {
     const alreadyMerged =
         auditIdentityMerge(db, from, to).changedRows === 0 &&
         db
@@ -240,9 +246,13 @@ function assertMergeDirectoriesSafe(
             )
             .get(from, to);
     const allowedDirs = new Set(allowances.map((item) => item.directory));
+    const missingSourceDirs = sourceDirs.filter(
+        (directory) => !targetDirs.includes(directory) && directoryDoesNotExist(directory),
+    );
+    for (const directory of missingSourceDirs) allowedDirs.add(directory);
     // A changed root can leave old sessions in one checkout and new sessions in others.
-    // Only proven stale source pins can justify relaxing the same-directory requirement.
-    const staleSourcePins =
+    // A missing source folder has no live identity that could contradict the merge.
+    const sourceDirsAllowed =
         allowedDirs.size > 0 &&
         sourceDirs.every(
             (directory) => targetDirs.includes(directory) || allowedDirs.has(directory),
@@ -253,13 +263,38 @@ function assertMergeDirectoriesSafe(
         to.startsWith("git:") &&
         (!sourceDirs.length ||
             !targetDirs.length ||
-            (!staleSourcePins &&
+            (!sourceDirsAllowed &&
                 (sourceDirs.some((dir) => !targetDirs.includes(dir)) ||
                     targetDirs.some((dir) => !sourceDirs.includes(dir)))))
     )
         throw new Error(
             `Refusing different directories for ${from} (${sourceDirs.join(", ") || "unknown"}) and ${to} (${targetDirs.join(", ") || "unknown"})`,
         );
+    return missingSourceDirs;
+}
+
+function printSidecarPreview(
+    allowances: PersistedIdentityAllowance[],
+    missingSourceDirs: string[],
+    to: string,
+    verbose: boolean,
+): void {
+    const missing = new Set(missingSourceDirs);
+    const orphanPins = allowances.filter((item) => missing.has(item.directory));
+    if (missingSourceDirs.length) {
+        console.log(
+            `  ${missingSourceDirs.length} source-only folders no longer exist: allowed${orphanPins.length ? ` (${orphanPins.length} orphaned sidecar(s) will be rewritten to ${to})` : ""}.${verbose ? "" : " Use --verbose for the full list."}`,
+        );
+        if (verbose)
+            for (const directory of missingSourceDirs)
+                if (!orphanPins.some((item) => item.directory === directory))
+                    console.log(`    ${directory} (orphaned; no persisted sidecar)`);
+    }
+    for (const item of allowances)
+        if (verbose || !missing.has(item.directory))
+            console.log(
+                `  Sidecar for ${item.directory}: overwrite with ${to} (${item.reason}; sidecar will be rewritten).`,
+            );
 }
 
 /** Print one observed directory's suggestion, applying the same rules as an explicit merge. */
@@ -397,7 +432,7 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
             .filter((row) => row.identities.some((item) => item.identity === options.to))
             .map((row) => row.directory);
         directories = [...new Set([...sourceDirs, ...targetDirs])];
-        assertMergeDirectoriesSafe(
+        const missingSourceDirs = assertMergeDirectoriesSafe(
             db,
             options.from,
             options.to,
@@ -419,10 +454,7 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
                 `Target ${options.to} does not resolve for any observed directory on this machine; use --force only after reviewing the identity.`,
             );
         const preview = mergeProjectIdentities(db, options.from, options.to, { dryRun: true });
-        for (const item of allowances)
-            console.log(
-                `  Sidecar for ${item.directory}: overwrite with ${options.to} (${item.reason}; sidecar will be rewritten).`,
-            );
+        printSidecarPreview(allowances, missingSourceDirs, options.to, options.verbose);
         printReport(preview);
         if (options.dryRun) return 0;
     } finally {

@@ -161,6 +161,7 @@ function seedRows(
 }
 
 function captureLog(): () => string {
+    logSpy?.mockRestore();
     const lines: string[] = [];
     logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
         lines.push(args.map(String).join(" "));
@@ -272,6 +273,29 @@ function reclonedMergeFixture(): {
     return { store, source, target };
 }
 
+function deletedSessionMergeFixture(count = 48): {
+    store: Store;
+    source: ReturnType<typeof newRepository>;
+    target: ReturnType<typeof newRepository>;
+    directories: string[];
+} {
+    const store = newStore();
+    const source = newRepository("deleted-session-source");
+    const target = newRepository("deleted-session-target");
+    const directories = Array.from({ length: count }, (_, index) =>
+        join(root, `deleted-worker-${++fixtureCounter}-${index}`),
+    );
+    seedGitMerge(store, { ...source, directory: directories[0] }, target);
+    rmSync(sidecarPath(store, directories[0]));
+    for (const [index, directory] of directories.entries()) {
+        mkdirSync(directory);
+        rmSync(directory, { recursive: true });
+        if (index > 0)
+            bindSession(store, `deleted-worker-session-${index}`, directory, source.identity);
+    }
+    return { store, source, target, directories };
+}
+
 describe("doctor merge-identities stale source sidecars", () => {
     it("allows a re-cloned source with a new-root worktree and repins without changing merge semantics", () => {
         const { store, source, target } = reclonedMergeFixture();
@@ -326,7 +350,7 @@ describe("doctor merge-identities stale source sidecars", () => {
             `Sidecar for ${source.directory}: overwrite with ${target.identity} (live root now resolves to ${target.identity}; sidecar will be rewritten)`,
         );
         expect(output()).toContain(
-            `Sidecar for ${orphan}: overwrite with ${target.identity} (orphaned; sidecar will be rewritten)`,
+            `1 source-only folders no longer exist: allowed (1 orphaned sidecar(s) will be rewritten to ${target.identity})`,
         );
         for (const directory of [source.directory, orphan])
             expect(JSON.parse(readFileSync(sidecarPath(store, directory), "utf8"))).toEqual({
@@ -354,10 +378,16 @@ describe("doctor merge-identities stale source sidecars", () => {
 
         expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
         expect(output()).toContain(
-            `Sidecar for ${directory}: overwrite with ${target.identity} (orphaned; sidecar will be rewritten)`,
+            `1 source-only folders no longer exist: allowed (1 orphaned sidecar(s) will be rewritten to ${target.identity})`,
         );
+        expect(output()).not.toContain(directory);
         expect(fileHash(store.dbPath)).toBe(beforeDb);
         expect(fileHash(sidecarPath(store, directory))).toBe(beforeSidecar);
+        const verboseOutput = captureLog();
+        expect(runMergeIdentityCli([...args, "--verbose"], noHolderDeps)).toBe(0);
+        expect(verboseOutput()).toContain(
+            `Sidecar for ${directory}: overwrite with ${target.identity} (orphaned; sidecar will be rewritten)`,
+        );
         expect(runMergeIdentityCli([...args, "--apply"], noHolderDeps)).toBe(0);
         expect(JSON.parse(readFileSync(sidecarPath(store, directory), "utf8"))).toEqual({
             directory: projectDirectoryKey(directory),
@@ -366,7 +396,7 @@ describe("doctor merge-identities stale source sidecars", () => {
         expect(existsSync(directory)).toBe(false);
         assertGitMergeRows(store, source.identity, target.identity);
         expect(runMergeIdentityCli(["--db", store.dbPath], noHolderDeps)).toBe(0);
-        expect(output()).toContain("No detected identity splits.");
+        expect(verboseOutput()).toContain("No detected identity splits.");
     }, 30_000);
 
     for (const resolution of ["source", "third", "failure"] as const)
@@ -409,7 +439,7 @@ describe("doctor merge-identities stale source sidecars", () => {
 
     it("refuses different directories when one source-only directory has no stale-sidecar allowance", () => {
         const { store, source, target } = reclonedMergeFixture();
-        const unallowed = join(root, `unallowed-source-${++fixtureCounter}`);
+        const unallowed = liveDirectory("unallowed-source");
         bindSession(store, "unallowed-session", unallowed, source.identity);
         closeStore(store);
         const before = fileHash(store.dbPath);
@@ -429,6 +459,95 @@ describe("doctor merge-identities stale source sidecars", () => {
             ),
         ).toThrow("Refusing different directories");
         expect(fileHash(store.dbPath)).toBe(before);
+    }, 30_000);
+
+    it("allows many deleted session-only source folders and summarizes the preview", () => {
+        const { store, source, target, directories } = deletedSessionMergeFixture();
+        closeStore(store);
+        const before = fileHash(store.dbPath);
+        const args = ["--db", store.dbPath, "--from", source.identity, "--to", target.identity];
+        const output = captureLog();
+        expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
+        const summary = "48 source-only folders no longer exist: allowed";
+        expect(output()).toContain(`${summary}. Use --verbose for the full list.`);
+        expect(output().split(summary)).toHaveLength(2);
+        expect(output()).toContain("Identity merge preview:");
+        for (const directory of directories) {
+            expect(output()).not.toContain(directory);
+            expect(existsSync(sidecarPath(store, directory))).toBe(false);
+        }
+        expect(fileHash(store.dbPath)).toBe(before);
+
+        const verboseOutput = captureLog();
+        expect(runMergeIdentityCli([...args, "--verbose"], noHolderDeps)).toBe(0);
+        for (const directory of directories)
+            expect(verboseOutput()).toContain(`${directory} (orphaned; no persisted sidecar)`);
+        expect(verboseOutput()).not.toContain("Use --verbose");
+        expect(fileHash(store.dbPath)).toBe(before);
+        expect(runMergeIdentityCli([...args, "--apply"], noHolderDeps)).toBe(0);
+        assertGitMergeRows(store, source.identity, target.identity, directories.length + 1);
+        for (const directory of directories) {
+            expect(existsSync(directory)).toBe(false);
+            expect(JSON.parse(readFileSync(sidecarPath(store, directory), "utf8"))).toEqual({
+                directory: projectDirectoryKey(directory),
+                identity: target.identity,
+            });
+        }
+    }, 30_000);
+
+    it("refuses deleted session-only source folders mixed with one existing unallowed folder", () => {
+        const { store, source, target } = deletedSessionMergeFixture();
+        const existing = liveDirectory("existing-unallowed-worker");
+        bindSession(store, "existing-worker-session", existing, source.identity);
+        closeStore(store);
+        const before = fileHash(store.dbPath);
+        captureLog();
+        for (const extra of [[], ["--apply", "--force"]])
+            expect(() =>
+                runMergeIdentityCli(
+                    [
+                        "--db",
+                        store.dbPath,
+                        "--from",
+                        source.identity,
+                        "--to",
+                        target.identity,
+                        ...extra,
+                    ],
+                    noHolderDeps,
+                ),
+            ).toThrow("Refusing different directories");
+        expect(fileHash(store.dbPath)).toBe(before);
+        expect(existsSync(sidecarPath(store, existing))).toBe(false);
+    }, 30_000);
+
+    it("rechecks missing session-only source folders under the write handle", () => {
+        const { store, source, target, directories } = deletedSessionMergeFixture(2);
+        closeStore(store);
+        const before = fileHash(store.dbPath);
+        captureLog();
+        expect(() =>
+            runMergeIdentityCli(
+                [
+                    "--db",
+                    store.dbPath,
+                    "--from",
+                    source.identity,
+                    "--to",
+                    target.identity,
+                    "--apply",
+                ],
+                {
+                    ...noHolderDeps,
+                    inspectHolders: () => {
+                        mkdirSync(directories[0]);
+                        return { safe: true, blockers: [] };
+                    },
+                },
+            ),
+        ).toThrow("Refusing different directories");
+        expect(fileHash(store.dbPath)).toBe(before);
+        expect(existsSync(sidecarPath(store, directories[0]))).toBe(false);
     }, 30_000);
 
     it("rechecks the live root under the write handle instead of trusting the preview", () => {
