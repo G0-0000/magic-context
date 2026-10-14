@@ -9,6 +9,7 @@ import {
 	LKG_SNAPSHOT_UNDEFINED,
 	type LkgContentField,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { piGoogleConversation } from "./pi-dispatch-google";
 
 // Limit structure and retained string volume, not just the number of messages.
 // Requests above these limits are refused rather than compared incompletely.
@@ -47,7 +48,20 @@ export function piConversationFields(
 				conversation: body.conversation,
 				prompt: body.prompt,
 			};
-		} else return undefined;
+		} else {
+			const google = piGoogleConversation(payload);
+			if (!google) return undefined;
+			// Google/Vertex plans put instructions in config; Cloud Code Assist
+			// puts them beside contents inside request. Retain both locations so
+			// changing instructions on a retry cannot borrow the first receipt.
+			conversation = {
+				contents: google.contents,
+				systemInstruction: google.systemInstruction,
+				configSystemInstruction: (
+					google.config as { systemInstruction?: unknown } | undefined
+				)?.systemInstruction,
+			};
+		}
 
 		const fields: LkgContentField[] = [];
 		const seen = new WeakSet<object>();
@@ -178,18 +192,26 @@ export function piHasManagedSignature(
 	signature: string | undefined,
 ): boolean {
 	if (!signature || !payload || typeof payload !== "object") return false;
-	const body = payload as { messages?: unknown; input?: unknown };
+	const body = payload as {
+		messages?: unknown;
+		input?: unknown;
+		inferenceConfig?: unknown;
+	};
+	const google = piGoogleConversation(payload);
+	const nativeText = !!google || body.inferenceConfig !== undefined;
 	if (typeof body.input === "string" && body.messages === undefined)
 		return body.input.slice(0, 4096).includes(signature);
 	const messages = Array.isArray(body.messages)
 		? body.messages
 		: Array.isArray(body.input)
 			? body.input
-			: undefined;
+			: (google?.contents as unknown[] | undefined);
 	if (!messages) return false;
 	for (const message of messages.slice(0, 8)) {
 		if (!message || typeof message !== "object") continue;
-		const content = (message as { content?: unknown }).content;
+		const content = google
+			? (message as { parts?: unknown }).parts
+			: (message as { content?: unknown }).content;
 		if (
 			typeof content === "string" &&
 			content.slice(0, 4096).includes(signature)
@@ -201,7 +223,8 @@ export function piHasManagedSignature(
 		for (const block of content.slice(0, 32)) {
 			if (
 				block &&
-				["text", "input_text", "output_text"].includes(block.type) &&
+				(["text", "input_text", "output_text"].includes(block.type) ||
+					(nativeText && block.type === undefined)) &&
 				typeof block.text === "string" &&
 				block.text.slice(0, 4096).includes(signature)
 			)

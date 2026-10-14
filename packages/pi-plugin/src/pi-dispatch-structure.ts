@@ -1,7 +1,11 @@
+import { piGoogleConversation } from "./pi-dispatch-google";
+
 interface MessageStructure {
 	role: "user" | "assistant" | "toolResult";
 	calls: string[];
 	results: string[];
+	callNames?: string[];
+	resultNames?: string[];
 	timestamp?: number;
 }
 
@@ -46,6 +50,8 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 			if (block?.type !== "toolCall" && block?.type !== "tool_use") continue;
 			if (typeof block.id !== "string") return undefined;
 			row.calls.push(block.id);
+			row.callNames ??= [];
+			row.callNames.push(typeof block.name === "string" ? block.name : "");
 		}
 	}
 	return row;
@@ -56,6 +62,7 @@ export function piPreparedStructure(
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
+	const toolNames = new Map<string, string>();
 	for (const message of messages) {
 		const source = object(message);
 		if (
@@ -66,6 +73,11 @@ export function piPreparedStructure(
 			continue;
 		const row = messageStructure(message);
 		if (!row) return undefined;
+		row.calls.forEach((id, index) => {
+			toolNames.set(id, row.callNames?.[index] ?? "");
+		});
+		if (row.results.length)
+			row.resultNames = row.results.map((id) => toolNames.get(id) ?? "");
 		rows.push(row);
 	}
 	return { messages: rows };
@@ -74,6 +86,9 @@ export function piPreparedStructure(
 function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 	const body = object(payload);
 	if (!body) return undefined;
+	const google = piGoogleConversation(payload);
+	if (google) return googleStructure(google.contents as unknown[]);
+	const bedrock = body.inferenceConfig !== undefined;
 	if (body.messages === undefined && typeof body.input === "string")
 		return [{ role: "user", calls: [], results: [] }];
 	const responses = body.messages === undefined && Array.isArray(body.input);
@@ -84,12 +99,11 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 	for (const value of messages) {
 		const message = object(value);
 		if (!message) return undefined;
-		// Chat completions renders context.systemPrompt before context.messages,
-		// using system or developer roles. Those leading instructions are not
+		// Chat Completions and Azure Responses render context.systemPrompt before
+		// context.messages, using system or developer roles. Leading instructions are not
 		// prepared turns. piConversationFields keeps the original instruction rows
 		// for exact comparison with the first admitted request on later dispatches.
 		if (
-			!responses &&
 			rows.length === 0 &&
 			(message.role === "system" || message.role === "developer")
 		)
@@ -135,17 +149,20 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 		}
 		if (message.role === "user" && Array.isArray(message.content)) {
 			const results = message.content.filter(
-				(block) => object(block)?.type === "tool_result",
+				(block) =>
+					object(block)?.type === "tool_result" ||
+					(bedrock && object(block)?.toolResult),
 			);
 			if (results.length) {
-				// Anthropic packs a consecutive result run into one user message;
+				// Anthropic and Bedrock pack a consecutive result run into one user message;
 				// expand it back to the prepared array's roles and result IDs.
 				for (const block of results) {
-					if (typeof block.tool_use_id !== "string") return undefined;
+					const id = bedrock ? block.toolResult?.toolUseId : block.tool_use_id;
+					if (typeof id !== "string") return undefined;
 					rows.push({
 						role: "toolResult",
 						calls: [],
-						results: [block.tool_use_id],
+						results: [id],
 					});
 				}
 				continue;
@@ -153,6 +170,13 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 		}
 		const row = messageStructure(message);
 		if (!row) return undefined;
+		if (bedrock && row.role === "assistant" && Array.isArray(message.content)) {
+			for (const block of message.content) {
+				if (!block?.toolUse) continue;
+				if (typeof block.toolUse.toolUseId !== "string") return undefined;
+				row.calls.push(block.toolUse.toolUseId);
+			}
+		}
 		if (Array.isArray(message.tool_calls)) {
 			for (const call of message.tool_calls) {
 				if (typeof call?.id !== "string") return undefined;
@@ -166,6 +190,58 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 		) {
 			rows[rows.length - 1].calls.push(...row.calls);
 		} else rows.push(row);
+	}
+	return rows;
+}
+
+function googleStructure(contents: unknown[]): MessageStructure[] | undefined {
+	if (contents.length > MAX_MESSAGES) return undefined;
+	const rows: MessageStructure[] = [];
+	for (const value of contents) {
+		const message = object(value);
+		if (!message || !Array.isArray(message.parts)) return undefined;
+		if (message.role !== "user" && message.role !== "model") return undefined;
+		const row: MessageStructure = {
+			role: message.role === "model" ? "assistant" : "user",
+			calls: [],
+			results: [],
+		};
+		const results: MessageStructure[] = [];
+		for (const value of message.parts) {
+			const part = object(value);
+			if (!part) return undefined;
+			if (part.functionCall) {
+				const call = object(part.functionCall);
+				if (
+					row.role !== "assistant" ||
+					typeof call?.name !== "string" ||
+					(call.id !== undefined && typeof call.id !== "string")
+				)
+					return undefined;
+				row.calls.push((call.id as string) ?? "");
+				row.callNames ??= [];
+				row.callNames.push(call.name);
+			}
+			if (part.functionResponse) {
+				const result = object(part.functionResponse);
+				if (
+					row.role !== "user" ||
+					typeof result?.name !== "string" ||
+					(result.id !== undefined && typeof result.id !== "string")
+				)
+					return undefined;
+				results.push({
+					role: "toolResult",
+					calls: [],
+					results: [(result.id as string) ?? ""],
+					resultNames: [result.name],
+				});
+			}
+		}
+		// Gemini packs adjacent function results into one user content. Its older
+		// models omit IDs, but preserve the ordered function names and result run.
+		if (results.length) rows.push(...results);
+		else rows.push(row);
 	}
 	return rows;
 }
@@ -195,8 +271,12 @@ export function piMatchesPreparedStructure(
 		if (!rows || !prepared || rows.length !== prepared.messages.length)
 			return false;
 		const body = payload as Record<string, unknown>;
+		const google = !!piGoogleConversation(payload);
 		const anthropic =
-			typeof body.system === "string" || Array.isArray(body.system);
+			google ||
+			body.inferenceConfig !== undefined ||
+			typeof body.system === "string" ||
+			Array.isArray(body.system);
 		const responses = body.messages === undefined && Array.isArray(body.input);
 		for (let i = 0; i < rows.length; i++) {
 			const expected = prepared.messages[i];
@@ -210,12 +290,21 @@ export function piMatchesPreparedStructure(
 			)
 				return false;
 			for (let j = 0; j < actual.calls.length; j++)
-				if (actual.calls[j] !== wireId(expected.calls[j], anthropic, responses))
+				if (
+					google && actual.calls[j] === ""
+						? !expected.callNames?.[j] ||
+							actual.callNames?.[j] !== expected.callNames[j]
+						: actual.calls[j] !==
+							wireId(expected.calls[j], anthropic, responses)
+				)
 					return false;
 			for (let j = 0; j < actual.results.length; j++)
 				if (
-					actual.results[j] !==
-					wireId(expected.results[j], anthropic, responses)
+					google && actual.results[j] === ""
+						? !expected.resultNames?.[j] ||
+							actual.resultNames?.[j] !== expected.resultNames[j]
+						: actual.results[j] !==
+							wireId(expected.results[j], anthropic, responses)
 				)
 					return false;
 		}
