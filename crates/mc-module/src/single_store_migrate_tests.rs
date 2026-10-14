@@ -1732,6 +1732,16 @@ fn issue682_nonzero_boundary_difference_still_refuses() {
 }
 
 #[test]
+fn issue682_overlap_requires_both_named_block_index_columns() {
+    for name in ["start_block_index", "end_block_index"] {
+        assert!(
+            COMPARTMENT_COLUMNS.contains(&name),
+            "COMPARTMENT_COLUMNS must include {name}"
+        );
+    }
+}
+
+#[test]
 fn issue682_a_gap_in_the_joined_history_still_refuses() {
     let fixture = Fixture::new(Extras::default());
     seed_mid_session(&fixture);

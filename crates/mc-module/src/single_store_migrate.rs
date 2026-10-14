@@ -2012,9 +2012,15 @@ pub struct HistoryDecision {
 /// flat ids into message id + block index, only NULL and zero are equivalent; nonzero
 /// blocks, ordinals, content, timestamps and all other columns remain exact.
 fn same_prefix_overlap(left: &[SqlValue], right: &[SqlValue]) -> bool {
+    let block_indices = ["start_block_index", "end_block_index"].map(|name| {
+        COMPARTMENT_COLUMNS
+            .iter()
+            .position(|column| *column == name)
+            .unwrap_or_else(|| panic!("COMPARTMENT_COLUMNS must include {name}"))
+    });
     let canonical = |row: &[SqlValue]| {
         let mut row = row.to_vec();
-        for index in [18, 19] {
+        for index in block_indices {
             if as_i64(&row[index]) == Some(0) {
                 row[index] = SqlValue::Null;
             }
