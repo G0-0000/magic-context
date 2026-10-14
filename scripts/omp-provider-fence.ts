@@ -42,7 +42,7 @@ if (version !== "18.10.4")
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";
-if (mode !== "managed" && mode !== "raw" && mode !== "managed-then-raw")
+if (!["managed", "raw", "managed-then-raw", "drop-commentary"].includes(mode))
 	throw new Error("unknown mode");
 const historyCase = process.argv[4] ?? "fresh";
 if (
@@ -62,6 +62,7 @@ if (
 		"summary",
 		"mixed",
 		"materialized",
+		"responses-history",
 	].includes(historyCase)
 )
 	throw new Error("unknown history case");
@@ -223,6 +224,13 @@ export default async pi => {
   const proxy = new Proxy(pi,{get(target,key){
     if(key==='on') return (name,handler)=>target.on(name,async(event,ctx)=>{
       const raw=name==='context'?structuredClone(event.messages):undefined;
+      if(name==='before_provider_request' && ${JSON.stringify(mode)}==='drop-commentary') {
+        const input=event.payload?.input;
+        const index=input?.findIndex(item=>item.role==='assistant' && item.content?.some(part=>part.type==='output_text' && part.text.includes('HISTORY686 signed commentary')));
+        if(!Array.isArray(input) || index<0) throw new Error('commentary drop did not reach signed wire text');
+        input.splice(index,1);
+        log({phase:'dropped-commentary',index});
+      }
       if(['context','before_provider_request','agent_start','agent_end'].includes(name)) log({phase:name,messages:event.messages,payload:event.payload});
       const wrapped=Object.defineProperties(Object.create(ctx),{
         abort:{value:()=>{log({phase:'abort',hook:name});return ctx.abort();}},
@@ -351,6 +359,61 @@ try {
 		);
 		let history: any[];
 		switch (historyCase) {
+			case "responses-history": {
+				const signed = (text: string, id: string, timestamp: number) => ({
+					...assistant(
+						[
+							{
+								type: "text",
+								text,
+								textSignature: JSON.stringify({
+									v: 1,
+									id,
+									phase: "commentary",
+								}),
+							},
+						],
+						timestamp,
+					),
+					api: "openai-responses",
+				});
+				const cached = signed(
+					"HISTORY686 cached commentary",
+					"rs_cached686",
+					stamp + 2,
+				);
+				(cached as any).providerPayload = {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: [
+						{
+							type: "message",
+							role: "assistant",
+							id: "rs_cached686",
+							phase: "commentary",
+							status: "completed",
+							content: [
+								{
+									type: "output_text",
+									text: "HISTORY686 cached commentary",
+									annotations: [],
+								},
+							],
+						},
+					],
+				};
+				history = [
+					user("HISTORY686 responses first user", stamp),
+					signed("HISTORY686 signed commentary", "rs_signed686", stamp + 1),
+					cached,
+					{ ...reply, api: "openai-completions", timestamp: stamp + 3 },
+					{ ...call, api: "openai-responses", timestamp: stamp + 4 },
+					{ ...result, timestamp: stamp + 5 },
+					{ ...reply, api: "openai-completions", timestamp: stamp + 6 },
+				];
+				break;
+			}
 			case "consecutive-users":
 				history = [
 					user("HISTORY683 first user", stamp),
@@ -501,7 +564,8 @@ try {
 		if (
 			historyCase === "resume" ||
 			historyCase === "summary" ||
-			historyCase === "mixed"
+			historyCase === "mixed" ||
+			historyCase === "responses-history"
 		) {
 			await historyManager.close();
 			historyManager = await SessionManager.open(file, undefined, undefined, {
@@ -600,6 +664,41 @@ try {
 	const refusals = hooks.filter(
 		(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
 	);
+	if (historyCase === "responses-history") {
+		const body = attempts[0]?.payload;
+		const input = body?.input;
+		const wireTexts = Array.isArray(input)
+			? input
+					.filter((item: { role?: string }) => item.role === "assistant")
+					.flatMap(
+						(item: { content?: { type?: string; text?: string }[] }) =>
+							item.content
+								?.filter((part) => part.type === "output_text")
+								.map((part) => part.text) ?? [],
+					)
+			: [];
+		const signedPresent = wireTexts.some((text) =>
+			text?.includes("HISTORY686 signed commentary"),
+		);
+		const cachedPresent = wireTexts.includes("HISTORY686 cached commentary");
+		const switchedPresent = wireTexts.some((text) =>
+			text?.includes("HISTORY683 previous reply"),
+		);
+		if (
+			signedPresent !== (mode !== "drop-commentary") ||
+			!cachedPresent ||
+			!switchedPresent
+		)
+			throw new Error("Responses text fixture did not reach the wire input");
+		audit({
+			phase: "responses-history-proof",
+			signedPresent,
+			cachedPresent,
+			switchedPresent,
+			assistantTextItems: wireTexts.length,
+			eventOrder: hooks.map((event) => event.phase),
+		});
+	}
 	if (historyCase === "materialized") {
 		const proof = hooks.find((event) => event.phase === "materialized-proof");
 		if (
@@ -629,9 +728,11 @@ try {
 	const name =
 		mode === "managed-then-raw"
 			? `${selector}: mixed managed history turns admit and raw final turn refuses`
-			: mode === "raw"
-				? `${selector}: raw request refused before transport`
-				: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
+			: mode === "drop-commentary"
+				? `${selector}: dropped signed commentary refused before transport`
+				: mode === "raw"
+					? `${selector}: raw request refused before transport`
+					: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
 	const ok =
 		mode === "managed-then-raw"
 			? managedOutcomes.length === managedTurns &&
@@ -639,9 +740,15 @@ try {
 				wires === managedTurns &&
 				refusals.length === 1 &&
 				refusals[0].data.message.includes("missing current receipt signature")
-			: mode === "raw"
-				? attempts.length > 0 && wires === 0 && refusals.length === 1
-				: attempts.length > 0 && wires > 0 && refusals.length === 0;
+			: mode === "drop-commentary"
+				? attempts.length === 1 &&
+					wires === 0 &&
+					refusals.length === 1 &&
+					refusals[0].data.message.includes("comparison=content") &&
+					hooks.some((event) => event.phase === "dropped-commentary")
+				: mode === "raw"
+					? attempts.length > 0 && wires === 0 && refusals.length === 1
+					: attempts.length > 0 && wires > 0 && refusals.length === 0;
 	console.log(
 		`Bun ${Bun.version}; OMP ${version}; ${ok ? "PASS" : "FAIL"} ${name}; attempts=${attempts.length} wires=${wires} refusals=${refusals.length}; evidence=${root}`,
 	);

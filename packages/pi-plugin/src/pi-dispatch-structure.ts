@@ -4,6 +4,10 @@ import {
 	piMatchesChatImages,
 } from "./pi-dispatch-chat-history";
 import { piGoogleConversation } from "./pi-dispatch-google";
+import {
+	piResponsesAssistantTexts,
+	piResponsesWireTexts,
+} from "./pi-dispatch-responses-history";
 
 interface MessageStructure {
 	role: "user" | "assistant" | "toolResult";
@@ -18,12 +22,15 @@ interface MessageStructure {
 	wireRole?: unknown;
 	idlessCalls?: boolean[];
 	idlessResults?: boolean[];
+	/** JSON [text, phase] pairs for every assistant text block, retained in wire order. */
+	responseTexts?: string[];
 }
 
 /** Transport-independent roles and ordered tool IDs, captured before text transforms. */
 export interface PiPreparedStructure {
 	messages: readonly MessageStructure[];
 	chatMessages?: readonly MessageStructure[];
+	responsesMessages?: readonly MessageStructure[];
 	api?: string;
 }
 
@@ -105,6 +112,41 @@ export function piPreparedStructure(
 		rows.push(row);
 		byIndex.set(index, row);
 	}
+	const responsesApi = [
+		"openai-responses",
+		"azure-openai-responses",
+		"openai-codex-responses",
+	].includes(model?.api ?? "");
+	let responsesMessages: MessageStructure[] | undefined = responsesApi
+		? []
+		: undefined;
+	if (responsesMessages) {
+		for (const [index, row] of byIndex) {
+			if (row.role !== "assistant") {
+				responsesMessages.push(row);
+				continue;
+			}
+			const texts = piResponsesAssistantTexts(messages[index], model);
+			if (!texts) {
+				responsesMessages = undefined;
+				break;
+			}
+			if (!texts.length && !row.calls.length) continue;
+			// OpenAI Responses encodes assistant text and calls as separate input
+			// items. Its normalized role rows combine adjacent assistant messages;
+			// mirror that on prepared history without discarding any text or call ID.
+			const previous = responsesMessages.at(-1);
+			if (previous?.role === "assistant") {
+				previous.calls.push(...row.calls);
+				previous.responseTexts?.push(...texts);
+			} else
+				responsesMessages.push({
+					...row,
+					calls: [...row.calls],
+					responseTexts: [...texts],
+				});
+		}
+	}
 	const plan = piChatHistoryPlan(messages, model);
 	const chatMessages = plan?.flatMap((step): MessageStructure[] => {
 		if (step.kind === "source") {
@@ -125,6 +167,7 @@ export function piPreparedStructure(
 	return {
 		messages: rows,
 		...(chatMessages ? { chatMessages } : {}),
+		...(responsesMessages ? { responsesMessages } : {}),
 		...(model?.api ? { api: model.api } : {}),
 	};
 }
@@ -132,6 +175,7 @@ export function piPreparedStructure(
 function payloadStructure(
 	payload: unknown,
 	ollama = false,
+	responsesItems = false,
 ): MessageStructure[] | undefined {
 	const body = object(payload);
 	if (!body) return undefined;
@@ -169,7 +213,12 @@ function payloadStructure(
 			if (typeof message.call_id !== "string") return undefined;
 			let assistant = rows.at(-1);
 			if (assistant?.role !== "assistant") {
-				assistant = { role: "assistant", calls: [], results: [] };
+				assistant = {
+					role: "assistant",
+					calls: [],
+					results: [],
+					...(responsesItems ? { responseTexts: [] } : {}),
+				};
 				rows.push(assistant);
 			}
 			assistant.calls.push(message.call_id);
@@ -238,6 +287,11 @@ function payloadStructure(
 		const row = messageStructure(message);
 		if (!row) return undefined;
 		row.wireContent = message.content;
+		if (responses && responsesItems && row.role === "assistant") {
+			const texts = piResponsesWireTexts(message.content, message.phase);
+			if (!texts) return undefined;
+			row.responseTexts = [...texts];
+		}
 		row.wireRole = message.role;
 		if (bedrock && row.role === "assistant" && Array.isArray(message.content)) {
 			for (const block of message.content) {
@@ -275,7 +329,10 @@ function payloadStructure(
 			row.role === "assistant" &&
 			rows.at(-1)?.role === "assistant"
 		) {
-			rows[rows.length - 1].calls.push(...row.calls);
+			const previous = rows[rows.length - 1];
+			previous.calls.push(...row.calls);
+			if (responsesItems)
+				previous.responseTexts?.push(...(row.responseTexts ?? []));
 		} else rows.push(row);
 	}
 	return rows;
@@ -401,7 +458,13 @@ export function piPreparedStructureMismatch(
 			body.input === undefined &&
 			body.system === undefined &&
 			body.inferenceConfig === undefined;
-		const rows = payloadStructure(payload, ollama);
+		const responses =
+			body?.messages === undefined && Array.isArray(body?.input);
+		const rows = payloadStructure(
+			payload,
+			ollama,
+			responses && !!prepared?.responsesMessages,
+		);
 		const chat =
 			!!body &&
 			Array.isArray(body.messages) &&
@@ -409,9 +472,11 @@ export function piPreparedStructureMismatch(
 			body.input === undefined &&
 			body.inferenceConfig === undefined;
 		const expectedRows =
-			chat && prepared?.chatMessages
-				? prepared.chatMessages
-				: prepared?.messages;
+			responses && prepared?.responsesMessages
+				? prepared.responsesMessages
+				: chat && prepared?.chatMessages
+					? prepared.chatMessages
+					: prepared?.messages;
 		if (!rows || !expectedRows)
 			return structureDetail(0, expectedRows, rows, "count");
 		if (!body) return structureDetail(0, expectedRows, rows, "count");
@@ -421,12 +486,19 @@ export function piPreparedStructureMismatch(
 			body.inferenceConfig !== undefined ||
 			typeof body.system === "string" ||
 			Array.isArray(body.system);
-		const responses = body.messages === undefined && Array.isArray(body.input);
 		for (let i = 0; i < Math.min(rows.length, expectedRows.length); i++) {
 			const expected = expectedRows[i];
 			const actual = rows[i];
 			if (actual.role !== expected.role)
 				return structureDetail(i, expectedRows, rows, "role");
+			if (
+				expected.responseTexts !== undefined &&
+				(expected.responseTexts.length !== actual.responseTexts?.length ||
+					expected.responseTexts.some(
+						(text, index) => text !== actual.responseTexts?.[index],
+					))
+			)
+				return structureDetail(i, expectedRows, rows, "content");
 			if (
 				expected.exactText !== undefined ||
 				expected.exactImages !== undefined
