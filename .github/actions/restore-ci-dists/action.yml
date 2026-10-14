@@ -1,0 +1,15 @@
+name: Restore same-commit CI dists
+description: Restore complete package output, checking its commit and archive digest
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: ci-dists-${{ github.sha }}
+        path: ${{ runner.temp }}/ci-dists
+    - shell: bash
+      run: |
+        cd "$RUNNER_TEMP/ci-dists"
+        test "$(cat ci-dists.commit)" = "$GITHUB_SHA"
+        sha256sum --check ci-dists.sha256
+        tar -xzf ci-dists.tar.gz -C "$GITHUB_WORKSPACE"
