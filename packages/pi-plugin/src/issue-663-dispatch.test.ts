@@ -77,7 +77,9 @@ test("issue 663: a late first agent_start preserves in-flight writer ownership",
 	h.emit("agent_start");
 	finish();
 	await work;
-	h.emit("before_provider_request", payload);
+	h.emit("before_provider_request", {
+		payload: { messages: conversation.messages },
+	});
 	expect(h.aborts).toBe(0);
 	expect(h.refusals).toEqual([]);
 });
@@ -89,7 +91,9 @@ test("issue 663: context before the next start cannot reuse an ended operation",
 	h.emit("agent_end");
 	await h.emit("context", conversation);
 	h.emit("agent_start");
-	h.emit("before_provider_request", payload);
+	h.emit("before_provider_request", {
+		payload: { messages: conversation.messages },
+	});
 	expect(h.refusals).toEqual([]);
 	expect(h.aborts).toBe(0);
 });
