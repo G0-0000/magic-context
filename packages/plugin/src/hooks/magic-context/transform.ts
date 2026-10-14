@@ -3299,9 +3299,11 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        // Ordinary passes retain the original capture gate and deferred save.
-        // Capture the complete array so a restart also retains the bytes of a
-        // signed newest turn; recovery's raw tail stays accounted for until a fold.
+        // On a normal completed pass, save the prefix through the last stable
+        // message in the existing background callback. Recovery must retain every
+        // returned message, including its already-served raw tail. Models whose
+        // thinking signatures depend on earlier bytes also need complete arrays
+        // to reproduce those bytes after restart.
         if (passOutcome.captureEligible || recovery.prefix || recoveryReleaseReason) {
             const keys = resolveLkgModelKeys(messages);
             const modelKey = modelForBudget
@@ -3309,7 +3311,10 @@ export function createTransform(deps: TransformDeps) {
                 : keys.modelKey;
             const providerKey = modelForBudget?.providerID ?? keys.providerKey;
             const captured = captureLkgSlot({
-                completeOutput: true,
+                completeOutput:
+                    !!recovery.prefix ||
+                    !!recoveryReleaseReason ||
+                    isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID),
                 sessionId,
                 input: lkgInput,
                 output: messages,
