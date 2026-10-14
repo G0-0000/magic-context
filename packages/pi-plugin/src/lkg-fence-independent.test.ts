@@ -14,6 +14,7 @@ const load = (path: string) => import(join(source, "packages", path));
 function proveIsolation() {
 	const result = spawnSync("lsof", ["-p", String(process.pid), "-Fn"], {
 		encoding: "utf8",
+		windowsHide: true,
 	});
 	expect(result.status).toBe(0);
 	const paths = result.stdout

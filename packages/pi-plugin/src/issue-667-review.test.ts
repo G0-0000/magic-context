@@ -20,8 +20,8 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-// Review regressions for the OMP dispatch fence's agent_end attribution
-// (docs/reports/issue-667-review.md). OMP's extension agent_end carries the
+// Regressions for the OMP dispatch fence's agent_end attribution.
+// OMP's extension agent_end carries the
 // agent's full message state at the end of the run; these tests replay that.
 
 const SESSION = "issue-667-review";

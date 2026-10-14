@@ -516,6 +516,34 @@ export function latestPersistedMessageForRecovery(
     });
 }
 
+/** The real-user turn anchor used by thinking recovery, without reading text
+ * payloads. Synthetic users and tool-result-only carriers cannot own a turn. */
+export function latestRealUserTurnIdFromOpenCodeDb(sessionId: string): string | undefined {
+    try {
+        return (
+            withReadOnlySessionDb((db) => {
+                const row = db
+                    .prepare(`SELECT m.id FROM message m
+                WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user'
+                  AND COALESCE(json_type(m.data, '$.synthetic'), 'null') != 'true'
+                  AND m.id NOT LIKE 'synth-user-%'
+                  AND NOT (EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
+                    AND NOT EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id
+                      AND COALESCE(json_type(p.data, '$.synthetic'), 'null') != 'true'
+                      AND COALESCE(json_type(p.data, '$.ignored'), 'null') != 'true'
+                      AND COALESCE(json_extract(p.data, '$.type'), '') NOT IN
+                          ('tool_result', 'toolResult', 'tool-result')))
+                ORDER BY m.time_created DESC, m.id DESC LIMIT 1`)
+                    .get(sessionId) as { id?: unknown } | null;
+                return typeof row?.id === "string" ? row.id : undefined;
+            }) ?? undefined
+        );
+    } catch {
+        // An unavailable or differently shaped host store is not proof of a turn.
+        return undefined;
+    }
+}
+
 export function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,

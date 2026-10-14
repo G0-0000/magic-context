@@ -5,8 +5,7 @@ the same Linux build host, one after the other, in a throwaway root
 (`/tmp/magic-context/bg_189551472f6f1b31`, with `XDG_*`, `HOME`,
 `MAGIC_CONTEXT_STORAGE_DIR` and `OPENCODE_DB` pointed inside it). "Before" is
 `packages/plugin/src` at 9d26c87081, extracted with `git archive`; "after" is
-this branch, including the fixes from the independent review
-(`docs/reports/oc-stall-fixes-review.md`). Every database the driver opened was
+this branch, including the independently reviewed fixes. Every database the driver opened was
 created under the root: `before-opencode.db`, `before-reasoning-context.db`,
 `after-opencode.db`, `after-reasoning-context.db` and `search-context.db` (built
 by the first run and searched by both). No OpenCode host was started.

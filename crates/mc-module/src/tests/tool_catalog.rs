@@ -1,10 +1,11 @@
-//! `tool.catalog` and `role.describe` against the design's pinned payloads.
+//! `tool.catalog` and `role.describe` against pinned payloads.
 //!
-//! `docs/designs/mc-tool-catalog-v1/` holds the exact bytes the module must serve
-//! for each example request under the example config, and
+//! `src/tests/fixtures/tool-catalog/` holds the exact bytes the module must serve
+//! for each example request under `config.json` (prompt surface, tool enablement,
+//! and guidance feature flags), and
 //! `testdata/tool-catalog-guidance-matrix.json` the digest of every guidance text
-//! for every combination of config inputs. Both are written by the design's
-//! generator from the same shared definition the module serves from, so these
+//! for every combination of config inputs. Both are written by
+//! `gen/gen-tool-catalog.ts` from the same shared definition the module serves from, so these
 //! tests hold the generator's TypeScript renderer and this module's Rust one to
 //! the same bytes.
 
@@ -17,7 +18,7 @@ use super::*;
 use crate::tool_catalog::{self, CatalogConfig, CatalogError, Surface, TextFlags};
 
 fn examples_dir() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/designs/mc-tool-catalog-v1")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/fixtures/tool-catalog")
 }
 
 /// The example config, as `config.json` records it.
@@ -107,7 +108,7 @@ fn examples() -> Vec<(String, Value, Vec<u8>)> {
 fn every_example_request_gets_exactly_the_pinned_answer_bytes() {
     let config = example_catalog_config();
     let examples = examples();
-    assert_eq!(examples.len(), 11, "the design pins eleven examples");
+    assert_eq!(examples.len(), 11, "the fixture pins eleven examples");
     for (name, request, expected) in examples {
         let actual = tool_catalog::catalog_answer_bytes(&request, &config)
             .unwrap_or_else(|error| panic!("{name}: {error:?}"));

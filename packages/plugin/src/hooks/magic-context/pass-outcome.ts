@@ -15,8 +15,8 @@ export type PassDegradationKind = "degraded" | "fatal";
  *   different in anything already served. The pass is served as a healthy one
  *   would be, over the limit or not.
  *
- * Every site a pass records is listed here, with its verdict from
- * docs/reports/degraded-pass-fail-open.md. Recording a site that is not listed
+ * Every site a pass records is listed here with its effect on served bytes.
+ * Recording a site that is not listed
  * does not type-check, so a new site cannot join or skip the size guard
  * without a verdict.
  */

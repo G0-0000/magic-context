@@ -83,7 +83,11 @@ import {
     applyDeferredCompactionMarker,
     type MarkerUpdateOutcome,
 } from "./compaction-marker-manager";
-import { primeCtxReduceSpawnPermission } from "./ctx-reduce-availability";
+import {
+    clearCtxReduceAvailability,
+    primeCtxReduceSpawnPermission,
+    resolveCtxReduceAvailabilityFromMessages,
+} from "./ctx-reduce-availability";
 import { autoEmbedAttemptedBySession } from "./embed-session-state";
 import {
     EmergencyFailClosedError,
@@ -123,6 +127,8 @@ import {
     type RustModeModuleClient,
 } from "./rust-mode-transform";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
+import { registerSystemDateRefresh } from "./system-date-refresh";
+import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { buildSyntheticTodoPart } from "./todo-view";
 import type { TransformDeps } from "./transform";
 import { createTransform } from "./transform";
@@ -318,6 +324,137 @@ function makeMeta(
         meta.systemPromptTokens = 100;
     }
     return meta;
+}
+
+for (const order of ["system-first", "messages-first"] as const) {
+    it(`Rust mode freezes environment date and system-hash HARD input across midnight (${order})`, async () => {
+        const sessionId = `rust-env-midnight-${order}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        makeMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { cacheTtl: "never", lastResponseTime: Date.now() });
+        const hashes: string[] = [];
+        let headEpoch = 0;
+        let lastHash = "";
+        const source = () => [
+            ...makeMessages(sessionId),
+            {
+                info: {
+                    id: "thinking",
+                    role: "assistant",
+                    sessionID: sessionId,
+                    finish: "tool-calls",
+                },
+                parts: [
+                    {
+                        type: "reasoning",
+                        text: "Kept signed loop",
+                        metadata: { anthropic: { signature: "kept-signature" } },
+                    },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "read",
+                        state: { status: "completed", input: {}, output: "result" },
+                    },
+                ],
+            },
+        ];
+        const native = () => [
+            {
+                info: {
+                    id: "history-head",
+                    role: "user",
+                    sessionID: sessionId,
+                    syntheticHead: true,
+                },
+                parts: [
+                    { type: "text", text: `<session-history>epoch ${headEpoch}</session-history>` },
+                ],
+            },
+            ...source(),
+        ];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                const hash = String(
+                    (body?.pass_inputs as Record<string, unknown>)?.system_prompt_hash,
+                );
+                expect(body?.system_prompt_hash).toBe(hash);
+                hashes.push(hash);
+                const changed = hash !== lastHash;
+                if (changed) headEpoch += 1;
+                lastHash = hash;
+                return {
+                    decision: changed ? "HARD" : "SOFT+",
+                    prefix_bust_permitted: changed,
+                    materialize_reason: changed
+                        ? headEpoch === 1
+                            ? "first_render"
+                            : "system_hash"
+                        : null,
+                    native_messages: native(),
+                };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        const route = { providerID: "anthropic", modelID: "claude-opus-5-5" };
+        deps.liveModelBySession?.set(sessionId, route);
+        registerSystemDateRefresh(deps.historyRefreshSessions);
+        const refresh = new Set<string>();
+        const system = createSystemPromptHashHandler({
+            db,
+            dreamerEnabled: false,
+            resolveModel: () => route,
+            historyRefreshSessions: deps.historyRefreshSessions,
+            pendingMaterializationSessions: deps.pendingMaterializationSessions,
+            systemPromptRefreshSessions: refresh,
+            lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
+            consumeMessagesPrepared: () => order === "messages-first",
+        });
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const prompt = (date: string) => [`Base\n<plugin-env>\n  Date: ${date}\n</plugin-env>`];
+        const serve = async (date: string) => {
+            const outputSystem = { system: prompt(date) };
+            const input = source() as MessageLike[];
+            const output = { messages: structuredClone(input) as unknown[] };
+            bindSystemDateRequestIdentity(output, output);
+            if (order === "system-first")
+                await system.handler(
+                    { sessionID: sessionId, dateRefreshRequest: output },
+                    outputSystem,
+                );
+            await transform.run(sessionId, input, output, getOrCreateSessionMeta(db, sessionId));
+            if (order === "messages-first")
+                await system.handler(
+                    { sessionID: sessionId, dateRefreshRequest: output },
+                    outputSystem,
+                );
+            return { system: outputSystem.system, messages: output.messages };
+        };
+        try {
+            resolveCtxReduceAvailabilityFromMessages(sessionId, source() as never);
+            await system.handler({ sessionID: sessionId }, { system: prompt("2026-10-12") });
+            const systemHash = getOrCreateSessionMeta(db, sessionId).systemPromptHash;
+            expect(systemHash).toMatch(/^[a-f0-9]{32}$/);
+            const before = await serve("2026-10-12");
+            const midnight = await serve("2026-10-13");
+            const next = await serve("2026-10-13");
+            expect(JSON.stringify(midnight)).toBe(JSON.stringify(before));
+            expect(JSON.stringify(next)).toBe(JSON.stringify(before));
+            expect(new Set(hashes).size).toBe(1);
+            expect(hashes).toEqual([systemHash, systemHash, systemHash]);
+            expect(headEpoch).toBe(1);
+            expect(deps.pendingMaterializationSessions.size).toBe(0);
+            expect(deps.historyRefreshSessions.size).toBe(0);
+            expect(refresh.size).toBe(0);
+        } finally {
+            system.clearSession(sessionId);
+            transform.dispose();
+            clearCtxReduceAvailability(sessionId);
+        }
+    });
 }
 
 function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string, unknown>): void {
@@ -10444,3 +10581,5 @@ it("Rust-mode typed protected overflow cannot become passthrough or LKG replay",
             "The tool results kept by protected_tools are larger than this model's context window, so this turn was not sent. Lower the protected_tools counts.",
     });
 });
+
+import { bindSystemDateRequestIdentity } from "./system-date-refresh";

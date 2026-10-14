@@ -632,16 +632,16 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Verify curated release notes exist
-        # `.cortexkit/alfonso/release-notes/<tag>.md` is the source of truth for the
-        # release body AND the Discord post. .cortexkit/alfonso/ is gitignored except
-        # for the release-notes/ subdirectory — see .gitignore. Fail loudly
+        # `.cortexkit/release-notes/<tag>.md` is the source of truth for the
+        # release body AND the Discord post. Only public release notes, skills,
+        # and rules are tracked under .cortexkit/ — see .gitignore. Fail loudly
         # if the file is missing so we don't ship a release with the bare
         # `**Full Changelog**: ...` GitHub auto-generated body.
         run: |
-          notes_file=".cortexkit/alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          notes_file=".cortexkit/release-notes/${GITHUB_REF_NAME}.md"
           if [ ! -f "$notes_file" ]; then
             echo "::error::Curated release notes missing: $notes_file"
-            echo "Draft them under .cortexkit/alfonso/release-notes/ before tagging the release."
+            echo "Draft them under .cortexkit/release-notes/ before tagging the release."
             exit 1
           fi
           # Release-note drafts are often checked against the code in an audit
@@ -662,7 +662,7 @@ jobs:
         run: |
           python3 - "$GITHUB_REF_NAME" <<'PY'
           import re, sys
-          path = f".cortexkit/alfonso/release-notes/{sys.argv[1]}.md"
+          path = f".cortexkit/release-notes/{sys.argv[1]}.md"
           src = open(path).read()
           out, in_fence = [], False
           for line in src.splitlines():
@@ -690,7 +690,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: .cortexkit/alfonso/release-notes/${{ github.ref_name }}.md
+          body_path: .cortexkit/release-notes/${{ github.ref_name }}.md
 
   # Announce on Discord after the GitHub release is created.
   #
@@ -718,7 +718,7 @@ jobs:
       - name: Read curated release notes
         id: notes
         run: |
-          notes_file=".cortexkit/alfonso/release-notes/${GITHUB_REF_NAME}.md"
+          notes_file=".cortexkit/release-notes/${GITHUB_REF_NAME}.md"
           if [ ! -f "$notes_file" ]; then
             echo "::error::Curated release notes missing: $notes_file"
             exit 1

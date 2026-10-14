@@ -2576,7 +2576,7 @@ async function startPiMagicContextRuntime(
 				// cached values that are now potentially stale).
 				signalPiHistoryRefresh(sessionId);
 				signalPiSystemPromptRefresh(sessionId);
-				signalPiPendingMaterialization(sessionId);
+				signalPiPendingMaterialization(sessionId, "system_hash");
 			}
 
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):

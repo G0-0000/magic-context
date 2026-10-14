@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "./rpc-utils";
 import { withStorageFileMutex } from "./storage-file-mutex";
+import { createTestTempDir } from "./test-temp-dir";
 
 const mutex = join(import.meta.dir, "storage-file-mutex.ts");
 
@@ -36,6 +36,7 @@ withStorageFileMutex(${JSON.stringify(join(root, "locks"))}, () => {
     if (process.platform === "darwin") {
         const files = spawnSync("/usr/sbin/lsof", ["-p", String(child.pid), "-Fn"], {
             encoding: "utf8",
+            windowsHide: true,
         });
         expect(files.status).toBe(0);
         const names = files.stdout.split("\n").filter((line) => line.startsWith("n"));
@@ -54,7 +55,7 @@ withStorageFileMutex(${JSON.stringify(join(root, "locks"))}, () => {
 test.skipIf(process.platform === "win32")(
     "independent mutex: paused live holder is not taken over, dead holder is reclaimed",
     async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-mutex-review-"));
+        const { dir: root, cleanup } = createTestTempDir("mc-mutex-review-");
         const child = await holder(root);
         try {
             process.kill(child.pid, "SIGSTOP");
@@ -86,7 +87,7 @@ test.skipIf(process.platform === "win32")(
                 child.kill("SIGKILL");
                 await child.exited;
             }
-            rmSync(root, { recursive: true, force: true });
+            cleanup();
         }
     },
     15000,
@@ -95,7 +96,7 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
     "independent mutex: corrupt live-owner identity refuses within a bound",
     async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-mutex-review-"));
+        const { dir: root, cleanup } = createTestTempDir("mc-mutex-review-");
         const child = await holder(root);
         try {
             const locks = join(root, "locks");
@@ -119,7 +120,7 @@ test.skipIf(process.platform === "win32")(
         } finally {
             child.kill("SIGKILL");
             await child.exited;
-            rmSync(root, { recursive: true, force: true });
+            cleanup();
         }
     },
     15000,
@@ -128,7 +129,7 @@ test.skipIf(process.platform === "win32")(
 test.skipIf(process.platform === "win32")(
     "independent mutex: denied PID probe is inconclusive and refuses within a bound",
     async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-mutex-inconclusive-review-"));
+        const { dir: root, cleanup } = createTestTempDir("mc-mutex-inconclusive-review-");
         const child = await holder(root);
         try {
             __setRpcIdentityTestHooks({
@@ -154,7 +155,7 @@ test.skipIf(process.platform === "win32")(
             __resetRpcIdentityTestHooks();
             child.kill("SIGKILL");
             await child.exited;
-            rmSync(root, { recursive: true, force: true });
+            cleanup();
         }
     },
     15000,

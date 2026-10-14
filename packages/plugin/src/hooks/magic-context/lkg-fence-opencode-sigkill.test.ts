@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 
 for (const host of ["oc1", "oc2"]) {
     for (const point of ["ordinary-deferred", "before-dirty", "temp-synced", "dirty", "returned"]) {
         test.skipIf(process.platform === "win32")(
             `independent SIGKILL ${host}: ${point}`,
             () => {
-                const root = mkdtempSync(join(tmpdir(), "mc-oc-sigkill-review-"));
+                const { dir: root, cleanup } = createTestTempDir("mc-oc-sigkill-review-");
                 const path = (relative: string) => JSON.stringify(join(import.meta.dir, relative));
                 const common = `
 import { writeFileSync } from 'node:fs';
@@ -46,7 +46,7 @@ const pass = async (messages) => {
  const output = {messages:structuredClone(messages)}; await handler({},output); return output;
 };
 const isolate = () => {
- const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8'});
+  const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8',windowsHide:true});
  if(files.status !== 0 || /\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.stdout)) throw new Error('Live-store isolation not proved');
  console.log('OC_LSOF pid=' + process.pid + ' forbidden=0');
 };
@@ -113,7 +113,7 @@ console.log('OC_RESTART '+JSON.stringify({trusted, prefix:slot?.jsonPrefix}));
                         `OC_SIGKILL_PROOF host=${host} point=${point} signal=${killed.signal} oldSlotRetained=true restartTrusted=${proof.trusted}`,
                     );
                 } finally {
-                    rmSync(root, { recursive: true, force: true });
+                    cleanup();
                 }
             },
             100000,
@@ -125,7 +125,7 @@ for (const point of ["committed", "before-clean", "after-clean"]) {
     test.skipIf(process.platform === "win32")(
         `independent SIGKILL shared publication: ${point}`,
         () => {
-            const root = mkdtempSync(join(tmpdir(), "mc-publication-sigkill-"));
+            const { dir: root, cleanup } = createTestTempDir("mc-publication-sigkill-");
             const path = (relative: string) => JSON.stringify(join(import.meta.dir, relative));
             const common = `
 import { Database } from 'bun:sqlite';
@@ -173,7 +173,7 @@ throw new Error('Selected publication boundary not reached');
                 expect(proof.prefix).toBe('[{"text":"matching healthy rebuild"}]');
                 expect(proof.trusted).toBe(point === "after-clean");
             } finally {
-                rmSync(root, { recursive: true, force: true });
+                cleanup();
             }
         },
         90000,

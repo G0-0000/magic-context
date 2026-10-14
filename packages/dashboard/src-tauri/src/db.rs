@@ -2573,8 +2573,7 @@ fn build_db_cache_events_with_attribution(
     //   - Anthropic reports it directly as cache_write (cache_creation tokens).
     //   - When cache_write is absent, use only the previous uncached input.
     //     Generated output (including reasoning) is not automatically part of
-    //     the next step's cached input; measured comparisons support this rule
-    //     (docs/reports/pi-openai-cache-busts-2026-09-28.md).
+    //     the next step's cached input: the host may not resend those bytes.
     // retention = current.cache_read / expected (only when prev had a cache):
     //   >= 0.95 stable · 0.80..0.95 warning · < 0.80 bust · ==0 full_bust
     // (Verified empirically: on a stable step retention is 0.97-1.00+ across
@@ -8398,6 +8397,25 @@ pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
         "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
         params![now_millis(), id],
     )?;
+    if affected > 0 {
+        bump_project_user_profile_version(&tx)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let affected = tx.execute(
+        "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
+        params![now_millis(), id],
+    )?;
+    // Same invariant as dismiss/delete: user_memories render into the cached
+    // m[0] <user-profile> block, so a restore must bump the global
+    // user-profile version or running sessions keep serving the profile
+    // without the restored entry. The status predicate keeps affected at 0
+    // for a row that is already active, so a no-op restore cannot
+    // invalidate every running session's cached profile.
     if affected > 0 {
         bump_project_user_profile_version(&tx)?;
     }

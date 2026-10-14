@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createTestTempDir } from "../../plugin/src/shared/test-temp-dir";
 
 const modulePath = (path: string) =>
 	JSON.stringify(join(import.meta.dir, path));
@@ -17,7 +17,7 @@ for (const point of [
 	test.skipIf(process.platform === "win32")(
 		`independent SIGKILL Pi recovery boundary: ${point}`,
 		() => {
-			const root = mkdtempSync(join(tmpdir(), "mc-sigkill-review-"));
+			const { dir: root, cleanup } = createTestTempDir("mc-sigkill-review-");
 			const common = `
 import { writeFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -42,7 +42,7 @@ const pass = (messages) => fake.handlers.get('context')({messages: structuredClo
 });
 const kill = () => process.kill(process.pid, 'SIGKILL');
 const isolate = () => {
- const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8'});
+  const files = spawnSync('lsof',['-p',String(process.pid),'-Fn'],{encoding:'utf8',windowsHide:true});
  if(files.status !== 0 || /\\/(?:\\.local\\/share\\/opencode|\\.local\\/share\\/cortexkit\\/magic-context|\\.config\\/(?:opencode|cortexkit))\\//.test(files.stdout)) throw new Error('Live-store isolation not proved');
  console.log('SIGKILL_LSOF pid=' + process.pid + ' forbidden=0');
 };
@@ -121,7 +121,7 @@ console.log('RESTART ' + JSON.stringify({trusted, refused, saved: slot?.jsonPref
 					`SIGKILL_PROOF point=${point} signal=${killed.signal} modelSawTail=${sawTail} restartTrusted=${proof.trusted} refused=${proof.refused}`,
 				);
 			} finally {
-				rmSync(root, { recursive: true, force: true });
+				cleanup();
 			}
 		},
 		90000,

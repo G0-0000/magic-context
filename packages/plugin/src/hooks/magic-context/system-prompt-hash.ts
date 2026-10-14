@@ -22,7 +22,9 @@ import {
     resolveCtxReduceAvailability,
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
+import { requestPendingMaterialization } from "./pending-materialization";
 import { estimateTokens } from "./read-session-formatting";
+import { systemPromptDates } from "./system-prompt-dates";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
@@ -213,10 +215,13 @@ export function createSystemPromptHashHandler(deps: {
      * seen before the messages transform, as on a system-first host.
      */
     consumeMessagesPrepared?: (sessionId: string) => boolean;
+    /** Without a request token, pair hooks using the ID of the last real user whose turn contains the thinking. */
+    resolveDateTurnId?: (sessionId: string) => string | undefined;
 }): {
     handler: (
         input: {
             sessionID?: string;
+            dateRefreshRequest?: SystemDateRequestIdentity;
             model?: { providerID?: string; modelID?: string };
         },
         output: { system: string[] },
@@ -236,9 +241,10 @@ export function createSystemPromptHashHandler(deps: {
     // flip from causing an unnecessary flush + cache rebuild.
     const stickyDateBySession = new Map<string, string>();
 
-    const handler = async (
+    const processSystemPrompt = async (
         input: {
             sessionID?: string;
+            dateRefreshRequest?: SystemDateRequestIdentity;
             model?: { providerID?: string; modelID?: string };
         },
         output: { system: string[] },
@@ -330,7 +336,21 @@ export function createSystemPromptHashHandler(deps: {
 
         // Read after the skip checks above: a skipped title/summary call for this
         // session must not consume the marker left by the main request's messages pass.
-        const requestMessagesFinal = deps.consumeMessagesPrepared?.(sessionId) ?? false;
+        const messagesPrepared = deps.consumeMessagesPrepared?.(sessionId) ?? false;
+        const dateRequest = beginSystemDateRequest(
+            deps.historyRefreshSessions,
+            sessionId,
+            messagesPrepared ? "system-after-messages" : "system",
+            input.dateRefreshRequest === undefined &&
+                hasSystemDateRefresh(deps.historyRefreshSessions)
+                ? (deps.resolveDateTurnId ?? latestRealUserTurnIdFromOpenCodeDb)(sessionId)
+                : undefined,
+            input.dateRefreshRequest,
+        );
+        bindSystemDateRequest(output, dateRequest);
+        const requestMessagesFinal =
+            messagesPrepared ||
+            systemDateRefreshPermission(deps.historyRefreshSessions, dateRequest) !== undefined;
 
         // ── Step 1: Inject magic-context guidance ──
         // Subagents with callable ctx_reduce get only the minimal drop mechanics
@@ -444,8 +464,6 @@ export function createSystemPromptHashHandler(deps: {
         const adoptSystemChange = idleCacheExpired || requestMessagesFinal;
 
         // ── Step 2: Coalesce content/preset and date changes into one bust ──
-        const DATE_PATTERN = /Today's date: .+/;
-        const DATE_PATTERN_ALL = /Today's date: .+/g;
         const liveSystemContent = output.system.join("\n");
         if (liveSystemContent.length === 0) return;
         const previousHash = sessionMetaEarly?.systemPromptHash ?? "";
@@ -454,27 +472,76 @@ export function createSystemPromptHashHandler(deps: {
         // establish a new baseline. Discard the session's sticky date instead of
         // reusing the date line frozen for the earlier host projection.
         if (!hasPersistedHash) stickyDateBySession.delete(sessionId);
-        // Every element carrying a date line participates in freezing. Only MC
-        // injects the line today, but a host prompt carrying the same format
-        // must not leave a second live date that busts the hash at midnight.
-        const dateElementIndexes: number[] = [];
-        let currentDate: string | undefined;
-        for (let i = 0; i < output.system.length; i++) {
-            const match = output.system[i].match(DATE_PATTERN);
-            if (!match) continue;
-            dateElementIndexes.push(i);
-            currentDate ??= match[0];
-        }
         const stickyDate = stickyDateBySession.get(sessionId);
-        const stableCandidate =
-            currentDate && stickyDate && currentDate !== stickyDate
-                ? liveSystemContent.replace(DATE_PATTERN_ALL, stickyDate)
-                : liveSystemContent;
+        const dates = systemPromptDates(liveSystemContent, stickyDate);
+        const currentDate = dates.live;
+        const stableCandidate = dates.stable;
         const stableCandidateHash = createHash("md5")
             .update(promptSurfaceHashMaterial(stableCandidate, promptSurface.preset))
             .digest("hex");
         const contentOrPresetChanged = hasPersistedHash && stableCandidateHash !== previousHash;
-        const dateMayAdvance = isCacheBusting || idleCacheExpired || contentOrPresetChanged;
+        const rewritePermission = systemDateRefreshPermission(
+            deps.historyRefreshSessions,
+            dateRequest,
+        );
+        // A queued refresh alone cannot change the prompt before an assistant's
+        // encrypted thinking that still requires its original earlier messages.
+        // If the system hook runs first, wait for a permitted messages rebuild;
+        // if the messages hook ran first, use its completed rebuild decision.
+        let deferredDateRefresh = false;
+        if (
+            currentDate &&
+            stickyDate &&
+            currentDate !== stickyDate &&
+            isCacheBusting &&
+            !idleCacheExpired &&
+            !contentOrPresetChanged &&
+            !requestMessagesFinal
+        ) {
+            const liveElements = [...output.system];
+            deferredDateRefresh = waitForSystemDateRefresh(
+                deps.historyRefreshSessions,
+                dateRequest,
+                (permitted) => {
+                    if (!permitted) {
+                        deps.systemPromptRefreshSessions.add(sessionId);
+                        return;
+                    }
+                    try {
+                        const content = liveElements.join("\n");
+                        const hash = createHash("md5")
+                            .update(promptSurfaceHashMaterial(content, promptSurface.preset))
+                            .digest("hex");
+                        updateSessionMeta(deps.db, sessionId, {
+                            systemPromptHash: hash,
+                            cachedM0SystemHash: hash,
+                            systemPromptTokens: estimateTokens(content),
+                        });
+                        stickyDateBySession.set(sessionId, currentDate);
+                        output.system.splice(0, output.system.length, ...liveElements);
+                        publishSystemDateOutput(output.system);
+                        deps.systemPromptRefreshSessions.delete(sessionId);
+                        sessionLog(
+                            sessionId,
+                            `system prompt date updated after prefix rewrite: ${stickyDate} → ${currentDate}`,
+                        );
+                    } catch (error) {
+                        deps.systemPromptRefreshSessions.add(sessionId);
+                        sessionLog(
+                            sessionId,
+                            "system prompt date refresh failed (keeping frozen date):",
+                            error,
+                        );
+                    }
+                },
+            );
+        }
+        const dateMayAdvance =
+            idleCacheExpired ||
+            contentOrPresetChanged ||
+            (isCacheBusting &&
+                !deferredDateRefresh &&
+                (dateRequest ? rewritePermission === true : rewritePermission !== false));
 
         if (currentDate && !stickyDate) {
             stickyDateBySession.set(sessionId, currentDate);
@@ -485,12 +552,19 @@ export function createSystemPromptHashHandler(deps: {
                     sessionId,
                     `system prompt date updated: ${stickyDate} → ${currentDate} (cache-busting pass)`,
                 );
-            } else if (dateElementIndexes.length > 0) {
-                for (const index of dateElementIndexes) {
-                    output.system[index] = output.system[index].replace(
-                        DATE_PATTERN_ALL,
-                        stickyDate,
-                    );
+            } else {
+                // Apply the saved host dates to each system prompt element
+                // without combining the original array entries.
+                let offset = 0;
+                const prior: string[] = JSON.parse(stickyDate);
+                for (let index = 0; index < output.system.length; index++) {
+                    const element = systemPromptDates(output.system[index]);
+                    const count = element.live ? JSON.parse(element.live).length : 0;
+                    output.system[index] = systemPromptDates(
+                        output.system[index],
+                        JSON.stringify(prior.slice(offset, offset + count)),
+                    ).stable;
+                    offset += count;
                 }
                 sessionLog(
                     sessionId,
@@ -536,7 +610,11 @@ export function createSystemPromptHashHandler(deps: {
             if (!adoptSystemChange) {
                 deps.historyRefreshSessions.add(sessionId);
                 deps.systemPromptRefreshSessions.add(sessionId);
-                deps.pendingMaterializationSessions.add(sessionId);
+                requestPendingMaterialization(
+                    deps.pendingMaterializationSessions,
+                    sessionId,
+                    "system_hash",
+                );
                 deps.lastHeuristicsTurnId.delete(sessionId);
             }
         } else if (previousHash === "" || previousHash === "0") {
@@ -612,14 +690,33 @@ export function createSystemPromptHashHandler(deps: {
         // the next valid pass can consume it.
         //
         // See Oracle review 2026-04-26 Finding A1 for the bug this fixes.
-        if (isCacheBusting) {
+        if (
+            isCacheBusting &&
+            !deferredDateRefresh &&
+            (contentOrPresetChanged ||
+                !currentDate ||
+                currentDate === stickyDate ||
+                !dateRequest ||
+                rewritePermission === true)
+        ) {
             deps.systemPromptRefreshSessions.delete(sessionId);
         }
     };
 
+    const handler: typeof processSystemPrompt = async (input, output) => {
+        try {
+            await processSystemPrompt(input, output);
+        } finally {
+            finishSystemDateHook(
+                deps.historyRefreshSessions,
+                systemDateRequestForOutput(deps.historyRefreshSessions, output),
+            );
+        }
+    };
     return {
         handler,
         clearSession: (sessionId: string) => {
+            clearSystemDateRefresh(deps.historyRefreshSessions, sessionId);
             guidanceEpochs.clear(sessionId);
             clearSystemPromptHashSession(sessionId, {
                 stickyDateBySession,
@@ -628,3 +725,17 @@ export function createSystemPromptHashHandler(deps: {
         },
     };
 }
+
+import { latestRealUserTurnIdFromOpenCodeDb } from "./read-session-db";
+import {
+    beginSystemDateRequest,
+    bindSystemDateRequest,
+    clearSystemDateRefresh,
+    finishSystemDateHook,
+    hasSystemDateRefresh,
+    publishSystemDateOutput,
+    type SystemDateRequestIdentity,
+    systemDateRefreshPermission,
+    systemDateRequestForOutput,
+    waitForSystemDateRefresh,
+} from "./system-date-refresh";

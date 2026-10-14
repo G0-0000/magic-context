@@ -56,7 +56,7 @@ import {
 } from "./lib/ctx-search-rerank";
 
 const SNAPSHOT_ROOT = resolve("local-ignore/ctx-search-rerank");
-const EVIDENCE_ROOT = resolve("docs/reports/ctx-search-rerank-spike");
+const EVIDENCE_ROOT = resolve(".cortexkit/internal-docs/investigations/reports/ctx-search-rerank-spike");
 const LANE_LIMIT = 25;
 
 interface SpikeRow extends RankRow {

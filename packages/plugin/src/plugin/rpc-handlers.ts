@@ -1774,7 +1774,11 @@ export function registerRpcHandlers(
         // pass instead of leaving the flush invisible until one happens anyway.
         liveSessionState.historyRefreshSessions.add(sessionId);
         liveSessionState.systemPromptRefreshSessions.add(sessionId);
-        liveSessionState.pendingMaterializationSessions.add(sessionId);
+        requestPendingMaterialization(
+            liveSessionState.pendingMaterializationSessions,
+            sessionId,
+            "user_flush",
+        );
         return { ok: true, message };
     });
 
@@ -1907,3 +1911,5 @@ export function registerRpcHandlers(
         return { ok: true } as unknown as Record<string, unknown>;
     });
 }
+
+import { requestPendingMaterialization } from "../hooks/magic-context/pending-materialization";

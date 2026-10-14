@@ -28,6 +28,15 @@ export type CanonicalMaterializeReason =
     | "project_memory_epoch"
     | "ttl_idle"
     | "explicit_flush"
+    | "user_flush"
+    | "fit_retry"
+    | "pending_materialization"
+    | "variant_change"
+    | "recomp"
+    | "boundary_repair"
+    | "host_history_change"
+    | "thinking_hold"
+    | "mutation_drift"
     | "max_mutation_id"
     | "first_render"
     | "pressure_refold"
@@ -113,6 +122,15 @@ const canonicalReasons = new Set<string>([
     "project_memory_epoch",
     "ttl_idle",
     "explicit_flush",
+    "user_flush",
+    "fit_retry",
+    "pending_materialization",
+    "variant_change",
+    "recomp",
+    "boundary_repair",
+    "host_history_change",
+    "thinking_hold",
+    "mutation_drift",
     "max_mutation_id",
     "first_render",
     "pressure_refold",

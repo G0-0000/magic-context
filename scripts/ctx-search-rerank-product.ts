@@ -45,8 +45,13 @@ if (baselinePath) assertOfflinePath(baselinePath, root);
 const beforeSearch: typeof unifiedSearch = baselinePath
 	? (await import(baselinePath)).unifiedSearch
 	: unifiedSearch;
+const spikeResultsFlag = process.argv.indexOf("--spike-results");
+const spikeResultsPath = spikeResultsFlag >= 0 ? process.argv[spikeResultsFlag + 1] : undefined;
+if (!spikeResultsPath || spikeResultsPath.startsWith("--")) {
+    throw new Error("--spike-results <path> is required; use the offline spike runner's results.json");
+}
 const archived = JSON.parse(
-	readFileSync("docs/reports/ctx-search-rerank-spike/results.json", "utf8"),
+    readFileSync(spikeResultsPath, "utf8"),
 ) as {
 	queries: {
 		id: string;

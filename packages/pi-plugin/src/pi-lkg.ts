@@ -810,6 +810,7 @@ export function createPiLkgCoordinator(
 			inputTokens: request.usage.inputTokens,
 			envelopeSignature: request.envelopeSignature,
 			appendedMessages,
+			previousMessages: JSON.parse(request.jsonPrefix) as unknown[],
 		};
 	};
 	const replay: PiLkgCoordinator["replay"] = (snapshot, parentOf) => {
