@@ -1,24 +1,13 @@
 import { expect, it } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { __test as pi } from "../packages/pi-plugin/src/context-handler";
-
-import {
-    closeCompactionMarkerDb,
-    getPreparedCompactionMarkerSummaryIds,
-    injectCompactionMarker,
-    prepareCompactionMarkerCandidates,
-} from "../packages/plugin/src/features/magic-context/compaction-marker";
-import {
-    findPiFallbackToolOwnerTags,
-    getAllStatusTagTokenTotalsFlat,
-} from "../packages/plugin/src/features/magic-context/storage-tags";
+import { __test as pi } from "../../../../pi-plugin/src/context-handler";
 import {
     resolveBoundaryContext,
     resolveProtectedTailBoundary,
-} from "../packages/plugin/src/hooks/magic-context/protected-tail-boundary";
-import { withRawMessageProvider } from "../packages/plugin/src/hooks/magic-context/read-session-chunk";
-import { Database } from "../packages/plugin/src/shared/sqlite";
+} from "../../hooks/magic-context/protected-tail-boundary";
+import { withRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
+import { Database } from "../../shared/sqlite";
 import {
     contextStore,
     fixture,
@@ -26,7 +15,14 @@ import {
     messageId,
     random,
     SESSION,
-} from "./host-stalls-fixture";
+} from "./__tests__/host-stalls.fixture";
+import {
+    closeCompactionMarkerDb,
+    getPreparedCompactionMarkerSummaryIds,
+    injectCompactionMarker,
+    prepareCompactionMarkerCandidates,
+} from "./compaction-marker";
+import { findPiFallbackToolOwnerTags, getAllStatusTagTokenTotalsFlat } from "./storage-tags";
 
 const OLD_LEGACY_MARKER_SQL = `SELECT m.id FROM message m WHERE m.session_id=? AND m.id<>?
     AND COALESCE(json_extract(m.data,'$.summary'),0)=1 AND COALESCE(json_extract(m.data,'$.finish'),'')='stop'

@@ -1,16 +1,15 @@
 import { afterEach, expect, it } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-
-import { sweepOrphanedOpenCodeMessageIndexes as syncSweep } from "../packages/plugin/src/features/magic-context/message-index";
-import { sweepOrphanedOpenCodeMessageIndexesOffThread as workerSweep } from "../packages/plugin/src/features/magic-context/message-index-async";
 import {
     runSessionWarmupWorker,
     stopRawSessionOrdinalWarmups,
-} from "../packages/plugin/src/hooks/magic-context/raw-ordinal-warmup";
-import { _resetHarnessForTesting, setHarness } from "../packages/plugin/src/shared/harness";
-import { Database } from "../packages/plugin/src/shared/sqlite";
-import { contextStore, fixture } from "./host-stalls-fixture";
+} from "../../hooks/magic-context/raw-ordinal-warmup";
+import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import { Database } from "../../shared/sqlite";
+import { contextStore, fixture } from "./__tests__/host-stalls.fixture";
+import { sweepOrphanedOpenCodeMessageIndexes as syncSweep } from "./message-index";
+import { sweepOrphanedOpenCodeMessageIndexesOffThread as workerSweep } from "./message-index-async";
 
 afterEach(() => {
     stopRawSessionOrdinalWarmups();
@@ -113,7 +112,7 @@ it("unavailable source and failed worker preserve orphan rows without advancing 
 // Pause the unchanged synchronous sweep body on its worker connection, exposing
 // the window between candidate discovery and the deletion transaction to writes.
 function barrierWorker(dir: string, at: "BEGIN IMMEDIATE" | "COMMIT") {
-    const modules = new URL("../packages/plugin/src/", import.meta.url).href;
+    const modules = new URL("../../", import.meta.url).href;
     const path = join(dir, "barrier-worker.mjs");
     writeFileSync(
         path,
@@ -250,7 +249,7 @@ it("host exit and SIGKILL during a worker transaction leave no committed deletio
     setHarness("opencode");
     const db = context(join(f.dir, "context.db"));
     const source = host(join(f.dir, "host.db"));
-    const modules = new URL("../packages/plugin/src/", import.meta.url).href;
+    const modules = new URL("../../", import.meta.url).href;
     try {
         for (const mode of ["exit", "SIGKILL"]) {
             const before = snapshot(db);
@@ -269,7 +268,11 @@ it("host exit and SIGKILL during a worker transaction leave no committed deletio
                 console.log('WORKER TRANSACTION OPEN');
                 ${mode === "exit" ? "process.exit(0);" : "process.kill(process.pid,'SIGKILL');"}`,
             );
-            const child = Bun.spawn([process.execPath, path], { stdout: "pipe", stderr: "pipe" });
+            const child = Bun.spawn([process.execPath, path], {
+                stdout: "pipe",
+                stderr: "pipe",
+                windowsHide: true,
+            });
             try {
                 const status = await child.exited;
                 const stdout = await new Response(child.stdout).text();

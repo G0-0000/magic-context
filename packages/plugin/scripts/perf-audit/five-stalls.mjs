@@ -6,7 +6,6 @@ import { __test as piTest } from "../../../pi-plugin/src/context-handler.ts";
 import {
     createStallContext,
     createStallHost,
-    OLD_ID_RANGE_SQL,
     OLD_LEGACY_MARKER_SQL,
     OLD_PI_OWNER_SQL,
     STALL_SESSION,
@@ -25,8 +24,6 @@ import {
     findPiFallbackToolOwnerTags,
     getAllStatusTagTokenTotalsFlat,
 } from "../../src/features/magic-context/storage-tags.ts";
-import { prewarmRawSessionOrdinalsForDb } from "../../src/hooks/magic-context/raw-ordinal-warmup.ts";
-import { readRawSessionMessageIdOrdinalsForRangeFromDb } from "../../src/hooks/magic-context/read-session-raw.ts";
 import { setHarness } from "../../src/shared/harness.ts";
 import { Database } from "../../src/shared/sqlite.ts";
 
@@ -77,40 +74,6 @@ async function heartbeat(name, call) {
     return value;
 }
 try {
-    const total = host
-        .prepare(
-            `SELECT count(*) AS n FROM message WHERE session_id=? AND CASE WHEN json_valid(data) THEN NOT (COALESCE(json_type(data,'$.summary'),'')='true' AND COALESCE(json_extract(data,'$.finish'),'')='stop') ELSE 1 END`,
-        )
-        .get(STALL_SESSION).n;
-    const from = total - 40,
-        to = total;
-    const oldRows = measure("id-range before", () =>
-        host.prepare(OLD_ID_RANGE_SQL).all(STALL_SESSION, to - from + 1, from - 1),
-    );
-    const expected = new Map(
-        oldRows.flatMap((row, index) => {
-            try {
-                const parsed = JSON.parse(row.data);
-                return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-                    ? [[row.id, from + index]]
-                    : [];
-            } catch {
-                return [];
-            }
-        }),
-    );
-    assert.equal(
-        await heartbeat("ordinal cold warmup off-thread", () =>
-            prewarmRawSessionOrdinalsForDb(host, STALL_SESSION),
-        ),
-        "warm",
-    );
-    assert.deepEqual(
-        measure("id-range after", () =>
-            readRawSessionMessageIdOrdinalsForRangeFromDb(host, STALL_SESSION, from, to),
-        ),
-        expected,
-    );
     // Invalid JSON is a reader fixture, not a valid marker candidate. The old writer rejects it.
     host.prepare("UPDATE message SET data='{}' WHERE json_valid(data)=0").run();
     const boundary = stallMessageId(count - 32),

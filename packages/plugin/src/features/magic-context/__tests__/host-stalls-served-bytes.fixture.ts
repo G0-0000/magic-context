@@ -2,7 +2,7 @@ import { spyOn } from "bun:test";
 import { strict as assert } from "node:assert";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { SessionContext, V2Context } from "../packages/plugin/src/v2/hooks/types";
+import type { SessionContext, V2Context } from "../../../v2/hooks/types";
 
 const [mode, sourceOrLeft, outputOrRight, host] = Bun.argv.slice(2);
 assert(

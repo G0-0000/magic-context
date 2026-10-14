@@ -1,15 +1,10 @@
 import { expect, it, spyOn } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-    fixture,
-    hostStore,
-    messageId,
-    SESSION,
-} from "../../../../../review-tests/host-stalls-fixture";
 import * as ordinalWarmup from "../../hooks/magic-context/raw-ordinal-warmup";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import { fixture, hostStore, messageId, SESSION } from "./__tests__/host-stalls.fixture";
 import {
     closeCompactionMarkerDb,
     getPreparedCompactionMarkerSummaryIds,

@@ -2,26 +2,26 @@ import { afterEach, expect, it } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-    prewarmRawSessionOrdinalsForDb,
-    resetRawSessionOrdinalWarmupsForTest,
-    stopRawSessionOrdinalWarmups,
-} from "../packages/plugin/src/hooks/magic-context/raw-ordinal-warmup";
-import {
-    getRawSessionSummaryEpoch,
-    installRawSessionSummaryScan,
-    RawOrdinalsNotReady,
-    readRawSessionMessageIdOrdinalsForRangeFromDb as readRange,
-    scanRawSessionSummaryRows,
-} from "../packages/plugin/src/hooks/magic-context/read-session-raw";
-import { Database } from "../packages/plugin/src/shared/sqlite";
-import {
     fixture,
     hostStore,
     messageId,
     offsetOracle,
     random,
     SESSION,
-} from "./host-stalls-fixture";
+} from "../../features/magic-context/__tests__/host-stalls.fixture";
+import { Database } from "../../shared/sqlite";
+import {
+    prewarmRawSessionOrdinalsForDb,
+    resetRawSessionOrdinalWarmupsForTest,
+    stopRawSessionOrdinalWarmups,
+} from "./raw-ordinal-warmup";
+import {
+    getRawSessionSummaryEpoch,
+    installRawSessionSummaryScan,
+    RawOrdinalsNotReady,
+    readRawSessionMessageIdOrdinalsForRangeFromDb as readRange,
+    scanRawSessionSummaryRows,
+} from "./read-session-raw";
 
 afterEach(() => resetRawSessionOrdinalWarmupsForTest());
 

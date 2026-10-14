@@ -166,8 +166,5 @@ export const OLD_LEGACY_MARKER_SQL = `SELECT m.id FROM message m WHERE m.session
     AND COALESCE(json_extract(m.data,'$.parentID'),'')=? AND EXISTS(SELECT 1 FROM part p
       WHERE +p.session_id=m.session_id AND p.message_id=m.id AND COALESCE(json_extract(p.data,'$.type'),'')='text'
       AND COALESCE(json_extract(p.data,'$.text'),'')=?)`;
-export const OLD_ID_RANGE_SQL = `SELECT id,data FROM message WHERE session_id=? AND CASE WHEN json_valid(data) THEN NOT (
-    COALESCE(json_type(data,'$.summary'),'')='true' AND COALESCE(json_extract(data,'$.finish'),'')='stop') ELSE 1 END
-    ORDER BY time_created,id LIMIT ? OFFSET ?`;
 export const OLD_PI_OWNER_SQL = `SELECT tag_number AS tagNumber,message_id AS callId,tool_owner_message_id AS toolOwnerMessageId,status
     FROM tags WHERE session_id=? AND type='tool' AND tool_owner_message_id LIKE 'pi-msg-%' ORDER BY tag_number`;

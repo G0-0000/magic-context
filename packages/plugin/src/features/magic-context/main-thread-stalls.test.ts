@@ -6,19 +6,12 @@ import {
     resolveBoundaryContext,
     resolveProtectedTailBoundary,
 } from "../../hooks/magic-context/protected-tail-boundary";
-import { prewarmRawSessionOrdinalsForDb } from "../../hooks/magic-context/raw-ordinal-warmup";
 import { withRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
-import {
-    getRawSessionOrdinalRowsVisitedForTest,
-    readRawSessionMessageIdOrdinalsForRangeFromDb,
-    resetRawSessionOrdinalRowsVisitedForTest,
-} from "../../hooks/magic-context/read-session-raw";
 import { setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import {
     createStallContext,
     createStallHost,
-    OLD_ID_RANGE_SQL,
     OLD_LEGACY_MARKER_SQL,
     OLD_PI_OWNER_SQL,
     STALL_SESSION,
@@ -146,45 +139,6 @@ it("legacy marker cleanup preserves the old deletion set with primary-key candid
             "older-lineage",
         ])
             expect(db.prepare("SELECT id FROM message WHERE id=?").get(id)).not.toBeNull();
-    } finally {
-        db.close();
-    }
-});
-
-it("late ID ranges use worker ranks and preserve numeric summaries and malformed holes", async () => {
-    const dir = fixtureDir();
-    const db = createStallHost(join(dir, "opencode.db"), 4096, 12800);
-    try {
-        expect(await prewarmRawSessionOrdinalsForDb(db, STALL_SESSION)).toBe("warm");
-        const from = 3580,
-            to = 4096;
-        const oldRows = db
-            .prepare(OLD_ID_RANGE_SQL)
-            .all(STALL_SESSION, to - from + 1, from - 1) as { id: string; data: string }[];
-        const expected = oldRows.flatMap((row, i) => {
-            try {
-                const parsed = JSON.parse(row.data);
-                return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-                    ? [[row.id, from + i]]
-                    : [];
-            } catch {
-                return [];
-            }
-        });
-        resetRawSessionOrdinalRowsVisitedForTest();
-        expect([
-            ...readRawSessionMessageIdOrdinalsForRangeFromDb(db, STALL_SESSION, from, to),
-        ]).toEqual(expected);
-        expect(getRawSessionOrdinalRowsVisitedForTest()).toBeGreaterThan(0);
-        expect(getRawSessionOrdinalRowsVisitedForTest()).toBeLessThan(to - from + 1 + 512);
-        db.prepare("DELETE FROM message WHERE time_created>=4000").run();
-        expect(await prewarmRawSessionOrdinalsForDb(db, STALL_SESSION)).toBe("warm");
-        const remaining = db
-            .prepare(OLD_ID_RANGE_SQL)
-            .all(STALL_SESSION, to - from + 1, from - 1) as { id: string; data: string }[];
-        expect([
-            ...readRawSessionMessageIdOrdinalsForRangeFromDb(db, STALL_SESSION, from, to),
-        ]).toEqual(remaining.map((row, i) => [row.id, from + i]));
     } finally {
         db.close();
     }

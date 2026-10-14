@@ -298,30 +298,3 @@ test("excluded marker appends preserve durable ordinals", async () => {
         }
     });
 });
-
-test("one thousand peer-session commits cost zero ordinal warmups for the unchanged session", async () => {
-    await fixture(async (source, reader, _context, _root, length) => {
-        expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
-        const log = spyOn(logger, "log");
-        try {
-            const insert = source.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)");
-            for (let commit = 0; commit < 1000; commit++) {
-                insert.run(`other-${commit}`, "session-b", commit, commit, '{"role":"user"}');
-                expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(true);
-                expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
-                expect(countRawSessionMessageOrdinalsFromDb(reader, SESSION)).toBe(
-                    recount(source, length),
-                );
-            }
-            expect(
-                log.mock.calls.filter(
-                    (call) =>
-                        String(call[0]).includes(`canonical ordinals of ${SESSION}`) &&
-                        String(call[0]).includes("warmed off-thread"),
-                ),
-            ).toHaveLength(0);
-        } finally {
-            log.mockRestore();
-        }
-    });
-});

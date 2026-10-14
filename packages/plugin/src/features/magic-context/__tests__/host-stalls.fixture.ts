@@ -1,9 +1,9 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMigrations } from "../packages/plugin/src/features/magic-context/migrations";
-import { initializeDatabase } from "../packages/plugin/src/features/magic-context/storage-db";
-import { Database } from "../packages/plugin/src/shared/sqlite";
+import { Database } from "../../../shared/sqlite";
+import { runMigrations } from "../migrations";
+import { initializeDatabase } from "../storage-db";
 
 export const SESSION = "review-session";
 export function fixture() {

@@ -504,53 +504,6 @@ export function readRawSessionMessageIdOrdinalsForRangeFromDb(
     const from = Math.max(1, Math.floor(fromOrdinal));
     const to = Math.floor(toOrdinal);
     if (to < from) return new Map();
-    if (getSqliteDatabasePath(db)) {
-        return withReadSnapshot(db, () => {
-            const scan = currentOrdinalCheckpoints(db, sessionId)?.scan;
-            if (!scan?.checkpoints && from > ORDINAL_LOOKUP_LIMIT) {
-                void prewarmRawSessionOrdinalsForDb(db, sessionId);
-                throw new RawOrdinalsNotReady();
-            }
-            const points = scan?.checkpoints ?? [];
-            let low = 0;
-            let high = points.length;
-            while (low < high) {
-                const middle = Math.floor((low + high) / 2);
-                if (points[middle].rangeOrdinal < from) low = middle + 1;
-                else high = middle;
-            }
-            let anchor: OrdinalKey | undefined = points[low - 1];
-            let ordinal = points[low - 1]?.rangeOrdinal ?? 0;
-            const result = new Map<string, number>();
-            while (ordinal < to) {
-                // Rank checkpoints skip the prefix. Limit keys before inspecting
-                // JSON so even a run of summaries is read in bounded pages.
-                const rows = db
-                    .prepare(`SELECT id, data, time_created, ${RANGE_EXCLUDED_ROW_SQL} AS excluded
-                    FROM message WHERE id IN (SELECT id FROM message WHERE session_id = ?
-                    ${anchor ? "AND (time_created, id) > (?, ?)" : ""}
-                    ORDER BY time_created, id LIMIT ?)
-                    ORDER BY time_created, id`)
-                    .all(
-                        sessionId,
-                        ...(anchor ? [anchor.timeCreated, anchor.id] : []),
-                        Math.min(ORDINAL_LOOKUP_LIMIT, to - ordinal + 256),
-                    ) as Array<RawMessageRow & { time_created: number; excluded: number }>;
-                ordinalRowsVisited += rows.length;
-                ordinalJsonRowsRead += rows.length;
-                if (!rows.length) break;
-                for (const row of rows) {
-                    anchor = { id: row.id, timeCreated: row.time_created };
-                    if (row.excluded === 1) continue;
-                    ordinal++;
-                    if (ordinal >= from && isRawMessageRow(row) && parseJsonRecord(row.data))
-                        result.set(row.id, ordinal);
-                    if (ordinal === to) break;
-                }
-            }
-            return result;
-        });
-    }
     const rows = db
         .prepare(`
         SELECT id, data FROM message WHERE session_id = ?
@@ -1089,11 +1042,6 @@ function countEligibleOrdinals(
  */
 
 const EXCLUDED_ROW_SQL = `${ORDINAL_SUMMARY_FLAG_SQL} AND ${ORDINAL_STOP_FLAG_SQL}`;
-// readRawSessionMessageIdOrdinalsForRangeFromDb excludes boolean-true summaries,
-// while countRawSessionMessageOrdinalsFromDb also excludes numeric 1. Retain
-// separate ranks so numeric 1 still occupies its historical range ordinal.
-const RANGE_EXCLUDED_ROW_SQL = `CASE WHEN json_valid(data) THEN
-    COALESCE(json_type(data, '$.summary'), '') = 'true' AND ${ORDINAL_STOP_FLAG_SQL} ELSE 0 END`;
 /** How far below the highest rowid the remembered rows reach. */
 const SUMMARY_ANCHOR_SPAN = 256;
 /** How many of those rows are remembered. */
@@ -1231,11 +1179,8 @@ export interface RawSessionSummaryScan {
     ids: string[];
     /** Rows of the session whose JSON the scan read. */
     sessionRows: number;
-    checkpoints?: Array<
-        OrdinalKey & { ordinal: number; rangeOrdinal: number; storedCount?: number }
-    >;
+    checkpoints?: Array<OrdinalKey & { ordinal: number; storedCount?: number }>;
     total?: number;
-    rangeTotal?: number;
 }
 
 interface OrdinalCheckpointState {
@@ -1289,42 +1234,32 @@ function extendOrdinalCheckpoints(
         }
         points.length = low;
         scan.total = points.at(-1)?.ordinal ?? 0;
-        scan.rangeTotal = points.at(-1)?.rangeOrdinal ?? 0;
         scan.sessionRows = points.at(-1)?.storedCount ?? 0;
     }
     const tail = points.at(-1);
     const rows = db
-        .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded, ${RANGE_EXCLUDED_ROW_SQL} AS rangeExcluded FROM message
+        .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message
         WHERE session_id=?${tail ? " AND (time_created,id) > (?,?)" : ""}
         ORDER BY time_created,id${limit === undefined ? "" : ` LIMIT ${limit + 1}`}`)
         .all(sessionId, ...(tail ? [tail.timeCreated, tail.id] : [])) as Array<
-        OrdinalKey & { excluded: number; rangeExcluded: number }
+        OrdinalKey & { excluded: number }
     >;
     ordinalJsonRowsRead += rows.length;
     if (limit !== undefined && rows.length > limit) return false;
     let total = scan.total ?? 0;
-    let rangeTotal = scan.rangeTotal ?? 0;
     // Only page boundaries and the current tail are retained, even after years
     // of one-message appends. The previous partial-page tail is redundant.
     if (rows.length && tail && (tail.storedCount ?? 0) % 256 !== 0) points.pop();
     for (let index = 0; index < rows.length; index++) {
         const row = rows[index];
         if (row.excluded !== 1) total++;
-        if (row.rangeExcluded !== 1) rangeTotal++;
         const storedCount = scan.sessionRows + index + 1;
         if (storedCount % 256 === 0 || index === rows.length - 1)
-            points.push({
-                id: row.id,
-                timeCreated: row.timeCreated,
-                ordinal: total,
-                rangeOrdinal: rangeTotal,
-                storedCount,
-            });
+            points.push({ id: row.id, timeCreated: row.timeCreated, ordinal: total, storedCount });
     }
     scan.checkpoints = points;
     scan.sessionRows += rows.length;
     scan.total = total;
-    scan.rangeTotal = rangeTotal;
     return true;
 }
 
@@ -1432,26 +1367,23 @@ export function scanRawSessionSummaryRows(
         // construction therefore evaluates the current predicate for every row
         // on the worker snapshot, including IDs absent from the seed.
         const keys = db
-            .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded, ${RANGE_EXCLUDED_ROW_SQL} AS rangeExcluded FROM message WHERE session_id = ?
+            .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE session_id = ?
         ORDER BY time_created, id`)
-            .all(sessionId) as Array<OrdinalKey & { excluded: number; rangeExcluded: number }>;
-        const checkpoints: NonNullable<RawSessionSummaryScan["checkpoints"]> = [];
+            .all(sessionId) as Array<OrdinalKey & { excluded: number }>;
+        const checkpoints: Array<OrdinalKey & { ordinal: number; storedCount: number }> = [];
         let total = 0;
-        let rangeTotal = 0;
         for (let index = 0; index < keys.length; index++) {
             const key = keys[index];
             if (key.excluded !== 1) total++;
-            if (key.rangeExcluded !== 1) rangeTotal++;
             if (index % 256 === 255 || index === keys.length - 1)
                 checkpoints.push({
                     id: key.id,
                     timeCreated: key.timeCreated,
                     ordinal: total,
-                    rangeOrdinal: rangeTotal,
                     storedCount: index + 1,
                 });
         }
-        return { anchors, ids, sessionRows, checkpoints, total, rangeTotal };
+        return { anchors, ids, sessionRows, checkpoints, total };
     });
 }
 

@@ -199,7 +199,8 @@ function sourceFiles(directory: string): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const path = join(directory, entry.name);
         if (entry.isDirectory()) {
-            files.push(...sourceFiles(path));
+            // Package fixture harnesses are excluded from production compilation.
+            if (entry.name !== "__tests__") files.push(...sourceFiles(path));
         } else if (entry.isFile() && path.endsWith(".ts") && !path.endsWith(".test.ts")) {
             files.push(path);
         }
