@@ -120,8 +120,8 @@ function inputMessageKeys(event: {
 
 /**
  * Pi catches context-hook exceptions and continues with its original messages.
- * Escaping errors here are deliberate refusals: abort the operation as well as
- * logging the original error. The entry is display-only, never a model message.
+ * Failed preparation refuses the operation, but user cancellation ends quietly.
+ * A refusal entry is display-only, never a model message.
  */
 export function registerPiGuardedContext(
 	pi: ExtensionAPI,
@@ -275,6 +275,13 @@ export function registerPiGuardedContext(
 		// context pass is the receipt for this operation, including payload retries.
 		// No awaits, DB access or payload hashing are allowed in this backstop.
 		pi.on("before_provider_request", (event, ctx) => {
+			const cancelledOperation = operations.get(operationKey(ctx));
+			const signal = (ctx as { signal?: AbortSignal }).signal;
+			if (signal ? signal.aborted : cancelledOperation?.pass?.isCancelled()) {
+				cancelledOperation?.pass?.cancel();
+				if (cancelledOperation) cancelledOperation.ready = false;
+				return;
+			}
 			if (options.compactionOff?.(ctx)) return;
 			const payload = (event as { payload?: unknown }).payload;
 			const key = operationKey(ctx);
@@ -357,6 +364,11 @@ export function registerPiGuardedContext(
 					throw new Error("context pass ran without a managed context receipt");
 				active.dispatched = true;
 			} catch (error) {
+				if (signal ? signal.aborted : budget.isCancelled(error)) {
+					budget.cancel();
+					active.ready = false;
+					return;
+				}
 				active.refused = true;
 				// Report what invalidated the prepared result and the last preparation
 				// stage it reached, rather than blaming a writer lock during dispatch.
@@ -376,6 +388,11 @@ export function registerPiGuardedContext(
 		// do not allocate an operation, claim a generation, or enter SQLite here.
 		if (fenceEnabled && isOmpDumpContext()) return { messages: event.messages };
 		const budget = new PiContextBudget();
+		// Pi's context signal is a live getter. Retain this pass's signal even
+		// after the session goes idle or a replacement run starts.
+		budget.signal =
+			(event as { signal?: AbortSignal }).signal ??
+			(ctx as { signal?: AbortSignal }).signal;
 		budget.sideTurn = fenceEnabled && isOmpSideContext(event);
 		const key = operationKey(ctx);
 		if (fenceEnabled) {
@@ -420,8 +437,12 @@ export function registerPiGuardedContext(
 							? "operation replacement or cache eviction"
 							: "newer context pass",
 				);
+			budget.signal?.throwIfAborted();
 		};
 		try {
+			// Do not start storage work for the post-tool context hook that Pi may
+			// invoke while the cancelled run is unwinding.
+			budget.assertOutcome();
 			// Snapshot the input before the handler rewrites it in place. Reading
 			// here, not on the hook's unguarded prefix, keeps a throwing messages
 			// getter on the refusal path.
@@ -447,6 +468,11 @@ export function registerPiGuardedContext(
 			}
 			return result;
 		} catch (error) {
+			if (budget.isCancelled(error)) {
+				budget.cancel();
+				if (isOwned()) active.ready = false;
+				return;
+			}
 			// A newer pass owns this session now. Calling its session-wide abort
 			// API from the abandoned hook would cancel the replacement turn.
 			if (error instanceof PiContextSupersededError || !isCurrent()) {
