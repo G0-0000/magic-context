@@ -486,23 +486,33 @@ describe("Pi context handler LKG replay", () => {
 				const handler = handlerFor(db, host);
 				// A separate process can release the lock while the main thread waits
 				// synchronously in SQLite. A timer on this thread could not do that.
+				// The holder needs its own busy timeout: its COMMIT can meet a
+				// concurrent reader from the handler, and without one it would die
+				// with SQLITE_BUSY instead of releasing the lock as the scenario needs.
 				const writer = spawn(
 					process.execPath,
 					[
 						"-e",
 						`import { Database } from 'bun:sqlite';
 					const db = new Database(${JSON.stringify(path)});
+					db.exec('PRAGMA busy_timeout=5000');
 					db.exec('BEGIN IMMEDIATE'); console.log('locked');
 					setTimeout(() => { db.exec('COMMIT'); db.close(); }, 80);`,
 					],
 					{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
 				);
-				const exited = new Promise<void>((resolve, reject) => {
-					writer.once("error", reject);
-					writer.once("exit", (code) =>
-						code === 0 ? resolve() : reject(new Error(`writer exit ${code}`)),
-					);
-				});
+			let writerStderr = "";
+			writer.stderr.on("data", (chunk) => {
+				writerStderr += String(chunk);
+			});
+			const exited = new Promise<void>((resolve, reject) => {
+				writer.once("error", reject);
+				writer.once("exit", (code) =>
+					code === 0
+						? resolve()
+						: reject(new Error(`writer exit ${code}: ${writerStderr.trim()}`)),
+				);
+			});
 				try {
 					await new Promise<void>((resolve, reject) => {
 						writer.stdout.once("data", () => resolve());
