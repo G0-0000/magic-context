@@ -1,7 +1,15 @@
 import {
 	createDbLkgPersistence,
+	loadPersistedLkgSlot,
 	saveLkgSlotToDb,
 } from "@magic-context/core/hooks/magic-context/lkg-persist";
+import {
+	clearLkgFenceProcessState,
+	lkgFenceRequiresRebuild,
+	lkgRecoveryFenceUnclean,
+	markLkgRecoveryDirty,
+	ownsLkgDirtyFence,
+} from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
 import { replayLkg } from "@magic-context/core/hooks/magic-context/lkg-replay";
 import {
 	captureSlot,
@@ -73,7 +81,19 @@ export interface PiLkgSerializedOutput {
 	json: string;
 }
 
+export interface PiLkgRecoveryPrefix {
+	fenceRevision: string;
+	modelKey: string | null;
+	providerKey: string | null;
+	systemEntries?: readonly string[];
+	inputs: readonly PiLkgInputSnapshot[];
+	json: string;
+	outputEntryIds: readonly (string | null)[];
+	untaggedInputIds: ReadonlySet<string>;
+}
+
 interface PiLkgSessionState {
+	recoveryPrefix?: PiLkgRecoveryPrefix;
 	captureSequence: number;
 	syncCaptureRequired: boolean;
 	acceptedInputs: readonly PiLkgInputSnapshot[] | null;
@@ -208,9 +228,16 @@ export function clearPiLkgSessionState(sessionId: string): void {
 	const state = piLkgSessionStates.get(sessionId);
 	if (state) state.captureSequence += 1;
 	piLkgSessionStates.delete(sessionId);
+	clearLkgFenceProcessState(sessionId);
 }
 
 export interface PiLkgCoordinator {
+	/** Retain the AgentMessage[] sent during recovery without reading tag assignments or allocating numbers. */
+	noteRecovery(snapshot: PiLkgPassSnapshot, messages: readonly unknown[]): void;
+	recoveryFor(snapshot: PiLkgPassSnapshot): {
+		prefix?: PiLkgRecoveryPrefix;
+		rebuildReason?: string;
+	};
 	beginPass(args: {
 		sessionId: string;
 		messages: readonly unknown[];
@@ -238,6 +265,7 @@ export interface PiLkgCoordinator {
 		outputMessages: readonly unknown[];
 		outputEntryIds?: readonly (string | null | undefined)[];
 		cacheBusting: boolean;
+		releaseRecovery?: boolean;
 		hostEnvelopeSignature?: string;
 	}): PiLkgSerializedOutput | undefined;
 }
@@ -564,6 +592,85 @@ export function createPiLkgCoordinator(
 			piLkgSessionStates.set(sessionId, state);
 		}
 		return state;
+	};
+	const recoveryFor: PiLkgCoordinator["recoveryFor"] = (snapshot) => {
+		const state = stateFor(snapshot.sessionId);
+		const prefix = state.recoveryPrefix;
+		if (!prefix) {
+			const slot = getSlot(snapshot.sessionId);
+			return lkgRecoveryFenceUnclean(snapshot.sessionId) ||
+				(slot &&
+					lkgFenceRequiresRebuild(
+						snapshot.sessionId,
+						state.acceptedInputs
+							? slot
+							: (loadPersistedLkgSlot(db, snapshot.sessionId) ?? slot),
+						!!state.acceptedInputs,
+					))
+				? { rebuildReason: "lkg_restart_rebuild" }
+				: {};
+		}
+		const durableSlot =
+			loadPersistedLkgSlot(db, snapshot.sessionId) ??
+			getSlot(snapshot.sessionId);
+		if (
+			snapshot.preparationFailure ||
+			!durableSlot ||
+			!ownsLkgDirtyFence(snapshot.sessionId, prefix.fenceRevision) ||
+			prefix.modelKey !== snapshot.modelKey ||
+			prefix.providerKey !== snapshot.providerKey ||
+			JSON.stringify(prefix.systemEntries) !==
+				JSON.stringify(snapshot.systemEntries) ||
+			exactReusablePrefix(snapshot.inputs, prefix.inputs) !==
+				prefix.inputs.length
+		)
+			return { rebuildReason: "lkg_recovery_input_rebuild" };
+		return { prefix };
+	};
+	const noteRecovery: PiLkgCoordinator["noteRecovery"] = (
+		snapshot,
+		messages,
+	) => {
+		const state = stateFor(snapshot.sessionId);
+		const anchor = snapshot.replayAnchorInputIndex;
+		const slot = getSlot(snapshot.sessionId);
+		if (
+			snapshot.preparationFailure ||
+			anchor === null ||
+			!slot?.piOutputEntryIds
+		)
+			throw new PiLkgUncapturable(
+				"lkg_output_mapping_unavailable",
+				"Cannot retain recovered output ownership",
+			);
+		const surviving = new Set(snapshot.inputs.map((input) => input.id));
+		const outputEntryIds = [
+			...slot.piOutputEntryIds.filter((id) => id === null || surviving.has(id)),
+			...snapshot.inputs.slice(anchor + 1).map((input) => input.id),
+		];
+		if (outputEntryIds.length !== messages.length)
+			throw new PiLkgUncapturable(
+				"lkg_output_mapping_unavailable",
+				"Recovered output ownership does not match the served array",
+			);
+		state.recoveryPrefix = {
+			fenceRevision: markLkgRecoveryDirty({
+				sessionId: snapshot.sessionId,
+				slot,
+				processLocalProof: !!state.acceptedInputs,
+				ownDirtyRevision: state.recoveryPrefix?.fenceRevision,
+			}),
+			modelKey: snapshot.modelKey,
+			providerKey: snapshot.providerKey,
+			systemEntries: snapshot.systemEntries,
+			inputs: snapshot.inputs,
+			json: JSON.stringify(messages),
+			outputEntryIds,
+			untaggedInputIds: new Set([
+				...(state.recoveryPrefix?.untaggedInputIds ?? []),
+				...snapshot.inputs.slice(anchor + 1).map((input) => input.id),
+			]),
+		};
 	};
 
 	const beginPass: PiLkgCoordinator["beginPass"] = (args) => {
@@ -1090,6 +1197,12 @@ export function createPiLkgCoordinator(
 							plan.sessionId,
 							slot,
 							args.publishServedNumbers,
+							{
+								rebuild: args.releaseRecovery,
+								retainDirtyRevision: !args.releaseRecovery
+									? state.recoveryPrefix?.fenceRevision
+									: undefined,
+							},
 						)
 					) {
 						throw new Error("Pi LKG/served publication failed");
@@ -1103,9 +1216,23 @@ export function createPiLkgCoordinator(
 				}
 				state.acceptedInputs = plan.inputs;
 				state.acceptedSlot = slot;
+				if (state.recoveryPrefix) {
+					state.recoveryPrefix = args.releaseRecovery
+						? undefined
+						: {
+								...state.recoveryPrefix,
+								inputs: plan.inputs,
+								json: plan.jsonPrefix,
+								outputEntryIds:
+									ownership ?? state.recoveryPrefix.outputEntryIds,
+							};
+				}
 				const persisted = args.publishServedNumbers
 					? true
-					: saveLkgSlotToDb(db, plan.sessionId, slot);
+					: saveLkgSlotToDb(db, plan.sessionId, slot, undefined, {
+							rebuild: args.releaseRecovery,
+							retainDirtyRevision: state.recoveryPrefix?.fenceRevision,
+						});
 				state.syncCaptureRequired = !persisted;
 				if (args.publishServedNumbers) noteCapturedRequest();
 			} catch (error) {
@@ -1165,6 +1292,8 @@ export function createPiLkgCoordinator(
 	};
 
 	return {
+		noteRecovery,
+		recoveryFor,
 		beginPass(args) {
 			return {
 				...beginPass(args),

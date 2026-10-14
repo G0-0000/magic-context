@@ -12,6 +12,7 @@ import {
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import * as schema from "./pi-tool-wire-schema";
 import {
+	assistantMessage,
 	createFakePi,
 	createTestDb,
 	fakeContext,
@@ -320,7 +321,9 @@ test("issue 680: cancelling an older pass does not revoke the replacement dispat
 	expect(await pending).toBeUndefined();
 	held.resolve();
 	expect(() =>
-		emit("before_provider_request", newContext, { payload: { messages: [] } }),
+		emit("before_provider_request", newContext, {
+			payload: { messages: [userMessage("new", 2)] },
+		}),
 	).not.toThrow();
 	expect(entries).toEqual([]);
 });
@@ -362,6 +365,79 @@ test("issue 680: a fresh live dispatch cannot reuse a cancelled pass", async () 
 			},
 		},
 		{ payload: { messages: [] } },
+	);
+	expect(entries).toHaveLength(1);
+	expect(aborts).toBe(1);
+});
+
+test("issue 680: cancellation revokes an identity-matched receipt retained after an earlier run end", async () => {
+	__setPiHarnessKindForTesting("omp");
+	const fake = createFakePi();
+	const controller = new AbortController();
+	const raw = [
+		userMessage("first", 1),
+		assistantMessage("reply", 2),
+		userMessage("continuation", 3),
+	];
+	const entries: unknown[] = [];
+	let pass!: PiContextBudget;
+	let aborts = 0;
+	registerPiGuardedContext(
+		{
+			...fake.pi,
+			appendEntry: (...args: unknown[]) => entries.push(args),
+		} as never,
+		async (event, _ctx, budget) => {
+			pass = budget;
+			return { messages: event.messages };
+		},
+	);
+	const ctx = {
+		...fakeContext(
+			SESSION,
+			process.cwd(),
+			["first", "reply", "continuation"],
+			raw,
+		),
+		signal: controller.signal,
+		isIdle: () => false,
+		ui: { notify: () => {} },
+		abort: () => {
+			aborts++;
+		},
+	};
+	const emit = (name: string, event: unknown = {}, context: unknown = ctx) =>
+		(fake.handlers.get(name) as (event: unknown, ctx: unknown) => unknown)(
+			event,
+			context,
+		);
+	const payload = { messages: structuredClone(raw) };
+	emit("agent_start");
+	emit("agent_start");
+	await emit("context", { messages: structuredClone(raw) });
+	emit("before_provider_request", { payload });
+	expect({ entries, aborts }).toEqual({ entries: [], aborts: 0 });
+	emit("agent_end", { messages: structuredClone(raw.slice(0, 2)) });
+	emit("before_provider_request", { payload });
+	expect({ entries, aborts, completed: pass.completed }).toEqual({
+		entries: [],
+		aborts: 0,
+		completed: true,
+	});
+	controller.abort();
+	expect(() => emit("before_provider_request", { payload })).not.toThrow();
+	expect({
+		entries,
+		aborts,
+		completed: pass.completed,
+		abandoned: pass.abandoned,
+	}).toEqual({ entries: [], aborts: 0, completed: false, abandoned: true });
+	expect(() => pass.assertDecisionPublication()).toThrow();
+	// Even an exact old payload cannot authorize a fresh live provider request.
+	emit(
+		"before_provider_request",
+		{ payload },
+		{ ...ctx, signal: new AbortController().signal },
 	);
 	expect(entries).toHaveLength(1);
 	expect(aborts).toBe(1);

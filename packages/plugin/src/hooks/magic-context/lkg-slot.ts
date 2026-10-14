@@ -3,6 +3,11 @@ import { createHash } from "node:crypto";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
+import {
+    clearLkgRecoveryPrefixes,
+    clearLkgRecoverySession,
+    noteLkgCapturedPrefix,
+} from "./lkg-recovery-prefix";
 import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
@@ -651,6 +656,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
     lkgHeapHolder.entries.set(sessionId, entry);
     totalBytes += bytes;
     hydrationAttemptBySession.delete(sessionId);
+    noteLkgCapturedPrefix(sessionId);
     return true;
 }
 
@@ -746,6 +752,7 @@ export function getSlot(sessionId: string): LkgSlot | undefined {
 
 /** Evict only the process copy; durable replay authority is unchanged. */
 export function forgetInMemorySlot(sessionId: string): void {
+    clearLkgRecoverySession(sessionId);
     const entry = lkgHeapHolder.entries.get(sessionId);
     if (entry) {
         lkgHeapHolder.entries.delete(sessionId);
@@ -1112,6 +1119,7 @@ export function getLkgDigestsComputedForTest(): number {
 }
 
 export function resetLkgSlotsForTest(): void {
+    clearLkgRecoveryPrefixes();
     digestMemo.clear();
     digestMemoBytes = 0;
     sharedLkgEntryDigests.clear();

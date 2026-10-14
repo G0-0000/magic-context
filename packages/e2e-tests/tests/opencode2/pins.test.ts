@@ -10,7 +10,9 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 	// began registering Magic Context's package version in
 	// `globalThis[Symbol.for("cortexkit.standalone-plugins")]`, the Map shared by
 	// standalone plugins. The `packages/plugin/src/index.ts` pin changed when a
-	// comment there stopped pointing at a report that moved out of `docs/`.
+	// comment there stopped pointing at a report that moved out of `docs/`, and
+	// again when the retired Fusiform window-overlay reload was removed from v1
+	// startup.
 	for (const [path, expected] of Object.entries(pins)) {
 		let bytes = readFileSync(resolve(root, path), "utf8");
 		if (path === "packages/plugin/src/index.ts") {

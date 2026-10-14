@@ -201,6 +201,11 @@ import {
 	captureOriginalTurn,
 	prepareLatestThinkingRecovery,
 } from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
+import { loadPersistedLkgSlot } from "@magic-context/core/hooks/magic-context/lkg-persist";
+import {
+	invalidateCleanLkgRecoveryFence,
+	LkgRecoveryFenceError,
+} from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
 import {
 	markNoteNudgeDelivered,
 	observeNoteNudgeServe,
@@ -736,6 +741,7 @@ class PiLkgAdmissionReplay extends Error {
 	constructor(
 		readonly messages: unknown[],
 		readonly recovery = "fitting LKG before writer retries",
+		readonly trigger: "writer_busy" | "held_identity_repair" = "writer_busy",
 	) {
 		super("Saved request served before writer wait");
 	}
@@ -4329,6 +4335,10 @@ export function registerPiContextHandler(
 				transport: (ctx.model as { transport?: string } | undefined)?.transport,
 			});
 			lkgPassSnapshot = snapshot;
+			const recovery =
+				budget.sideTurn || lkgCompactionOff
+					? {}
+					: lkgCoordinator.recoveryFor(snapshot);
 			const lkgInputFields = new WeakMap(
 				snapshot.inputs.flatMap((input) => {
 					const message = event.messages[input.messageIndex];
@@ -4370,6 +4380,7 @@ export function registerPiContextHandler(
 								})?.usableHard;
 							if (
 								lkgCompactionOff ||
+								recovery.rebuildReason ||
 								lkgEmergencyRecoveryArmed ||
 								isProviderOverflowFailClosedProven(sessionId)
 							)
@@ -5269,6 +5280,8 @@ export function registerPiContextHandler(
 				? structuredClone(event.messages)
 				: null;
 			const pipelineArgs: RunPipelineArgs = {
+				recoveryPrefix: recovery.prefix,
+				recoveryRebuildReason: recovery.rebuildReason,
 				assertCurrentPass,
 				db: options.db,
 				tagger,
@@ -5405,12 +5418,14 @@ export function registerPiContextHandler(
 					throw new PiLkgAdmissionReplay(
 						replay.messages,
 						"held tag-identity rebuild: replaying the served prefix",
+						"held_identity_repair",
 					);
 				},
 			};
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
-			if (result.identityRebuilt) schedulerDecision = "execute";
+			if (result.identityRebuilt || result.lkgFrozenReleaseReason)
+				schedulerDecision = "execute";
 			const postPipelineStart = performance.now();
 			const tTransformDecision = performance.now();
 			// Replace the reuse window only after a successful pass. Bound it to the
@@ -5458,6 +5473,7 @@ export function registerPiContextHandler(
 									droppedCount: result.droppedCount,
 									inputTokens: usageInputTokens,
 									bustedThisPass: true,
+									lkgFrozenReleaseReason: result.lkgFrozenReleaseReason,
 								},
 								piDecisionSnapshotNewestAssistant,
 								budget.assertDecisionPublication,
@@ -5758,6 +5774,7 @@ export function registerPiContextHandler(
 						// signatures bind all preceding bytes. A permitted prefix rewrite
 						// omits every signed block, including those in the active turn.
 						cacheBustingPass:
+							!!recovery.rebuildReason ||
 							result.signedPrefixRewritten ||
 							(result.prefixBustPermitted &&
 								!result.strictThinkingKept &&
@@ -5767,9 +5784,11 @@ export function registerPiContextHandler(
 										(result.prefixEditBesidesReasoningTrim ||
 											hostEditBeforeNewestThinking)))),
 						stripActiveTurn: result.signedPrefixRewritten,
+						requirePersistence: !!recovery.rebuildReason,
 						report: (line) => sessionLog(sessionId, line),
 					});
 				} catch (err) {
+					if (recovery.rebuildReason) throw err;
 					sessionLog(
 						sessionId,
 						`proactive thinking strip failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -6002,6 +6021,35 @@ export function registerPiContextHandler(
 				sessionId,
 				`transform completed in ${transformElapsedMs.toFixed(1)}ms (${outputMessages.length} messages, ${result.targetCount} targets, watermark: ${result.reasoningWatermark})`,
 			);
+			if (recovery.prefix && !result.recoveryNormalized) {
+				const priorIds = new Set(
+					recovery.prefix.inputs.map((input) => input.id),
+				);
+				const newIds = new Set(
+					snapshot.inputs
+						.filter((input) => !priorIds.has(input.id))
+						.map((input) => input.id),
+				);
+				const suffix = outputMessages.filter((message) => {
+					const id =
+						result.postCommitEntryIdByRef.get(message) ??
+						result.lkgEntryIdByRef.get(message);
+					return id !== undefined && newIds.has(id);
+				});
+				const prefix = JSON.parse(recovery.prefix.json) as PiAgentMessage[];
+				const recoveredEntryIds = new Map(result.postCommitEntryIdByRef);
+				prefix.forEach((message, index) => {
+					const id = recovery.prefix?.outputEntryIds[index];
+					if (id) recoveredEntryIds.set(message, id);
+				});
+				result.postCommitEntryIdByRef = recoveredEntryIds;
+				outputMessages = [...prefix, ...suffix];
+				result.syntheticLeadingCount = recovery.prefix.outputEntryIds.findIndex(
+					(id) => id !== null,
+				);
+				if (result.syntheticLeadingCount < 0)
+					result.syntheticLeadingCount = prefix.length;
+			}
 			runPiDebugAssertion(assertTailHygieneLastWriter);
 			if (
 				!options.compactionOff &&
@@ -6179,10 +6227,21 @@ export function registerPiContextHandler(
 						// Refresh the replay request on every successful managed pass. If reductions
 						// changed its representation, invalidate the stale request before replacement.
 						cacheBusting: result.bustedThisPass,
+						releaseRecovery:
+							result.recoveryNormalized || !!recovery.rebuildReason,
 					});
 					numbersCommitted = true;
 				} catch (error) {
 					// Publication failure cannot admit an expired, cancelled or superseded context invocation.
+					if (error instanceof LkgRecoveryFenceError)
+						throw new PiServedIdentityError(error);
+					try {
+						invalidateCleanLkgRecoveryFence(sessionId, () =>
+							loadPersistedLkgSlot(options.db, sessionId),
+						);
+					} catch (fenceError) {
+						throw new PiServedIdentityError(fenceError);
+					}
 					budget.assertOutcome();
 					// Do not attach the next assistant's provider-usage measurement to a
 					// previous request when this newly served request was not captured.
@@ -6293,9 +6352,16 @@ export function registerPiContextHandler(
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
+				// A queued tag-number repair uses its durable database row to keep
+				// replaying the saved request until a rebuild may change old bytes.
+				// It is not a failure to get SQLite's writer. Only replay caused by
+				// that failure records new raw tail bytes here; marking the repair
+				// path dirty would make an ordinary restart change a held prefix.
+				if (lkgPassSnapshot && err.trigger === "writer_busy")
+					lkgCoordinator.noteRecovery(lkgPassSnapshot, err.messages);
 				if (!budget.sideTurn)
 					captureServedEvidence(sessionIdForError, err.messages, {
-						db: baseOptions.db,
+						recoveryWithoutTagState: true,
 						assertCurrentPass: budget.assertOutcome,
 					});
 				budget.assertOutcome();
@@ -6347,10 +6413,17 @@ export function registerPiContextHandler(
 				!lkgEmergencyRecoveryArmed
 			) {
 				try {
-					const replay = lkgCoordinator.replay(
-						lkgPassSnapshot,
-						(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
-					);
+					const replay = lkgCoordinator.recoveryFor(lkgPassSnapshot)
+						.rebuildReason
+						? {
+								ok: false as const,
+								reason:
+									lkgPassSnapshot.replayFailure ?? "lkg_recovery_unproven",
+							}
+						: lkgCoordinator.replay(
+								lkgPassSnapshot,
+								(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+							);
 					if (replay.ok) {
 						// A valid stored prefix does not bound the newly appended raw tail.
 						assertPiRawFallbackFits(
@@ -6376,9 +6449,10 @@ export function registerPiContextHandler(
 							`${failureLabel} ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
 						);
 						budget.assertOutcome();
+						lkgCoordinator.noteRecovery(lkgPassSnapshot, replay.messages);
 						if (!budget.sideTurn)
 							captureServedEvidence(sessionIdForError, replay.messages, {
-								db: baseOptions.db,
+								recoveryWithoutTagState: true,
 								assertCurrentPass: budget.assertOutcome,
 							});
 						budget.assertOutcome();
@@ -7429,6 +7503,8 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	recoveryPrefix?: import("./pi-lkg").PiLkgRecoveryPrefix;
+	recoveryRebuildReason?: string;
 	tryReplayHeldIdentityRebuild?: () => void;
 	readLastServedMessages?: () => readonly unknown[] | null;
 	forceSignedRebuildForFit?: boolean;
@@ -7588,6 +7664,8 @@ interface PiChannelBaselineSnapshot {
 }
 
 interface RunPipelineResult {
+	recoveryNormalized?: boolean;
+	lkgFrozenReleaseReason?: string;
 	/** Shared permission for first applications in the pipeline and host-side lanes. */
 	prefixBustPermitted: boolean;
 	/** False while a signed-prefix hold defers new host-side work. */
@@ -7836,6 +7914,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			cacheBustingPass: true,
 			stripActiveTurn: true,
 			persistOnly: true,
+			requirePersistence: !!args.recoveryRebuildReason,
 		});
 		if (activeThinkingTurn && !result)
 			throw new Error(
@@ -7845,7 +7924,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		activeThinkingTurn = false;
 		protectedSignedPrefix = false;
 	};
-	if (args.forceSignedRebuildForFit && protectedSignedPrefix)
+	if (
+		args.recoveryRebuildReason ||
+		(args.forceSignedRebuildForFit && protectedSignedPrefix)
+	)
 		stripForPrefixRewrite();
 	// Messages without a real entry id get a position-independent fallback id
 	// computed once from this pass's input, before any stage edits content.
@@ -8602,6 +8684,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		...message,
 		parts: message.parts,
 	}));
+	// Storage recovery already sent these messages without §N§ reduction handles.
+	// Adding handles would invalidate the provider's cached bytes, so they wait
+	// for a prefix-busting fold or the declared tag-identity rebuild of that prefix.
+	const recoveryNormalized =
+		!!args.recoveryPrefix &&
+		(foldBustsServedPrefixThisPass || firstRenderBust || identityRebuild);
+	const taggingView =
+		args.recoveryPrefix && !recoveryNormalized
+			? mutationView.filter(
+					(message) =>
+						!args.recoveryPrefix?.untaggedInputIds.has(message.info.id ?? ""),
+				)
+			: mutationView;
 	let tagTextTokenCache = piTagTextTokenCacheBySession.get(args.sessionId);
 	if (!tagTextTokenCache) {
 		tagTextTokenCache = new Map();
@@ -8622,7 +8717,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.assertCurrentPass?.();
 			return tagTranscript(
 				args.sessionId,
-				{ ...transcript, messages: mutationView },
+				{ ...transcript, messages: taggingView },
 				args.tagger,
 				args.db,
 				{
@@ -10144,6 +10239,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		? PI_TAG_IDENTITY_REPAIR_REASON
 		: (injectionResult?.m0Reason ?? null);
 	const bustedThisPass =
+		!!args.recoveryRebuildReason ||
+		recoveryNormalized ||
 		identityRebuild ||
 		firstRenderBust ||
 		pendingOpsDidMutate ||
@@ -10238,6 +10335,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	}
 	return {
 		messages: outputMessages,
+		recoveryNormalized,
+		lkgFrozenReleaseReason:
+			args.recoveryRebuildReason ??
+			(recoveryNormalized ? "recovery_tail_normalized" : undefined),
 		prefixBustPermitted: isCacheBustingPass,
 		prefixMutationAllowed,
 		strictThinkingKept: protectedSignedPrefix,
@@ -10259,6 +10360,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		bustedThisPass,
 		agentDropsAppliedThisPass: pendingOpsDidMutate,
 		prefixEditBesidesReasoningTrim:
+			!!args.recoveryRebuildReason ||
 			prefixEditBesidesReasoningTrim ||
 			firstRenderBust ||
 			args.isCacheBusting ||
