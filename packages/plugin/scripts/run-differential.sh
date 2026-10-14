@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$ROOT"
-BASE=${REVIEW_BASE:-9382158d98bc087b397594ab03a611b26827493e}
+BASE=${REVIEW_BASE:-fe7e2dffe7c3ef40b6d2a8c5c01509c5a5b198e6}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 MASTER="$WORK/master"

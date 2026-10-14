@@ -2,7 +2,7 @@
 
 import { expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as piContext from "../../../../pi-plugin/src/context-handler";
@@ -32,6 +32,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage-meta";
 import { createTagger } from "../../features/magic-context/tagger";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import type { StoreRow } from "../../v2/store-reader";
 import goldenDigests from "./fixtures/system-delivery-unheld-digests.json";
 import {
@@ -110,7 +111,7 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
         : undefined;
     const responseRows: StoreRow<"assistant">[] = [];
     const sessionId = `review-${host}-${signed}-${active ? "active-" : ""}${seed}`;
-    const home = mkdtempSync(join(tmpdir(), "delivery-review-"));
+    const home = createTestTempDirFromPath(join(tmpdir(), "delivery-review-"));
     const db = openDatabase(join(home, "context.db"))!;
     runMigrations(db);
     getOrCreateSessionMeta(db, sessionId);
@@ -371,13 +372,13 @@ async function openCode(host: "oc1" | "oc2", signed: boolean, seed: number, acti
     } finally {
         clearLkgMeasuredRequest(sessionId);
         db.close();
-        rmSync(home, { recursive: true, force: true });
+        cleanupTestTempDir(home);
     }
 }
 
 async function pi(signed: boolean, seed: number, active = false) {
     const sessionId = `review-pi-${signed}-${active ? "active-" : ""}${seed}`;
-    const home = mkdtempSync(join(tmpdir(), "delivery-review-pi-"));
+    const home = createTestTempDirFromPath(join(tmpdir(), "delivery-review-pi-"));
     const db = openDatabase(join(home, "context.db"))!;
     runMigrations(db);
     getOrCreateSessionMeta(db, sessionId);
@@ -594,7 +595,7 @@ async function pi(signed: boolean, seed: number, active = false) {
         piContext.clearContextHandlerSession(sessionId);
         clearPiSystemPromptSession(sessionId);
         db.close();
-        rmSync(home, { recursive: true, force: true });
+        cleanupTestTempDir(home);
     }
 }
 

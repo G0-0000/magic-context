@@ -1,6 +1,5 @@
 /// <reference types="bun-types" />
 import { expect, it, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -20,6 +19,7 @@ import { recordDetectedContextLimit } from "../../features/magic-context/storage
 import { createTagger } from "../../features/magic-context/tagger";
 import { recordToolDefinition } from "../../features/magic-context/tool-definition-tokens";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { bindV2SystemPromptResponse } from "../../v2/hooks/system-prompt-response";
 import type { StoreRow } from "../../v2/store-reader";
 import { createEventHandler } from "./event-handler";
@@ -42,7 +42,7 @@ const deliveryPath = "./system-prompt-delivery.ts";
 let sequence = 0;
 type HostMessage = MessageLike & { info: MessageLike["info"] & Record<string, unknown> };
 async function dbFixture() {
-    const home = mkdtempSync(join(tmpdir(), "delivery-review-attack-"));
+    const home = createTestTempDirFromPath(join(tmpdir(), "delivery-review-attack-"));
     const db = openDatabase(join(home, "context.db"))!;
     runMigrations(db);
     const sessionId = `attack-${++sequence}`;
@@ -64,7 +64,7 @@ async function dbFixture() {
             clearLkgMeasuredRequest(sessionId);
             delivery.clearSystemPromptDelivery(sessionId);
             db.close();
-            rmSync(home, { recursive: true, force: true });
+            cleanupTestTempDir(home);
         },
     };
 }
