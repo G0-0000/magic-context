@@ -11,7 +11,6 @@ import { withRawMessageProvider } from "../../hooks/magic-context/read-session-c
 import {
     getRawSessionOrdinalRowsVisitedForTest,
     readRawSessionMessageIdOrdinalsForRangeFromDb,
-    readRawSessionSummaryCandidateBasis,
     resetRawSessionOrdinalRowsVisitedForTest,
 } from "../../hooks/magic-context/read-session-raw";
 import { setHarness } from "../../shared/harness";
@@ -28,8 +27,10 @@ import {
 import {
     closeCompactionMarkerDb,
     getOpenCodeDbPath,
+    getPreparedCompactionMarkerSummaryIds,
     injectCompactionMarker,
     LEGACY_MARKER_LINEAGE_SQL,
+    prepareCompactionMarkerCandidates,
 } from "./compaction-marker";
 import { sweepOrphanedOpenCodeMessageIndexes } from "./message-index";
 import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "./message-index-async";
@@ -84,8 +85,8 @@ it("legacy marker cleanup preserves the old deletion set with primary-key candid
             .prepare(OLD_LEGACY_MARKER_SQL)
             .all(STALL_SESSION, "canonical", boundary, "summary") as { id: string }[];
         expect(oldIds.map((r) => r.id).sort()).toEqual(["legacy-after", "legacy-at"]);
-        expect(await prewarmRawSessionOrdinalsForDb(db, STALL_SESSION)).toBe("warm");
-        const candidates = readRawSessionSummaryCandidateBasis(db, STALL_SESSION).ids;
+        expect(await prepareCompactionMarkerCandidates(STALL_SESSION)).toBe(true);
+        const candidates = getPreparedCompactionMarkerSummaryIds(STALL_SESSION)!;
         for (const row of oldIds) expect(candidates).toContain(row.id);
         expect(getOpenCodeDbPath()).toBe(join(dir, "opencode", "opencode.db"));
         expect(db.inTransaction).toBe(false);

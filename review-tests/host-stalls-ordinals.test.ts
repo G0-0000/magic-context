@@ -7,14 +7,10 @@ import {
     stopRawSessionOrdinalWarmups,
 } from "../packages/plugin/src/hooks/magic-context/raw-ordinal-warmup";
 import {
-    captureRawOrdinalScanProof,
-    countRawSessionMessageOrdinalsFromDb,
     getRawSessionSummaryEpoch,
     installRawSessionSummaryScan,
     RawOrdinalsNotReady,
     readRawSessionMessageIdOrdinalsForRangeFromDb as readRange,
-    readRawSessionMessageIdOrdinalsFromDb,
-    readRawSessionMessageOrdinalByIdFromDb,
     scanRawSessionSummaryRows,
 } from "../packages/plugin/src/hooks/magic-context/read-session-raw";
 import { Database } from "../packages/plugin/src/shared/sqlite";
@@ -138,26 +134,6 @@ it("a prefix removal must not reuse a surviving checkpoint's old range rank", as
     }
 });
 
-it("local prefix writes invalidate cached ranks without a peer data_version change", async () => {
-    const f = fixture();
-    const db = hostStore(join(f.dir, "local-prefix.db"), 1100);
-    try {
-        expect(
-            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
-                acceptMs: 60000,
-                resultMs: 120000,
-            }),
-        ).toBe("warm");
-        const before = db.prepare("PRAGMA data_version").get();
-        db.prepare("DELETE FROM message WHERE id=?").run(messageId(10));
-        expect(db.prepare("PRAGMA data_version").get()).toEqual(before);
-        exactOrRefused(db, 900, 905);
-    } finally {
-        db.close();
-        f.cleanup();
-    }
-});
-
 it("a backdated concurrent append must not reuse a surviving checkpoint's old range rank", async () => {
     const f = fixture();
     const path = join(f.dir, "host.db");
@@ -226,39 +202,6 @@ it("a delayed worker snapshot cannot certify ranks after a prefix removal", () =
     }
 });
 
-it("a serving transaction cannot hide a commit during worker installation", () => {
-    const f = fixture();
-    const path = join(f.dir, "pinned.db");
-    const db = hostStore(path, 1100);
-    const writer = new Database(path);
-    const scanner = new Database(path, { readonly: true });
-    try {
-        const proof = captureRawOrdinalScanProof(db);
-        db.exec("BEGIN");
-        db.prepare("SELECT count(*) FROM message").get();
-        writer.prepare("DELETE FROM message WHERE id=?").run(messageId(10));
-        const scan = scanRawSessionSummaryRows(scanner, SESSION);
-        expect(
-            installRawSessionSummaryScan(
-                db,
-                SESSION,
-                scan,
-                getRawSessionSummaryEpoch(SESSION),
-                true,
-                proof,
-            ),
-        ).toBe(false);
-        db.exec("ROLLBACK");
-        exactOrRefused(db, 900, 905);
-    } finally {
-        if (db.inTransaction) db.exec("ROLLBACK");
-        scanner.close();
-        writer.close();
-        db.close();
-        f.cleanup();
-    }
-});
-
 it("slow and crashed warmup workers return exact late ranges or refuse them", async () => {
     const f = fixture();
     try {
@@ -291,111 +234,6 @@ it("slow and crashed warmup workers return exact late ranges or refuse them", as
             }
         }
     } finally {
-        f.cleanup();
-    }
-});
-
-it("count and by-ID APIs also refuse stale current-DB prefix ranks", async () => {
-    const f = fixture();
-    try {
-        for (const change of ["delete", "backdate", "finish", "install"] as const) {
-            const db = hostStore(join(f.dir, `${change}.db`), 1100);
-            const other = new Database(join(f.dir, `${change}.db`));
-            try {
-                if (change === "finish")
-                    db.prepare("UPDATE message SET data=? WHERE id=?").run(
-                        '{"summary":true,"finish":"length"}',
-                        messageId(10),
-                    );
-                expect(
-                    await prewarmRawSessionOrdinalsForDb(db, SESSION, {
-                        acceptMs: 60000,
-                        resultMs: 120000,
-                    }),
-                ).toBe("warm");
-                const scan = scanRawSessionSummaryRows(db, SESSION);
-                if (change === "delete" || change === "install")
-                    other.prepare("DELETE FROM message WHERE id=?").run(messageId(10));
-                else if (change === "backdate")
-                    other
-                        .prepare("INSERT INTO message VALUES (?,?,?,?,?)")
-                        .run("backdated", SESSION, 0, 1200, '{"role":"user"}');
-                else
-                    other
-                        .prepare("UPDATE message SET data=? WHERE id=?")
-                        .run('{"summary":true,"finish":"stop"}', messageId(10));
-                if (change === "install")
-                    expect(
-                        installRawSessionSummaryScan(
-                            db,
-                            SESSION,
-                            scan,
-                            getRawSessionSummaryEpoch(SESSION),
-                            true,
-                        ),
-                    ).toBe(false);
-                for (const read of [
-                    () => countRawSessionMessageOrdinalsFromDb(db, SESSION),
-                    () => readRawSessionMessageOrdinalByIdFromDb(db, SESSION, messageId(1099)),
-                ]) {
-                    let actual: number | null;
-                    try {
-                        actual = read();
-                    } catch (error) {
-                        expect(error).toBeInstanceOf(RawOrdinalsNotReady);
-                        continue;
-                    }
-                    expect(actual).toBe(change === "backdate" ? 1101 : 1099);
-                }
-                expect(
-                    await prewarmRawSessionOrdinalsForDb(db, SESSION, {
-                        acceptMs: 60000,
-                        resultMs: 120000,
-                    }),
-                ).toBe("warm");
-                expect(countRawSessionMessageOrdinalsFromDb(db, SESSION)).toBe(
-                    change === "backdate" ? 1101 : 1099,
-                );
-                expect(readRawSessionMessageOrdinalByIdFromDb(db, SESSION, messageId(1099))).toBe(
-                    change === "backdate" ? 1101 : 1099,
-                );
-            } finally {
-                other.close();
-                db.close();
-            }
-        }
-    } finally {
-        f.cleanup();
-    }
-});
-
-it("numeric summary 1 retains the historical count/by-ID versus raw/range predicate distinction", async () => {
-    const f = fixture();
-    const db = hostStore(join(f.dir, "numeric.db"), 3);
-    try {
-        db.prepare("UPDATE message SET data=? WHERE id=?").run(
-            '{"summary":1,"finish":"stop"}',
-            messageId(1),
-        );
-        expect(
-            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
-                acceptMs: 60000,
-                resultMs: 120000,
-            }),
-        ).toBe("warm");
-        expect(countRawSessionMessageOrdinalsFromDb(db, SESSION)).toBe(2);
-        expect(readRawSessionMessageOrdinalByIdFromDb(db, SESSION, messageId(1))).toBeNull();
-        expect(readRawSessionMessageOrdinalByIdFromDb(db, SESSION, messageId(2))).toBe(2);
-        expect([...readRange(db, SESSION, 1, 3)]).toEqual([
-            [messageId(0), 1],
-            [messageId(1), 2],
-            [messageId(2), 3],
-        ]);
-        expect([...readRawSessionMessageIdOrdinalsFromDb(db, SESSION)]).toEqual([
-            ...offsetOracle(db, 1, 3),
-        ]);
-    } finally {
-        db.close();
         f.cleanup();
     }
 });

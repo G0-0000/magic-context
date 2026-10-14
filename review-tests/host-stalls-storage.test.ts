@@ -5,7 +5,9 @@ import { __test as pi } from "../packages/pi-plugin/src/context-handler";
 
 import {
     closeCompactionMarkerDb,
+    getPreparedCompactionMarkerSummaryIds,
     injectCompactionMarker,
+    prepareCompactionMarkerCandidates,
 } from "../packages/plugin/src/features/magic-context/compaction-marker";
 import {
     findPiFallbackToolOwnerTags,
@@ -15,12 +17,7 @@ import {
     resolveBoundaryContext,
     resolveProtectedTailBoundary,
 } from "../packages/plugin/src/hooks/magic-context/protected-tail-boundary";
-import { prewarmRawSessionOrdinalsForDb } from "../packages/plugin/src/hooks/magic-context/raw-ordinal-warmup";
 import { withRawMessageProvider } from "../packages/plugin/src/hooks/magic-context/read-session-chunk";
-import {
-    RawOrdinalsNotReady,
-    readRawSessionSummaryCandidateBasis,
-} from "../packages/plugin/src/hooks/magic-context/read-session-raw";
 import { Database } from "../packages/plugin/src/shared/sqlite";
 import {
     contextStore,
@@ -37,7 +34,7 @@ const OLD_LEGACY_MARKER_SQL = `SELECT m.id FROM message m WHERE m.session_id=? A
       WHERE +p.session_id=m.session_id AND p.message_id=m.id AND COALESCE(json_extract(p.data,'$.type'),'')='text'
       AND COALESCE(json_extract(p.data,'$.text'),'')=?)`;
 
-it("marker cleanup deletes the frozen lineage set including equal, skewed and missing timestamps", () => {
+it("marker cleanup deletes the frozen lineage set including equal, skewed and missing timestamps", async () => {
     const f = fixture();
     const oldHome = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = f.dir;
@@ -79,6 +76,7 @@ it("marker cleanup deletes the frozen lineage set including equal, skewed and mi
             "legacy-missing",
             "legacy-skewed",
         ]);
+        expect(await prepareCompactionMarkerCandidates(SESSION)).toBe(true);
         expect(
             injectCompactionMarker({
                 sessionId: SESSION,
@@ -116,11 +114,11 @@ it("marker candidate discovery refuses a peer import until its complete summary 
     const boundary = messageId(1098);
     try {
         expect(
-            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
+            await prepareCompactionMarkerCandidates(SESSION, {
                 acceptMs: 60000,
                 resultMs: 120000,
             }),
-        ).toBe("warm");
+        ).toBe(true);
         peer.prepare("INSERT INTO message VALUES (?,?,?,?,?)").run(
             "imported-summary",
             SESSION,
@@ -136,14 +134,14 @@ it("marker candidate discovery refuses a peer import until its complete summary 
             400,
             JSON.stringify({ type: "text", text: "summary" }),
         );
-        expect(() => readRawSessionSummaryCandidateBasis(db, SESSION)).toThrow(RawOrdinalsNotReady);
+        expect(getPreparedCompactionMarkerSummaryIds(SESSION)).toBeUndefined();
         expect(
-            await prewarmRawSessionOrdinalsForDb(db, SESSION, {
+            await prepareCompactionMarkerCandidates(SESSION, {
                 acceptMs: 60000,
                 resultMs: 120000,
             }),
-        ).toBe("warm");
-        expect(readRawSessionSummaryCandidateBasis(db, SESSION).ids).toContain("imported-summary");
+        ).toBe(true);
+        expect(getPreparedCompactionMarkerSummaryIds(SESSION)).toContain("imported-summary");
         expect(
             injectCompactionMarker({
                 sessionId: SESSION,

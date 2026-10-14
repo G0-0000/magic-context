@@ -1,5 +1,5 @@
 import { isMainThread } from "node:worker_threads";
-import { type Database, getSqliteDatabasePath, type Statement } from "../../shared/sqlite";
+import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
 import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 
 export interface RawMessageParts {
@@ -284,7 +284,7 @@ function readRawMessagePageRows(
         const anchor = useFloor ? floor : after;
         const skip = anchor === after && after ? 0 : ordinal - (floor?.ordinal ?? 0);
         if (skip > ORDINAL_LOOKUP_LIMIT) {
-            requestRawOrdinalWarmup(db, sessionId);
+            void prewarmRawSessionOrdinalsForDb(db, sessionId);
             throw new RawOrdinalsNotReady();
         }
         // Limit index keys BEFORE touching JSON. Even a long run of excluded
@@ -303,7 +303,7 @@ function readRawMessagePageRows(
         rawMessagePageRowsVisited += rows.length;
         const eligible = rows.filter((row) => row.excluded !== 1);
         if (eligible.length <= skip && rows.length === rawLimit) {
-            requestRawOrdinalWarmup(db, sessionId);
+            void prewarmRawSessionOrdinalsForDb(db, sessionId);
             throw new RawOrdinalsNotReady();
         }
         return eligible
@@ -508,7 +508,7 @@ export function readRawSessionMessageIdOrdinalsForRangeFromDb(
         return withReadSnapshot(db, () => {
             const scan = currentOrdinalCheckpoints(db, sessionId)?.scan;
             if (!scan?.checkpoints && from > ORDINAL_LOOKUP_LIMIT) {
-                requestRawOrdinalWarmup(db, sessionId);
+                void prewarmRawSessionOrdinalsForDb(db, sessionId);
                 throw new RawOrdinalsNotReady();
             }
             const points = scan?.checkpoints ?? [];
@@ -947,14 +947,14 @@ interface StoreStamp {
 }
 
 function readStoreStamp(db: Database): StoreStamp | null {
-    let statement: Statement | undefined;
     try {
-        statement = db.prepare(
-            `SELECT data_version AS dataVersion, total_changes() AS totalChanges,
+        const row = db
+            .prepare(
+                `SELECT data_version AS dataVersion, total_changes() AS totalChanges,
                         (SELECT schema_version FROM pragma_schema_version) AS schemaVersion
                  FROM pragma_data_version`,
-        );
-        const row = statement.get() as Partial<StoreStamp> | null;
+            )
+            .get() as Partial<StoreStamp> | null;
         if (
             typeof row?.dataVersion !== "number" ||
             typeof row.totalChanges !== "number" ||
@@ -968,11 +968,6 @@ function readStoreStamp(db: Database): StoreStamp | null {
         };
     } catch {
         return null;
-    } finally {
-        // This one-shot metadata statement must not keep a native read cursor
-        // alive after snapshot validation. Node owns statement cleanup itself;
-        // Bun exposes finalize(), which releases it immediately.
-        (statement as unknown as { finalize?: () => void } | undefined)?.finalize?.();
     }
 }
 
@@ -1226,10 +1221,10 @@ function survivingAnchor(db: Database, set: SummaryCandidates): RowAnchor | null
 }
 
 /**
- * A worker snapshot of summary IDs, the highest physical message rowids, and
- * counts of preceding ordinal-bearing messages. These ranks describe the rows
- * present in (time_created, id) order when the worker read them; they are not
- * permanent message numbers. Later commits require revalidation or a rebuild.
+ * A worker snapshot of summary candidates, global rowid anchors and exact ranks.
+ * Checkpoints are durable prefix ranks: new messages extend the last anchor,
+ * and a revert truncates to the newest surviving checkpoint. Message identities
+ * and ordering are immutable outside tail deletion in the OpenCode store.
  */
 export interface RawSessionSummaryScan {
     anchors: Array<{ rowid: number; id: string }>;
@@ -1246,91 +1241,6 @@ export interface RawSessionSummaryScan {
 interface OrdinalCheckpointState {
     epoch: number;
     scan: RawSessionSummaryScan;
-    proof: RawOrdinalScanProof;
-}
-/** PRAGMA data_version counts peer commits on one SQLite connection, while
- * total_changes counts that connection's own writes. Recheck both on the same
- * serving connection; worker-connection counters cannot certify its snapshot. */
-export interface RawOrdinalScanProof {
-    connection: Database;
-    stamp: StoreStamp;
-}
-const localScanProofs = new WeakMap<RawSessionSummaryScan, RawOrdinalScanProof>();
-const summaryScanSources = new Map<
-    string,
-    Map<
-        string,
-        {
-            connection: WeakRef<Database>;
-            stamp: StoreStamp;
-            epoch: number;
-            ids: string[];
-        }
-    >
->();
-
-export function captureRawOrdinalScanProof(db: Database): RawOrdinalScanProof | undefined {
-    if (connectionHasOpenTransaction(db)) return undefined;
-    const stamp = readStoreStamp(db);
-    return stamp ? { connection: db, stamp } : undefined;
-}
-
-function requestRawOrdinalWarmup(db: Database, sessionId: string): void {
-    // A lookup that lacks valid ranks can request preparation inside its read
-    // transaction. Queue preparation until that transaction closes, so the
-    // serving proof describes a current, committed snapshot.
-    queueMicrotask(() => {
-        try {
-            void prewarmRawSessionOrdinalsForDb(db, sessionId).catch(() => {});
-        } catch {
-            /* The db handle that scheduled preparation may have closed before this microtask. */
-        }
-    });
-}
-
-export function isRawOrdinalScanProofCurrent(db: Database, proof: RawOrdinalScanProof): boolean {
-    return proof.connection === db && sameStoreStamp(proof.stamp, readStoreStamp(db));
-}
-
-/** Exact summary candidates for marker cleanup, irrespective of timestamp.
- * Borrow a worker-discovered set only while its unpinned source connection proves
- * no commit crossed the serving snapshot. Small cold stores can scan one page;
- * large cold stores defer rather than inspect all message JSON on the host. */
-export function readRawSessionSummaryCandidateBasis(
-    db: Database,
-    sessionId: string,
-): {
-    ids: string[];
-    proof: RawOrdinalScanProof;
-} {
-    const path = getSqliteDatabasePath(db);
-    const source = path ? summaryScanSources.get(path)?.get(sessionId) : undefined;
-    const origin = source?.connection.deref();
-    const usable =
-        source &&
-        origin &&
-        source.epoch === getRawSessionSummaryEpoch(sessionId) &&
-        !connectionHasOpenTransaction(origin) &&
-        sameStoreStamp(source.stamp, readStoreStamp(origin));
-    if (connectionHasOpenTransaction(db)) throw new RawOrdinalsNotReady();
-    return withReadSnapshot(db, () => {
-        const stamp = readStoreStamp(db);
-        if (!stamp) throw new RawOrdinalsNotReady();
-        if (usable && origin && source && sameStoreStamp(source.stamp, readStoreStamp(origin)))
-            return { ids: source.ids, proof: { connection: db, stamp } };
-        const rows = db
-            .prepare(`SELECT id, ${ORDINAL_SUMMARY_FLAG_SQL} AS summary FROM message
-            WHERE id IN (SELECT id FROM message WHERE session_id = ? LIMIT ${ORDINAL_LOOKUP_LIMIT + 1})`)
-            .all(sessionId) as Array<{ id: string; summary: number }>;
-        if (rows.length > ORDINAL_LOOKUP_LIMIT) {
-            requestRawOrdinalWarmup(db, sessionId);
-            throw new RawOrdinalsNotReady();
-        }
-        return {
-            ids: rows.filter((row) => row.summary === 1).map((row) => row.id),
-            proof: { connection: db, stamp },
-        };
-    });
 }
 const ordinalCheckpoints = new WeakMap<Database, Map<string, OrdinalCheckpointState>>();
 const ordinalSummarySeeds = new WeakMap<
@@ -1346,19 +1256,76 @@ function currentOrdinalCheckpoints(
     const cached = ordinalCheckpoints.get(db)?.get(sessionId);
     if (!cached) return undefined;
     return withReadSnapshot(db, () => {
-        // A surviving checkpoint identifies a row, not its current prefix rank.
-        // data_version sees every peer commit; total_changes sees local writes.
-        // Without a host-owned session mutation journal, invalidate conservatively
-        // on any store write, including backdated inserts and summary completion.
-        if (
-            cached.epoch !== getRawSessionSummaryEpoch(sessionId) ||
-            !sameStoreStamp(cached.proof.stamp, readStoreStamp(db))
-        ) {
-            ordinalCheckpoints.get(db)?.delete(sessionId);
+        if (!extendOrdinalCheckpoints(db, sessionId, cached.scan, ORDINAL_LOOKUP_LIMIT))
             return undefined;
-        }
+        cached.epoch = getRawSessionSummaryEpoch(sessionId);
         return cached;
     });
+}
+
+/** Retain prefix ranks across commits; OpenCode reverts remove only a suffix. */
+function extendOrdinalCheckpoints(
+    db: Database,
+    sessionId: string,
+    scan: RawSessionSummaryScan,
+    limit?: number,
+): boolean {
+    const points = scan.checkpoints ?? [];
+    const exists = (point: OrdinalKey) =>
+        Boolean(
+            db
+                .prepare("SELECT 1 FROM message WHERE id=? AND session_id=? AND time_created=?")
+                .get(point.id, sessionId, point.timeCreated),
+        );
+    // Binary search keeps the newest surviving page after a revert. At most one
+    // old page is replayed, rather than warming the entire surviving prefix.
+    if (points.length && !exists(points[points.length - 1])) {
+        let low = 0;
+        let high = points.length;
+        while (low < high) {
+            const middle = Math.floor((low + high) / 2);
+            if (exists(points[middle])) low = middle + 1;
+            else high = middle;
+        }
+        points.length = low;
+        scan.total = points.at(-1)?.ordinal ?? 0;
+        scan.rangeTotal = points.at(-1)?.rangeOrdinal ?? 0;
+        scan.sessionRows = points.at(-1)?.storedCount ?? 0;
+    }
+    const tail = points.at(-1);
+    const rows = db
+        .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded, ${RANGE_EXCLUDED_ROW_SQL} AS rangeExcluded FROM message
+        WHERE session_id=?${tail ? " AND (time_created,id) > (?,?)" : ""}
+        ORDER BY time_created,id${limit === undefined ? "" : ` LIMIT ${limit + 1}`}`)
+        .all(sessionId, ...(tail ? [tail.timeCreated, tail.id] : [])) as Array<
+        OrdinalKey & { excluded: number; rangeExcluded: number }
+    >;
+    ordinalJsonRowsRead += rows.length;
+    if (limit !== undefined && rows.length > limit) return false;
+    let total = scan.total ?? 0;
+    let rangeTotal = scan.rangeTotal ?? 0;
+    // Only page boundaries and the current tail are retained, even after years
+    // of one-message appends. The previous partial-page tail is redundant.
+    if (rows.length && tail && (tail.storedCount ?? 0) % 256 !== 0) points.pop();
+    for (let index = 0; index < rows.length; index++) {
+        const row = rows[index];
+        if (row.excluded !== 1) total++;
+        if (row.rangeExcluded !== 1) rangeTotal++;
+        const storedCount = scan.sessionRows + index + 1;
+        if (storedCount % 256 === 0 || index === rows.length - 1)
+            points.push({
+                id: row.id,
+                timeCreated: row.timeCreated,
+                ordinal: total,
+                rangeOrdinal: rangeTotal,
+                storedCount,
+            });
+    }
+    scan.checkpoints = points;
+    scan.sessionRows += rows.length;
+    scan.total = total;
+    scan.rangeTotal = rangeTotal;
+    return true;
 }
 
 export class RawOrdinalsNotReady extends Error {
@@ -1367,14 +1334,13 @@ export class RawOrdinalsNotReady extends Error {
     }
 }
 
-/** Legacy discovery hints for worker callers; they do not certify prefix ranks
- * after a commit. The rank builder always reads its current snapshot in full. */
+/** Retained ranks seed a worker when more than one bounded page was appended. */
 export function rawOrdinalSummarySeed(
     db: Database,
     sessionId: string,
 ): RawSessionSummaryScan | undefined {
     const retained = ordinalCheckpoints.get(db)?.get(sessionId);
-    if (retained && sameStoreStamp(retained.proof.stamp, readStoreStamp(db))) return retained.scan;
+    if (retained) return retained.scan;
     const seed = ordinalSummarySeeds.get(db)?.get(sessionId);
     if (!seed || seed.epoch !== getRawSessionSummaryEpoch(sessionId)) return undefined;
     return {
@@ -1412,7 +1378,7 @@ function boundedOrdinalPrefix(db: Database, sessionId: string, through: OrdinalK
     ordinalRowsVisited += rows.length;
     ordinalJsonRowsRead += rows.length;
     if (rows.length > ORDINAL_LOOKUP_LIMIT) {
-        requestRawOrdinalWarmup(db, sessionId);
+        void prewarmRawSessionOrdinalsForDb(db, sessionId);
         throw new RawOrdinalsNotReady();
     }
     return (floor?.ordinal ?? 0) + rows.reduce((sum, row) => sum + (row.excluded === 1 ? 0 : 1), 0);
@@ -1422,13 +1388,29 @@ function boundedOrdinalPrefix(db: Database, sessionId: string, through: OrdinalK
 export function scanRawSessionSummaryRows(
     db: Database,
     sessionId: string,
-    _previous?: RawSessionSummaryScan,
+    previous?: RawSessionSummaryScan,
 ): RawSessionSummaryScan {
-    const proof = captureRawOrdinalScanProof(db);
-    const scan = withReadSnapshot(db, () => {
-        // A previous scan has no cross-connection prefix certificate. Rebuild
-        // from this snapshot rather than extending ranks that a peer may have shifted.
-        const rows = db.prepare(SUMMARY_FULL_SCAN_SQL).all(sessionId, sessionId) as ScanRow[];
+    return withReadSnapshot(db, () => {
+        if (previous?.checkpoints) {
+            extendOrdinalCheckpoints(db, sessionId, previous);
+            return previous;
+        }
+        if (previous) {
+            const sessions = summaryCandidateSets.get(db) ?? new Map();
+            sessions.set(sessionId, {
+                epoch: getRawSessionSummaryEpoch(sessionId),
+                anchors: previous.anchors,
+                ids: new Set(previous.ids),
+            });
+            summaryCandidateSets.set(db, sessions);
+        }
+        const incremental =
+            previous && isRawSessionSummaryWarm(db, sessionId)
+                ? summaryCandidatesOf(db, sessionId)
+                : undefined;
+        const rows = incremental
+            ? []
+            : (db.prepare(SUMMARY_FULL_SCAN_SQL).all(sessionId, sessionId) as ScanRow[]);
         const anchors: RowAnchor[] = [];
         const ids: string[] = [];
         let sessionRows = 0;
@@ -1437,6 +1419,11 @@ export function scanRawSessionSummaryRows(
                 anchors.push({ rowid: row.rid, id: row.id });
             else if (row.kind === 2 && typeof row.id === "string") ids.push(row.id);
             else if (row.kind === 4 && typeof row.rid === "number") sessionRows = row.rid;
+        }
+        if (incremental) {
+            ids.push(...incremental.ids);
+            anchors.push(...(summaryCandidateSets.get(db)?.get(sessionId)?.anchors ?? []));
+            sessionRows = countStoredRawSessionRowsIndexed(db, sessionId);
         }
         anchors.sort((left, right) => right.rowid - left.rowid);
         anchors.length = Math.min(anchors.length, SUMMARY_ANCHOR_LIMIT);
@@ -1466,8 +1453,6 @@ export function scanRawSessionSummaryRows(
         }
         return { anchors, ids, sessionRows, checkpoints, total, rangeTotal };
     });
-    if (proof && sameStoreStamp(proof.stamp, readStoreStamp(db))) localScanProofs.set(scan, proof);
-    return scan;
 }
 
 /** The value to pass to {@link installRawSessionSummaryScan} for a scan started now. */
@@ -1476,9 +1461,9 @@ export function getRawSessionSummaryEpoch(sessionId: string): number {
 }
 
 /**
- * Publish ranks only when the serving snapshot has not changed since preparation
- * began. Same-connection scans carry a local proof; worker replies require the
- * proof captured on the serving connection before the worker was started.
+ * Retain discovered candidates and prefix ranks for incremental extension.
+ * Tail removals during a cold scan are repaired against the serving snapshot
+ * before ranks become ready. A later revert retains the same surviving prefix.
  */
 export function installRawSessionSummaryScan(
     db: Database,
@@ -1486,47 +1471,24 @@ export function installRawSessionSummaryScan(
     scan: RawSessionSummaryScan,
     epoch: number,
     workerPrepared = false,
-    proof = localScanProofs.get(scan),
 ): boolean {
     if (epoch !== getRawSessionSummaryEpoch(sessionId)) return false;
-    if (!proof || proof.connection !== db) return false;
-    // A caller-owned read transaction may hide commits since worker start; a
-    // caller-owned write transaction may contain rows the worker cannot see.
-    if (connectionHasOpenTransaction(db)) return false;
-    return withReadSnapshot(db, () => {
-        if (!sameStoreStamp(proof.stamp, readStoreStamp(db))) return false;
-        const path = getSqliteDatabasePath(db);
-        if (path) {
-            const sources = summaryScanSources.get(path) ?? new Map();
-            sources.delete(sessionId);
-            sources.set(sessionId, {
-                connection: new WeakRef(db),
-                stamp: proof.stamp,
-                epoch,
-                ids: scan.ids,
-            });
-            while (sources.size > 32) sources.delete(sources.keys().next().value as string);
-            summaryScanSources.set(path, sources);
-            while (summaryScanSources.size > 16)
-                summaryScanSources.delete(summaryScanSources.keys().next().value as string);
-        }
-        const seeds = ordinalSummarySeeds.get(db) ?? new Map();
-        seeds.set(sessionId, { epoch, scan });
-        ordinalSummarySeeds.set(db, seeds);
-        if (scan.checkpoints && workerPrepared) {
-            const counts = ordinalCheckpoints.get(db) ?? new Map();
-            counts.set(sessionId, { epoch, scan, proof });
-            ordinalCheckpoints.set(db, counts);
-        } else if (getSqliteDatabasePath(db) && isMainThread) return false;
-        if (isRawSessionSummaryWarm(db, sessionId)) return true;
-        let sessions = summaryCandidateSets.get(db);
-        if (!sessions) {
-            sessions = new Map();
-            summaryCandidateSets.set(db, sessions);
-        }
-        sessions.set(sessionId, { epoch, anchors: [...scan.anchors], ids: new Set(scan.ids) });
-        return isRawSessionSummaryWarm(db, sessionId);
-    });
+    const seeds = ordinalSummarySeeds.get(db) ?? new Map();
+    seeds.set(sessionId, { epoch, scan });
+    ordinalSummarySeeds.set(db, seeds);
+    if (scan.checkpoints && workerPrepared) {
+        const counts = ordinalCheckpoints.get(db) ?? new Map();
+        counts.set(sessionId, { epoch, scan });
+        ordinalCheckpoints.set(db, counts);
+    } else if (getSqliteDatabasePath(db) && isMainThread) return false;
+    if (isRawSessionSummaryWarm(db, sessionId)) return true;
+    let sessions = summaryCandidateSets.get(db);
+    if (!sessions) {
+        sessions = new Map();
+        summaryCandidateSets.set(db, sessions);
+    }
+    sessions.set(sessionId, { epoch, anchors: [...scan.anchors], ids: new Set(scan.ids) });
+    return isRawSessionSummaryWarm(db, sessionId);
 }
 
 /**

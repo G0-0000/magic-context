@@ -37,6 +37,8 @@ async function instrument() {
     // messages that own each tag. Ship it beside the plugin, as production does.
     const worker = await Bun.build({ entrypoints: [join(import.meta.dir, "../../../plugin/src/hooks/magic-context/raw-ordinal-warmup-worker.ts")], outdir: root, naming: "raw-ordinal-warmup-worker.js", target: "node", format: "esm", external: ["bun:sqlite", "node:sqlite"] });
     if (!worker.success) throw new Error(worker.logs.join("\n"));
+    const markerWorker = await Bun.build({ entrypoints: [join(import.meta.dir, "../../../plugin/src/features/magic-context/compaction-marker-candidates-worker.ts")], outdir: root, naming: "compaction-marker-candidates-worker.js", target: "node", format: "esm", external: ["bun:sqlite", "node:sqlite"] });
+    if (!markerWorker.success) throw new Error(markerWorker.logs.join("\n"));
     expect([...found].sort()).toEqual([...names].sort());
     return { root, calls: (sessionID: string) => readFileSync(trace, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(call => call.sessionID === sessionID) };
 }

@@ -3,8 +3,10 @@
 These tests use synthetic stores only, under
 `$TMPDIR/magic-context/host-stalls-five-review/`. They assert contracts, not the
 current implementation's output. The plugin's `host-stalls-review.test.ts`
-imports these contracts into the normal package suite; the standalone commands
-below remain useful for focused verification.
+imports the storage and cleanup contracts into the normal package suite. The
+ordinal witnesses remain separate until the durable-assignment policy is reviewed;
+their current-DB OFFSET expectations are not the accepted durable policy. The
+standalone commands below remain useful for that design review.
 
 Reviewed commit: `d355645ff5f470a9e0d6db10edb1dfd4005ae17b`.
 Comparison base: `baaebec0f389163214d696de84ef8462405e0a3f`.

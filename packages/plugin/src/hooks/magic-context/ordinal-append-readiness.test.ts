@@ -127,7 +127,7 @@ function foreignWrite(root: string): void {
 }
 
 test(
-    "append preparation rebuilds for 120 commits and ctx_expand serves current-DB ordinals",
+    "append preparation stays warm for 120 commits and ctx_expand serves the active session",
     async () => {
         await fixture(async (source, reader, context, root, length) => {
             const log = spyOn(logger, "log");
@@ -166,9 +166,7 @@ test(
                         .run(`part-${index}`);
                     foreignWrite(root);
                     const started = performance.now();
-                    // A commit does not prove that only the tail changed. The
-                    // read-only host has no mutation journal, so rebuild off-thread.
-                    expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(false);
+                    expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(true);
                     expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
                     timings.push(performance.now() - started);
                     const ownersStarted = performance.now();
@@ -194,7 +192,7 @@ test(
                 expect(expanded).not.toContain("warming in the background");
                 expect(
                     log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-                ).toHaveLength(121);
+                ).toHaveLength(1);
                 expect(getRawSessionSummaryFullScansForTest()).toBe(0);
                 console.info(
                     JSON.stringify({
@@ -202,7 +200,7 @@ test(
                         messages: length,
                         passes: timings.length,
                         ready: true,
-                        warmups: 121,
+                        warmups: 1,
                         prepareAverageMs: timings.reduce((a, b) => a + b, 0) / timings.length,
                         prepareMaxMs: Math.max(...timings),
                         ownerPrepareAverageMs:
@@ -233,7 +231,7 @@ test(
     stressRoot ? 600_000 : 30_000,
 );
 
-test("revert and append rebuild current-DB checkpoint ranks off-thread", async () => {
+test("revert truncates checkpoints without rescanning the surviving prefix", async () => {
     await fixture(async (source, reader, _context, _root, length) => {
         const log = spyOn(logger, "log");
         try {
@@ -258,14 +256,14 @@ test("revert and append rebuild current-DB checkpoint ranks off-thread", async (
             );
             expect(
                 log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-            ).toHaveLength(3);
+            ).toHaveLength(1);
         } finally {
             log.mockRestore();
         }
     });
 });
 
-test("excluded marker appends preserve ordinal values after a fresh worker snapshot", async () => {
+test("excluded marker appends preserve durable ordinals", async () => {
     await fixture(async (source, reader, _context, _root, length) => {
         const log = spyOn(logger, "log");
         try {
@@ -294,7 +292,34 @@ test("excluded marker appends preserve ordinal values after a fresh worker snaps
             );
             expect(
                 log.mock.calls.filter((call) => String(call[0]).includes("warmed off-thread")),
-            ).toHaveLength(2);
+            ).toHaveLength(1);
+        } finally {
+            log.mockRestore();
+        }
+    });
+});
+
+test("one thousand peer-session commits cost zero ordinal warmups for the unchanged session", async () => {
+    await fixture(async (source, reader, _context, _root, length) => {
+        expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
+        const log = spyOn(logger, "log");
+        try {
+            const insert = source.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)");
+            for (let commit = 0; commit < 1000; commit++) {
+                insert.run(`other-${commit}`, "session-b", commit, commit, '{"role":"user"}');
+                expect(isRawSessionSummaryWarm(reader, SESSION)).toBe(true);
+                expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
+                expect(countRawSessionMessageOrdinalsFromDb(reader, SESSION)).toBe(
+                    recount(source, length),
+                );
+            }
+            expect(
+                log.mock.calls.filter(
+                    (call) =>
+                        String(call[0]).includes(`canonical ordinals of ${SESSION}`) &&
+                        String(call[0]).includes("warmed off-thread"),
+                ),
+            ).toHaveLength(0);
         } finally {
             log.mockRestore();
         }

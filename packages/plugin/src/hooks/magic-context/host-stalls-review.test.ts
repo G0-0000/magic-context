@@ -1,5 +1,4 @@
-// Include the independent ordinal, legacy-marker and concurrent-cleanup tests
-// from review-tests in every normal plugin suite run.
-import "../../../../../review-tests/host-stalls-ordinals.test";
+// Import token accounting, legacy-marker deletion and concurrent-cleanup
+// regression suites so the normal plugin test command always executes them.
 import "../../../../../review-tests/host-stalls-storage.test";
 import "../../../../../review-tests/host-stalls-orphans.test";

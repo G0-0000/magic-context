@@ -29,12 +29,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import {
-    isRawOrdinalScanProofCurrent,
-    noteRawSessionSummaryRowWritten,
-    RawOrdinalsNotReady,
-    readRawSessionSummaryCandidateBasis,
-} from "../../hooks/magic-context/read-session-raw";
+import { noteRawSessionSummaryRowWritten } from "../../hooks/magic-context/read-session-raw";
 import { harnessOwnsOpenCodeStore } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import {
@@ -43,6 +38,13 @@ import {
 } from "../../shared/opencode-db-path";
 import { Database, withoutSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import {
+    isMarkerCandidateBasisCurrent,
+    type MarkerCandidateBasis,
+    type MarkerCandidatePreparationOptions,
+    prepareMarkerCandidateBasis,
+    readMarkerCandidateBasis,
+} from "./compaction-marker-candidates";
 
 // ── ID Generation ────────────────────────────────────────────────
 
@@ -569,9 +571,33 @@ export function injectCompactionMarker(
     return injectCompactionMarkerFromBasis(args);
 }
 
+/** Candidate preparation is a marker optimization, not an ordinal readiness
+ * check. False means keep the existing marker and serve the rebuilding turn. */
+export async function prepareCompactionMarkerCandidates(
+    sessionId: string,
+    options: MarkerCandidatePreparationOptions = {},
+): Promise<boolean> {
+    if (!harnessOwnsOpenCodeStore()) return true;
+    try {
+        return await prepareMarkerCandidateBasis(getWritableOpenCodeDb(), sessionId, options);
+    } catch (error) {
+        log(
+            `[magic-context] compaction-marker: deferred candidate preparation for ${sessionId}: ${error instanceof Error ? error.message : String(error)}; marker unchanged`,
+        );
+        return false;
+    }
+}
+
+/** Snapshot-complete IDs for diagnostics and the marker's primary-key query. */
+export function getPreparedCompactionMarkerSummaryIds(
+    sessionId: string,
+): readonly string[] | undefined {
+    return readMarkerCandidateBasis(getWritableOpenCodeDb(), sessionId)?.ids;
+}
+
 function injectCompactionMarkerFromBasis(
     args: InjectCompactionMarkerArgs,
-    validatedBasis?: ReturnType<typeof readRawSessionSummaryCandidateBasis>,
+    validatedBasis?: MarkerCandidateBasis,
 ): CompactionMarkerState | null {
     // Verify OpenCode's schema still matches what our INSERTs expect BEFORE we
     // try to write. If OpenCode shipped a breaking schema change, bail cleanly
@@ -618,14 +644,17 @@ function injectCompactionMarkerFromBasis(
     });
 
     try {
-        const basis = validatedBasis ?? readRawSessionSummaryCandidateBasis(db, args.sessionId);
+        const basis = validatedBasis ?? readMarkerCandidateBasis(db, args.sessionId);
+        if (!basis) return null;
         runMarkerWriteTransaction(db, "compaction-marker-inject", () => {
             // Candidate IDs were read before acquiring the host writer lock.
             // Recheck their snapshot before cleanup. Atomic replacement already
             // checked it before deleting its old marker rows, so its supplied
             // candidate set is still complete except for those known deletions.
-            if (!validatedBasis && !isRawOrdinalScanProofCurrent(db, basis.proof))
-                throw new RawOrdinalsNotReady();
+            if (!validatedBasis && !isMarkerCandidateBasisCurrent(db, basis))
+                throw new Error(
+                    "host store changed after marker candidate preparation; marker unchanged",
+                );
             // A committed insert can outlive a failed context-state write. Remove
             // any stale lineage in the transaction that writes the canonical rows.
             removeLegacyMarkerLineageRows(db, {
@@ -726,10 +755,19 @@ export function replaceCompactionMarker(
     try {
         const db = getWritableOpenCodeDb();
         connection = db;
-        const basis = readRawSessionSummaryCandidateBasis(db, args.sessionId);
+        const basis = readMarkerCandidateBasis(db, args.sessionId);
+        if (!basis) {
+            return {
+                kind: "definitely-no-cut",
+                error: new Error("marker candidate preparation pending; marker unchanged"),
+            };
+        }
         const marker = runMarkerWriteTransaction(db, "compaction-marker-replace", () => {
             entered = true;
-            if (!isRawOrdinalScanProofCurrent(db, basis.proof)) throw new RawOrdinalsNotReady();
+            if (!isMarkerCandidateBasisCurrent(db, basis))
+                throw new Error(
+                    "host store changed after marker candidate preparation; marker unchanged",
+                );
             if (existing) {
                 db.prepare("DELETE FROM part WHERE id = ?").run(existing.summaryPartId);
                 db.prepare("DELETE FROM message WHERE id = ?").run(existing.summaryMessageId);
