@@ -2,6 +2,38 @@
 mod executable_staging;
 
 #[test]
+fn staging_root_uses_tmpdir_only_when_resolved_outside_var_folders() {
+    use std::path::{Path, PathBuf};
+
+    let fallback = Path::new("/tmp/magic-context-exec");
+    assert_eq!(
+        executable_staging::executable_root_for_tmpdir(None, None),
+        fallback
+    );
+    assert_eq!(
+        executable_staging::executable_root_for_tmpdir(
+            Some(Path::new("/var/folders/abc")),
+            Some(Path::new("/var/folders/abc")),
+        ),
+        fallback
+    );
+    assert_eq!(
+        executable_staging::executable_root_for_tmpdir(
+            Some(Path::new("/var/folders/abc")),
+            Some(Path::new("/private/var/folders/abc")),
+        ),
+        fallback
+    );
+    assert_eq!(
+        executable_staging::executable_root_for_tmpdir(
+            Some(Path::new("/worker/task-tmp")),
+            Some(Path::new("/worker/task-tmp")),
+        ),
+        PathBuf::from("/worker/task-tmp/magic-context-exec")
+    );
+}
+
+#[test]
 fn staged_executable_is_content_named_private_and_reused() {
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -34,7 +66,16 @@ fn staged_executable_is_content_named_private_and_reused() {
             .unwrap(),
         first_digest
     );
-    assert!(first.starts_with("/tmp/magic-context-exec"));
+    assert_eq!(
+        first
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("magic-context-exec")
+    );
     assert!(!first.starts_with(scratch.path()));
 
     #[cfg(not(target_os = "macos"))]

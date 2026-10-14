@@ -8,6 +8,7 @@ import {
     mkdirSync,
     openSync,
     readFileSync,
+    realpathSync,
     renameSync,
     unlinkSync,
     writeFileSync,
@@ -15,7 +16,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const EXECUTABLE_ROOT = "/tmp/magic-context-exec";
+const FALLBACK_EXECUTABLE_ROOT = "/tmp/magic-context-exec";
 
 /** Stage a child executable on the internal disk under a digest of its source bytes. */
 export function stageExecutable(source: string, name: string, identifier: string): string {
@@ -24,8 +25,9 @@ export function stageExecutable(source: string, name: string, identifier: string
     }
     const sourceBytes = readFileSync(source);
     const sourceDigest = createHash("sha256").update(sourceBytes).digest("hex");
-    ensurePrivateDirectory(EXECUTABLE_ROOT);
-    const directory = join(EXECUTABLE_ROOT, sourceDigest);
+    const executableRoot = getExecutableRoot();
+    ensurePrivateDirectory(executableRoot);
+    const directory = join(executableRoot, sourceDigest);
     ensurePrivateDirectory(directory);
     const destination = join(directory, name);
     if (verifiedCopy(destination, sourceBytes, sourceDigest, identifier)) return destination;
@@ -59,6 +61,29 @@ export function stageExecutable(source: string, name: string, identifier: string
         }
         throw error;
     }
+}
+
+export function executableRootForTmpdir(tmpDir?: string, resolvedTmpDir?: string): string {
+    if (!tmpDir || !resolvedTmpDir || isUnderMacOsTempFolders(resolvedTmpDir)) {
+        return FALLBACK_EXECUTABLE_ROOT;
+    }
+    return join(tmpDir, "magic-context-exec");
+}
+
+function getExecutableRoot(): string {
+    const tmpDir = process.env.TMPDIR;
+    if (!tmpDir) return FALLBACK_EXECUTABLE_ROOT;
+    try {
+        return executableRootForTmpdir(tmpDir, realpathSync(tmpDir));
+    } catch {
+        return FALLBACK_EXECUTABLE_ROOT;
+    }
+}
+
+function isUnderMacOsTempFolders(path: string): boolean {
+    return ["/var/folders", "/private/var/folders"].some(
+        (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+    );
 }
 
 function ensurePrivateDirectory(path: string): void {

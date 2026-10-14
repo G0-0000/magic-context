@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __hermeticSubcTest } from "./hermetic-subc";
@@ -33,7 +33,7 @@ describe("hermetic Rust process isolation", () => {
             if (process.platform !== "darwin") writeFileSync(source, "test executable");
             const staged = __hermeticSubcTest.stageDevBinary(source, "ckdev-mc-e2e-test");
 
-            expect(staged.startsWith("/tmp/magic-context-exec/")).toBe(true);
+            expect(staged.startsWith(`${expectedStagingRoot()}/`)).toBe(true);
             expect(staged).toContain("/ckdev-mc-e2e-test");
             if (process.platform !== "darwin") {
                 expect(readFileSync(staged, "utf8")).toBe("test executable");
@@ -62,3 +62,22 @@ describe("hermetic Rust process isolation", () => {
         expect(__hermeticSubcTest.isStaleRustE2ePidRecord(Number.NaN, nowMs)).toBe(false);
     });
 });
+
+function expectedStagingRoot(): string {
+    const tmpDir = process.env.TMPDIR;
+    if (!tmpDir) return "/tmp/magic-context-exec";
+    let resolvedTmpDir: string;
+    try {
+        resolvedTmpDir = realpathSync(tmpDir);
+    } catch {
+        return "/tmp/magic-context-exec";
+    }
+    if (
+        ["/var/folders", "/private/var/folders"].some(
+            (prefix) => resolvedTmpDir === prefix || resolvedTmpDir.startsWith(`${prefix}/`),
+        )
+    ) {
+        return "/tmp/magic-context-exec";
+    }
+    return join(tmpDir, "magic-context-exec");
+}

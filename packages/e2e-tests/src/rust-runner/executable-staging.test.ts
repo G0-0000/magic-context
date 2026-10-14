@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "bun:test";
 
 import { cleanupE2ETempDir, createE2ETempDir } from "../temp-dir";
-import { stageExecutable } from "./executable-staging";
+import { executableRootForTmpdir, stageExecutable } from "./executable-staging";
 
 describe("content-named child executable staging", () => {
     it("keeps copies off the source tree, reuses identical bytes, and hashes changed bytes separately", () => {
@@ -30,7 +30,7 @@ describe("content-named child executable staging", () => {
             const changedDigest = createHash("sha256").update(readFileSync(changedBinary)).digest("hex");
 
             expect(first).toBe(reused);
-            expect(first.startsWith(`/tmp/magic-context-exec/${expectedDigest}/`)).toBe(true);
+            expect(first.startsWith(`${expectedStagingRoot()}/${expectedDigest}/`)).toBe(true);
             expect(first.startsWith(fixtureDir)).toBe(false);
             expect(first).not.toContain("/target/");
             expect(changed.split("/").at(-2)).toBe(changedDigest);
@@ -40,10 +40,51 @@ describe("content-named child executable staging", () => {
                 expect(statSync(path).mode & 0o777).toBe(0o700);
                 expect(statSync(join(path, "..")).mode & 0o777).toBe(0o700);
             }
-            expect(statSync("/tmp/magic-context-exec").mode & 0o777).toBe(0o700);
+            expect(statSync(expectedStagingRoot()).mode & 0o777).toBe(0o700);
         } finally {
             cleanupE2ETempDir(fixtureDir);
         }
+    });
+
+    it("uses TMPDIR outside /var/folders for staged executables", () => {
+        const fixtureDir = createE2ETempDir("magic-context-executable-tmpdir-test-");
+        const stagingDir = mkdtempSync(join(resolve(import.meta.dir, "../../../../"), ".magic-context-exec-tmpdir-"));
+        const source = join(fixtureDir, "ck-mc");
+        const previousTmpdir = process.env.TMPDIR;
+        try {
+            if (process.platform === "darwin") {
+                writeFileSync(source, readFileSync(process.execPath), { mode: 0o700 });
+            } else {
+                writeFileSync(source, "test executable", { mode: 0o700 });
+            }
+            process.env.TMPDIR = stagingDir;
+
+            const staged = stageExecutable(source, "ckdev-mc-tmpdir-test", "ck-mc");
+            const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+
+            expect(staged).toBe(join(stagingDir, "magic-context-exec", digest, "ckdev-mc-tmpdir-test"));
+            expect(statSync(join(stagingDir, "magic-context-exec")).mode & 0o777).toBe(0o700);
+        } finally {
+            if (previousTmpdir === undefined) delete process.env.TMPDIR;
+            else process.env.TMPDIR = previousTmpdir;
+            rmSync(stagingDir, { recursive: true, force: true });
+            cleanupE2ETempDir(fixtureDir);
+        }
+    });
+
+    it("falls back to /tmp when TMPDIR is unset or resolves under /var/folders", () => {
+        const fallback = "/tmp/magic-context-exec";
+
+        expect(executableRootForTmpdir()).toBe(fallback);
+        expect(executableRootForTmpdir("/var/folders/abc", "/var/folders/abc")).toBe(fallback);
+        expect(executableRootForTmpdir("/var/folders/abc", "/private/var/folders/abc")).toBe(fallback);
+        expect(executableRootForTmpdir("/private/var/folders/abc", "/private/var/folders/abc")).toBe(fallback);
+    });
+
+    it("uses a TMPDIR outside /var/folders as the staging parent", () => {
+        expect(executableRootForTmpdir("/worker/task-tmp", "/worker/task-tmp")).toBe(
+            "/worker/task-tmp/magic-context-exec",
+        );
     });
 
     it("flags direct process launches from Cargo build paths", () => {
@@ -140,4 +181,23 @@ function collectTypeScriptFiles(directory: string): string[] {
         else if (/\.(?:[cm]?tsx?)$/.test(entry.name)) files.push(path);
     }
     return files;
+}
+
+function expectedStagingRoot(): string {
+    const tmpDir = process.env.TMPDIR;
+    if (!tmpDir) return "/tmp/magic-context-exec";
+    let resolvedTmpDir: string;
+    try {
+        resolvedTmpDir = realpathSync(tmpDir);
+    } catch {
+        return "/tmp/magic-context-exec";
+    }
+    if (
+        ["/var/folders", "/private/var/folders"].some(
+            (prefix) => resolvedTmpDir === prefix || resolvedTmpDir.startsWith(`${prefix}/`),
+        )
+    ) {
+        return "/tmp/magic-context-exec";
+    }
+    return join(tmpDir, "magic-context-exec");
 }
