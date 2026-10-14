@@ -4125,9 +4125,7 @@ export function registerPiContextHandler(
 		const generation = Symbol();
 		if (passSessionId && !budget.sideTurn)
 			contextPassGeneration.set(passSessionId, generation);
-		const signal =
-			(event as { signal?: AbortSignal }).signal ??
-			(ctx as { signal?: AbortSignal }).signal;
+		const signal = budget.signal;
 		const assertOperation = budget.assertOwner;
 		budget.assertOwner = () => {
 			assertOperation();
@@ -6346,6 +6344,9 @@ export function registerPiContextHandler(
 				messages: typeof event.messages;
 			};
 		} catch (err) {
+			// Cancellation must not enter recovery or queue a failed-turn diagnostic,
+			// including on hosts that report AbortError without exposing a signal.
+			if (budget.isCancelled(err)) throw err;
 			budget.assertOutcome();
 			budget.stage = "recovery";
 			if (err instanceof PiServedIdentityError) {
