@@ -13,6 +13,7 @@
 	},
 	"include": [
 		"review-lkg-fence.ts",
+		"../packages/pi-plugin/src/context-handler-lkg-debug-assertions.test.ts",
 		"../packages/pi-plugin/src/lkg-fence-independent.test.ts",
 		"../packages/pi-plugin/src/lkg-fence-restart-regression.test.ts",
 		"../packages/pi-plugin/src/lkg-fence-sigkill.test.ts",
