@@ -103,6 +103,7 @@ import {
 } from "./latest-thinking-recovery";
 import {
     claimLkgRequestIdentity,
+    currentLkgRequestIdentity,
     type LkgRequestIdentity,
     noteCapturedLkgRequest,
 } from "./lkg-measured-request";
@@ -186,6 +187,7 @@ import {
     findReasoningBearingAssistantIds,
     snapshotTrailingBlankSourceDecisions,
 } from "./strip-content";
+import { deferDeliveredSystemRefresh, recordHeldHeadForRequest } from "./system-prompt-delivery";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
 import type { TransformDeps } from "./transform";
 import { resolveHistoryBudgetTokens } from "./transform";
@@ -3305,9 +3307,10 @@ export function createRustModeTransform(
             }
             const effectiveFloor = protectionFloorResolution.floor;
             const historianRun = deps.resolveHistorianRun?.();
-            // The system hook acknowledges its first hash and idle-expired changes in
-            // the durable cached marker. Forward that acknowledgement separately from
-            // the actual identity so the module can adopt only a system-only delta.
+            // cachedM0SystemHash also records system prompts the provider accepted
+            // while signed thinking required m[0]/m[1] to stay unchanged. Send that
+            // acknowledgement separately: the module compares all the other render
+            // inputs before updating its system identity without rebuilding messages.
             const observedSystemHash = sessionMeta.systemPromptHash ?? "";
             const rustSystemHash = observedSystemHash;
             const historianModels = {
@@ -4890,6 +4893,17 @@ export function createRustModeTransform(
                 resolveKeepReasoningTokens(deps.keepReasoningTokens, modelKey ?? undefined),
                 isPrefixBoundThinkingModel(model?.providerID, model?.modelID),
             );
+            if (
+                !moduleDecisionBusts &&
+                inputHasActiveThinking &&
+                isPrefixBoundThinkingModel(model?.providerID, model?.modelID)
+            ) {
+                recordHeldHeadForRequest(
+                    sessionId,
+                    currentLkgRequestIdentity(sessionId),
+                    (ownsHistory) => deferDeliveredSystemRefresh(deps, sessionId, ownsHistory),
+                );
+            }
             finishPass(true);
             // Validation, message replacement, synchronous LKG persistence and
             // bookkeeping have finished. Clear the persisted replay block last; if

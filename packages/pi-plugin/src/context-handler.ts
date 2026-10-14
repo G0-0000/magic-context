@@ -720,6 +720,37 @@ const systemPromptRefreshSessions = new Set<string>();
 const pendingMaterializationSessions = new Set<string>();
 const deferredHistoryRefreshSessions = new Set<string>();
 const deferredMaterializationSessions = new Set<string>();
+
+export function signalPiSystemHashChange(
+	sessionId: string,
+	hash: string,
+): void {
+	recordSystemRefreshOwnership(
+		sessionId,
+		hash,
+		!historyRefreshSessions.has(sessionId),
+	);
+	signalPiHistoryRefresh(sessionId);
+	signalPiSystemPromptRefresh(sessionId);
+	if (!pendingMaterializationSessions.has(sessionId))
+		signalPiPendingMaterialization(sessionId, "system_hash");
+}
+
+function deferPiDeliveredSystemRefresh(
+	sessionId: string,
+	ownsHistory: boolean,
+): void {
+	deferDeliveredSystemRefresh(
+		{
+			historyRefreshSessions,
+			pendingMaterializationSessions,
+			deferredHistoryRefreshSessions,
+			deferredMaterializationSessions,
+		},
+		sessionId,
+		ownsHistory,
+	);
+}
 const sessionsByProject = new Map<string, Set<string>>();
 const lastSeenProjectIdentityBySession = new Map<string, string>();
 const persistedProjectIdentityBySession = new Map<string, string>();
@@ -4203,6 +4234,9 @@ export function registerPiContextHandler(
 			// resolver is wired (tests) or the resolver returns nothing.
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
+			const deliveryModelKey = resolvePiContextModelKey(ctx);
+			if (!budget.sideTurn && deliveryModelKey)
+				beginPiSystemPromptRequest(options.db, sessionId, deliveryModelKey);
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
 			lkgCompactionOff = options.compactionOff === true;
@@ -6278,6 +6312,15 @@ export function registerPiContextHandler(
 			}
 			budget.assertOutcome();
 			publishTransformDecision?.();
+			if (
+				!budget.sideTurn &&
+				result.strictThinkingKept &&
+				!result.signedPrefixRewritten &&
+				!result.materialized
+			)
+				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
+					deferPiDeliveredSystemRefresh(sessionId, ownsHistory),
+				);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -10923,4 +10966,12 @@ import {
 	pendingMaterializationOrigin,
 	requestPendingMaterialization,
 } from "@magic-context/core/hooks/magic-context/pending-materialization";
+import {
+	deferDeliveredSystemRefresh,
+	recordSystemRefreshOwnership,
+} from "@magic-context/core/hooks/magic-context/system-prompt-delivery";
+import {
+	beginPiSystemPromptRequest,
+	recordPiHeldSystemHead,
+} from "./system-prompt-delivery-pi";
 import { piOpaqueThinkingFallbackSteps } from "./tokenize-pi-messages";

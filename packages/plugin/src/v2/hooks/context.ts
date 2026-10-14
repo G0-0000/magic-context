@@ -1665,6 +1665,11 @@ export async function registerContext(context: V2Context) {
                 injectionEnabled: config.system_prompt_injection.enabled,
                 injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
+            beginV2LkgRequest(
+                draft.sessionID,
+                `${draft.model.providerID}/${draft.model.id}`,
+                latestLkgResponseIds.get(draft.sessionID),
+            );
             await applyV2SystemPrompt(systemPrompt, draft);
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
@@ -2011,11 +2016,6 @@ export async function registerContext(context: V2Context) {
             }
             const mapped = adaptPayload(draft, admitted);
             bindSystemDateRequestIdentity(mapped, draft);
-            beginV2LkgRequest(
-                draft.sessionID,
-                `${draft.model.providerID}/${draft.model.id}`,
-                latestLkgResponseIds.get(draft.sessionID),
-            );
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,

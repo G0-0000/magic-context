@@ -22,9 +22,11 @@ import {
     resolveCtxReduceAvailability,
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
+import { currentLkgRequestIdentity } from "./lkg-measured-request";
 import { requestPendingMaterialization } from "./pending-materialization";
 import { estimateTokens } from "./read-session-formatting";
 import { systemPromptDates } from "./system-prompt-dates";
+import { isHeldHeadForRequest, recordSystemPromptForRequest } from "./system-prompt-delivery";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
@@ -461,7 +463,12 @@ export function createSystemPromptHashHandler(deps: {
         // on an idle-expired request; queued work rides the next natural bust.
         // This must not release the sticky date: OpenCode 1 reports
         // `requestMessagesFinal` on every request, warm or not.
-        const adoptSystemChange = idleCacheExpired || requestMessagesFinal;
+        // A completed messages hook that kept m[0]/m[1] frozen for signed
+        // thinking must instead wait for the matching successful provider reply.
+        const adoptSystemChange =
+            idleCacheExpired ||
+            (requestMessagesFinal &&
+                !isHeldHeadForRequest(sessionId, currentLkgRequestIdentity(sessionId)));
 
         // ── Step 2: Coalesce content/preset and date changes into one bust ──
         const liveSystemContent = output.system.join("\n");
@@ -588,6 +595,14 @@ export function createSystemPromptHashHandler(deps: {
             .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
             .digest("hex");
 
+        recordSystemPromptForRequest(
+            sessionId,
+            currentLkgRequestIdentity(sessionId),
+            currentHash,
+            deps.db,
+            previousHash !== currentHash ? !deps.historyRefreshSessions.has(sessionId) : undefined,
+        );
+
         // Reuse sessionMetaEarly from Step 1 — no code path between that read
         // and here mutates session_meta for this session, so a second DB read
         // would return identical data. If Step 1's read failed (sessionMetaEarly
@@ -610,11 +625,13 @@ export function createSystemPromptHashHandler(deps: {
             if (!adoptSystemChange) {
                 deps.historyRefreshSessions.add(sessionId);
                 deps.systemPromptRefreshSessions.add(sessionId);
-                requestPendingMaterialization(
-                    deps.pendingMaterializationSessions,
-                    sessionId,
-                    "system_hash",
-                );
+                if (!deps.pendingMaterializationSessions.has(sessionId)) {
+                    requestPendingMaterialization(
+                        deps.pendingMaterializationSessions,
+                        sessionId,
+                        "system_hash",
+                    );
+                }
                 deps.lastHeuristicsTurnId.delete(sessionId);
             }
         } else if (previousHash === "" || previousHash === "0") {

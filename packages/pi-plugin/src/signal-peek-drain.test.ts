@@ -377,9 +377,23 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 		const idx = code.indexOf("if (result.hashChanged)");
 		expect(idx).toBeGreaterThan(0);
 		const segment = code.slice(idx, idx + 500);
-		expect(segment).toContain("signalPiHistoryRefresh(sessionId)");
-		expect(segment).toContain("signalPiSystemPromptRefresh(sessionId)");
 		expect(segment).toContain(
+			"signalPiSystemHashChange(sessionId, result.currentHash)",
+		);
+		const contextCode = stripComments(CONTEXT_HANDLER_SRC);
+		const start = contextCode.indexOf(
+			"export function signalPiSystemHashChange",
+		);
+		const end = contextCode.indexOf(
+			"function deferPiDeliveredSystemRefresh",
+			start,
+		);
+		expect(start).toBeGreaterThan(0);
+		expect(end).toBeGreaterThan(start);
+		const signals = contextCode.slice(start, end);
+		expect(signals).toContain("signalPiHistoryRefresh(sessionId)");
+		expect(signals).toContain("signalPiSystemPromptRefresh(sessionId)");
+		expect(signals).toContain(
 			'signalPiPendingMaterialization(sessionId, "system_hash")',
 		);
 	});

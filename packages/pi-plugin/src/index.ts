@@ -156,9 +156,7 @@ import {
 	registerPiContextHandler,
 	signalPiDeferredHistoryRefresh,
 	signalPiDeferredMaterialization,
-	signalPiHistoryRefresh,
-	signalPiPendingMaterialization,
-	signalPiSystemPromptRefresh,
+	signalPiSystemHashChange,
 	signalPiSystemPromptRefreshForProject,
 	trackSessionForProject,
 } from "./context-handler";
@@ -242,6 +240,7 @@ import {
 	composeMagicContextSystemPrompt,
 	processSystemPromptForCache,
 } from "./system-prompt";
+import { acknowledgePiSystemPromptResponse } from "./system-prompt-delivery-pi";
 import { withTimeout } from "./timeout";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./tools";
 import {
@@ -711,6 +710,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	readBranch?: () => readonly unknown[] | undefined;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
+	acknowledgePiSystemPromptResponse(args.sessionId, args.message);
 	// Pi emits message_end before it appends the message to the branch, so the
 	// branch read for the flag does not hold this message yet. A reply with
 	// provider usage becomes the anchor of Pi's live figure once appended.
@@ -2574,9 +2574,7 @@ async function startPiMagicContextRuntime(
 				// materialize, AND the next before_agent_start refreshes
 				// adjuncts (since this turn's adjunct read used the
 				// cached values that are now potentially stale).
-				signalPiHistoryRefresh(sessionId);
-				signalPiSystemPromptRefresh(sessionId);
-				signalPiPendingMaterialization(sessionId, "system_hash");
+				signalPiSystemHashChange(sessionId, result.currentHash);
 			}
 
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):

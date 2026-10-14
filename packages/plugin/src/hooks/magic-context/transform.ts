@@ -134,6 +134,7 @@ import {
     captureLatestTurnOriginals,
     prepareLatestThinkingRecovery,
 } from "./latest-thinking-recovery";
+import { currentLkgRequestIdentity } from "./lkg-measured-request";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
@@ -169,6 +170,7 @@ import {
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
+import { deferDeliveredSystemRefresh, recordHeldHeadForRequest } from "./system-prompt-delivery";
 import { prewarmTagOwners, waitForTagOwners } from "./tag-owner-warmup";
 import { collectTemporalCandidates, injectTemporalMarkers } from "./temporal-awareness";
 import { readServedTemporalDecisions } from "./temporal-served-projection";
@@ -734,9 +736,10 @@ export function createTransform(deps: TransformDeps) {
             entryReuse = stats;
         },
     });
-    const deferredHistoryRefreshSessions = deps.deferredHistoryRefreshSessions ?? new Set<string>();
-    const deferredMaterializationSessions =
-        deps.deferredMaterializationSessions ?? new Set<string>();
+    const deferredHistoryRefreshSessions = (deps.deferredHistoryRefreshSessions ??=
+        new Set<string>());
+    const deferredMaterializationSessions = (deps.deferredMaterializationSessions ??=
+        new Set<string>());
 
     const observeCommitNudgeTransition = (
         sessionId: string,
@@ -3259,6 +3262,18 @@ export function createTransform(deps: TransformDeps) {
             (postTransformResult.bustedThisPass && !activeThinkingPrefixHold) ||
                 postTransformResult.thinkingReleasedForFit === true,
         );
+        if (
+            activeThinkingPrefixHold &&
+            !postTransformResult.thinkingReleasedForFit &&
+            sessionMeta.cachedM0Bytes != null &&
+            sessionMeta.cachedM1Bytes != null
+        ) {
+            recordHeldHeadForRequest(
+                sessionId,
+                currentLkgRequestIdentity(sessionId),
+                (ownsHistory) => deferDeliveredSystemRefresh(deps, sessionId, ownsHistory),
+            );
+        }
         if (passOutcome.captureEligible) {
             const keys = resolveLkgModelKeys(messages);
             const modelKey = modelForBudget

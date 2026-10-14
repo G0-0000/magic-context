@@ -3,6 +3,10 @@ import { getMeasuredToolDefinitionTokens } from "../../features/magic-context/to
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { providerResponseFailed } from "../../shared/provider-response-completion";
 import type { LkgSlot } from "./lkg-slot";
+import {
+    acknowledgeSystemPromptDelivery,
+    clearSystemPromptDelivery,
+} from "./system-prompt-delivery";
 import type { MessageLike } from "./transform-operations";
 
 export type LkgRequestIdentity =
@@ -83,6 +87,10 @@ export function claimLkgRequestIdentity(sessionId: string): LkgRequestIdentity |
     return request;
 }
 
+export function currentLkgRequestIdentity(sessionId: string): LkgRequestIdentity | undefined {
+    return requests.get(sessionId);
+}
+
 export function noteCapturedLkgRequest(args: {
     sessionId: string;
     slot: LkgSlot;
@@ -134,6 +142,7 @@ export function noteLkgProviderResponse(args: {
         });
         return;
     }
+    acknowledgeSystemPromptDelivery({ ...args, request: requests.get(args.sessionId) });
     const capture = captures.get(args.sessionId);
     if (
         !capture ||
@@ -191,6 +200,7 @@ export function measuredLkgPrefix(args: {
 export function clearLkgMeasuredRequest(sessionId: string): void {
     requests.delete(sessionId);
     captures.delete(sessionId);
+    clearSystemPromptDelivery(sessionId);
 }
 
 /** A pass that rebuilds the cached prefix discards the previously saved request

@@ -17232,6 +17232,11 @@ fn active_anthropic_thinking_turn(req: &TransformRequest) -> bool {
         .any(|m| protected.contains(m.mid.as_str()) && m.ck.content.iter().any(is_reasoning_block))
 }
 
+#[cfg(test)]
+pub(crate) fn active_signed_head_for_test(req: &TransformRequest) -> bool {
+    active_anthropic_thinking_turn(req) && is_prefix_bound_thinking_model(req.model_key.as_deref())
+}
+
 /// Reproduce persisted reasoning decisions before protecting a new prefix edit.
 /// Already-frozen legacy omissions are not new mutations and remain authoritative.
 fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> HashSet<String> {
