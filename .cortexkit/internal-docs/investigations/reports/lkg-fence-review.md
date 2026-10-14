@@ -1,5 +1,9 @@
 # Independent LKG recovery-fence review
 
+The original finding identified changed Pi held-prefix bytes at revision
+`75e40737`, the implementation under review. Its later reproduction, minimized
+cause and verified repair are documented in **P2 resolution** below.
+
 Reviewed the durable last-good request (LKG) fence and immutable recovery-prefix changes across the complete range `207e64e298dcb94309e29158a4998e363f66e901..75e40737f04748104977d9e6a73c1f85a71bc9d8`. The final commit only adjusts when complete arrays are captured; the review includes the earlier fence implementation too. Report-only: no product changes, architecture changes, schema changes or package changes are included.
 
 The author's initially absent report was supplied at `.cortexkit/internal-docs/investigations/reports/lkg-durable-recovery-fence-2026-10-13.md`. Its SHA-256 is `95d573b9b7718bdd9dcf79e3ed7e90b0a30f3fa464238cff1a940eb63b0837ba`. Its final-policy section, rather than the superseded per-capture-certificate claims, was reviewed. Claims below are observations from this review, not repetitions of that report.
@@ -159,3 +163,122 @@ Restored positive run: **3 pass, 58 filtered, 0 fail, 80 assertions**. Additiona
 - Sidekick research incorrectly pinned the baseline even when asked for current HEAD; its unsupported current-code conclusions were not used. File reads and executable gates supplied the evidence instead.
 
 The retained evidence is this report, the executable witnesses and the final delivery JSON's mutation evidence (exact failed test outputs, applied non-empty diff statistics and restored empty diff statistics). Regenerable build directories and disposable exports are not evidence artifacts. The verified safety improvements do not erase the demonstrated no-busy Pi cache regression or justify calling the review an unconditional approval.
+
+## P2 resolution: admission replay trigger was misclassified
+
+The finding above was reproduced before any product edit: the independent
+restart file failed all three cases (0 pass, 3 fail, 6 assertions), at exactly the
+reported held passes for seeds 2, 3 and 8. A fresh independent export of
+`207e64e2`, installed from its committed lockfile and built on Linux, passed the
+unchanged held driver for those seeds (3 pass, 15 filtered, 0 fail, 9 assertions).
+
+The responsible hunk was minimized to the two added lines in the
+`PiLkgAdmissionReplay` catch in `context-handler.ts` which unconditionally called
+`lkgCoordinator.noteRecovery`. Neutralizing only those two lines changed the
+three regression witnesses from red to green. No identity-repair algorithm,
+input-ID/content evidence, fence reader, or existing held-driver assertion was
+changed in that causal experiment.
+
+The private exception class had two different callers: writer admission uses it
+when a busy writer can be avoided by serving LKG; the held-identity callback uses
+it to preserve the served prefix while a durable repair of tag-number identity
+remains pending. That repair prevents a previously served message from acquiring
+new reduction-handle numbers; it is the mechanism tracked by issue #650.
+Treating both callers as storage recovery wrote dirty on the ordinary no-busy
+held-repair path. After process-state reset, that dirty mark produced
+`lkg_restart_rebuild`, allowing the carried repair to rebuild the held prefix
+instead of following the baseline replay path.
+
+The fix adds an explicit private trigger, defaulting to `writer_busy`, and sets
+`held_identity_repair` at the one held-repair constructor call. The common catch
+records the recovered raw-tail obligation only for `writer_busy`. The existing
+held-repair record continues to control replay until a rebuild is allowed to
+change the old prefix bytes; neither
+that record nor its attribution algorithm was altered. The separate degraded/
+error LKG fallback still records recovery as before. Both writer-busy routes
+therefore retain dirty-before-return ordering. No fence certificate checks were
+weakened to make the restart tests pass.
+
+`packages/pi-plugin/src/lkg-fence-restart-regression.test.ts` now runs in the
+normal suite without requiring a review environment flag. All three cases passed
+with no flag set (3 pass, 0 fail, 6 assertions). Reintroducing only the removed trigger guard reproduced seed 2
+pass 96's first-message change. Only the selected top-level test
+`independent no-busy restart regression: Pi held seed 2` failed (0 pass,
+2 filtered, 1 fail, 2 assertions); its child oracle reported the expected
+held-driver failure, not an unrelated test error. The mutation was labelled
+`NON-VACUITY BREAK`, applied from staged live source with an empty unstaged diff,
+showed one insertion and one deletion in `context-handler.ts`, and was restored
+with checkout plus touch to an empty unstaged diff.
+
+### Resolution verification
+
+All executable checks used Linux `runon: linux,4c` with Bun 1.4.2, TypeScript
+5.9.3 and Biome 2.5.1. Independent export installs used `,net` and their committed
+lockfiles. `OPENCODE_DB` was unset; all stores were disposable.
+
+- Pi's two compiler checks and OpenCode's three compiler checks passed.
+  `scripts/tsconfig.lkg-fence-review.json` also passed its explicit `tsc --noEmit`
+  check covering the imported witnesses and runner.
+- Package lint passed without errors (323 Pi files, 1402 OpenCode files).
+  Root build passed all packages; TUI generation checked nine outputs and rewrote
+  none. No manifests or lockfiles changed.
+- The final default Pi serial suite passed **2147 tests**, skipped **40**, failed
+  **0**, with **162800 assertions across 222 files**. This includes the now-default
+  restart regression cases, the new Pi SIGKILL matrix, and #650/#640/#641 tests.
+- Imported OpenCode SIGKILL, native mutex-review, durable fence and Rust recovery
+  suites passed **236 tests**, skipped one child-only case, failed **0**, with
+  **3824 assertions across four files**.
+- Unchanged tests proving that busy replay bytes remain fixed on the next healthy
+  pass and are normalized only at a rebuilding fold, for both Pi shapes and both
+  OpenCode generations, plus zero warm fence I/O, directory-fallback no-write,
+  and clean/lost
+  Pi restart receipts passed together: **9 pass, 83 filtered, 0 fail,
+  164 assertions across four files**.
+- Independently observed ESM filesystem probes passed for each of Pi, OpenCode 1
+  and OpenCode 2: 120 normal passes and 241 assertions per process, with both
+  actual filesystem fence I/O and the internal observer count equal to zero.
+  Sampled descriptors numbered 26/32/32 with zero forbidden paths.
+- Three alternating 32-pass runs of independently installed/built base and
+  candidate exports again matched all **288 complete serialized requests** and
+  asserted zero candidate warm fence I/O. Corpus SHA-256 values remained
+  `43d3774b62c82d79dbc79885fdc2329da649d5d6978d8835f8b9e3d57f0db646`
+  (Pi), `69820f3e1e4202cee04e0a94678135a0bdfd4a243343afd8f04eec1b7d5ff0c9`
+  (v1), and `94989c3b3a01d5e08dc663fc7de1835a512ba88385e677d6b3759b7a211f03cd`
+  (v2). These append comparisons do not replace the separately passing restart
+  witnesses or imply unconditional compatibility for arbitrary workloads.
+
+The existing warm-read, skipped recovery-dirty, ordinary directory-dirty,
+recovered-tail retagging and removed-mutex controls were rerun. Each produced
+exactly its selected named failure and no unrelated failure, then returned to an
+empty unstaged diff after restoration. The mutex control observed 70 committed
+publications instead of 24; the other expected failures were unchanged. Exact
+outputs and applied/restored statistics are in the delivery declaration.
+
+OpenCode product code was not changed by this P2 repair; its imported crash and
+mutex witnesses were run rather than repeating the unrelated full-package WASM
+fixture failure. Verification remains limited to fixture-visible requests and
+sampled descriptor sets, not live-provider
+billing or cryptographic signature-acceptance tests. The broader performance
+samples above do not establish a formal idle-runner bound.
+
+Post-mutation positive controls passed in the isolated OpenCode package context:
+3 pass, 55 filtered, 0 fail, 80 assertions (warm I/O, publisher mutex and directory
+fallback). A prior combined Pi/OpenCode process had seven passing controls and
+one final host-scope assertion failure in the mutex fixture; the same restored
+source passed when run in its own package context, with no code/test change.
+The full Pi suite and separate four-file OpenCode crash/mutex/Rust run above
+passed on the same live implementation before these older control reruns; all
+controls were restored to that source. This mixed-process check is not reported
+as a clean combined-suite result.
+
+Latest 288-pair run, median of three warm medians in milliseconds:
+
+| Host | Foreground base | Foreground repaired | Settled base | Settled repaired |
+|---|---:|---:|---:|---:|
+| Pi | 6.689 | 6.304 | 6.827 | 6.690 |
+| OpenCode 1 | 2.783 | 2.960 | 3.127 | 3.503 |
+| OpenCode 2 | 4.637 | 4.323 | 4.742 | 4.408 |
+
+These are shared-runner observations, not a formal idle-runner performance
+bound. No warm fence I/O was observed or internally recorded in those candidate
+passes; the direct filesystem probes independently confirmed that property.

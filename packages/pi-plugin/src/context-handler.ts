@@ -742,6 +742,7 @@ class PiLkgAdmissionReplay extends Error {
 	constructor(
 		readonly messages: unknown[],
 		readonly recovery = "fitting LKG before writer retries",
+		readonly trigger: "writer_busy" | "held_identity_repair" = "writer_busy",
 	) {
 		super("Saved request served before writer wait");
 	}
@@ -5409,6 +5410,7 @@ export function registerPiContextHandler(
 					throw new PiLkgAdmissionReplay(
 						replay.messages,
 						"held tag-identity rebuild: replaying the served prefix",
+						"held_identity_repair",
 					);
 				},
 			};
@@ -6311,7 +6313,12 @@ export function registerPiContextHandler(
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
-				if (lkgPassSnapshot)
+				// A queued tag-number repair uses its durable database row to keep
+				// replaying the saved request until a rebuild may change old bytes.
+				// It is not a failure to get SQLite's writer. Only replay caused by
+				// that failure records new raw tail bytes here; marking the repair
+				// path dirty would make an ordinary restart change a held prefix.
+				if (lkgPassSnapshot && err.trigger === "writer_busy")
 					lkgCoordinator.noteRecovery(lkgPassSnapshot, err.messages);
 				if (!budget.sideTurn)
 					captureServedEvidence(sessionIdForError, err.messages, {
