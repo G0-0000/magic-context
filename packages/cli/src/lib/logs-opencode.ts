@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
-import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { capBodyToGithubLimit, extractRecentErrors, filterLogLinesBySession } from "./issue-body";
 import { parseLogLine, readLogLines } from "./log-lines";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
 
@@ -84,34 +84,6 @@ export function extractHistorianFailureLines(sanitized: string, limit = 30): str
         }
     }
     return matches.reverse();
-}
-
-/**
- * Drop log lines that reference a `ses_*` session ID OTHER than `sessionId`.
- * Lines without any `ses_*` reference are kept (they're shared-runtime logs
- * that may or may not be relevant — we don't have enough signal to drop
- * them, and keeping them is safe).
- *
- * When `sessionId` is null, no filtering happens — the full log slice is
- * returned. This is the Q2 design: filter only when the user picked a
- * specific session in the `--issue` picker.
- */
-function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
-    if (!sessionId) return lines;
-    // Pattern matches OpenCode session IDs (`ses_*` with hex/alnum body, up to
-    // 32 chars). Anchored with a non-word boundary so we don't trip on names
-    // that happen to embed `ses_`.
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
-    return lines.filter((line) => {
-        const parsed = parseLogLine(line);
-        if (parsed?.session && parsed.session !== sessionId) return false;
-        const matches =
-            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
-        if (!matches) return true;
-        // Keep the line only if EVERY session ID it mentions matches the chosen
-        // one. Mixed-session lines (rare but possible) get dropped to be safe.
-        return matches.every((id) => id === sessionId);
-    });
 }
 
 export async function bundleIssueReport(

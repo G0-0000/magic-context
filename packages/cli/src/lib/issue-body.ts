@@ -57,6 +57,10 @@ const ERROR_LOG_PATTERNS = [
     /\b(?:[A-Z][a-zA-Z]*)?Error:\s/,
     // Emergency abort path emits ALL CAPS marker:
     /\bEMERGENCY\b/,
+    // Magic Context turn refusals are actionable failures even when logged at INFO:
+    /could not safely prepare this turn/i,
+    /\bMC-H[A-Z0-9-]+\b/i,
+    /\brefused\s*\(/i,
     // Generic exception/throw text:
     /\bexception\b/i,
     // V8/JSC stack-trace frames (kept so the agent gets call-site context
@@ -99,6 +103,47 @@ export function extractRecentErrors(sanitized: string, limit = 20): string[] {
         }
     }
     return matches.reverse();
+}
+
+/**
+ * Drop lines that refer to a different session. Shared runtime lines without a
+ * session reference stay in the report because they may explain the failure.
+ */
+export function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
+    if (!sessionId) return lines;
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
+    return lines.filter((line) => {
+        const parsed = parseLogLine(line);
+        if (parsed?.session && parsed.session !== sessionId) return false;
+        const matches =
+            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
+        if (!matches) return true;
+        return matches.every((id) => id === sessionId);
+    });
+}
+
+/** Return session IDs in most-recent-first order for an issue-report picker. */
+export function getLogSessionIds(lines: string[]): string[] {
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
+    const seen = new Set<string>();
+    const sessions: string[] = [];
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = lines[index];
+        const parsed = parseLogLine(line);
+        if (parsed?.session && !seen.has(parsed.session)) {
+            seen.add(parsed.session);
+            sessions.push(parsed.session);
+        }
+        const matches =
+            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
+        for (const session of matches ?? []) {
+            if (!seen.has(session)) {
+                seen.add(session);
+                sessions.push(session);
+            }
+        }
+    }
+    return sessions;
 }
 
 /**
