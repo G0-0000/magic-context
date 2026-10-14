@@ -76,7 +76,11 @@ import {
     resolveSessionId,
 } from "./event-resolvers";
 import { armBindingRecoverySafely, armLatestThinkingRecovery } from "./latest-thinking-recovery";
-import { lkgProviderInputTotal, noteLkgProviderResponse } from "./lkg-measured-request";
+import {
+    clearLkgMeasuredRequest,
+    lkgProviderInputTotal,
+    noteLkgProviderResponse,
+} from "./lkg-measured-request";
 import { dropSlot } from "./lkg-slot";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import {
@@ -1276,6 +1280,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             dropSlot(sessionId, "session.deleted");
+            clearLkgMeasuredRequest(sessionId);
             clearTrackedOpenCodeSession(sessionId);
             try {
                 // Commit the retry marker before any deletion work. clearSession removes

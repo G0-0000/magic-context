@@ -15,6 +15,7 @@ export type PendingMaterializationOrigin =
 // requested the pending work, separately for each plugin's Set. Postprocess
 // (or Pi's pipeline) drains it only after an allowed materialization succeeds.
 const origins = new WeakMap<Set<string>, Map<string, PendingMaterializationOrigin>>();
+const causes = new WeakMap<Set<string>, Map<string, Set<PendingMaterializationOrigin>>>();
 
 export function requestPendingMaterialization(
     sessions: Set<string>,
@@ -23,6 +24,14 @@ export function requestPendingMaterialization(
 ): void {
     let reasons = origins.get(sessions);
     if (!reasons) origins.set(sessions, (reasons = new Map()));
+    let sessionCauses = causes.get(sessions);
+    if (!sessionCauses) causes.set(sessions, (sessionCauses = new Map()));
+    let pendingCauses = sessionCauses.get(sessionId);
+    if (!sessions.has(sessionId) || !pendingCauses) {
+        pendingCauses = new Set();
+        sessionCauses.set(sessionId, pendingCauses);
+    }
+    pendingCauses.add(origin);
     if (!sessions.has(sessionId) || !reasons.has(sessionId) || origin === "fit_retry")
         reasons.set(sessionId, origin);
     sessions.add(sessionId);
@@ -37,4 +46,15 @@ export function pendingMaterializationOrigin(sessions: Set<string>, sessionId: s
 export function clearPendingMaterialization(sessions: Set<string>, sessionId: string): void {
     sessions.delete(sessionId);
     origins.get(sessions)?.delete(sessionId);
+    causes.get(sessions)?.delete(sessionId);
+}
+
+/** The first origin remains the log label, but subsequent requests still matter:
+ * a flush arriving while a system edit awaits its reply must not be deferred. */
+export function hasOnlySystemHashMaterialization(
+    sessions: Set<string>,
+    sessionId: string,
+): boolean {
+    const pendingCauses = causes.get(sessions)?.get(sessionId);
+    return sessions.has(sessionId) && pendingCauses?.size === 1 && pendingCauses.has("system_hash");
 }

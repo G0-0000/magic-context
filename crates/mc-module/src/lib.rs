@@ -21714,6 +21714,95 @@ mod tests {
         handler_with_store_and_resolver(state, config, Arc::new(MissingSessionResolver))
     }
 
+    /// A line-oriented test bridge lets the real TypeScript adapter drive the module
+    /// without a daemon or access to an operator's stores. It is ignored by Cargo's
+    /// normal suite and explicitly launched by the system-delivery integration test.
+    #[tokio::test]
+    #[ignore]
+    async fn system_delivery_adapter_fixture() {
+        use std::io::{BufRead, Write};
+        let (mut handler, mut store, _dir, _) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        for line in std::io::stdin().lock().lines() {
+            let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let session = request["session_id"].as_str().unwrap_or("ses");
+            let root = request["project_root"]
+                .as_str()
+                .unwrap_or("/nonexistent-docs");
+            if request["method"] == "test.init" {
+                let home = request["data_home"].as_str().unwrap();
+                let mut descriptor = dev_descriptor_at(home);
+                descriptor.backend = StorageBackend::Sqlite {
+                    path: PathBuf::from(home)
+                        .join("store.db")
+                        .to_string_lossy()
+                        .into_owned(),
+                };
+                store = Arc::new(McStore::open_for_test(&descriptor).unwrap());
+                handler = McHandler::with_producer_factory_config_resolver(
+                    Arc::new(TestProducerFactory {
+                        state: Arc::new(ProducerState::default()),
+                    }),
+                    default_test_config(),
+                    Arc::new(MissingSessionResolver),
+                );
+                handler.store.set(Arc::clone(&store)).ok().unwrap();
+            }
+            handler.bind_route(7, binding_with_harness(root, "opencode", session));
+            let response = match request["method"].as_str().unwrap() {
+                "test.init" => serde_json::json!({"ok": true}),
+                "test.queue" => {
+                    let target = store
+                        .load_tags_for_session(session)
+                        .unwrap()
+                        .into_iter()
+                        .find(|tag| tag.block_id.starts_with("old-answer#"))
+                        .unwrap()
+                        .block_id;
+                    store
+                        .append_pending_agent_drops(session, &[target], 1)
+                        .unwrap();
+                    serde_json::json!({"ok": true})
+                }
+                "test.status" => {
+                    let loaded = store.load(session).unwrap();
+                    let last_request = handler
+                        .transform_snapshots
+                        .lock()
+                        .unwrap()
+                        .ready_request_clone(session);
+                    serde_json::json!({
+                        "pending": store.load_pending_agent_drops(session).unwrap().len(),
+                        "system_hash": loaded.meta.last_system_prompt_hash,
+                        "render_config": loaded.meta.last_render_config,
+                        "soft_refresh": loaded.meta.soft_refresh_pending,
+                        "signed_turn_active": last_request.as_ref().map(|req| transform::active_signed_head_for_test(req)),
+                        "last_request_mids": last_request.as_ref().map(|req| req.messages.iter().map(|m| (&m.mid, &m.ck.role, m.ck.meta.synthetic)).collect::<Vec<_>>()),
+                    })
+                }
+                "test.other_identity" => {
+                    let mut loaded = store.load(session).unwrap();
+                    let (current, previous) = match request["input"].as_str().unwrap() {
+                        "model" => ("claude-opus-5-5", "claude-opus-5-4"),
+                        "renderer" => ("mre3", "mre2"),
+                        "workspace" => ("ws:0:", "ws:3:old"),
+                        _ => panic!("unknown identity input"),
+                    };
+                    assert!(loaded.meta.last_render_config.contains(current));
+                    loaded.meta.last_render_config =
+                        loaded.meta.last_render_config.replace(current, previous);
+                    store
+                        .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                    serde_json::json!({"ok": true})
+                }
+                _ => call_dispatch_request_on_channel(&handler, 7, request).await,
+            };
+            println!("SYSTEM_DELIVERY_RESPONSE {}", response);
+            std::io::stdout().flush().unwrap();
+        }
+    }
+
     fn handler_with_store_and_resolver(
         state: Arc<ProducerState>,
         config: McModuleConfig,

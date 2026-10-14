@@ -71,6 +71,7 @@ import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
 import {
     beginV2LkgRequest,
+    clearLkgMeasuredRequest,
     lkgProviderInputTotal,
     noteLkgProviderResponse,
 } from "../../hooks/magic-context/lkg-measured-request";
@@ -88,6 +89,7 @@ import {
     STORAGE_BUSY_MESSAGE,
     StorageBusyRefusalError,
 } from "../../hooks/magic-context/storage-busy-refusal";
+import { retirePendingSystemPromptDelivery } from "../../hooks/magic-context/system-prompt-delivery";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { UnmanagedOverWindowError } from "../../hooks/magic-context/unmanaged-over-window";
@@ -168,7 +170,6 @@ import { V2LkgSystemReplay } from "./lkg-system";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
-
 import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
@@ -190,6 +191,7 @@ import {
     resolveV2BoundaryUserMessage,
     servedBoundaryRow,
 } from "./store";
+import { bindV2SystemPromptResponse } from "./system-prompt-response";
 import { registerTools } from "./tools";
 import type { SessionContext, V2Context, V2Message } from "./types";
 import { persistV2UsageReading } from "./usage-persist";
@@ -1130,6 +1132,15 @@ export async function registerContext(context: V2Context) {
             try {
                 const latest = reader.latestAssistant(draft.sessionID);
                 latestLkgResponseIds.set(draft.sessionID, latest?.id);
+                try {
+                    bindV2SystemPromptResponse(draft.sessionID, reader);
+                } catch (error) {
+                    sessionLog(
+                        draft.sessionID,
+                        "v2 response ownership unavailable; keeping system identity pending",
+                        error,
+                    );
+                }
                 if (latest)
                     noteLkgProviderResponse({
                         sessionId: draft.sessionID,
@@ -1273,6 +1284,7 @@ export async function registerContext(context: V2Context) {
                     continue;
                 }
                 if (event.type === "session.deleted") {
+                    clearLkgMeasuredRequest(sessionID);
                     deletedSessions.add(sessionID);
                     transform?.clearSessionLogState(sessionID);
                     if (db) {
@@ -1465,6 +1477,7 @@ export async function registerContext(context: V2Context) {
         const systemAtEntry = structuredClone(draft.system);
         const slotAtEntry = getSlot(draft.sessionID);
         const restoreLkgSystem = () => {
+            retirePendingSystemPromptDelivery(draft.sessionID);
             if (
                 !lkgSystems.restore(
                     draft.sessionID,
@@ -1665,6 +1678,27 @@ export async function registerContext(context: V2Context) {
                 injectionEnabled: config.system_prompt_injection.enabled,
                 injectionSkipSignatures: config.system_prompt_injection.skip_signatures,
             });
+            let responseAfterSequence: number | undefined;
+            try {
+                const responseReader = openStoreReader();
+                try {
+                    responseAfterSequence = responseReader.latestSequence(draft.sessionID);
+                } finally {
+                    responseReader.close();
+                }
+            } catch (error) {
+                sessionLog(
+                    draft.sessionID,
+                    "v2 response boundary unavailable; no system delivery acknowledgement",
+                    error,
+                );
+            }
+            beginV2LkgRequest(
+                draft.sessionID,
+                `${draft.model.providerID}/${draft.model.id}`,
+                latestLkgResponseIds.get(draft.sessionID),
+                responseAfterSequence,
+            );
             await applyV2SystemPrompt(systemPrompt, draft);
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
@@ -2011,11 +2045,6 @@ export async function registerContext(context: V2Context) {
             }
             const mapped = adaptPayload(draft, admitted);
             bindSystemDateRequestIdentity(mapped, draft);
-            beginV2LkgRequest(
-                draft.sessionID,
-                `${draft.model.providerID}/${draft.model.id}`,
-                latestLkgResponseIds.get(draft.sessionID),
-            );
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,

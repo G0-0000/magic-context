@@ -21,6 +21,7 @@ import { systemPromptDates } from "@magic-context/core/hooks/magic-context/syste
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { PromptSurfacePreset } from "@magic-context/core/shared/prompt-surface";
 import { promptSurfaceHashMaterial } from "@magic-context/core/shared/prompt-surface-runtime";
+import { clearPiSystemPromptDelivery } from "./system-prompt-delivery-pi";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
@@ -238,6 +239,7 @@ export function processSystemPromptForCache(args: {
  * handlers in context-handler/index.
  */
 export function clearPiSystemPromptSession(sessionId: string): void {
+	clearPiSystemPromptDelivery(sessionId);
 	stickyDateBySession.delete(sessionId);
 }
 
