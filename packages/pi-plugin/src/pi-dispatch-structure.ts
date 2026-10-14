@@ -16,12 +16,15 @@ interface MessageStructure {
 	exactImages?: readonly string[];
 	wireContent?: unknown;
 	wireRole?: unknown;
+	idlessCalls?: boolean[];
+	idlessResults?: boolean[];
 }
 
 /** Transport-independent roles and ordered tool IDs, captured before text transforms. */
 export interface PiPreparedStructure {
 	messages: readonly MessageStructure[];
 	chatMessages?: readonly MessageStructure[];
+	api?: string;
 }
 
 const MAX_MESSAGES = 100_000;
@@ -119,10 +122,17 @@ export function piPreparedStructure(
 			},
 		];
 	});
-	return { messages: rows, ...(chatMessages ? { chatMessages } : {}) };
+	return {
+		messages: rows,
+		...(chatMessages ? { chatMessages } : {}),
+		...(model?.api ? { api: model.api } : {}),
+	};
 }
 
-function payloadStructure(payload: unknown): MessageStructure[] | undefined {
+function payloadStructure(
+	payload: unknown,
+	ollama = false,
+): MessageStructure[] | undefined {
 	const body = object(payload);
 	if (!body) return undefined;
 	const google = piGoogleConversation(payload);
@@ -178,6 +188,24 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 			continue;
 		}
 		if (message.role === "tool") {
+			if (
+				message.tool_call_id === undefined &&
+				ollama &&
+				typeof message.tool_name === "string"
+			) {
+				// Oh My Pi's Ollama converter emits no pairing IDs, only tool_name.
+				// Match the prepared call's name at this exact result position so a
+				// reordered or unrelated answer cannot borrow an earlier call's receipt.
+				// @oh-my-pi/pi-ai/src/providers/ollama.ts:209-215,229-243 (18.10.4).
+				rows.push({
+					role: "toolResult",
+					calls: [],
+					results: [""],
+					resultNames: [message.tool_name],
+					idlessResults: [true],
+				});
+				continue;
+			}
 			if (typeof message.tool_call_id !== "string") return undefined;
 			rows.push({
 				role: "toolResult",
@@ -220,8 +248,26 @@ function payloadStructure(payload: unknown): MessageStructure[] | undefined {
 		}
 		if (Array.isArray(message.tool_calls)) {
 			for (const call of message.tool_calls) {
-				if (typeof call?.id !== "string") return undefined;
-				row.calls.push(call.id);
+				const source = object(call);
+				if (!source) return undefined;
+				if (source.id === undefined && ollama) {
+					const fn = object(source.function);
+					if (typeof fn?.name !== "string") return undefined;
+					row.calls.push("");
+					row.callNames ??= [];
+					row.callNames.push(fn.name);
+					row.idlessCalls ??= [];
+					row.idlessCalls.push(true);
+				} else {
+					if (typeof source.id !== "string") return undefined;
+					row.calls.push(source.id);
+					if (ollama) {
+						row.callNames ??= [];
+						row.callNames.push("");
+						row.idlessCalls ??= [];
+						row.idlessCalls.push(false);
+					}
+				}
 			}
 		}
 		if (
@@ -347,8 +393,15 @@ export function piPreparedStructureMismatch(
 	prepared: PiPreparedStructure | undefined,
 ): string | undefined {
 	try {
-		const rows = payloadStructure(payload);
 		const body = object(payload);
+		const ollama =
+			prepared?.api === "ollama-chat" &&
+			!!body &&
+			Array.isArray(body.messages) &&
+			body.input === undefined &&
+			body.system === undefined &&
+			body.inferenceConfig === undefined;
+		const rows = payloadStructure(payload, ollama);
 		const chat =
 			!!body &&
 			Array.isArray(body.messages) &&
@@ -400,7 +453,8 @@ export function piPreparedStructureMismatch(
 				return structureDetail(i, expectedRows, rows, "timestamp");
 			for (let j = 0; j < actual.calls.length; j++)
 				if (
-					google && actual.calls[j] === ""
+					(google && actual.calls[j] === "") ||
+					(ollama && actual.idlessCalls?.[j] === true)
 						? !expected.callNames?.[j] ||
 							actual.callNames?.[j] !== expected.callNames[j]
 						: actual.calls[j] !==
@@ -410,11 +464,15 @@ export function piPreparedStructureMismatch(
 						i,
 						expectedRows,
 						rows,
-						google && actual.calls[j] === "" ? "name" : "call id",
+						(google && actual.calls[j] === "") ||
+							(ollama && actual.idlessCalls?.[j] === true)
+							? "name"
+							: "call id",
 					);
 			for (let j = 0; j < actual.results.length; j++)
 				if (
-					google && actual.results[j] === ""
+					(google && actual.results[j] === "") ||
+					(ollama && actual.idlessResults?.[j] === true)
 						? !expected.resultNames?.[j] ||
 							actual.resultNames?.[j] !== expected.resultNames[j]
 						: actual.results[j] !==
@@ -424,7 +482,10 @@ export function piPreparedStructureMismatch(
 						i,
 						expectedRows,
 						rows,
-						google && actual.results[j] === "" ? "name" : "result id",
+						(google && actual.results[j] === "") ||
+							(ollama && actual.idlessResults?.[j] === true)
+							? "name"
+							: "result id",
 					);
 		}
 		if (rows.length !== expectedRows.length)

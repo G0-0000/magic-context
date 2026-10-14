@@ -61,6 +61,7 @@ if (
 		"missing-result",
 		"summary",
 		"mixed",
+		"materialized",
 	].includes(historyCase)
 )
 	throw new Error("unknown history case");
@@ -196,15 +197,29 @@ writeFileSync(
 		dreamer: { disable: true },
 	}),
 );
-const plugin = resolve(import.meta.dir, "../packages/pi-plugin/dist/index.js");
+const plugin =
+	process.env.MC683_PLUGIN ??
+	resolve(import.meta.dir, "../packages/pi-plugin/dist/index.js");
 const probe = join(root, "probe.mjs");
 writeFileSync(
 	probe,
 	`
 import magic from ${JSON.stringify(plugin)};
 import {appendFileSync} from 'node:fs';
+import {Database} from 'bun:sqlite';
+import {appendCompartments} from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin/src/features/magic-context/compartment-storage.ts"))};
 const log = value => appendFileSync(${JSON.stringify(join(root, "hooks.jsonl"))},JSON.stringify({at:Date.now(),...value})+'\\n');
 export default async pi => {
+  let seeded=false;
+  pi.on('context',(event,ctx)=>{
+    if(${JSON.stringify(historyCase)}!=='materialized' || seeded) return;
+    seeded=true;
+    const first=ctx.sessionManager.getBranch().find(entry=>entry.type==='message');
+    if(!first) throw new Error('materialization probe requires persisted history');
+    const db=new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR+'/context.db');
+    try {appendCompartments(db,ctx.sessionManager.getSessionId(),[{sequence:0,startMessage:1,endMessage:1,startMessageId:first.id,endMessageId:first.id,title:'Real compartment 686',content:'U: prior turn\\nCOMPARTMENT686_BODY'}]);}
+    finally {db.close();}
+  });
   const proxy = new Proxy(pi,{get(target,key){
     if(key==='on') return (name,handler)=>target.on(name,async(event,ctx)=>{
       const raw=name==='context'?structuredClone(event.messages):undefined;
@@ -215,6 +230,11 @@ export default async pi => {
       const result=await handler(event,wrapped);
       if(name==='context') {
         log({phase:'prepared',messages:result?.messages});
+        if(${JSON.stringify(historyCase)}==='materialized' && result?.messages) {
+          const db=new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR+'/context.db',{readonly:true});
+          try {log({phase:'materialized-proof',leadingRoles:result.messages.map(message=>message.role),rows:db.query('SELECT cached_m0_bytes,cached_m1_bytes FROM session_meta WHERE session_id=?').all(ctx.sessionManager.getSessionId()).map(row=>({m0:new TextDecoder().decode(row.cached_m0_bytes),m1:new TextDecoder().decode(row.cached_m1_bytes)}))});}
+          finally {db.close();}
+        }
         if(${JSON.stringify(mode)}==='raw' || globalThis.__mc683Raw) return {messages:raw};
       }
       return result;
@@ -580,6 +600,19 @@ try {
 	const refusals = hooks.filter(
 		(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
 	);
+	if (historyCase === "materialized") {
+		const proof = hooks.find((event) => event.phase === "materialized-proof");
+		if (
+			!proof ||
+			!proof.rows.some(
+				(row: any) =>
+					typeof row.m0 === "string" &&
+					row.m0.includes("COMPARTMENT686_BODY") &&
+					typeof row.m1 === "string",
+			)
+		)
+			throw new Error("compartments did not produce persisted m0/m1");
+	}
 	audit({
 		phase: "summary",
 		api,
