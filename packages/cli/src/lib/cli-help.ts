@@ -31,13 +31,16 @@ const HARNESS_LINES = [
 
 export const SETUP_HELP = [
     "",
-    "  Usage: magic-context setup [--harness opencode|pi|omp] [--dry-run]",
+    "  Usage: magic-context setup [--harness opencode|pi|omp] [--dry-run] [--dashboard|--no-dashboard]",
     "",
     "  Interactive setup wizard: registers the Magic Context plugin with the",
-    "  selected harness and writes its Magic Context config.",
+    "  selected harness and writes its Magic Context config. Afterwards it offers",
+    "  to install the Magic Context Dashboard desktop app (interactive runs only).",
     "",
     "  Options:",
     "    --dry-run             Preview the wizard without writing any files",
+    "    --dashboard           Install or update the dashboard without asking",
+    "    --no-dashboard        Skip the dashboard offer",
     ...HARNESS_LINES,
     "",
 ].join("\n");
