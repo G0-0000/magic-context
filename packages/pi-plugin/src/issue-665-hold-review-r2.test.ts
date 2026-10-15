@@ -81,6 +81,10 @@ interface PassRecord {
 	pair: string;
 	carried: number;
 	tags: string;
+	/** SHA-256 of the served JSON text, including property order. */
+	wireHash?: string;
+	decision?: string;
+	rawInputBytes?: number;
 }
 
 interface Violation {
@@ -183,6 +187,7 @@ export async function runPiHoldDriver(options: {
 	const modelId =
 		options.scenario === "unheld-unbound" ? UNBOUND : PREFIX_BOUND;
 	const sessionId = `r2-pi-${options.scenario}-${options.seed}`;
+	const contextWindow = Number(process.env.R2_WINDOW ?? 100000);
 	const db: Database = createTestDb();
 	getOrCreateSessionMeta(db, sessionId);
 	updateSessionMeta(db, sessionId, {
@@ -304,6 +309,7 @@ export async function runPiHoldDriver(options: {
 		const messages = structuredClone(source);
 		const ctx = {
 			...fakeContext(sessionId, process.cwd(), [...ids], messages),
+			...(process.env.R2_HEADLESS ? { hasUI: false } : {}),
 			// Real Pi always reports its system prompt; the last-known-good fit
 			// check refuses a replay it cannot price without one.
 			getSystemPrompt: () =>
@@ -312,12 +318,12 @@ export async function runPiHoldDriver(options: {
 				provider: "anthropic",
 				id: modelId,
 				api: "anthropic-messages",
-				contextWindow: 100000,
+				contextWindow,
 			},
 			getContextUsage: () => ({
-				tokens: percent * 1000,
+				tokens: (percent * contextWindow) / 100,
 				percent,
-				contextWindow: 100000,
+				contextWindow,
 			}),
 		};
 		const handler = fake.handlers.get("context")!;
@@ -628,6 +634,19 @@ export async function runPiHoldDriver(options: {
 				)
 				.digest("hex")
 				.slice(0, 16),
+			...(process.env.R2_LITERAL
+				? {
+						wireHash: createHash("sha256")
+							.update(JSON.stringify(served))
+							.digest("hex"),
+						rawInputBytes: Buffer.byteLength(JSON.stringify(source)),
+						decision: options.logCalls
+							?.slice(logStart)
+							.map((call) => String(call[1]))
+							.find((line) => /transform:.*decision=/.test(line))
+							?.match(/decision=(execute|defer)/)?.[1],
+					}
+				: {}),
 		};
 		records.push(record);
 		if (options.trace)
@@ -715,6 +734,7 @@ for (const seed of SEEDS) {
 				const { records, violations } = await runPiHoldDriver({
 					scenario,
 					seed,
+					logCalls: logs.mock.calls,
 					passes: Number(process.env.R2_UNHELD_PASSES ?? PASSES),
 					trace: process.env.R2_TRACE
 						? `${process.env.R2_TRACE}.pi-${scenario}-${seed}`
