@@ -551,6 +551,7 @@ function logPiLkgRecovery(sessionId: string, message: string): void {
 }
 
 export const __test = {
+	readPiFallbackFingerprintHeaders,
 	setBeforePipelineForTests(fn: (() => Promise<void>) | undefined) {
 		const previous = beforePipelineForTests;
 		beforePipelineForTests = fn;
@@ -2858,10 +2859,13 @@ function readPiFallbackFingerprintHeaders(
 ): Set<string> | null {
 	const rows = db
 		.prepare(
-			`SELECT DISTINCT entry_fingerprint FROM tags WHERE session_id = ? AND type = 'message'
-			 AND entry_fingerprint IS NOT NULL AND message_id LIKE 'pi-msg-%'`,
+			`SELECT DISTINCT entry_fingerprint FROM json_each(?) prefix CROSS JOIN tags INDEXED BY idx_tags_session_message_id WHERE session_id = ? AND tags.type = 'message'
+             AND message_id >= prefix.value AND message_id < substr(prefix.value, 1, 6) || '.'
+             AND entry_fingerprint IS NOT NULL AND message_id LIKE 'pi-msg-%'`,
 		)
-		.all(sessionId) as { entry_fingerprint: string }[];
+		.all(PI_FALLBACK_PREFIXES_JSON, sessionId) as {
+		entry_fingerprint: string;
+	}[];
 	const headers = new Set<string>();
 	for (const row of rows) {
 		let parsed: unknown;
@@ -11106,6 +11110,7 @@ import {
 	deferDeliveredSystemRefresh,
 	recordSystemRefreshOwnership,
 } from "@magic-context/core/hooks/magic-context/system-prompt-delivery";
+import { PI_FALLBACK_PREFIXES_JSON } from "../../plugin/src/shared/tag-owner-id";
 import {
 	beginPiSystemPromptRequest,
 	recordPiHeldSystemHead,

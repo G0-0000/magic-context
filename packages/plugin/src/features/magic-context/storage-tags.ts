@@ -7,7 +7,11 @@ import {
     getTagIdentityWriteGeneration,
     type Statement as PreparedStatement,
 } from "../../shared/sqlite";
-import { contentTagOwnerMessageId, TEXT_TAG_IDENTITY_MARKER } from "../../shared/tag-owner-id";
+import {
+    contentTagOwnerMessageId,
+    PI_FALLBACK_PREFIXES_JSON,
+    TEXT_TAG_IDENTITY_MARKER,
+} from "../../shared/tag-owner-id";
 import { tagOrderConstraintIndex } from "./migration-v95-perf-indexes";
 import { queuePendingOp, removePendingOp } from "./storage-ops";
 import { tagIdentityRevisionKey } from "./storage-tag-identity-revision";
@@ -648,6 +652,7 @@ export function getAllStatusTagTokenTotalsFlat(
     sessionId: string,
     floor = 0,
     calibration: { proseRatio: number; toolsRatio: number } = { proseRatio: 1, toolsRatio: 1 },
+    ownerMessageIds?: readonly string[],
 ): { totals: Map<string, number>; nullMessageIds: Set<string> } {
     // floor > 0 (OpenCode) loads only the live-wire range (tag_number >= floor):
     // tag_number is monotonic with message order, so every tag below the first
@@ -656,22 +661,86 @@ export function getAllStatusTagTokenTotalsFlat(
     // by construction), and any excluded slice message degrades to live
     // tokenization of the same content — byte-identical total. floor=0 (Pi, and
     // the OpenCode no-floor fallback) keeps the full-session scan unchanged.
+    const columns =
+        "type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count";
+    const owners = ownerMessageIds ? new Set(ownerMessageIds) : undefined;
+    let scanOrder = "id";
+    if (owners) {
+        // Floating-point addition depends on row order. Replay the full query's
+        // index order for the selected rows, including after ANALYZE changes its
+        // plan, so calibrated totals remain bit-for-bit identical.
+        const planStatement = db.prepare(
+            `EXPLAIN QUERY PLAN SELECT ${columns} FROM tags WHERE session_id = ?${floor > 0 ? " AND tag_number >= ?" : ""}`,
+        );
+        let plan: Array<{ detail: string }>;
+        try {
+            plan = planStatement.all(sessionId, ...(floor > 0 ? [floor] : [])) as Array<{
+                detail: string;
+            }>;
+        } finally {
+            // Bun's metadata cursors can retain a read snapshot even in
+            // autocommit mode. Release the plan before later context writes.
+            (planStatement as unknown as { finalize?: () => void }).finalize?.();
+        }
+        const index = plan
+            .map((row) => /USING (?:COVERING )?INDEX (\S+)/.exec(row.detail)?.[1])
+            .find(Boolean);
+        if (index) {
+            const keyStatement = db.prepare(
+                "SELECT name, coll, desc FROM pragma_index_xinfo(?) WHERE key = 1 ORDER BY seqno",
+            );
+            let keys: Array<{ name: string | null; coll: string; desc: number }>;
+            try {
+                keys = keyStatement.all(index) as Array<{
+                    name: string | null;
+                    coll: string;
+                    desc: number;
+                }>;
+            } finally {
+                (keyStatement as unknown as { finalize?: () => void }).finalize?.();
+            }
+            scanOrder = [
+                ...keys.map(
+                    (key) =>
+                        `"${(key.name ?? "id").replaceAll('"', '""')}" COLLATE "${key.coll.replaceAll('"', '""')}"${key.desc ? " DESC" : ""}`,
+                ),
+                "id",
+            ].join(", ");
+        }
+    }
     const rows = (
-        floor > 0
+        owners
             ? db
-                  .prepare(
-                      `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+                  .prepare(`SELECT ${columns} FROM tags WHERE id IN (
+                SELECT t.id FROM json_each(?) o CROSS JOIN tags t INDEXED BY idx_tags_session_message_id
+                ON t.session_id = ? AND t.message_id >= o.value AND t.message_id < o.value || ';'
+                UNION
+                SELECT t.id FROM json_each(?) o CROSS JOIN tags t INDEXED BY idx_tags_pi_fallback_tool_owner
+                ON t.session_id = ? AND t.tool_owner_message_id = o.value
+                WHERE t.type = 'tool'
+              ) AND tag_number >= ? ORDER BY ${scanOrder}`)
+                  .all(
+                      JSON.stringify([...owners]),
+                      sessionId,
+                      JSON.stringify([...owners]),
+                      sessionId,
+                      floor,
+                  )
+            : floor > 0
+              ? db
+                    .prepare(
+                        `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
                        FROM tags
                        WHERE session_id = ? AND tag_number >= ?`,
-                  )
-                  .all(sessionId, floor)
-            : db
-                  .prepare(
-                      `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+                    )
+                    .all(sessionId, floor)
+              : db
+                    .prepare(
+                        `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
                        FROM tags
                        WHERE session_id = ?`,
-                  )
-                  .all(sessionId)
+                    )
+                    .all(sessionId)
     ) as Array<{
         type: string;
         message_id: string;
@@ -694,6 +763,7 @@ export function getAllStatusTagTokenTotalsFlat(
         // resolves the owner, after which it lands under the real id).
         if (row.type === "tool" && row.tool_owner_message_id === null) continue;
         const owner = ownerMessageIdForTagRow(row);
+        if (owners && !owners.has(owner)) continue;
         if (row.token_count === null) {
             nullMessageIds.add(owner);
             totals.delete(owner);
@@ -2340,13 +2410,15 @@ export function findPiFallbackToolOwnerTags(
                     message_id AS callId,
                     tool_owner_message_id AS toolOwnerMessageId,
                     status
-             FROM tags
+             FROM json_each(?) prefix CROSS JOIN tags
              WHERE session_id = ?
-               AND type = 'tool'
-               AND tool_owner_message_id LIKE 'pi-msg-%'
+               AND tags.type = 'tool'
+                AND tool_owner_message_id >= prefix.value
+                AND tool_owner_message_id < substr(prefix.value, 1, 6) || '.'
+                AND tool_owner_message_id LIKE 'pi-msg-%'
              ORDER BY tag_number ASC`,
         )
-        .all(sessionId)
+        .all(PI_FALLBACK_PREFIXES_JSON, sessionId)
         .filter(isPiFallbackToolOwnerTag);
 }
 

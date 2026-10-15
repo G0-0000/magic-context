@@ -1,4 +1,5 @@
 import { withContentLanguageDirective } from "../../agents/language-directive";
+import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
@@ -1206,6 +1207,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             deps.onDeferredMarkerPending?.(sessionId);
         } else {
             try {
+                if (
+                    !deps.compactionMarkerStrategy?.publish ||
+                    deps.compactionMarkerStrategy.publish === updateCompactionMarkerAfterPublication
+                )
+                    await prepareCompactionMarkerCandidates(sessionId);
                 (deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication)(
                     db,
                     sessionId,

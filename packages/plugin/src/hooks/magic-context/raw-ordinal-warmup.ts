@@ -16,6 +16,10 @@
  * same session until FAILURE_BACKOFF_MS has passed.
  */
 import { Worker } from "node:worker_threads";
+import type {
+    MessageHistoryOrphanSweepOptions,
+    MessageHistoryOrphanSweepResult,
+} from "../../features/magic-context/message-index";
 import type { IndexWorkerMeasurements } from "../../features/magic-context/message-index-bounded";
 import type {
     TagOwnerDelta,
@@ -48,6 +52,7 @@ export interface RawOrdinalWarmupInput {
     indexCancellation?: SharedArrayBuffer;
     indexCoordination?: SharedArrayBuffer;
     indexOwner?: number;
+    orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
 }
 
 export type RawOrdinalWarmupReply =
@@ -56,6 +61,7 @@ export type RawOrdinalWarmupReply =
     | { kind: "tag-summary"; summary: TagOwnerSummary }
     | { kind: "tag-delta"; delta: TagOwnerDelta }
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
+    | { kind: "orphan-sweep"; result: MessageHistoryOrphanSweepResult }
     | { kind: "error"; error: string };
 
 /**
@@ -145,6 +151,7 @@ export function runSessionWarmupWorker(
                 | { summary: TagOwnerSummary }
                 | { delta: TagOwnerDelta }
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
+                | { orphanSweep: MessageHistoryOrphanSweepResult }
                 | { failure: RawOrdinalWarmupFailureReason; detail: string },
         ) => {
             if (settled) return;
@@ -188,6 +195,7 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "tag-delta") finish({ delta: reply.delta });
             else if (reply.kind === "indexed")
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
+            else if (reply.kind === "orphan-sweep") finish({ orphanSweep: reply.result });
             else finish({ failure: "worker-error", detail: reply.error });
         });
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
@@ -288,6 +296,7 @@ type WorkerResult =
     | { summary: TagOwnerSummary }
     | { delta: TagOwnerDelta }
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
+    | { orphanSweep: MessageHistoryOrphanSweepResult }
     | { failure: RawOrdinalWarmupFailureReason; detail: string };
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */

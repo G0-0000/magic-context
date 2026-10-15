@@ -16,6 +16,7 @@ import {
     generateMessageId,
     injectCompactionMarker,
     isOpenCodeGapHistorianAbsent,
+    prepareCompactionMarkerCandidates,
     removeCompactionMarker,
     removeForeignCompactionMarker,
     removeMcOwnedCompactionMarkers,
@@ -99,6 +100,7 @@ describe("marker removal acquisition isolation", () => {
                 directory: dataHome,
                 resolvedBoundary: { id: "msg_user", timeCreated: 100 },
             };
+            expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
             const marker = injectCompactionMarker(args);
             if (!marker) throw new Error("expected marker fixture");
             const result = await whileWriterIsLocked(
@@ -161,6 +163,7 @@ describe("marker removal acquisition isolation", () => {
             expect(performance.now() - replacementStartedAt).toBeLessThan(1000);
         });
         expect(db.prepare("SELECT count(*) AS n FROM part").get()).toEqual({ n: 0 });
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         expect(injectCompactionMarker(args)).not.toBeNull();
         closeQuietly(db);
     }, 10_000);
@@ -335,11 +338,12 @@ describe("findBoundaryUserMessage", () => {
 });
 
 describe("injectCompactionMarker", () => {
-    it("logs marker acquire, hold, work and transaction-end time separately", () => {
+    it("logs marker acquire, hold, work and transaction-end time separately", async () => {
         const dataHome = useTempDataHome("marker-writer-timing-");
         const db = createOpenCodeDb(dataHome);
         insertMessage(db, "msg_user", "user", 100);
         closeQuietly(db);
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const logged = spyOn(logger, "log").mockImplementation(() => {});
         const times = [0, 70, 370, 390];
         const clock = spyOn(performance, "now").mockImplementation(() => times.shift() ?? 390);
@@ -367,7 +371,7 @@ describe("injectCompactionMarker", () => {
             logged.mockRestore();
         }
     });
-    it("makes an in-place summary rewrite visible to canonical ordinals on other connections", () => {
+    it("makes an in-place summary rewrite visible to canonical ordinals on other connections", async () => {
         const dataHome = useTempDataHome("marker-inject-ordinal-");
         const db = createOpenCodeDb(dataHome);
         insertMessage(db, "msg_user", "user", 100);
@@ -377,6 +381,7 @@ describe("injectCompactionMarker", () => {
         insertMessage(db, summaryId, "assistant", 101, { finish: "stop" });
         insertMessage(db, "msg_later", "user", 200);
         expect(readRawSessionMessageOrdinalByIdFromDb(db, "ses-1", "msg_later")).toBe(3);
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const marker = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 1,
@@ -392,13 +397,14 @@ describe("injectCompactionMarker", () => {
             closeQuietly(db);
         }
     });
-    it("writes a completed summary timestamp for OpenCode 2 conversion", () => {
+    it("writes a completed summary timestamp for OpenCode 2 conversion", async () => {
         const dataHome = useTempDataHome("marker-inject-completed-");
         const db = createOpenCodeDb(dataHome);
         insertMessage(db, "msg_001_user", "user", 100);
         insertMessage(db, "msg_002_target", "assistant", 200);
         closeQuietly(db);
 
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const result = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 2,
@@ -415,7 +421,7 @@ describe("injectCompactionMarker", () => {
         closeQuietly(inspection);
     });
 
-    it("keeps deterministic marker ids in OpenCode's lexicographic row order", () => {
+    it("keeps deterministic marker ids in OpenCode's lexicographic row order", async () => {
         const dataHome = useTempDataHome("marker-inject-id-order-");
         const db = createOpenCodeDb(dataHome);
         const boundaryId = generateMessageId(1_000, 0n, "boundary");
@@ -424,6 +430,7 @@ describe("injectCompactionMarker", () => {
         insertMessage(db, retainedId, "assistant", 1_002);
         closeQuietly(db);
 
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const result = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 2,
@@ -461,7 +468,7 @@ describe("injectCompactionMarker", () => {
         closeQuietly(inspection);
     });
 
-    it("preserves the deterministic boundary in the healthy no-deletion case", () => {
+    it("preserves the deterministic boundary in the healthy no-deletion case", async () => {
         const dataHome = useTempDataHome("marker-inject-healthy-");
         const db = createOpenCodeDb(dataHome);
         insertMessage(db, "msg_001_user", "user", 100);
@@ -469,6 +476,7 @@ describe("injectCompactionMarker", () => {
         insertMessage(db, "msg_003_target", "assistant", 300);
         closeQuietly(db);
 
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const result = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 3,
@@ -480,6 +488,7 @@ describe("injectCompactionMarker", () => {
         expect(result?.boundaryMessageId).toBe("msg_001_user");
         expect(result?.summaryMessageId).toMatch(/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
 
+        expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const retry = injectCompactionMarker({
             sessionId: "ses-1",
             endOrdinal: 3,

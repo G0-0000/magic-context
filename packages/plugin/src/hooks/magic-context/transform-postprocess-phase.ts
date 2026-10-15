@@ -3683,6 +3683,11 @@ export async function runPostTransformPhase(
                 );
             } else {
                 const tMarkerDrain = performance.now();
+                if (
+                    (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy)
+                        .applyDeferred === applyDeferredCompactionMarker
+                )
+                    await prepareCompactionMarkerCandidates(args.sessionId);
                 const outcome = (
                     args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy
                 ).applyDeferred(args.db, args.sessionId, pending, args.sessionDirectory);
@@ -4698,6 +4703,7 @@ export function checkM0MutationDriftAndSignal(args: {
     return false;
 }
 
+import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
     pendingMaterializationOrigin,
