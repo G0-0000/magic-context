@@ -5816,33 +5816,36 @@ export function registerPiContextHandler(
 			// Subagents do not receive these synthetic todo reminders, matching
 			// OpenCode's primary-session-only policy.
 			const tTodoCapture = performance.now();
-			try {
-				const sessionMetaForTodo = sessionMeta;
-				if (
-					options.todowriteEnabled === true &&
-					!options.compactionOff &&
-					!sessionMetaForTodo.isSubagent &&
-					sessionMetaForTodo.lastTodoState !== ""
-				) {
-					const isCacheBustingForTodo =
-						result.prefixBustPermitted && !result.strictThinkingKept;
-					outputMessages = injectSyntheticTodowriteForPi({
-						db: options.db,
+			const injectTodo = () => {
+				try {
+					const sessionMetaForTodo = sessionMeta;
+					if (
+						options.todowriteEnabled === true &&
+						!options.compactionOff &&
+						!sessionMetaForTodo.isSubagent &&
+						sessionMetaForTodo.lastTodoState !== ""
+					) {
+						const isCacheBustingForTodo =
+							result.prefixBustPermitted && !result.strictThinkingKept;
+						outputMessages = injectSyntheticTodowriteForPi({
+							db: options.db,
+							sessionId,
+							isSubagent: sessionMetaForTodo.isSubagent,
+							isCacheBusting: isCacheBustingForTodo,
+							lastTodoState: sessionMetaForTodo.lastTodoState,
+							messages: outputMessages as unknown as Parameters<
+								typeof injectSyntheticTodowriteForPi
+							>[0]["messages"],
+						}) as unknown as typeof outputMessages;
+					}
+				} catch (err) {
+					sessionLog(
 						sessionId,
-						isSubagent: sessionMetaForTodo.isSubagent,
-						isCacheBusting: isCacheBustingForTodo,
-						lastTodoState: sessionMetaForTodo.lastTodoState,
-						messages: outputMessages as unknown as Parameters<
-							typeof injectSyntheticTodowriteForPi
-						>[0]["messages"],
-					}) as unknown as typeof outputMessages;
+						`synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
 				}
-			} catch (err) {
-				sessionLog(
-					sessionId,
-					`synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
+			};
+			injectTodo();
 			logTransformTiming(sessionId, "todoCapture", tTodoCapture);
 
 			// Thinking-binding strips run last, on the array this pass serves, so the
@@ -6485,6 +6488,9 @@ export function registerPiContextHandler(
 									}),
 								);
 								outputMessages = result.messages as PiAgentMessage[];
+								// Reclaim replaces the postprocessed output with a pristine-input
+								// rebuild. Restore the todo pair before stripping and measuring it.
+								injectTodo();
 								if (upperCursor)
 									recordPiUpperEstimateReclaim(
 										options.db,
