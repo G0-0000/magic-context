@@ -37,7 +37,9 @@ import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir
 import {
 	__test,
 	handlePiCloneSessionStart,
+	type PiCloneTransitionRegistrar,
 	readPiSessionIdFromFile,
+	registerPiCloneSessionTransitions,
 } from "./clone-inheritance";
 import { mustMaterializePi } from "./inject-compartments-pi";
 import { createTestDb } from "./test-utils.test";
@@ -195,6 +197,91 @@ function copyWithEntries(database: Database, entries: unknown[]) {
 		__test.createCloneFilter(entries),
 	);
 }
+
+async function transitionFixture() {
+	const database = db();
+	seedTag(database, { tagNumber: 1, messageId: "u1" });
+	seedTag(database, { tagNumber: 4, messageId: "abandoned" });
+	seedTag(database, { tagNumber: 9, messageId: "a1" });
+	const directory = await createTestTempDirFromPath(
+		join(tmpdir(), "mc-native-clone-"),
+	);
+	temporaryDirectories.push(directory);
+	const file = join(directory, "source.jsonl");
+	await writeFile(file, '{"type":"session","id":"source"}\n');
+	const handlers = new Map<string, Parameters<PiCloneTransitionRegistrar>[1]>();
+	const logs: string[] = [];
+	registerPiCloneSessionTransitions(
+		(name, handler) => handlers.set(name, handler),
+		{
+			db: database,
+			signalPendingMarker: () => {},
+			writeLog: (line) => logs.push(line),
+		},
+	);
+	const emit = async (name: string, reason: string, destination = "clone") => {
+		await handlers.get(name)?.(
+			{ reason, previousSessionFile: file },
+			{
+				sessionManager: {
+					getSessionId: () => destination,
+					getHeader: () => ({ parentSession: file }),
+					getBranch: () => [user("u1"), assistant("a1")],
+				},
+			},
+		);
+	};
+	return { database, logs, emit };
+}
+
+describe("OMP clone transitions", () => {
+	it("session_switch fork inherits retained tag gaps before the next context pass", async () => {
+		const { database, emit } = await transitionFixture();
+		await emit("session_switch", "fork");
+		expect(
+			getTagsBySession(database, "clone").map((tag) => tag.tagNumber),
+		).toEqual([1, 9]);
+	});
+
+	it("session_branch fork, branch and btw inherit only retained tag gaps", async () => {
+		const { database, emit } = await transitionFixture();
+		for (const reason of ["fork", "branch", "btw"]) {
+			await emit("session_branch", reason, reason);
+			expect(
+				getTagsBySession(database, reason).map((tag) => tag.tagNumber),
+			).toEqual([1, 9]);
+		}
+	});
+
+	it("resume, new and tree never copy even with an explicit parent", async () => {
+		const { database, emit, logs } = await transitionFixture();
+		await emit("session_switch", "resume");
+		await emit("session_switch", "new");
+		await emit("session_tree", "fork");
+		await emit("session_branch", "resume");
+		expect(count(database, "tags")).toBe(0);
+		expect(count(database, "session_meta")).toBe(0);
+		expect(logs).toEqual([]);
+	});
+
+	it("live copies skip a destination with prepared state without overwriting", async () => {
+		const { database, emit, logs } = await transitionFixture();
+		seedTag(database, { tagNumber: 42, messageId: "prepared" });
+		database
+			.prepare("UPDATE tags SET session_id = ? WHERE message_id = ?")
+			.run("clone", "prepared");
+		for (const name of ["session_switch", "session_branch"]) {
+			await emit(name, "fork");
+		}
+		expect(
+			getTagsBySession(database, "clone").map((tag) => tag.tagNumber),
+		).toEqual([42]);
+		expect(logs).toHaveLength(2);
+		expect(
+			logs.every((line) => line.includes("reason=destination-not-empty")),
+		).toBe(true);
+	});
+});
 
 function seedMeta(database: Database, values: Record<string, unknown>): void {
 	const columns = Object.keys(values);
@@ -360,7 +447,9 @@ describe("Pi clone state inheritance", () => {
 		const sourceFactId = (
 			database
 				.prepare("SELECT id FROM session_facts WHERE session_id = ?")
-				.get("source") as { id: number }
+				.get("source") as {
+				id: number;
+			}
 		).id;
 
 		const result = copyWithEntries(database, [user("u1"), assistant("a1")]);

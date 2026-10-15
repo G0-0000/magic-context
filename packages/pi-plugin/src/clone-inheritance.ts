@@ -37,6 +37,13 @@ type SessionManagerLike = {
 type CloneContextLike = { sessionManager?: SessionManagerLike };
 type CloneStartEventLike = { reason?: unknown; previousSessionFile?: unknown };
 
+// OMP emits session_switch and session_branch after the destination session
+// manager exposes the copied transcript through getBranch().
+export type PiCloneTransitionRegistrar = (
+	event: "session_switch" | "session_branch",
+	handler: (event: CloneStartEventLike, ctx: CloneContextLike) => Promise<void>,
+) => void;
+
 export interface PiCloneInheritanceDeps {
 	db: ContextDatabase;
 	signalPendingMarker: (sessionId: string) => void;
@@ -216,7 +223,34 @@ export async function handlePiCloneSessionStart(
 	// Oh My Pi omits reason on startup; this session_start hook treats that absence as startup.
 	const isStartup = event.reason === "startup" || event.reason === undefined;
 	if (event.reason !== "fork" && !isStartup) return null;
+	return inheritPiCloneSession(event, ctx, deps, isStartup);
+}
 
+export function registerPiCloneSessionTransitions(
+	on: PiCloneTransitionRegistrar,
+	deps: PiCloneInheritanceDeps,
+): void {
+	on("session_switch", async (event, ctx) => {
+		if (event.reason !== "fork") return;
+		await inheritPiCloneSession(event, ctx, deps, false);
+	});
+	on("session_branch", async (event, ctx) => {
+		if (
+			event.reason !== "fork" &&
+			event.reason !== "branch" &&
+			event.reason !== "btw"
+		)
+			return;
+		await inheritPiCloneSession(event, ctx, deps, false);
+	});
+}
+
+async function inheritPiCloneSession(
+	event: CloneStartEventLike,
+	ctx: CloneContextLike,
+	deps: PiCloneInheritanceDeps,
+	isStartup: boolean,
+): Promise<CopySessionStateForCloneResult | null> {
 	let stage = "resolve-destination";
 	let sourceSessionId = "unknown";
 	let destinationSessionId = "unknown";
