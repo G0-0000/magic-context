@@ -156,6 +156,7 @@ test("issue 698: dispatch refusal persists one sanitized full divergence line to
 	const child = Bun.spawn({
 		cmd: [process.execPath, "--eval", scenario],
 		cwd: import.meta.dir,
+		windowsHide: true,
 		env: {
 			...process.env,
 			NODE_ENV: "production",

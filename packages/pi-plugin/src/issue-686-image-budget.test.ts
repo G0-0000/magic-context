@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearPiContextReceipt,
 	registerPiGuardedContext,
@@ -559,7 +560,7 @@ test("issue 686 image budget logs counts only once per session across retries an
 		"magic-context/omp-686-r4/unit/magic-context/issue-673",
 	);
 	mkdirSync(base, { recursive: true });
-	const root = mkdtempSync(join(base, "logging-"));
+	const root = createTestTempDirFromPath(join(base, "logging-"));
 	const source = (file: string) =>
 		JSON.stringify(new URL(file, import.meta.url).href);
 	const script = `
@@ -597,6 +598,7 @@ test("issue 686 image budget logs counts only once per session across retries an
 		const result = Bun.spawnSync([process.execPath, "-e", script], {
 			env,
 			cwd: import.meta.dir,
+			windowsHide: true,
 		});
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.stdout.toString())).toEqual({
