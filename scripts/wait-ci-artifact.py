@@ -45,6 +45,27 @@ def producer_for_attempt(current, history, producer):
     return [max(previous, key=lambda job: job["id"])] if previous else []
 
 
+def originating_attempt(job, history):
+    """Attempt that actually ran this producer execution.
+
+    A failed-only rerun copies successful jobs into the new attempt under a new
+    job id and the new run_attempt, but keeps their original started_at. Their
+    artifact still carries the attempt that produced it, so follow the copy back
+    to the earliest attempt with the same start. A producer that really ran
+    again has a new start time and keeps its own attempt.
+    """
+    started = job.get("started_at")
+    attempt = job.get("run_attempt")
+    if not started or attempt is None:
+        return attempt
+    same_run = [
+        other["run_attempt"]
+        for other in history
+        if other["name"] == job["name"] and other.get("started_at") == started and other.get("run_attempt") is not None
+    ]
+    return min(same_run + [attempt])
+
+
 class WaitTests(unittest.TestCase):
     def run_wait(self, status="in_progress", conclusion=None, ready=False, timeout=20):
         now = [0]
@@ -90,6 +111,16 @@ class WaitTests(unittest.TestCase):
     def test_failed_only_rerun_reuses_the_successful_producers_attempt(self):
         previous = {"id": 1, "name": "producer", "status": "completed", "conclusion": "success", "run_attempt": 1}
         self.assertEqual(producer_for_attempt([], [previous], "producer"), [previous])
+
+    def test_copied_producer_resolves_to_the_attempt_that_ran_it(self):
+        original = {"id": 1, "name": "producer", "run_attempt": 1, "started_at": "2026-10-15T04:59:08Z"}
+        copy = {"id": 2, "name": "producer", "run_attempt": 2, "started_at": "2026-10-15T04:59:08Z"}
+        self.assertEqual(originating_attempt(copy, [original, copy]), 1)
+
+    def test_rerun_producer_keeps_its_own_attempt(self):
+        original = {"id": 1, "name": "producer", "run_attempt": 1, "started_at": "2026-10-15T04:59:08Z"}
+        rerun = {"id": 2, "name": "producer", "run_attempt": 2, "started_at": "2026-10-15T05:20:00Z"}
+        self.assertEqual(originating_attempt(rerun, [original, rerun]), 2)
 
     def test_rerun_preflight_prevents_consuming_previous_producer_artifacts(self):
         previous = {"id": 1, "name": "producer", "status": "completed", "conclusion": "success", "run_attempt": 1}
@@ -138,7 +169,13 @@ def main():
                 history = inventory("/jobs?filter=all&", "jobs")
             matches = producer_for_attempt(current, history, args.producer)
             if matches:
-                selected_attempt[0] = str(matches[0].get("run_attempt", attempt))
+                producer = matches[0]
+                if producer.get("status") == "completed" and producer.get("conclusion") == "success":
+                    if not history:
+                        history = inventory("/jobs?filter=all&", "jobs")
+                    selected_attempt[0] = str(originating_attempt(producer, history) or attempt)
+                else:
+                    selected_attempt[0] = str(producer.get("run_attempt", attempt))
             return {"jobs": matches}
         expected_name = args.artifact + "-" + selected_attempt[0]
         matches = [item for item in inventory("/artifacts?", "artifacts") if item["name"] == expected_name]
