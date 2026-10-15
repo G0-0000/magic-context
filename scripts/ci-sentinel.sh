@@ -121,6 +121,10 @@ ERROR_STREAK=0
 TAB=$(printf '\t')
 RUN_FIELDS=databaseId,workflowName,headBranch,headSha,status,conclusion,createdAt,attempt
 RUN_ROW='def nonempty: if . == null or . == "" then "-" else . end; [.databaseId, (.attempt // 1), (.workflowName | nonempty), (.headBranch | nonempty), (.headSha | nonempty), .status, (.conclusion | nonempty), .createdAt] | @tsv'
+# GitHub's ISO creation times sort lexically when comparing sibling runs.
+is_superseded() {
+  SUPERSEDED=$(LC_ALL=C awk -F "$TAB" -v workflow="$WORKFLOW" -v branch="$BRANCH" -v created="$CREATED" '$3 == workflow && $4 == branch && $8 > created { found = 1; exit } END { print found ? 1 : 0 }' "$WORK/runs")
+}
 
 # Keep API failures distinct from empty results, with a portable wall deadline.
 gh_bounded() {
@@ -185,6 +189,7 @@ poll() {
   done < "$STATE_DIR/active"
   while IFS="$TAB" read -r RUN_ID ATTEMPT WORKFLOW BRANCH SHA STATUS CONCLUSION CREATED; do
     [ -n "$RUN_ID" ] || continue
+    is_superseded
     if [ "$STATUS" != completed ]; then
       printf '%s\n' "$RUN_ID" >> "$WORK/active"
     elif seen "checked:$RUN_ID:$ATTEMPT"; then
@@ -193,6 +198,10 @@ poll() {
     if gh_bounded 30 "$WORK/jobs" run view "$RUN_ID" --json jobs -q '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.databaseId, .conclusion, .name] | @tsv'; then
       while IFS="$TAB" read -r JOB_ID JOB_CONCLUSION JOB_NAME; do
         [ -n "$JOB_ID" ] || continue
+        # CI (required) aggregates shards, so cancellations in an older run can make it fail.
+        if [ "$SUPERSEDED" -eq 1 ] && { [ "$JOB_CONCLUSION" = cancelled ] || { [ "$JOB_CONCLUSION" = failure ] && [ "$JOB_NAME" = 'CI (required)' ]; }; }; then
+          continue
+        fi
         seen "job:$JOB_ID" && continue
         remember "job:$JOB_ID"
         {
@@ -207,8 +216,10 @@ poll() {
       [ "$STATUS" != completed ] || printf '%s\n' "$RUN_ID" >> "$WORK/active"
     fi
     if [ "$STATUS" = completed ] && { [ "$CONCLUSION" = failure ] || [ "$CONCLUSION" = cancelled ]; } && ! seen "run:$RUN_ID:$ATTEMPT"; then
-      remember "run:$RUN_ID:$ATTEMPT"
-      describe_run >> "$WORK/reports"
+      if [ "$CONCLUSION" != cancelled ] || [ "$SUPERSEDED" -eq 0 ]; then
+        remember "run:$RUN_ID:$ATTEMPT"
+        describe_run >> "$WORK/reports"
+      fi
     fi
   done < "$WORK/runs"
   mv -f "$WORK/active" "$STATE_DIR/active" || die "Cannot persist watched runs"

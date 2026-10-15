@@ -58,6 +58,7 @@ if [ "$ACTION" = list ]; then
 elif [ "$FIELDS" = jobs ]; then
   [ "$FAKE_SCENARIO" != jobs-unavailable ] || exit 1
   INPUT="$FAKE_DIR/jobs"
+  [ ! -f "$FAKE_DIR/jobs-$RUN" ] || INPUT="$FAKE_DIR/jobs-$RUN"
 else
   [ "$RUN" = 101 ] || exit 64
   INPUT="$FAKE_DIR/run"
@@ -171,6 +172,42 @@ cancelled() {
   invoke
   expect_rc 0
   [ ! -s "$OUT" ] || fail 'duplicate cancelled job'
+}
+add_newer_sibling() {
+  jq '.status = "completed" | .conclusion = "cancelled"' "$FAKE_DIR/run" > "$FAKE_DIR/old"
+  jq '.databaseId = 102 | .createdAt = "2026-10-14T10:01:00Z" | .status = "in_progress" | .conclusion = ""' "$FAKE_DIR/run" > "$FAKE_DIR/new"
+  jq -s . "$FAKE_DIR/old" "$FAKE_DIR/new" > "$FAKE_DIR/runs"
+  printf '{"jobs":[]}\n' > "$FAKE_DIR/jobs-102"
+}
+superseded_cancelled_run() {
+  add_newer_sibling
+  printf '{"jobs":[{"databaseId":1003,"name":"cancelled matrix job","conclusion":"cancelled"}]}\n' > "$FAKE_DIR/jobs"
+  invoke
+  expect_rc 0
+  [ ! -s "$OUT" ] || fail 'superseded cancellation was reported'
+}
+newest_cancelled_run() {
+  jq '.status = "completed" | .conclusion = "cancelled"' "$FAKE_DIR/run" > "$FAKE_DIR/new"
+  mv "$FAKE_DIR/new" "$FAKE_DIR/run"
+  jq -s . "$FAKE_DIR/run" > "$FAKE_DIR/runs"
+  printf '{"jobs":[{"databaseId":1003,"name":"cancelled matrix job","conclusion":"cancelled"}]}\n' > "$FAKE_DIR/jobs"
+  invoke
+  expect_rc 1
+  contains 'job: cancelled matrix job (cancelled, id: 1003)'
+  contains 'conclusion: cancelled'
+}
+failed_job() {
+  printf '{"jobs":[{"databaseId":1004,"name":"unit tests","conclusion":"failure"}]}\n' > "$FAKE_DIR/jobs"
+  invoke
+  expect_rc 1
+  contains 'job: unit tests (failure, id: 1004)'
+}
+superseded_gate() {
+  add_newer_sibling
+  printf '{"jobs":[{"databaseId":1005,"name":"CI (required)","conclusion":"failure"},{"databaseId":1006,"name":"unit tests","conclusion":"cancelled"}]}\n' > "$FAKE_DIR/jobs"
+  invoke
+  expect_rc 0
+  [ ! -s "$OUT" ] || fail 'superseded gate or cancellation was reported'
 }
 multiple_jobs() {
   printf '{"jobs":[{"databaseId":1001,"name":"one","conclusion":"failure"},{"databaseId":1003,"name":"two","conclusion":"cancelled"},{"databaseId":1005,"name":"three","conclusion":"failure"}]}\n' > "$FAKE_DIR/jobs"
@@ -375,6 +412,10 @@ PY
 
 run_test 'mid-run failed job is reported once' mid_run
 run_test 'cancelled job is reported once' cancelled
+run_test 'superseded cancelled run is silent' superseded_cancelled_run
+run_test 'newest cancelled run is reported' newest_cancelled_run
+run_test 'failed job is still reported' failed_job
+run_test 'gate in superseded run is silent' superseded_gate
 run_test 'all failed jobs in a poll are reported once' multiple_jobs
 run_test 'run completion is a separate report' completion
 run_test 'successful run completion is silent' success
