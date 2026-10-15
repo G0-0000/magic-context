@@ -139,6 +139,34 @@ export interface StripPiDroppedPlaceholderResult {
 	discovered: number;
 }
 
+export interface PiOrphanToolDropFacts {
+	active: boolean;
+	legacyDroppedTag?: number;
+}
+
+/** Resolve only this orphan's call ID through the existing session/message index. */
+export function readPiOrphanToolDropFacts(
+	db: ContextDatabase,
+	sessionId: string,
+	callId: string,
+): PiOrphanToolDropFacts {
+	const row = db
+		.prepare(
+			`SELECT MAX(status = 'active') AS active,
+			        MAX(CASE WHEN status = 'dropped' AND drop_mode = 'truncated'
+			                 THEN tag_number END) AS legacyTag
+			 FROM tags INDEXED BY idx_tags_session_message_id
+			 WHERE session_id = ? AND message_id = ? AND type = 'tool'`,
+		)
+		.get(sessionId, callId) as
+		| { active: number | null; legacyTag: number | null }
+		| undefined;
+	return {
+		active: row?.active === 1,
+		legacyDroppedTag: row?.legacyTag ?? undefined,
+	};
+}
+
 export function stripPiDroppedPlaceholderMessages(args: {
 	db: ContextDatabase;
 	sessionId: string;
@@ -168,10 +196,8 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	canFirstApply?: boolean;
 	/** Responses/Anthropic: MC's structure check rejects Oh My Pi's orphan-to-user conversion. */
 	retireOrphansBeforeRefusal?: boolean;
-	/** Persisted dropped/truncated tags prove that even original JSONL output was already hidden. */
-	legacyDroppedTools?: ReadonlyMap<string, number>;
-	/** Active tool IDs from storage; expanding archived output cancels its persisted removal. */
-	activeToolCallIds?: ReadonlySet<string>;
+	/** Called only for an orphan call ID, at most once per pass; defaults to indexed storage lookup. */
+	getToolDropFacts?: (callId: string) => PiOrphanToolDropFacts;
 	/** Transfer the result entry's stable session-entry ID to its replacement object. */
 	onLegacyReplay?: (previous: object, next: object) => void;
 	/** Test seam for exhausting the durable CAS write. */
@@ -183,6 +209,26 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	const persistedIds = getStrippedPlaceholderIds(db, sessionId);
 	const idsToStrip = new Set(persistedIds);
 	const calls = toolCallIds(messages);
+	let toolFacts: Map<string, PiOrphanToolDropFacts> | undefined;
+	const factsFor = (message: unknown): PiOrphanToolDropFacts | undefined => {
+		const msg = message as { role?: unknown; toolCallId?: unknown } | undefined;
+		if (
+			msg?.role !== "toolResult" ||
+			typeof msg.toolCallId !== "string" ||
+			isPairedResult(msg, calls)
+		)
+			return undefined;
+		// Ordinary paired history never allocates this cache or reads tag facts.
+		toolFacts ??= new Map();
+		let facts = toolFacts.get(msg.toolCallId);
+		if (!facts) {
+			facts = args.getToolDropFacts
+				? args.getToolDropFacts(msg.toolCallId)
+				: readPiOrphanToolDropFacts(db, sessionId, msg.toolCallId);
+			toolFacts.set(msg.toolCallId, facts);
+		}
+		return facts;
+	};
 
 	const idOf = (msg: unknown, index: number): string | undefined => {
 		const m = msg && typeof msg === "object" ? (msg as object) : undefined;
@@ -201,8 +247,8 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		return (
 			msg?.role === "toolResult" &&
 			typeof msg.toolCallId === "string" &&
-			args.activeToolCallIds?.has(msg.toolCallId) === true &&
-			!isDroppedResult(message)
+			!isDroppedResult(message) &&
+			factsFor(message)?.active === true
 		);
 	};
 	const isRetiredResult = (message: unknown): boolean => {
@@ -212,7 +258,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 			typeof msg.toolCallId === "string" &&
 			!isActiveRealResult(message) &&
 			(isDroppedResult(message) ||
-				args.legacyDroppedTools?.has(msg.toolCallId) === true)
+				factsFor(message)?.legacyDroppedTag !== undefined)
 		);
 	};
 	const discoverOrphans =
@@ -224,7 +270,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	// keep those previously served bytes until another change invalidates the
 	// provider's cached prefix. Only persisted dropped/truncated tags qualify;
 	// active results are never replaced here.
-	if (!discoverOrphans && args.legacyDroppedTools?.size) {
+	if (!discoverOrphans) {
 		for (let i = 0; i < messages.length; i++) {
 			const msg = messages[i] as {
 				role?: unknown;
@@ -240,7 +286,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 				idsToStrip.has(idOf(msg, i) ?? "")
 			)
 				continue;
-			const tag = args.legacyDroppedTools.get(msg.toolCallId);
+			const tag = factsFor(msg)?.legacyDroppedTag;
 			if (tag === undefined) continue;
 			const text = `[dropped §${tag}§]`;
 			messages[i] = {
@@ -262,8 +308,8 @@ export function stripPiDroppedPlaceholderMessages(args: {
 				(((isCacheBusting || args.forceDiscovery) &&
 					messageIsPlaceholderOnly(messages[i])) ||
 					(discoverOrphans &&
-						isRetiredResult(messages[i]) &&
-						!isPairedResult(messages[i], calls)))
+						!isPairedResult(messages[i], calls) &&
+						isRetiredResult(messages[i])))
 			) {
 				discoveredIds.push(id);
 			}

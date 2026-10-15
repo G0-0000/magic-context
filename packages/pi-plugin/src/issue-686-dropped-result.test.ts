@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +56,130 @@ const fixture = () => [
 ];
 
 describe("issue 686 dropped tool results", () => {
+	test("ordinary passes with no orphan never load active or legacy tool facts", async () => {
+		const db = createTestDb();
+		const sessionId = "ordinary-no-orphan-facts";
+		const query = spyOn(db, "prepare");
+		let factLoads = 0;
+		let activeReads = 0;
+		let legacyReads = 0;
+		const getToolDropFacts = () => {
+			factLoads++;
+			return {
+				get active() {
+					activeReads++;
+					return false;
+				},
+				get legacyDroppedTag() {
+					legacyReads++;
+					return 6192;
+				},
+			};
+		};
+		const factQueries = () =>
+			query.mock.calls.filter(([sql]) =>
+				sql.includes("MAX(status = 'active')"),
+			);
+		try {
+			for (const flags of [
+				{ isCacheBusting: false },
+				{ isCacheBusting: true },
+				{ isCacheBusting: false, retireOrphansBeforeRefusal: true },
+			]) {
+				const messages = [
+					userMessage("keep", 1),
+					call(),
+					dropped(),
+					userMessage("next", 4),
+				];
+				stripPiDroppedPlaceholderMessages({
+					db,
+					sessionId,
+					messages,
+					getToolDropFacts,
+					...flags,
+				});
+			}
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, { db });
+			const handler = fake.handlers.get("context") as unknown as (
+				event: { messages: unknown[] },
+				ctx: unknown,
+			) => Promise<unknown>;
+			const raw = [
+				userMessage("keep", 1),
+				call(),
+				{ ...dropped(), content: [{ type: "text", text: "real output" }] },
+				userMessage("next", 4),
+			];
+			for (let i = 0; i < 3; i++) {
+				const messages = structuredClone(raw);
+				await handler(
+					{ messages },
+					{
+						...fakeContext(
+							sessionId,
+							process.cwd(),
+							["u", "call", "result", "next"],
+							messages as never,
+						),
+						model: { api: "openai-responses", provider: "mock", id: "mock" },
+					},
+				);
+			}
+			expect(factLoads).toBe(0);
+			expect(activeReads).toBe(0);
+			expect(legacyReads).toBe(0);
+			expect(factQueries()).toHaveLength(0);
+		} finally {
+			query.mockRestore();
+			clearContextHandlerSession(sessionId);
+			db.close();
+		}
+	});
+
+	test("orphan facts use one indexed lookup per distinct call ID", () => {
+		const db = createTestDb();
+		const query = spyOn(db, "prepare");
+		try {
+			const messages = [
+				userMessage("keep", 1),
+				{
+					...dropped(),
+					content: [{ type: "text", text: "first real output" }],
+				},
+				{
+					...dropped(),
+					timestamp: 4,
+					content: [{ type: "text", text: "second real output" }],
+				},
+			];
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "indexed-orphan",
+				messages,
+				isCacheBusting: false,
+			});
+			const lookups = query.mock.calls.filter(([sql]) =>
+				sql.includes("MAX(status = 'active')"),
+			);
+			expect(lookups).toHaveLength(1);
+			const plan = db
+				.query(`EXPLAIN QUERY PLAN ${lookups[0][0]}`)
+				.all("indexed-orphan", callId) as { detail: string }[];
+			expect(
+				plan.some((row) =>
+					row.detail.includes(
+						"idx_tags_session_message_id (session_id=? AND message_id=?)",
+					),
+				),
+			).toBe(true);
+		} finally {
+			query.mockRestore();
+			db.close();
+		}
+	});
+
 	test("legacy truncated replay does not placeholder an incomplete tool arc", () => {
 		const db = createTestDb();
 		const sessionId = "legacy-incomplete";
@@ -252,7 +376,6 @@ describe("issue 686 dropped tool results", () => {
 	test("legacy orphan Chat replay keeps master bytes until a bust and paired legacy tags stay paired", () => {
 		const db = createTestDb();
 		try {
-			const legacyDroppedTools = new Map([[callId, 6192]]);
 			const real = {
 				...dropped(),
 				content: [{ type: "text", text: "pristine output" }],
@@ -261,7 +384,7 @@ describe("issue 686 dropped tool results", () => {
 			const args = {
 				db,
 				sessionId: "legacy-chat",
-				legacyDroppedTools,
+				getToolDropFacts: () => ({ active: false, legacyDroppedTag: 6192 }),
 				isCacheBusting: false,
 			};
 			expect(stripPiDroppedPlaceholderMessages({ ...args, messages })).toEqual({
@@ -315,7 +438,7 @@ describe("issue 686 dropped tool results", () => {
 				stripPiDroppedPlaceholderMessages({
 					...args,
 					messages: restored,
-					activeToolCallIds: new Set([callId]),
+					getToolDropFacts: () => ({ active: true }),
 				}),
 			).toEqual({ removed: 0, discovered: 0 });
 			expect(JSON.stringify(restored)).toBe(before);

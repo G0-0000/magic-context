@@ -10039,23 +10039,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.
 		canFirstApply: isCacheBustingPass,
-		legacyDroppedTools: new Map(
-			allTagsForPass.flatMap((tag) =>
-				tag.type === "tool" &&
-				tag.status === "dropped" &&
-				tag.dropMode === "truncated" &&
-				tag.messageId
-					? [[tag.messageId, tag.tagNumber] as const]
-					: [],
-			),
-		),
-		activeToolCallIds: new Set(
-			allTagsForPass.flatMap((tag) =>
-				tag.type === "tool" && tag.status === "active" && tag.messageId
-					? [tag.messageId]
-					: [],
-			),
-		),
 		onLegacyReplay: (previous, next) => {
 			const id = postCommitStableIdByRef.get(previous);
 			if (id) postCommitStableIdByRef.set(next, id);
