@@ -5428,6 +5428,7 @@ export function registerPiContextHandler(
 				},
 				resolvedProviderID: ctx.model?.provider,
 				resolvedModelID: ctx.model?.id,
+				providerApi: ctx.model?.api,
 				canUseEmptySentinels,
 				temporalAwareness: options.injection?.temporalAwareness === true,
 				appendCompaction: guardedPiAppendCompaction(ctx, assertCurrentPass),
@@ -7590,6 +7591,7 @@ interface RunPipelineArgs {
 	forceSignedRebuildForFit?: boolean;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
+	providerApi?: string;
 	assertCurrentPass?: () => void;
 	db: ContextDatabase;
 	tagger: Tagger;
@@ -10037,6 +10039,38 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.
 		canFirstApply: isCacheBustingPass,
+		legacyDroppedTools: new Map(
+			allTagsForPass.flatMap((tag) =>
+				tag.type === "tool" &&
+				tag.status === "dropped" &&
+				tag.dropMode === "truncated" &&
+				tag.messageId
+					? [[tag.messageId, tag.tagNumber] as const]
+					: [],
+			),
+		),
+		activeToolCallIds: new Set(
+			allTagsForPass.flatMap((tag) =>
+				tag.type === "tool" && tag.status === "active" && tag.messageId
+					? [tag.messageId]
+					: [],
+			),
+		),
+		onLegacyReplay: (previous, next) => {
+			const id = postCommitStableIdByRef.get(previous);
+			if (id) postCommitStableIdByRef.set(next, id);
+		},
+		// Oh My Pi's common transform renders an orphan as <stale-tool-result> user
+		// text, not as a tool output (pi-ai providers/transform-messages.ts,
+		// 18.10.4:1395-1449, 18.11.0:1391-1445). Our Responses/Anthropic dispatch
+		// fence refuses that role change. Chat already accepts an exact note, so
+		// its retirement waits for another change to invalidate the cached prefix.
+		retireOrphansBeforeRefusal: [
+			"openai-responses",
+			"openai-codex-responses",
+			"azure-openai-responses",
+			"anthropic-messages",
+		].includes(args.providerApi ?? ""),
 		onFirstApplication: (message, index) =>
 			recordFirstApplicationAt(message, index, 0, (item) =>
 				item && typeof item === "object"
