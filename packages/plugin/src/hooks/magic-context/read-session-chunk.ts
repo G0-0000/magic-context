@@ -1493,6 +1493,17 @@ export function readSessionChunk(
     }
 
     if (flushCurrentBlock() && pendingNoiseMeta.length > 0) {
+        // Filtering removes duplicate results and other non-narrative rows from
+        // the text, not from raw coverage. Only absorb them after the preceding
+        // block is admitted; otherwise they would skip budget-rejected content.
+        const lastNoise = pendingNoiseMeta[pendingNoiseMeta.length - 1];
+        if (messagesProcessed > 0 && lastNoise) {
+            lineMeta.push(...pendingNoiseMeta);
+            messagesProcessed += pendingNoiseMeta.length;
+            lastOrdinal = lastNoise.ordinal;
+            lastMessageId = lastNoise.messageId;
+            pendingNoiseMeta = [];
+        }
         highestScannedOrdinal = Math.max(
             highestScannedOrdinal,
             pendingNoiseMeta[pendingNoiseMeta.length - 1]?.ordinal ?? highestScannedOrdinal,

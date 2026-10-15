@@ -617,7 +617,42 @@ pub fn build_historian_chunk_with_expansions(
             );
         }
     }
-    let _ = builder.flush_current_block();
+    if builder.flush_current_block() {
+        highest_scanned_ordinal = highest_scanned_ordinal.max(
+            builder
+                .pending_noise_meta
+                .last()
+                .map_or(builder.last_ordinal, |meta| meta.ordinal),
+        );
+        // Filtered results and non-narrative rows still belong to raw coverage.
+        // Admit their metadata only if the preceding visible block was admitted,
+        // so a budget-rejected block cannot be skipped by its trailing noise.
+        if !builder.line_meta.is_empty() {
+            // Zero-block messages have no flat-block ID for a persisted endpoint.
+            // Leave an unanchorable suffix pending until a later real block can own it.
+            if let Some(index) = builder
+                .pending_noise_meta
+                .iter()
+                .rposition(|meta| meta.anchorable)
+            {
+                let last = &builder.pending_noise_meta[index];
+                builder.last_ordinal = last.ordinal;
+                builder.last_message_id.clone_from(&last.message_id);
+                builder
+                    .line_meta
+                    .extend(
+                        builder
+                            .pending_noise_meta
+                            .drain(..=index)
+                            .map(|meta| ChunkLine {
+                                ordinal: meta.ordinal,
+                                message_id: meta.message_id,
+                                anchorable: meta.anchorable,
+                            }),
+                    );
+            }
+        }
+    }
     let tool_only_ranges = merge_tool_only_ranges(&builder.tool_only_ranges);
     let end = builder.last_ordinal;
     // Filtering removes some scanned messages from the chunk text, but they still advance
@@ -2622,6 +2657,171 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    fn expanded_result_pair() -> Vec<CkIngressMessage> {
+        vec![
+            msg(
+                "invocation",
+                1,
+                "assistant",
+                vec![
+                    text("Updating tasks."),
+                    CkKind::ToolCall {
+                        id: "tasks".to_string(),
+                        name: "todowrite".to_string(),
+                        input: json!({"todos": [{"content": "Investigate", "status": "in_progress"}]}),
+                        provider_executed: false,
+                    },
+                ],
+            ),
+            msg(
+                "result",
+                2,
+                "tool",
+                vec![CkKind::ToolResult {
+                    id: "tasks".to_string(),
+                    tool_name: "todowrite".to_string(),
+                    output: mc_store::CkToolOutput::bare(mc_store::CkOutputKind::Text {
+                        text: r#"[{"content":"Investigate","status":"in_progress"}]"#.to_string(),
+                    }),
+                    provider_executed: false,
+                }],
+            ),
+        ]
+    }
+
+    fn assert_result_coverage(messages: &[CkIngressMessage], expand: bool) {
+        let projection = project_messages(messages).unwrap();
+        let mut expansions = BTreeMap::new();
+        if !expand {
+            expansions.insert("todowrite".to_string(), serde_json::Value::Bool(false));
+        }
+        let built = build_historian_chunk_with_expansions(
+            messages,
+            &projection.blocks,
+            1,
+            32_000,
+            messages.len() as u64 + 1,
+            &expansions,
+        );
+        let end = messages.len() as u64;
+        assert_eq!(built.chunk.end_index, end);
+        assert_eq!(
+            built.end_message_id,
+            format!("{}#0", messages.last().unwrap().mid)
+        );
+        assert_eq!(built.chunk.lines.len(), messages.len());
+        assert_eq!(
+            built
+                .chunk
+                .lines
+                .iter()
+                .map(|line| line.ordinal)
+                .collect::<Vec<_>>(),
+            (1..=end).collect::<Vec<_>>()
+        );
+        assert!(!built.has_more);
+        assert_eq!(
+            built.chunk.completed_tool_arcs,
+            vec![MessageRange { start: 1, end: 2 }]
+        );
+        assert!(built.snapshot.iter().any(|item| item.id == "result#0"));
+        assert_eq!(
+            crate::historian_validate::validate_chunk_coverage(&built.chunk),
+            None
+        );
+        let validated = crate::historian_validate::validate_historian_output(
+            &historian_output(1, if end == 2 { 1 } else { end }, end + 1),
+            &built.chunk,
+            &[],
+            crate::historian_validate::ValidateOptions {
+                force_keep_last_compartment: true,
+                ..Default::default()
+            },
+        )
+        .expect("completed result heals to an anchorable endpoint");
+        assert_eq!(validated.compartments[0].end_message, end);
+        assert_eq!(
+            validated.compartments[0].end_message_id,
+            built.end_message_id
+        );
+        if expand {
+            assert_eq!(built.text.matches("Investigate").count(), 1);
+        }
+    }
+
+    #[test]
+    fn trailing_expanded_result_coverage() {
+        assert_result_coverage(&expanded_result_pair(), true);
+    }
+
+    #[test]
+    fn trailing_expanded_result_coverage_expansion_off_control() {
+        assert_result_coverage(&expanded_result_pair(), false);
+    }
+
+    #[test]
+    fn trailing_expanded_result_coverage_visible_successor_control() {
+        let mut messages = expanded_result_pair();
+        messages.push(msg("next", 3, "user", vec![text("Continue.")]));
+        assert_result_coverage(&messages, true);
+    }
+
+    #[test]
+    fn trailing_filtered_noise_coverage_stops_at_an_anchorable_row() {
+        for (role, parts) in [
+            (
+                "user",
+                vec![text("<system-reminder>finished</system-reminder>")],
+            ),
+            ("assistant", vec![text("")]),
+            ("system", vec![text("Pinned instructions")]),
+        ] {
+            let messages = vec![
+                msg("visible", 1, "user", vec![text("Work.")]),
+                msg("empty", 2, "assistant", vec![]),
+                msg("noise", 3, role, parts),
+                msg("empty-tail", 4, "assistant", vec![]),
+            ];
+            let built = project_and_build(&messages, 1, 32_000, 5);
+            assert_eq!(built.text, "[1] U: Work.");
+            assert_eq!(built.chunk.end_index, 3);
+            assert_eq!(built.end_message_id, "noise#0");
+            assert_eq!(built.chunk.lines.len(), 3);
+            assert!(!built.chunk.lines[1].anchorable);
+            assert!(!built.has_more);
+            assert_eq!(
+                crate::historian_validate::validate_chunk_coverage(&built.chunk),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_zero_block_noise_cannot_be_a_persisted_endpoint() {
+        let messages = vec![
+            msg("visible", 1, "user", vec![text("Work.")]),
+            msg("empty", 2, "assistant", vec![]),
+        ];
+        let built = project_and_build(&messages, 1, 32_000, 3);
+        assert_eq!(built.chunk.end_index, 1);
+        assert_eq!(built.end_message_id, "visible#0");
+        assert_eq!(built.chunk.lines.len(), 1);
+        assert!(!built.has_more);
+    }
+
+    #[test]
+    fn fenced_eligible_end_excludes_the_invocation_of_an_unavailable_result() {
+        let mut messages = vec![msg("prefix", 1, "user", vec![text("Earlier work.")])];
+        messages.extend(expanded_result_pair().into_iter().map(|mut message| {
+            message.ordinal += 1;
+            message
+        }));
+        let built = project_and_build(&messages, 1, 32_000, 2);
+        assert_eq!(built.chunk.end_index, 1);
+        assert_eq!(built.end_message_id, "prefix#0");
+        assert_eq!(built.text, "[1] U: Earlier work.");
     }
 
     #[test]
