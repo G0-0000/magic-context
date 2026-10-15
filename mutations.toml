@@ -201,7 +201,7 @@ runner = 'command'
 command = ['bun', 'test', 'packages/plugin/src/hooks/magic-context/transform-postprocess-phase.test.ts', '--timeout', '30000', '-t', '{test}']
 test_count_pattern = 'Ran {count} test'
 expect_red = ['^deferred\scompaction\smarker\srepresentation\snewer\spending\spublication\swaits\suntil\sconsumed\sby\sthe\sserved\sresponse$']
-expect_message = 'expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull()'
+expect_message = 'expect(fences).toBe(0)'
 
 [[control]]
 id = 'ts-marker-cas-clear-keeps-newer-pending'
