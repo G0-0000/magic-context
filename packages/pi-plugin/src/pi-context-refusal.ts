@@ -383,6 +383,8 @@ export function registerPiGuardedContext(
 	receiptMaps.add(unsendableNonces);
 	const structureWarnings = new Map<string | object, boolean>();
 	receiptMaps.add(structureWarnings);
+	const imageTrimNotices = new Map<string | object, boolean>();
+	receiptMaps.add(imageTrimNotices);
 	const refuse = (
 		ctx: ExtensionContext,
 		budget: PiContextBudget,
@@ -613,7 +615,17 @@ export function registerPiGuardedContext(
 				}
 				const structureMismatch = skipReason
 					? undefined
-					: piPreparedStructureMismatch(payload, active.preparedStructure);
+					: piPreparedStructureMismatch(
+							payload,
+							active.preparedStructure,
+							(counts) => {
+								if (imageTrimNotices.has(key)) return;
+								imageTrimNotices.set(key, true);
+								log(
+									`[magic-context][pi] OMP provider images trimmed: planned=${counts.planned} actual=${counts.actual} trimmed=${counts.trimmed}`,
+								);
+							},
+						);
 				if (structureMismatch)
 					throw new Error(
 						`provider request does not match this pass's managed dispatch (prepared turn structure); ${structureMismatch}`,

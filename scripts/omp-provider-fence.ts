@@ -52,6 +52,7 @@ if (
 		"resume",
 		"user-image",
 		"tool-image",
+		"image-budget",
 		"thinking",
 		"consecutive-users",
 		"empty-assistant",
@@ -288,13 +289,17 @@ const template =
 		: templates.find(
 				(model: any) =>
 					model.api === api &&
-					(historyCase === "cross-model-thinking"
-						? model.provider === "opencode-zen" &&
-							model.id === "muse-spark-1.3-contributor-free"
-						: historyCase === "custom-summary" && api === "openai-completions"
+					(historyCase === "image-budget"
+						? model.provider ===
+								(api === "anthropic-messages" ? "umans" : "opencode-zen") &&
+							model.input.includes("image")
+						: historyCase === "cross-model-thinking"
 							? model.provider === "opencode-zen" &&
-								model.id === "deepseek-v4-flash-free"
-							: true),
+								model.id === "muse-spark-1.3-contributor-free"
+							: historyCase === "custom-summary" && api === "openai-completions"
+								? model.provider === "opencode-zen" &&
+									model.id === "deepseek-v4-flash-free"
+								: true),
 			);
 if (!template) throw new Error(`no bundled model for ${selector}`);
 const model = { ...template, baseUrl, preferWebsockets: false };
@@ -376,6 +381,35 @@ try {
 		);
 		let history: any[];
 		switch (historyCase) {
+			case "image-budget":
+				history = [user("HISTORY686 image budget prompt", stamp)];
+				for (let index = 0; index < 20; index++) {
+					const id = `image_budget_${index}`;
+					history.push(
+						assistant(
+							[
+								{
+									type: "toolCall",
+									id,
+									name: toolName,
+									arguments: { path: "seed.png" },
+								},
+							],
+							stamp + index * 3 + 1,
+							"toolUse",
+						),
+						{
+							...result,
+							toolCallId: id,
+							timestamp: stamp + index * 3 + 2,
+							content: [
+								{ type: "text", text: `Image result ${index}` },
+								{ type: "image", data: png, mimeType: "image/png" },
+							],
+						},
+					);
+				}
+				break;
 			case "custom-summary":
 				history = [
 					user("HISTORY686 custom prompt", stamp),
@@ -792,6 +826,75 @@ try {
 	const refusals = hooks.filter(
 		(e) => e.phase === "entry" && e.type === "magic-context-turn-refused",
 	);
+	if (historyCase === "image-budget") {
+		const body = attempts[0]?.payload;
+		const rows = body?.messages ?? body?.input ?? [];
+		const results =
+			api === "anthropic-messages"
+				? rows.flatMap((row: any) =>
+						Array.isArray(row.content)
+							? row.content.filter((block: any) => block.type === "tool_result")
+							: [],
+					)
+				: api.includes("responses")
+					? rows.filter((row: any) => row.type === "function_call_output")
+					: rows.filter((row: any) => row.role === "tool");
+		const countImages = (content: any) =>
+			Array.isArray(content)
+				? content.filter((block: any) =>
+						["image", "image_url", "input_image"].includes(block.type),
+					).length
+				: 0;
+		const imageCounts =
+			api === "openai-completions"
+				? rows.map((row: any) => countImages(row.content))
+				: results.map((row: any) => countImages(row.content ?? row.output));
+		const actualImages = imageCounts.reduce(
+			(sum: number, count: number) => sum + count,
+			0,
+		);
+		const budget = api === "anthropic-messages" ? 10 : 5;
+		let lastToolId: string | undefined;
+		const imagedToolIds: string[] = [];
+		if (api === "openai-completions")
+			for (const row of rows) {
+				if (row.role === "tool") lastToolId = row.tool_call_id;
+				if (countImages(row.content))
+					imagedToolIds.push(lastToolId ?? "missing");
+			}
+		if (
+			attempts.length !== 1 ||
+			wires !== (mode === "raw" ? 0 : 1) ||
+			results.length !== 20 ||
+			actualImages !== budget ||
+			(api === "openai-completions" &&
+				JSON.stringify(imagedToolIds) !==
+					JSON.stringify(
+						Array.from(
+							{ length: 5 },
+							(_, index) => `image_budget_${index + 15}`,
+						),
+					)) ||
+			(api !== "openai-completions" &&
+				results.some(
+					(row: any, index: number) =>
+						countImages(row.content ?? row.output) !==
+						(index >= 20 - budget ? 1 : 0),
+				))
+		)
+			throw new Error(
+				"native image budget did not retain the newest images and all tool results",
+			);
+		audit({
+			phase: "image-budget-proof",
+			provider: model.provider,
+			model: model.id,
+			plannedImages: 20,
+			actualImages,
+			toolResults: results.length,
+			expectedWires: mode === "raw" ? 0 : 1,
+		});
+	}
 	if (historyCase === "responses-history") {
 		const body = attempts[0]?.payload;
 		const input = body?.input;

@@ -8,6 +8,7 @@ export interface PiChatHistoryModel {
 	provider?: string;
 	input?: readonly string[];
 	compat?: unknown;
+	requiresToolResultImageHoisting?: boolean;
 }
 
 export type PiChatHistoryStep =
