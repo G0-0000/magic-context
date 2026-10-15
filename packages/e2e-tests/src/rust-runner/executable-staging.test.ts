@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "bun:test";
 
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { cleanupE2ETempDir, createE2ETempDir } from "../temp-dir";
 import { executableRootForTmpdir, stageExecutable } from "./executable-staging";
 
@@ -48,7 +49,7 @@ describe("content-named child executable staging", () => {
 
     it("uses TMPDIR outside /var/folders for staged executables", () => {
         const fixtureDir = createE2ETempDir("magic-context-executable-tmpdir-test-");
-        const stagingDir = mkdtempSync(join(resolve(import.meta.dir, "../../../../"), ".magic-context-exec-tmpdir-"));
+        const stagingDir = createTestTempDirFromPath(join(resolve(import.meta.dir, "../../../../"), ".magic-context-exec-tmpdir-"));
         const source = join(fixtureDir, "ck-mc");
         const previousTmpdir = process.env.TMPDIR;
         try {
@@ -67,7 +68,7 @@ describe("content-named child executable staging", () => {
         } finally {
             if (previousTmpdir === undefined) delete process.env.TMPDIR;
             else process.env.TMPDIR = previousTmpdir;
-            rmSync(stagingDir, { recursive: true, force: true });
+            cleanupTestTempDir(stagingDir);
             cleanupE2ETempDir(fixtureDir);
         }
     });

@@ -760,11 +760,14 @@ export function defaultDashboardInstallDeps(): DashboardInstallDeps {
         linuxSystemBinaryPath: "/usr/bin/magic-context-dashboard",
         tempRoot: tmpdir(),
         extractTarGz: async (archive, destinationDir) => {
-            await execFileAsync("tar", ["-xzf", archive, "-C", destinationDir]);
+            await execFileAsync("tar", ["-xzf", archive, "-C", destinationDir], {
+                windowsHide: true,
+            });
         },
         // `/P` is the Tauri NSIS installer's passive mode: progress only, no questions.
         runWindowsInstaller: async (installerPath) => {
-            await execFileAsync(installerPath, ["/P"]);
+            // GUI installer in passive mode: its progress window must stay visible.
+            await execFileAsync(installerPath, ["/P"], { windowsHide: false });
         },
         readWindowsInstall: readWindowsInstallFromRegistry,
     };

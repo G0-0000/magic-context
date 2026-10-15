@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
 	createStallContext,
 	STALL_SESSION,
-} from "../../plugin/src/features/magic-context/__tests__/stall-fixture";
+} from "../../plugin/src/features/magic-context/__tests__/stall.fixture";
 import { __test } from "./context-handler";
 
 it("fallback fingerprint headers preserve ASCII LIKE matches using message index ranges", () => {

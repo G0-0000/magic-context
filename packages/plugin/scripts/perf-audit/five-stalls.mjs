@@ -10,7 +10,7 @@ import {
     OLD_PI_OWNER_SQL,
     STALL_SESSION,
     stallMessageId,
-} from "../../src/features/magic-context/__tests__/stall-fixture.ts";
+} from "../../src/features/magic-context/__tests__/stall.fixture.ts";
 import {
     closeCompactionMarkerDb,
     getPreparedCompactionMarkerSummaryIds,

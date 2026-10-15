@@ -16,7 +16,7 @@ import {
     OLD_PI_OWNER_SQL,
     STALL_SESSION,
     stallMessageId,
-} from "./__tests__/stall-fixture";
+} from "./__tests__/stall.fixture";
 import {
     closeCompactionMarkerDb,
     getOpenCodeDbPath,
