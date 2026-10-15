@@ -60,23 +60,78 @@ function firstText(
 		: undefined;
 }
 
-// Recognize the Anthropic Messages and OpenAI Responses shapes observed on
-// OMP 18.8.6. Other shapes must still prove a completed managed context pass
-// before sending a conversation; an unknown shape is not an exemption.
+// Only consume the leading instruction run emitted by a provider adapter. A
+// quoted prompt in user content, or instructions later in history, cannot turn
+// an ordinary conversation into an advisor request.
+function leadingInstructions(
+	messages: unknown[],
+	roles: readonly string[],
+	inputBlocks = false,
+) {
+	const system: string[] = [];
+	let index = 0;
+	while (index < messages.length) {
+		const message = record(messages[index]);
+		if (typeof message?.role !== "string" || !roles.includes(message.role))
+			break;
+		const content = message.content;
+		if (typeof content === "string") system.push(content);
+		else if (
+			inputBlocks &&
+			message.type === "message" &&
+			Array.isArray(content) &&
+			content.length > 0 &&
+			content.every(
+				(part) =>
+					record(part)?.type === "input_text" &&
+					typeof record(part)?.text === "string",
+			)
+		) {
+			// OpenAI Codex wraps extra developer prompts as type:"message" with
+			// input_text blocks, unlike the other adapters' string content.
+			system.push(content.map((part) => record(part)?.text).join("\n"));
+		} else return undefined;
+		index++;
+	}
+	return { system, messages: messages.slice(index) };
+}
+
+// OMP uses different envelopes for Messages, chat-completions and Responses.
+// Keep their instruction locations and tool encodings separate: accepting a
+// hybrid envelope would let unrelated fields establish an advisor exemption.
 function providerRequest(payload: unknown) {
 	const body = record(payload);
 	if (!body || !Array.isArray(body.tools)) return undefined;
-	if (Array.isArray(body.input) && typeof body.instructions === "string") {
+	if (Array.isArray(body.input)) {
 		if (
 			"messages" in body ||
 			"system" in body ||
-			!body.tools.every((tool) => record(tool)?.type === "function")
+			(body.instructions !== undefined && typeof body.instructions !== "string")
 		)
 			return undefined;
+		// Responses puts the advisor prompt in instructions or leading input
+		// system/developer messages. Codex may also prepend extra developer
+		// prompts to input, but instructions still owns the advisor identity.
+		const leading = leadingInstructions(
+			body.input,
+			typeof body.instructions === "string"
+				? ["developer"]
+				: ["system", "developer"],
+			typeof body.instructions === "string",
+		);
+		if (!leading) return undefined;
 		return {
-			messages: body.input,
-			system: [body.instructions],
-			tools: body.tools.map((tool) => record(tool)?.name),
+			messages: leading.messages,
+			system:
+				typeof body.instructions === "string"
+					? [body.instructions]
+					: leading.system.slice(0, 1),
+			tools: body.tools.map((tool) => {
+				const entry = record(tool);
+				return entry?.type === "function" && !("function" in entry)
+					? entry.name
+					: undefined;
+			}),
 			textType: "input_text" as const,
 		};
 	}
@@ -86,6 +141,21 @@ function providerRequest(payload: unknown) {
 		"instructions" in body
 	)
 		return undefined;
+	if (!("system" in body)) {
+		const leading = leadingInstructions(body.messages, ["system", "developer"]);
+		if (!leading?.system.length) return undefined;
+		return {
+			...leading,
+			system: leading.system.slice(0, 1),
+			tools: body.tools.map((tool) => {
+				const entry = record(tool);
+				return entry?.type === "function" && !("name" in entry)
+					? record(entry.function)?.name
+					: undefined;
+			}),
+			textType: "text" as const,
+		};
+	}
 	const system =
 		typeof body.system === "string"
 			? [body.system]
@@ -93,9 +163,18 @@ function providerRequest(payload: unknown) {
 				? body.system.map(firstTextBlock)
 				: [];
 	const tools = body.tools.map((tool) => {
-		const name = record(tool)?.name;
-		return typeof name === "string" && name.startsWith("_")
-			? name.slice(1)
+		const entry = record(tool);
+		const name =
+			entry && !("function" in entry) && entry.type !== "function"
+				? entry.name
+				: undefined;
+		// Anthropic's OAuth login and escapeBuiltinToolNames option send
+		// "_advise" instead of "advise". Undo that single provider prefix;
+		// ordinary API-key requests can already have the unprefixed name.
+		return typeof name === "string"
+			? name.startsWith("_")
+				? name.slice(1)
+				: name
 			: undefined;
 	});
 	return { messages: body.messages, system, tools, textType: "text" as const };
@@ -125,7 +204,7 @@ export function isOmpAdvisorRequest(payload: unknown): boolean {
 		/^<system-reminder>\nToday: [^\n]+\n<\/system-reminder>(?:\n|$)/,
 		"",
 	);
-	// OpenAI Responses separates its date and working-directory reminder from
+	// OpenAI adapters separate the date and working-directory reminder from
 	// the review text. If the first block is only that reminder, read the next.
 	if (text === "" && Array.isArray(first.content))
 		text = firstText(first.content.slice(1, 2), request.textType);
