@@ -6,6 +6,14 @@ import {
 } from "./pi-dispatch-chat-history";
 import { piGoogleConversation } from "./pi-dispatch-google";
 import {
+	type PiImageBudgetPlan,
+	type PiImageContent,
+	piImageBudgetPlan,
+	piImageContent,
+	piTrimOldestImages,
+	piWireImageCount,
+} from "./pi-dispatch-image-budget";
+import {
 	piResponsesAssistantTexts,
 	piResponsesWireTexts,
 } from "./pi-dispatch-responses-history";
@@ -28,6 +36,8 @@ interface MessageStructure {
 	idlessResults?: boolean[];
 	/** JSON [text, phase] pairs for every assistant text block, retained in wire order. */
 	responseTexts?: string[];
+	imageContent?: PiImageContent;
+	hoistedImageContent?: PiImageContent;
 }
 
 /** Transport-independent roles and ordered tool IDs, captured before text transforms. */
@@ -38,6 +48,8 @@ export interface PiPreparedStructure {
 	api?: string;
 	googleFunctionIds?: boolean;
 	structuralSkipReason?: string;
+	imageBudget?: PiImageBudgetPlan;
+	imageProjection?: boolean;
 }
 
 const MAX_MESSAGES = 100_000;
@@ -225,6 +237,7 @@ function buildPiPreparedStructure(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
 	prepareUser?: (index: number, source: Record<string, unknown>) => void,
+	imageProjection = false,
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
 	for (let index = 0; index < messages.length; index++) {
@@ -264,6 +277,75 @@ function buildPiPreparedStructure(
 			if (!prepareUser) return undefined;
 			valid = false;
 			continue;
+		}
+		if (imageProjection && source) {
+			row.imageContent = piImageContent(
+				row.role === "assistant" && Array.isArray(source.content)
+					? source.content.filter((value) => object(value)?.type !== "image")
+					: source.content,
+				model?.api,
+				false,
+				row.role === "toolResult" && model?.api !== "anthropic-messages",
+				row.role === "user" && responsesLane(model?.api),
+			);
+			if (!row.imageContent) return undefined;
+			if (
+				row.imageContent &&
+				model?.api === "openai-completions" &&
+				row.role === "toolResult"
+			)
+				row.imageContent = {
+					text:
+						row.imageContent.text ||
+						(row.imageContent.images.length ? "(see attached image)" : ""),
+					images: [],
+				};
+			if (responsesLane(model?.api) && row.role === "assistant")
+				row.imageContent = undefined;
+			if (row.role === "toolResult" && row.imageContent) {
+				const content = row.imageContent;
+				const google = model?.api?.startsWith("google-");
+				const bedrock = model?.api === "bedrock-converse-stream";
+				const hoist =
+					(google &&
+						object(model?.compat)?.multimodalFunctionResponse !== true) ||
+					(bedrock &&
+						(source.isError || model?.requiresToolResultImageHoisting)) ||
+					(model?.api === "anthropic-messages" && source.isError);
+				if (content.images.length && hoist) {
+					row.hoistedImageContent = {
+						text: google ? "Tool result image:" : "",
+						images: content.images,
+					};
+					row.imageContent =
+						bedrock && Array.isArray(source.content)
+							? piImageContent(
+									source.content.map((value) =>
+										object(value)?.type === "image"
+											? { type: "text", text: "(see attached image)" }
+											: value,
+									),
+									model?.api,
+									false,
+									true,
+								)
+							: { text: content.text, images: [] };
+					if (!row.imageContent) return undefined;
+				}
+				if (google && !content.text && content.images.length)
+					row.imageContent.text = "(see attached image)";
+				if (google && row.imageContent.images.length)
+					row.imageContent.imageTextPositions = row.imageContent.images.map(
+						() => (row.imageContent?.text ? 1 : 0),
+					);
+				if (
+					model?.api === "anthropic-messages" &&
+					source.isError &&
+					!row.imageContent.text &&
+					!row.imageContent.images.length
+				)
+					row.imageContent.text = "Tool failed with no output.";
+			}
 		}
 		// These providers omit a user/developer row with no nonblank text or
 		// images. In particular, a compaction summary with blocks: [] has no wrapper.
@@ -375,8 +457,42 @@ function buildPiPreparedStructure(
 			},
 		];
 	});
+	const imageBudget = imageProjection
+		? undefined
+		: piImageBudgetPlan(projectedMessages, model);
+	const imageRows: MessageStructure[] = [];
+	let hoisted: PiImageContent[] = [];
+	const flushHoisted = () => {
+		if (!hoisted.length) return;
+		let textPosition = 0;
+		imageRows.push({
+			role: "user",
+			calls: [],
+			results: [],
+			imageContent: {
+				text: hoisted
+					.map((content) => content.text)
+					.filter(Boolean)
+					.join("\n"),
+				images: hoisted.flatMap((content) => content.images),
+				imageTextPositions: hoisted.flatMap((content) => {
+					if (content.text) textPosition++;
+					return content.images.map(() => textPosition);
+				}),
+			},
+		});
+		hoisted = [];
+	};
+	for (const row of rows) {
+		if (row.role !== "toolResult") flushHoisted();
+		imageRows.push(row);
+		if (row.hoistedImageContent) hoisted.push(row.hoistedImageContent);
+	}
+	flushHoisted();
 	return {
-		messages: rows,
+		messages: imageRows,
+		...(imageProjection ? { imageProjection: true } : {}),
+		...(imageBudget ? { imageBudget } : {}),
 		...(responsesApi && !responsesMessages
 			? { structuralSkipReason: "Responses history transform is not modeled" }
 			: model?.api === "openai-completions" && !chatMessages
@@ -406,6 +522,7 @@ function payloadStructure(
 	payload: unknown,
 	ollama = false,
 	responsesItems = false,
+	imageProjection = false,
 ): MessageStructure[] | undefined {
 	const body = object(payload);
 	if (!body) return undefined;
@@ -464,6 +581,12 @@ function payloadStructure(
 		) {
 			if (typeof message.call_id !== "string") return undefined;
 			rows.push({ role: "toolResult", calls: [], results: [message.call_id] });
+			rows[rows.length - 1].imageContent = piImageContent(
+				message.output,
+				undefined,
+				false,
+				true,
+			);
 			continue;
 		}
 		if (message.role === "tool") {
@@ -482,6 +605,12 @@ function payloadStructure(
 					results: [""],
 					resultNames: [message.tool_name],
 					idlessResults: [true],
+					imageContent: {
+						text: typeof message.content === "string" ? message.content : "",
+						images: Array.isArray(message.images)
+							? message.images.map((data: unknown) => `bytes:${data}`)
+							: [],
+					},
 				});
 				continue;
 			}
@@ -490,6 +619,7 @@ function payloadStructure(
 				role: "toolResult",
 				calls: [],
 				results: [message.tool_call_id],
+				imageContent: piImageContent(message.content),
 			});
 			continue;
 		}
@@ -509,8 +639,24 @@ function payloadStructure(
 						role: "toolResult",
 						calls: [],
 						results: [id],
+						imageContent: piImageContent(
+							bedrock ? block.toolResult?.content : block.content,
+							undefined,
+							false,
+							bedrock,
+						),
 					});
 				}
+				const rest = message.content.filter(
+					(block) => !results.includes(block) && !block.cachePoint,
+				);
+				if (imageProjection && rest.length)
+					rows.push({
+						role: "user",
+						calls: [],
+						results: [],
+						imageContent: piImageContent(rest),
+					});
 				continue;
 			}
 		}
@@ -521,6 +667,17 @@ function payloadStructure(
 		);
 		if (!row) return undefined;
 		row.wireContent = message.content;
+		row.imageContent = piImageContent(
+			message.content,
+			undefined,
+			rows.length === 0 && row.role === "user",
+		);
+		if (ollama && row.imageContent)
+			row.imageContent.images = Array.isArray(message.images)
+				? message.images.map((data: unknown) => `bytes:${data}`)
+				: [];
+		if (row.role === "assistant" && message.content == null)
+			row.imageContent = { text: "", images: [] };
 		if (responses && responsesItems && row.role === "assistant") {
 			const texts = piResponsesWireTexts(message.content, message.phase);
 			if (!texts) return undefined;
@@ -583,6 +740,11 @@ function googleStructure(contents: unknown[]): MessageStructure[] | undefined {
 			role: message.role === "model" ? "assistant" : "user",
 			calls: [],
 			results: [],
+			imageContent: piImageContent(
+				message.parts,
+				undefined,
+				rows.length === 0 && message.role === "user",
+			),
 		};
 		const results: MessageStructure[] = [];
 		for (const value of message.parts) {
@@ -613,6 +775,16 @@ function googleStructure(contents: unknown[]): MessageStructure[] | undefined {
 					calls: [],
 					results: [(result.id as string) ?? ""],
 					resultNames: [result.name],
+					imageContent: piImageContent([
+						{
+							text: String(
+								object(result.response)?.output ??
+									object(result.response)?.error ??
+									"",
+							),
+						},
+						...(Array.isArray(result.parts) ? result.parts : []),
+					]),
 				});
 			}
 		}
@@ -682,9 +854,31 @@ function structureDetail(
 export function piPreparedStructureMismatch(
 	payload: unknown,
 	prepared: PiPreparedStructure | undefined,
+	onImageTrim?: (counts: {
+		planned: number;
+		actual: number;
+		trimmed: number;
+	}) => void,
 ): string | undefined {
 	try {
 		if (prepared?.structuralSkipReason) return undefined;
+		if (prepared?.imageBudget) {
+			const plan = prepared.imageBudget;
+			const actual = piWireImageCount(payload);
+			const trimmed = plan.count - actual;
+			if (trimmed < 0) return "comparison=image count";
+			const projected = buildPiPreparedStructure(
+				piTrimOldestImages(plan, trimmed),
+				plan.model,
+				undefined,
+				true,
+			);
+			if (!projected) return "comparison=image projection";
+			const mismatch = piPreparedStructureMismatch(payload, projected);
+			if (!mismatch && trimmed > 0)
+				onImageTrim?.({ planned: plan.count, actual, trimmed });
+			return mismatch;
+		}
 		const body = object(payload);
 		const ollama =
 			prepared?.api === "ollama-chat" &&
@@ -699,6 +893,7 @@ export function piPreparedStructureMismatch(
 			payload,
 			ollama,
 			responses && !!prepared?.responsesMessages,
+			prepared?.imageProjection,
 		);
 		const chat =
 			!!body &&
@@ -728,6 +923,12 @@ export function piPreparedStructureMismatch(
 			const actual = rows[i];
 			if (actual.role !== expected.role)
 				return structureDetail(i, expectedRows, rows, "role");
+			if (
+				expected.imageContent &&
+				JSON.stringify(expected.imageContent) !==
+					JSON.stringify(actual.imageContent)
+			)
+				return structureDetail(i, expectedRows, rows, "content");
 			if (
 				expected.responseTexts !== undefined &&
 				(expected.responseTexts.length !== actual.responseTexts?.length ||
