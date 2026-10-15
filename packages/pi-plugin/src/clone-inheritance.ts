@@ -17,6 +17,7 @@ const CONTENT_ID_SUFFIX = /:(?:p|file)\d+$/;
 type SessionManagerLike = {
 	getSessionId?: () => string | undefined;
 	getBranch?: () => unknown[];
+	getHeader?: () => { parentSession?: unknown } | null;
 };
 
 type CloneContextLike = { sessionManager?: SessionManagerLike };
@@ -164,12 +165,7 @@ export async function handlePiCloneSessionStart(
 	ctx: CloneContextLike,
 	deps: PiCloneInheritanceDeps,
 ): Promise<CopySessionStateForCloneResult | null> {
-	if (
-		event.reason !== "fork" ||
-		typeof event.previousSessionFile !== "string"
-	) {
-		return null;
-	}
+	if (event.reason !== "fork" && event.reason !== "startup") return null;
 
 	let stage = "resolve-destination";
 	let sourceSessionId = "unknown";
@@ -177,6 +173,11 @@ export async function handlePiCloneSessionStart(
 	const writeLog = deps.writeLog ?? log;
 	try {
 		const manager = ctx.sessionManager;
+		const sourceFile =
+			event.reason === "fork"
+				? event.previousSessionFile
+				: manager?.getHeader?.()?.parentSession;
+		if (typeof sourceFile !== "string" || sourceFile.length === 0) return null;
 		if (typeof manager?.getSessionId !== "function") {
 			throw new Error("Pi session manager does not expose getSessionId");
 		}
@@ -186,7 +187,7 @@ export async function handlePiCloneSessionStart(
 		}
 
 		stage = "read-source-header";
-		sourceSessionId = await readPiSessionIdFromFile(event.previousSessionFile);
+		sourceSessionId = await readPiSessionIdFromFile(sourceFile);
 
 		stage = "read-clone-branch";
 		if (typeof manager.getBranch !== "function") {
@@ -202,7 +203,10 @@ export async function handlePiCloneSessionStart(
 			deps.db,
 			sourceSessionId,
 			destinationSessionId,
-			createCloneFilter(branchEntries),
+			{
+				...createCloneFilter(branchEntries),
+				requireEmptyDestinationMeta: event.reason === "startup",
+			},
 		);
 		if (result.kind === "destination-not-empty") {
 			writeLog(
@@ -216,7 +220,7 @@ export async function handlePiCloneSessionStart(
 			deps.signalPendingMarker(destinationSessionId);
 		}
 		writeLog(
-			`[magic-context][pi] clone-inheritance: migrated compartments=${result.compartmentsCopied} tags=${result.tagsCopied} notes=${result.notesCopied} facts=${result.factsCopied} source=${sourceSessionId} dest=${destinationSessionId} reason=fork`,
+			`[magic-context][pi] clone-inheritance: migrated compartments=${result.compartmentsCopied} tags=${result.tagsCopied} notes=${result.notesCopied} facts=${result.factsCopied} source=${sourceSessionId} dest=${destinationSessionId} reason=${event.reason}`,
 		);
 		return result;
 	} catch (error) {

@@ -9,7 +9,7 @@ import {
 	tokenCountUsesByteBound,
 } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { UNKNOWN_FIT_RATIO } from "@magic-context/core/hooks/magic-context/tokenizer-calibration";
-import { tokenizePiMessages } from "./tokenize-pi-messages";
+import { piFitMessageBytes, tokenizePiMessages } from "./tokenize-pi-messages";
 
 export class PiStorageBusyError extends Error {
 	readonly code = "PI_STORAGE_BUSY";
@@ -107,11 +107,11 @@ export function estimatePiOutgoingInputTokens(
 		!hasTokenizerForFit()
 	)
 		return { tokens: 0, trusted: false };
-	const complete = messages.every((message) => {
+	const countable = (message: unknown) => {
 		if (!message || typeof message !== "object") return false;
 		const m = message as { role?: string; content?: unknown };
 		return (
-			["user", "assistant", "toolResult"].includes(m.role ?? "") &&
+			["user", "assistant", "toolResult", "custom"].includes(m.role ?? "") &&
 			(typeof m.content === "string" ||
 				(Array.isArray(m.content) &&
 					m.content.every(
@@ -123,8 +123,8 @@ export function estimatePiOutgoingInputTokens(
 							),
 					)))
 		);
-	});
-	if (!complete) return { tokens: 0, trusted: false };
+	};
+	const complete = messages.every(countable);
 	const measuredForBounds =
 		measuredPrefix &&
 		measuredPrefix.modelKey === observed.modelKey &&
@@ -138,11 +138,12 @@ export function estimatePiOutgoingInputTokens(
 		const priced = measuredForBounds?.appendedMessages ?? messages;
 		const baseline = measuredForBounds?.inputTokens ?? 0;
 		let contentBytes = 0;
-		for (const rawMessage of priced) {
+		for (const rawMessage of priced.filter(countable)) {
 			const message = rawMessage as {
 				content:
 					| string
 					| Array<{
+							type?: string;
 							text?: string;
 							thinking?: string;
 							redacted?: boolean;
@@ -156,14 +157,18 @@ export function estimatePiOutgoingInputTokens(
 				contentBytes += Buffer.byteLength(message.content);
 			else
 				for (const part of message.content) {
+					// Only serialized content is lower-bound evidence. Extension
+					// metadata on a text part must not manufacture an overflow.
 					for (const value of [
-						part.text,
-						part.redacted ? undefined : part.thinking,
-						part.name,
+						part.type === "text" ? part.text : undefined,
+						part.type === "thinking" && !part.redacted
+							? part.thinking
+							: undefined,
+						part.type === "toolCall" ? part.name : undefined,
 					])
 						if (typeof value === "string")
 							contentBytes += Buffer.byteLength(value);
-					if (part.arguments !== undefined)
+					if (part.type === "toolCall" && part.arguments !== undefined)
 						contentBytes += Buffer.byteLength(JSON.stringify(part.arguments));
 				}
 			if (baseline + Math.ceil(contentBytes / 4) > contextLimit) break;
@@ -203,6 +208,28 @@ export function estimatePiOutgoingInputTokens(
 				refusalGrade: false,
 				refusalBasis: "byte-bound",
 			};
+	}
+	if (!complete) {
+		// Unrecognized extension roles/parts require counting their entire JSON,
+		// including metadata the provider might omit. That estimate can request
+		// reclaim, but cannot prove that the actual request exceeds the window.
+		return {
+			tokens: providerMass(
+				{
+					system: observed.systemTokens,
+					tools:
+						observed.toolDefinitionTokens +
+						messages.reduce<number>(
+							(sum, message) => sum + piFitMessageBytes(message),
+							0,
+						),
+				},
+				observed.calibration ?? calibrationForModelKey(observed.modelKey),
+				true,
+			),
+			trusted: true,
+			refusalGrade: false,
+		};
 	}
 	const bounded = messages.some((rawMessage) => {
 		const content = (rawMessage as { content: unknown }).content;
@@ -389,7 +416,7 @@ export function assertPiRawFallbackFits(
 		if (!message || typeof message !== "object") return false;
 		const m = message as { role?: string; content?: unknown };
 		return (
-			["user", "assistant", "toolResult"].includes(m.role ?? "") &&
+			["user", "assistant", "toolResult", "custom"].includes(m.role ?? "") &&
 			(typeof m.content === "string" ||
 				(Array.isArray(m.content) &&
 					m.content.every(
@@ -433,4 +460,22 @@ export function assertPiRawFallbackFits(
 	}
 }
 
-import { piFitMessageBytes } from "./tokenize-pi-messages";
+/** Reject a request only when its proven minimum exceeds the window; an estimated excess requests reclaim. */
+export function classifyPiOutgoingFit(
+	estimate: ReturnType<typeof estimatePiOutgoingInputTokens>,
+	limit: number | undefined,
+): "over-window-proof" | "upper-estimate-pressure" | "fits-or-unknown" {
+	if (!limit || !Number.isFinite(limit) || limit <= 0) return "fits-or-unknown";
+	if (
+		estimate.refusalGrade &&
+		typeof estimate.refusalTokens === "number" &&
+		Number.isFinite(estimate.refusalTokens) &&
+		estimate.refusalTokens > limit
+	)
+		return "over-window-proof";
+	return estimate.trusted &&
+		Number.isFinite(estimate.tokens) &&
+		estimate.tokens > limit
+		? "upper-estimate-pressure"
+		: "fits-or-unknown";
+}

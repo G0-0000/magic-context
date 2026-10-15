@@ -137,7 +137,11 @@ export function tokenizePiMessages(
 			// User/Assistant: content is array of PiTextContent | PiImageContent
 			// | PiThinkingContent | PiToolCall (or a plain string for user
 			// messages — Pi allows that shape too).
-			if (msg.role === "user" || msg.role === "assistant") {
+			if (
+				msg.role === "user" ||
+				msg.role === "assistant" ||
+				msg.role === "custom"
+			) {
 				if (typeof content === "string") {
 					conversation += estimateTokens(content);
 					continue;
@@ -251,7 +255,12 @@ function buildTokenCacheFingerprint(value: object): readonly (string | null)[] {
 		String(message.usage?.reasoning ?? ""),
 		String(message.usage?.output ?? ""),
 	];
-	if (role !== "user" && role !== "assistant" && role !== "toolResult") {
+	if (
+		role !== "user" &&
+		role !== "assistant" &&
+		role !== "toolResult" &&
+		role !== "custom"
+	) {
 		return fingerprint;
 	}
 	if (typeof message.content === "string") {

@@ -35,6 +35,8 @@ export interface CloneTagRow {
 }
 
 export interface CloneSessionStateFilter {
+    /** Require no destination metadata, even if the child has no compartments or tags yet. */
+    requireEmptyDestinationMeta?: boolean;
     resolveBoundaryOrdinal(messageId: string): number | undefined;
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;
@@ -464,6 +466,8 @@ export function copySessionStateForClone(
         // upgrading them; only current stores have indexed temporal choices.
         const hasTemporalDecisions = tableExists(db, "temporal_decisions");
         if (
+            (filter.requireEmptyDestinationMeta === true &&
+                countRows(db, "session_meta", destinationSessionId) > 0) ||
             countRows(db, "compartments", destinationSessionId) > 0 ||
             countRows(db, "tags", destinationSessionId) > 0 ||
             (hasTemporalDecisions &&

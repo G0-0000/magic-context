@@ -9,9 +9,53 @@ import {
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
 	assertPiRawFallbackFits,
+	classifyPiOutgoingFit,
 	estimatePiOutgoingInputTokens,
 } from "./pi-raw-fallback";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
+
+it("custom text keeps lower-bound overflow evidence without pricing notice metadata", () => {
+	const envelope = {
+		modelKey: "unknown/unknown",
+		systemTokens: 100,
+		toolDefinitionTokens: 0,
+	};
+	const custom = {
+		role: "custom",
+		customType: "notice",
+		content: "x".repeat(1200000),
+		display: false,
+	};
+	const estimate = estimatePiOutgoingInputTokens(
+		[custom],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(estimate.refusalTokens).toBe(300000);
+	expect(classifyPiOutgoingFit(estimate, 272000)).toBe("over-window-proof");
+	expect(
+		tokenizePiMessages([{ ...custom, content: "visible notice" }]).conversation,
+	).toBeGreaterThan(0);
+	const metadata = estimatePiOutgoingInputTokens(
+		[{ ...custom, content: "small", details: "x".repeat(1200000) }],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(metadata.tokens).toBeLessThan(272000);
+	expect(classifyPiOutgoingFit(metadata, 272000)).toBe("fits-or-unknown");
+	const unknown = estimatePiOutgoingInputTokens(
+		[{ role: "extension-role", content: "x".repeat(1200000) }],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(unknown.tokens).toBeGreaterThan(272000);
+	expect(classifyPiOutgoingFit(unknown, 272000)).toBe(
+		"upper-estimate-pressure",
+	);
+});
 
 it("Pi fit and fallback byte proxies do not price ciphertext as input text", () => {
 	const envelope = {

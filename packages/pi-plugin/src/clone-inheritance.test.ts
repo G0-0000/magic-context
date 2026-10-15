@@ -1031,4 +1031,35 @@ describe("Pi clone state inheritance", () => {
 		);
 		expect(messages[0]).toContain("run /ctx-wrapup to rebuild, or re-clone");
 	});
+	it("startup fork inherits once and never overwrites a metadata-only resume", async () => {
+		const database = db();
+		seedCompartment(database, { sequence: 1, startId: "u1", endId: "a1" });
+		const directory = await createTestTempDirFromPath(
+			join(tmpdir(), "mc-sdk-fork-"),
+		);
+		temporaryDirectories.push(directory);
+		const file = join(directory, "source.jsonl");
+		await writeFile(file, '{"type":"session","id":"source"}\n');
+		const open = (id: string) =>
+			handlePiCloneSessionStart(
+				{ reason: "startup" },
+				{
+					sessionManager: {
+						getSessionId: () => id,
+						getHeader: () => ({ parentSession: file }),
+						getBranch: () => [user("u1"), assistant("a1")],
+					},
+				},
+				{ db: database, signalPendingMarker: () => {}, writeLog: () => {} },
+			);
+		expect((await open("clone"))?.compartmentsCopied).toBe(1);
+		seedCompartment(database, { sequence: 2, startId: "u1", endId: "a1" });
+		expect((await open("clone"))?.kind).toBe("destination-not-empty");
+		expect(count(database, "compartments")).toBe(1);
+		database
+			.prepare("INSERT INTO session_meta (session_id, harness) VALUES (?, ?)")
+			.run("old-fork", "pi");
+		expect((await open("old-fork"))?.kind).toBe("destination-not-empty");
+		expect(count(database, "compartments", "old-fork")).toBe(0);
+	});
 });

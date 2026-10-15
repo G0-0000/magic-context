@@ -372,6 +372,7 @@ import {
 import { resolvePiProvenInputFloor } from "./pi-proven-floor";
 import {
 	assertPiRawFallbackFits,
+	classifyPiOutgoingFit,
 	estimatePiOutgoingInputTokens,
 	PiDegradedPassError,
 	PiStorageBusyError,
@@ -4875,8 +4876,9 @@ export function registerPiContextHandler(
 				}
 				emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
 				lkgEmergencyRecoveryArmed = emergencyRecoveryArmed;
-				needsEmergencyBump =
-					overflowState.needsEmergencyRecovery && usagePercentage < 95;
+				// Pi's estimate of its entire unmodified history may be discarded below.
+				// Keep the persisted overflow flag so pressure still reaches 95% afterward.
+				needsEmergencyBump = overflowState.needsEmergencyRecovery;
 			} catch (err) {
 				sessionLog(
 					sessionId,
@@ -5341,6 +5343,12 @@ export function registerPiContextHandler(
 			)
 				? structuredClone(event.messages)
 				: null;
+			// Pipeline renderers can mutate their input parts. A second fit-reclaim
+			// pass must not inject history/guidance into an already rendered prefix.
+			const inputForFitReclaim =
+				getHarness() === "pi"
+					? (inputForThinkingFit ?? structuredClone(event.messages))
+					: undefined;
 			const pipelineArgs: RunPipelineArgs = {
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
@@ -5548,10 +5556,9 @@ export function registerPiContextHandler(
 				tTransformDecision,
 			);
 
-			// After tagging+drops have committed, check whether historian
-			// should fire. Historian config is optional — tagging-only
-			// behavior is the Step 4b.2 contract, and historian is
-			// fire-and-forget so we never block the LLM call on it.
+			// After tagging and drops commit, an optional historian can start in
+			// the background. A headless request proven too large joins it below
+			// before deciding whether the rebuilt request can be sent.
 			const tHistorianScheduling = performance.now();
 			const historian = options.historian;
 			budget.stage = "historian scheduling";
@@ -6120,7 +6127,8 @@ export function registerPiContextHandler(
 			runPiDebugAssertion(assertTailHygieneLastWriter);
 			if (
 				!options.compactionOff &&
-				(result.executedWorkThisPass ||
+				(getHarness() === "pi" ||
+					result.executedWorkThisPass ||
 					isCacheBusting ||
 					schedulerDecision === "execute")
 			) {
@@ -6138,11 +6146,17 @@ export function registerPiContextHandler(
 							(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
 						)
 					: undefined;
+				// Exceeding Magic Context's earlier reclaim threshold or replay output
+				// reservation is not proof that the model's actual window is exceeded.
+				const outgoingFitLimit =
+					getHarness() === "pi" && baseWindowGeometry
+						? baseWindowGeometry.derivation.absoluteWall
+						: rawFallbackLimit;
 				let estimate = estimatePiOutgoingInputTokens(
 					outputMessages,
 					envelope,
 					measuredPrefix,
-					rawFallbackLimit,
+					outgoingFitLimit,
 				);
 				if (
 					inputForThinkingFit &&
@@ -6224,6 +6238,112 @@ export function registerPiContextHandler(
 					throw contextRefusalError(
 						"The request remains over the model window after stripping signed thinking and reclaiming context",
 					);
+				if (getHarness() === "pi") {
+					const fitCase = classifyPiOutgoingFit(estimate, outgoingFitLimit);
+					// Active thinking signatures bind earlier messages to the provider's
+					// reasoning. Uncertain metadata size cannot authorize rewriting them;
+					// provider overflow or proof that the request cannot fit can do so.
+					const reclaimHeld =
+						fitCase === "upper-estimate-pressure" && result.strictThinkingKept;
+					if (reclaimHeld)
+						sessionLog(
+							sessionId,
+							"outgoing fit: upper-estimate-pressure; reclaim held by signed prefix",
+						);
+					if (fitCase !== "fits-or-unknown" && !reclaimHeld) {
+						sessionLog(
+							sessionId,
+							`outgoing fit: ${fitCase}; attempting emergency reclaim`,
+						);
+						// Upper estimates may include metadata the provider never sees.
+						// They request reclaim; only a proven minimum above the window
+						// can block the outgoing request.
+						if (fitCase === "over-window-proof" && !ctx.hasUI && historian) {
+							maybeFireHistorian({
+								pi,
+								ctx,
+								sessionId,
+								db: options.db,
+								historian,
+								startGuard: budget.assert,
+								isFirstContextPassForSession: false,
+								activeTags: result.activeTags,
+								rawMessageProvider,
+								ordinalAlignment: ordinalAlignment(),
+								taggerFloor,
+								sessionMeta: getOrCreateSessionMeta(options.db, sessionId),
+								piUsage,
+								pressureSnapshot: {
+									percentage: Math.max(95, usagePercentage),
+									inputTokens: usageInputTokens,
+								},
+								minimumPercentage: 95,
+								publishedHistoryRide: false,
+								historianStateSnapshot: loadPiHistorianStateSnapshot(
+									options.db,
+									sessionId,
+								),
+							});
+							const pending = inFlightHistorian.get(sessionId);
+							if (pending) {
+								budget.stage = "headless fit historian";
+								await budget.wait(pending);
+							}
+						}
+						budget.stage = "outgoing fit reclaim";
+						const freshMeta = getOrCreateSessionMeta(options.db, sessionId);
+						result = await budget.waitMandatory(
+							runPipeline({
+								...pipelineArgs,
+								messages: inputForFitReclaim ?? pipelineArgs.messages,
+								sessionMeta: freshMeta,
+								schedulerDecision: "execute",
+								schedulerDeferReason: null,
+								forceMaterialization: true,
+								upperEstimateOnly: fitCase === "upper-estimate-pressure",
+								forceSignedRebuildForFit: fitCase === "over-window-proof",
+								isCacheBusting:
+									historyRefreshSessions.has(sessionId) ||
+									deferredHistoryRefreshSessions.has(sessionId),
+								injectionPassSnapshot: options.injection
+									? createPiM0M1PassSnapshot({
+											db: options.db,
+											sessionId,
+											compactionOff: false,
+											sessionMeta: freshMeta,
+										})
+									: undefined,
+								contextUsage: {
+									percentage: Math.max(95, usagePercentage),
+									inputTokens: usageInputTokens,
+								},
+							}),
+						);
+						outputMessages = result.messages as PiAgentMessage[];
+						applyPiProactiveThinkingStrip({
+							db: options.db,
+							sessionId,
+							messages: outputMessages,
+							entryIds: resolvePiLkgOutputEntryIds(
+								outputMessages,
+								result.syntheticLeadingCount,
+								(message) =>
+									result.lkgEntryIdByRef.get(message) ??
+									result.postCommitEntryIdByRef.get(message),
+							).map((id) => id ?? undefined),
+							provider: ctx.model?.provider,
+							model: ctx.model?.id,
+							cacheBustingPass: result.bustedThisPass,
+							stripActiveTurn: result.signedPrefixRewritten,
+						});
+						estimate = estimatePiOutgoingInputTokens(
+							outputMessages,
+							envelope,
+							undefined,
+							outgoingFitLimit,
+						);
+					}
+				}
 				const refusal = outgoingContextRefusal(
 					estimate,
 					rawFallbackLimit,
@@ -6234,6 +6354,12 @@ export function registerPiContextHandler(
 					),
 				);
 				if (refusal) throw contextRefusalError(refusal);
+				if (
+					getHarness() === "pi" &&
+					classifyPiOutgoingFit(estimate, outgoingFitLimit) ===
+						"over-window-proof"
+				)
+					throw new PiDegradedPassError("outgoing-over-window");
 			}
 			let serializedOutput: PiLkgSerializedOutput | undefined;
 			let numbersCommitted = false;
@@ -6563,6 +6689,13 @@ export function registerPiContextHandler(
 			// Keep refusal outside the replay try/catch: it must reach Pi, not be
 			// mistaken for another replay failure and swallowed into raw fallthrough.
 			if (transientStorageFailure) throw new PiStorageBusyError({ cause: err });
+			if (
+				err instanceof PiDegradedPassError &&
+				err.site === "outgoing-over-window"
+			)
+				throw contextRefusalError(
+					"The request exceeds the model's context window after reclaim, and no fitting saved request is available; this turn was not sent.",
+				);
 			// Fit is not enough: raw messages omit persisted decisions even when
 			// small. Only a validated last-good replay may serve a failed pass.
 			// Without a resolved session there are no persisted decisions to omit
@@ -6629,7 +6762,8 @@ export function registerPiContextHandler(
  *
  * We store the actual Promise (not just the session id) so the
  * `session_shutdown` handler can cancel and await outstanding runs.
- * Headless sessions do not launch background historians.
+ * Headless requests proven too large also join the tracked run within their
+ * foreground context deadline before retrying reclaim and the fit check.
  */
 const inFlightHistorian = new Map<string, Promise<unknown>>();
 const historianAbortControllers = new Map<string, AbortController>();
@@ -7538,19 +7672,19 @@ function maybeFireHistorian(args: {
 			return;
 		}
 
-		// Headless Pi exits after agent_end without dispatching session_shutdown.
-		// Leave the eligible history in the store for the next interactive pass.
-		if (!ctx.hasUI) return;
+		// Archive summaries, drops and the checkpoint marker commit together.
+		// If a host without a UI exits, its publication lease can be reclaimed.
+		// Such hosts can run this background historian across turns; a request
+		// proven too large waits for its result before the final fit check.
 		triggered = true;
 		sessionLog(
 			sessionId,
 			`historian trigger fired (reason=${trigger.reason ?? "unknown"}) usage=${usage.percentage.toFixed(1)}% — spawning subagent`,
 		);
 
-		// Fire-and-forget for the user's LLM call: the parent agent
-		// turn never awaits this. But we DO track the Promise in
-		// inFlightHistorian so shutdown can cancel the child and wait for
-		// the run's finally block to release its compartment-state lease.
+		// Track the background promise so an oversized headless request can
+		// await it, and shutdown can cancel the child and wait for the run's
+		// finally block to release its compartment-state lease.
 		spawnPiHistorianRun({
 			startGuard: args.startGuard,
 			pi: args.pi,
@@ -7579,6 +7713,8 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	/** Metadata estimates alone cannot rewrite messages bound to an active thinking signature. */
+	upperEstimateOnly?: boolean;
 	recoveryPrefix?: import("./pi-lkg").PiLkgRecoveryPrefix;
 	recoveryRebuildReason?: string;
 	tryReplayHeldIdentityRebuild?: () => void;
@@ -8875,7 +9011,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.reasoningClearing?.prefixBound === true,
 		),
 	);
-	if (protectedSignedPrefix && args.contextUsage.percentage >= 95) {
+	if (
+		protectedSignedPrefix &&
+		args.contextUsage.percentage >= 95 &&
+		!args.upperEstimateOnly
+	) {
 		const candidates = getActiveTagsBySession(args.db, args.sessionId).filter(
 			(tag) => tag.type === "tool" && targets.get(tag.tagNumber)?.canDrop?.(),
 		);
