@@ -720,6 +720,10 @@ pub struct TransformRequest {
     /// It can acknowledge only a system-only identity delta, never other render inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_system_prompt_hash: Option<String>,
+    /// Block IDs (`message_id#block_index`) the host already sent without tag prefixes.
+    /// Recording provider visibility does not authorize rewriting the cached prefix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_raw_block_ids: Vec<String>,
     /// Identity of the materializer's upgrade state, stored so a change is detected as a
     /// render-configuration change consistently with the TypeScript materializer.
     #[serde(default)]
@@ -1018,6 +1022,8 @@ fn present_deprecated_value<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 struct TransformRequestWire {
     #[serde(default)]
+    served_raw_block_ids: Vec<String>,
+    #[serde(default)]
     kind: String,
     #[serde(default = "default_wire_version")]
     v: u32,
@@ -1179,6 +1185,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or_else(default_protected_tags);
         Ok(Self {
+            served_raw_block_ids: wire.served_raw_block_ids,
             kind: wire.kind,
             v: wire.v,
             serializer_profile: wire.serializer_profile.unwrap_or_default(),
@@ -4608,13 +4615,15 @@ fn apply_once(
                 req.session_id,
                 fingerprint
             );
+            let mut pending_tags = loaded.meta.pending_tag_block_ids.clone();
+            pending_tags.extend(req.served_raw_block_ids.iter().cloned());
             let passthrough_overlay = tagging_active.then(|| {
                 tag_overlay_state(
                     &tag_rows,
                     &temporal_marks,
                     &user_hints,
                     &channel1_appends,
-                    &loaded.meta.pending_tag_block_ids,
+                    &pending_tags,
                     &loaded.meta.pending_user_hint_block_ids,
                 )
             });
@@ -4634,6 +4643,7 @@ fn apply_once(
                 .as_ref()
                 .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
             let mut next_meta = loaded.meta.clone();
+            next_meta.pending_tag_block_ids = pending_tags;
             next_meta.served_output_fingerprint = served_fingerprints;
             next_meta.served_output_generation = Some(reasoning_generation(&next_meta));
             let fingerprint_changed = next_meta != loaded.meta;
@@ -4707,6 +4717,8 @@ fn apply_once(
 
         let core = loaded.core.clone();
         let mut meta = loaded.meta.clone();
+        meta.pending_tag_block_ids
+            .extend(req.served_raw_block_ids.iter().cloned());
         let mut trip_count = meta.pending_rewrite_trip_count;
         if trip_count > 0 {
             trip_count = trip_count.saturating_add(1);
@@ -6032,6 +6044,10 @@ fn apply_once(
         serializer_profile,
         Some(SerializerProfile::OpencodeAiSdk | SerializerProfile::OwnedBroca)
     ) {
+        // The host may have sent raw bytes instead of an earlier successful
+        // transform's output. Hide tags for all reported blocks, even older rows.
+        meta.pending_tag_block_ids
+            .extend(req.served_raw_block_ids.iter().cloned());
         // Broca can serve a message the module never rendered (its last-known-good array
         // plus the raw tail after a failed transform), so it needs the same hold.
         let mint_end = pending_overlays
@@ -20629,6 +20645,7 @@ pub(crate) mod tests {
             render_config: cfg.to_string(),
             system_prompt_hash: String::new(),
             adopted_system_prompt_hash: None,
+            served_raw_block_ids: Vec::new(),
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
@@ -36391,6 +36408,110 @@ pub(crate) mod tests {
             .any(|row| row.block_id == "target#1"));
         assert!(s
             .load("opencode-late-tag-bust")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn external_raw_replay_pending_rewrite_holds_existing_tags_before_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "external-raw-pending";
+        s.replace_compartments(session, &[comp(1, 1, 2, "t2#0", "summary")])
+            .unwrap();
+        let present = active_opencode_req(
+            session,
+            "cfg0",
+            vec![item("t2", 2, "covered"), item("t3", 3, "tail")],
+        );
+        run(&s, &present, &spine());
+        let mut absent = active_opencode_req(session, "cfg0", vec![item("t3", 3, "tail")]);
+        absent.served_raw_block_ids = vec!["t3#0".into()];
+        for _ in 0..2 {
+            let response = run(&s, &absent, &spine());
+            assert_eq!(response.action, "PASSTHROUGH");
+            assert_eq!(tail_bytes(&response, "t3"), "tail");
+            assert!(s
+                .load(session)
+                .unwrap()
+                .meta
+                .pending_tag_block_ids
+                .contains("t3#0"));
+        }
+    }
+
+    #[test]
+    fn external_raw_replay_holds_existing_and_new_rows_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "external-raw-replay";
+        let mut request = active_opencode_req(session, "cfg0", vec![item("u1", 1, "inspect")]);
+        run(&s, &request, &spine());
+        request
+            .messages
+            .push(unstamped_opencode_tool_pair("reduce", 2, "reduce-call"));
+        request.messages.push(item("u2", 3, "continue"));
+        let minted = run(&s, &request, &spine());
+        assert!(!minted.prefix_bust_permitted);
+        assert!(s
+            .load_tags_for_session(session)
+            .unwrap()
+            .iter()
+            .any(|r| r.block_id == "reduce#1"));
+
+        // The host reports sending this block raw after its tag row was created;
+        // it never sent the transformed output. That older tag must stay hidden too.
+        request.served_raw_block_ids = vec!["reduce#1".into(), "ordinary#1".into()];
+        request
+            .messages
+            .push(unstamped_opencode_tool_pair("ordinary", 4, "ordinary-call"));
+        request.messages.push(item("u3", 5, "next"));
+        for _ in 0..3 {
+            let response = run(&s, &request, &spine());
+            assert!(!response.prefix_bust_permitted);
+            for mid in ["reduce", "ordinary"] {
+                let message = response
+                    .messages()
+                    .iter()
+                    .find(|m| m.meta.harness_id.as_deref() == Some(mid))
+                    .unwrap();
+                assert!(!first_block_text(&message.content[1])
+                    .unwrap()
+                    .starts_with('§'));
+                assert!(s
+                    .load(session)
+                    .unwrap()
+                    .meta
+                    .pending_tag_block_ids
+                    .contains(&format!("{mid}#1")));
+            }
+        }
+        drop(s);
+        let s = store(dir.path());
+        request.served_raw_block_ids.clear();
+        let response = run(&s, &request, &spine());
+        assert!(!response.prefix_bust_permitted);
+        assert!(s
+            .load(session)
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .contains("reduce#1"));
+        request.render_config = "cfg1".into();
+        let rebuilt = run(&s, &request, &spine());
+        assert!(rebuilt.prefix_bust_permitted);
+        let result = rebuilt
+            .messages()
+            .iter()
+            .find(|m| m.meta.harness_id.as_deref() == Some("reduce"))
+            .unwrap();
+        assert!(first_block_text(&result.content[1])
+            .unwrap()
+            .starts_with('§'));
+        assert!(s
+            .load(session)
             .unwrap()
             .meta
             .pending_tag_block_ids

@@ -114,6 +114,8 @@ import {
     coldStartUncapturedReplay,
     replayLkg,
     resolveLkgModelKeys,
+    validateAnthropicReasoningRuns,
+    validateLkgSeam,
 } from "./lkg-replay";
 import {
     lkgReplayFits,
@@ -179,6 +181,12 @@ import {
     type RustLkgReplayParticipant,
     registerRustLkgReplayParticipant,
 } from "./rust-lkg-freeze-registry";
+import {
+    noteRustServedRaw,
+    preserveRustServedRaw,
+    releaseRustServedRaw,
+    servedRawBlockIds,
+} from "./rust-served-raw";
 import { isAnthropicFamilyRoute } from "./sentinel";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
@@ -1660,6 +1668,7 @@ function buildTransformBody(args: {
     sessionId: string;
     input: unknown[];
     nativeMessages: unknown[];
+    servedRawBlockIds?: string[];
     toolInputKeyOrders?: Record<string, string[]>;
     passInputs: Record<string, unknown>;
     usage: Record<string, number | boolean>;
@@ -1705,6 +1714,7 @@ function buildTransformBody(args: {
         is_subagent: args.passInputs.is_subagent === true,
         messages: args.input,
         native_messages: args.nativeMessages,
+        served_raw_block_ids: args.servedRawBlockIds ?? [],
         tool_input_key_orders: args.toolInputKeyOrders ?? toolInputKeyOrders(args.input),
         ...(args.fullArrayFingerprint ? { full_array_fingerprint: args.fullArrayFingerprint } : {}),
         ...(args.tailDelta
@@ -2302,6 +2312,7 @@ export function createRustModeTransform(
             }),
         );
         const replayInputCount = currentMessages.length;
+        noteRustServedRaw(deps.db, sessionId, currentMessages, replay.messages);
         replaceMessagesInPlace(output, replay.messages);
         ensureState(states, sessionId).lkgLatestServedDigest = lkgServedArrayDigest(
             JSON.stringify(replay.messages),
@@ -2420,8 +2431,10 @@ export function createRustModeTransform(
     const replayParticipant: RustLkgReplayParticipant = {
         lastPassStamp: (sessionId) =>
             states.has(sessionId) ? passStampBySession.get(sessionId) : undefined,
-        enterFreezeFromExternalServe: (sessionId, inputCount) =>
-            enterLkgReplayFreeze(ensureState(states, sessionId), inputCount),
+        enterFreezeFromExternalServe: (sessionId, inputMessages, servedMessages) => {
+            noteRustServedRaw(deps.db, sessionId, inputMessages, servedMessages);
+            enterLkgReplayFreeze(ensureState(states, sessionId), inputMessages.length);
+        },
         replayFits: (sessionId, messages, inputMessages) => {
             try {
                 const fit = lkgReplayFits({
@@ -2697,6 +2710,7 @@ export function createRustModeTransform(
         let decision = "error";
         let materializeReason = "none";
         let frozenReleaseReason: string | null = null;
+        let frozenReleaseFirstChanged = "unknown";
         let schedulerDecision: string | undefined;
         let responseCommitted: boolean | undefined;
         let responsePrefixBustPermitted: boolean | undefined;
@@ -3004,7 +3018,10 @@ export function createRustModeTransform(
                     decision,
                     committed: responseCommitted,
                     prefixBustPermitted: responsePrefixBustPermitted,
-                    reason: materializeReason,
+                    reason:
+                        applied && served && frozenReleaseReason
+                            ? `lkg_frozen_release:${frozenReleaseReason};first_changed=${frozenReleaseFirstChanged};materialize_reason=${materializeReason}`
+                            : materializeReason,
                     schedulerDecision,
                     schedulerDeferReason,
                     historianNoFire,
@@ -3028,7 +3045,9 @@ export function createRustModeTransform(
                     inputTokens: requestInputTokens,
                     tsMs: passObservedAtMs,
                     lkgFrozenReleaseReason:
-                        applied && served ? (frozenReleaseReason ?? undefined) : undefined,
+                        applied && served && frozenReleaseReason
+                            ? `${frozenReleaseReason};first_changed=${frozenReleaseFirstChanged}`
+                            : undefined,
                 });
             }
         };
@@ -3812,6 +3831,7 @@ export function createRustModeTransform(
             };
             let body = buildTransformBody({
                 sessionId,
+                servedRawBlockIds: servedRawBlockIds(deps.db, sessionId),
                 input: encodedInput,
                 nativeMessages: wireDelta ? messages.slice(wireDelta.rawStart) : messages,
                 toolInputKeyOrders: toolInputKeyOrders(encodedInput),
@@ -4143,6 +4163,7 @@ export function createRustModeTransform(
                     const retryWireBuildStartedAt = performance.now();
                     body = buildTransformBody({
                         sessionId,
+                        servedRawBlockIds: servedRawBlockIds(deps.db, sessionId),
                         input: retryEncodedInput,
                         nativeMessages: messages,
                         toolInputKeyOrders: toolInputKeyOrders(retryEncodedInput),
@@ -4312,7 +4333,7 @@ export function createRustModeTransform(
                           }
                         : undefined,
                 );
-                let appliedMessages = moduleMessages;
+                let appliedMessages = moduleMessages as MessageLike[];
                 let markerStrategyFailure: Error | undefined;
                 let replayedFrozenRepresentation = false;
                 const boundaryId = response.boundary_id;
@@ -4505,7 +4526,10 @@ export function createRustModeTransform(
                 }
                 if (!replayedFrozenRepresentation) {
                     const outputCloneStartedAt = performance.now();
-                    appliedMessages = cloneModuleNativeOutput(moduleMessages);
+                    appliedMessages = cloneModuleNativeOutput(moduleMessages) as MessageLike[];
+                    if (!moduleDecisionBusts) {
+                        preserveRustServedRaw(deps.db, sessionId, appliedMessages);
+                    }
                     timings.outputClone += performance.now() - outputCloneStartedAt;
                 }
                 // Delta offsets count the module's array, before host marker insertion or
@@ -4585,14 +4609,11 @@ export function createRustModeTransform(
                         prefixPermissionSupported: permissionSupported,
                         moduleReasoningTrimOnly: response.reasoning_trim_only === true,
                         moduleSignedThinkingReset: response.signed_thinking_reset === true,
-                        // A frozen session hands the strip gate the last-served array on
-                        // every pass that reaches postprocess. That includes a module bust
-                        // whose own edit only trims the oldest reasoning: it still replaces
-                        // the raw tail the freeze served with tagged module output, and a
-                        // signed thinking block is valid only while every byte before it is
-                        // unchanged, so thinking after the first changed message must be
-                        // stripped.
-                        ...(permissionSupported &&
+                        // Only prefix_bust_permitted authorizes replacing the provider's
+                        // cached raw tail. Compare with its previous request even when the
+                        // module only trimmed old reasoning: adopting its tags may also
+                        // change bytes before newer signed thinking and invalidate it.
+                        ...(moduleDecisionBusts &&
                         (passStartedFrozen || frozenReleaseReason || coldStartLastServed)
                             ? { frozenReleaseLastServed }
                             : {}),
@@ -4610,6 +4631,40 @@ export function createRustModeTransform(
                     // work is not an admitted cut, even if fresh native output fits.
                     // Keep the durable fence until a supported recovery repairs it.
                     if (markerStrategyFailure) throw markerStrategyFailure;
+                }
+                if (!moduleDecisionBusts && !replayedFrozenRepresentation) {
+                    preserveRustServedRaw(deps.db, sessionId, appliedMessages);
+                    // Persisted thinking-removal decisions are already authorized.
+                    // Restoring saved raw parts must not reintroduce those blocks.
+                    replayRustModeBindingMismatchStrips({
+                        db: deps.db,
+                        sessionId,
+                        messages: appliedMessages,
+                        resolvedProviderID: model?.providerID,
+                    });
+                    if (
+                        servedRawBlockIds(deps.db, sessionId).length > 0 &&
+                        (!validateLkgSeam([], appliedMessages, model?.providerID ?? null) ||
+                            (model?.providerID === "anthropic" &&
+                                !validateAnthropicReasoningRuns(
+                                    appliedMessages.map((message) => ({
+                                        ...message,
+                                        // Validate provider content, not empty sentinels OpenCode removes before dispatch.
+                                        parts: message.parts.filter(
+                                            (part) =>
+                                                !isRecord(part) ||
+                                                !["text", "reasoning"].includes(
+                                                    String(part.type),
+                                                ) ||
+                                                part.text !== "",
+                                        ),
+                                    })),
+                                )))
+                    ) {
+                        throw new EmergencyFailClosedError(
+                            "Rust served-raw replacement has no valid tool/thinking seam",
+                        );
+                    }
                 }
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     assertNativeBoundary(appliedMessages, sessionId, boundaryId);
@@ -4684,6 +4739,43 @@ export function createRustModeTransform(
                     }
                 }
                 logStage(sessionId, "apply", applyStartedAt, timings);
+
+                if (
+                    frozenReleaseReason &&
+                    frozenReleaseLastServed.messages &&
+                    [...frozenReleaseLastServed.messages, ...appliedMessages].every(
+                        (message) =>
+                            isRecord(message) &&
+                            isRecord(message.info) &&
+                            Array.isArray(message.parts),
+                    )
+                ) {
+                    frozenReleaseFirstChanged = "none";
+                    const byId = new Map(
+                        appliedMessages.map((message) => [message.info.id, message]),
+                    );
+                    for (const before of frozenReleaseLastServed.messages as MessageLike[]) {
+                        const after = byId.get(before.info.id);
+                        const index = before.parts.findIndex(
+                            (part, i) => JSON.stringify(part) !== JSON.stringify(after?.parts[i]),
+                        );
+                        if (!after || index >= 0) {
+                            const blockIndex =
+                                index > 0
+                                    ? (
+                                          encodeOpenCodeMessagesToCk([
+                                              { ...before, parts: before.parts.slice(0, index) },
+                                          ])[0].ck.content as unknown[]
+                                      ).length
+                                    : 0;
+                            frozenReleaseFirstChanged = `${before.info.id}#${blockIndex}`;
+                            break;
+                        }
+                    }
+                }
+                if (replayedFrozenRepresentation) {
+                    noteRustServedRaw(deps.db, sessionId, messages, appliedMessages);
+                }
                 // output.messages commonly aliases the raw input array, so preserve the entry ids
                 // before installation replaces that array with native output.
                 const lkgInputIds = messages.map((message) => message.info.id);
@@ -5085,6 +5177,11 @@ export function createRustModeTransform(
                         );
                     }
                 }
+            }
+            // A rejected capture or bookkeeping fault did not replace the provider's
+            // raw bytes. Clear served-raw records only after the entire pass succeeds.
+            if (moduleDecisionBusts) {
+                releaseRustServedRaw(deps.db, sessionId, output.messages as MessageLike[]);
             }
         } catch (error) {
             if (markerDefinitelyNoCut) {

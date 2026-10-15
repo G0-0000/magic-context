@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 use subc_client_rs::{CallOptions, ConsumerOptions, RetryBackoff, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 
+#[path = "support/daemon_checkout.rs"]
+mod daemon_checkout;
 #[path = "support/executable.rs"]
 mod executable_staging;
 
@@ -93,6 +95,9 @@ async fn cereb_full_sync_through_real_daemon() {
     let fixture =
         fs::read(std::env::var("MC_SYNC_PROBE_FIXTURE").expect("fixture required")).unwrap();
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     let daemon_bin = ensure_daemon_binary(&workspace);
     let module_bin = ensure_module_binary();
     let temp_root = TempRoot(unique_temp_dir("mc-full-sync-probe"));
@@ -164,6 +169,9 @@ async fn mc_transform_spine_through_real_daemon() {
     std::env::remove_var(subc_os::LAUNCH_NONCE_FD_ENV);
 
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     // Reuse the lock-pinned daemon and the module Cargo built for this test target.
     let daemon_bin = ensure_daemon_binary(&workspace);
     let module_bin = ensure_module_binary();
@@ -985,6 +993,9 @@ fn daemon_artifacts_are_built_and_copied_once() {
     use std::os::unix::fs::MetadataExt;
 
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     let first = ensure_daemon_build(&workspace);
     let daemon_inode = fs::metadata(&first.daemon).unwrap().ino();
     let cli_inode = fs::metadata(&first.cli).unwrap().ino();
@@ -1106,6 +1117,9 @@ async fn mc_pipe_only_supervision_through_real_daemon() {
     };
 
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     let daemon_bin = ensure_daemon_binary(&workspace);
     let module_bin = ensure_module_binary();
     let ck_bin = ensure_daemon_build(&workspace).cli.clone();
@@ -1362,6 +1376,9 @@ impl Drop for StopSupervisedModule<'_> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hostless_store_init_first_transform_through_real_daemon() {
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     let daemon_bin = ensure_daemon_binary(&workspace);
     let module_bin = ensure_module_binary();
     let parent = std::env::temp_dir().join("magic-context/store-init");

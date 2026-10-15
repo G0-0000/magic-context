@@ -178,9 +178,11 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
     let lastInput: MessageLike[] = [];
     let statusFails = false;
     const moduleClient: RustModeModuleClient = {
-        call: async ({ method }) => {
+        call: async ({ method, body }) => {
             if (method === "session.status" && statusFails) throw new Error("no answer");
             if (method !== "transform") return { ok: true };
+            // Page uploads are not separate scheduler decisions; only the final page applies.
+            if (body?.transform_page_complete === false) return { ok: true };
             pass += 1;
             const step = script.shift() ?? "SOFT+";
             if (step === "throw") throw new Error("daemon unavailable");
@@ -722,12 +724,9 @@ describe("a restart resumes a freeze the durable slot proves", () => {
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
     });
 
-    it("restart right after an uncaptured failure replay adopts module output (gap closed by the v95 marker)", async () => {
-        // A replay served after a failure is not captured, so the durable slot does
-        // not hold the raw tail it served and nothing inside the slot proves the
-        // freeze. Nothing else durable records the freeze either (the planned fix is a
-        // frozen marker column on the slot row, added by schema migration v95), so the
-        // restarted adapter adopts module output. This pins that known gap until then.
+    it("restart right after an uncaptured failure replay preserves its raw tail", async () => {
+        // The slot predates the raw tail, but the separate served-part evidence
+        // survives restart and keeps the module's later tags hidden.
         const s = frozenSession("restart-after-failure");
         const sid = s.sessionId;
         s.setModuleOutput(tagAllUsers);
@@ -742,11 +741,11 @@ describe("a restart resumes a freeze the durable slot proves", () => {
 
         s.restart();
         const served = await s.run([...conversation], "SOFT+");
-        expect(textOf(served, "m2")).toBe("§3§ turn 2");
+        expect(textOf(served, "m2")).toBe("turn 2");
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
     });
 
-    it("a restart right after an uncaptured failure replay strips the thinking produced against its raw tail", async () => {
+    it("a restart right after an uncaptured failure replay keeps thinking bound to its unchanged raw tail", async () => {
         const s = frozenSession("restart-after-failure-thinking");
         const sid = s.sessionId;
         s.setModuleOutput(tagAllUsers);
@@ -764,11 +763,9 @@ describe("a restart resumes a freeze the durable slot proves", () => {
 
         s.restart();
         const served = await s.run([...conversation], "SOFT+");
-        // The module retags m2, changing the prefix a2's thinking was produced
-        // against, so a2's thinking must not be sent behind it.
-        expect(textOf(served, "m2")).toBe("§3§ turn 2");
-        expect(hasReasoningOn(served, "a2")).toBe(false);
-        // The strip is persisted, so the next pass serves the same bytes.
+        expect(textOf(served, "m2")).toBe("turn 2");
+        expect(hasReasoningOn(served, "a2")).toBe(true);
+        // The same raw representation is retained on the next healthy pass.
         conversation.push(assistant(sid, "a3"), user(sid, "m4", "turn 4"));
         const next = await s.run([...conversation], "SOFT+");
         expect(sha(next.slice(0, served.length))).toBe(sha(served));
@@ -932,15 +929,20 @@ describe("a healthy frozen pass is admitted like any other replay", () => {
         // The freeze can still end: a module bust (what /ctx-flush requests) whose
         // output fits is served, and thinking the freeze served raw is stripped.
         s.setModuleOutput((input) =>
-            tagAllUsers(input).map((message) =>
-                (message as MessageLike).info.id === "m-huge"
-                    ? {
-                          ...(message as MessageLike),
-                          parts: [{ type: "text", text: "[compacted]" }],
-                      }
-                    : message,
-            ),
+            tagAllUsers(input).map((message) => {
+                const native = message as MessageLike;
+                return {
+                    ...native,
+                    parts:
+                        native.info.id === "m-huge"
+                            ? [{ type: "text", text: "[compacted]" }]
+                            : native.parts.filter(
+                                  (part) => (part as { type?: string }).type !== "reasoning",
+                              ),
+                };
+            }),
         );
+        s.setResponseExtras({ signed_thinking_reset: true });
         const served = await s.run([...conversation], "HARD");
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
         expect(JSON.stringify(served)).toContain("[compacted]");
