@@ -9,9 +9,103 @@ import {
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
 	assertPiRawFallbackFits,
+	classifyPiOutgoingFit,
 	estimatePiOutgoingInputTokens,
 } from "./pi-raw-fallback";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
+
+it("known text, thinking and tool fields survive unsupported sibling parts in the lower bound", () => {
+	const envelope = {
+		modelKey: "mock/mock",
+		systemTokens: 10,
+		toolDefinitionTokens: 0,
+	};
+	for (const unsupported of [
+		{ type: "image", mimeType: "image/png", data: "opaque" },
+		{ type: "extension-metadata", details: "not provider text" },
+		null,
+	]) {
+		for (const known of [
+			{ type: "text", text: "word ".repeat(100000) },
+			{ type: "thinking", thinking: "word ".repeat(100000) },
+			{
+				type: "toolCall",
+				name: "probe",
+				arguments: { text: "word ".repeat(100000) },
+			},
+		]) {
+			const estimate = estimatePiOutgoingInputTokens(
+				[{ role: "assistant", content: [unsupported, known] }],
+				envelope,
+				undefined,
+				50000,
+			);
+			expect(estimate.refusalTokens).toBeGreaterThanOrEqual(125000);
+			expect(classifyPiOutgoingFit(estimate, 50000)).toBe("over-window-proof");
+		}
+		const uncertain = estimatePiOutgoingInputTokens(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "small" },
+						unsupported,
+						{ type: "extension", text: "x".repeat(1000000) },
+					],
+				},
+			],
+			envelope,
+			undefined,
+			50000,
+		);
+		expect(classifyPiOutgoingFit(uncertain, 50000)).toBe(
+			"upper-estimate-pressure",
+		);
+	}
+});
+
+it("custom text keeps lower-bound overflow evidence without pricing notice metadata", () => {
+	const envelope = {
+		modelKey: "unknown/unknown",
+		systemTokens: 100,
+		toolDefinitionTokens: 0,
+	};
+	const custom = {
+		role: "custom",
+		customType: "notice",
+		content: "x".repeat(1200000),
+		display: false,
+	};
+	const estimate = estimatePiOutgoingInputTokens(
+		[custom],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(estimate.refusalTokens).toBe(300000);
+	expect(classifyPiOutgoingFit(estimate, 272000)).toBe("over-window-proof");
+	expect(
+		tokenizePiMessages([{ ...custom, content: "visible notice" }]).conversation,
+	).toBeGreaterThan(0);
+	const metadata = estimatePiOutgoingInputTokens(
+		[{ ...custom, content: "small", details: "x".repeat(1200000) }],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(metadata.tokens).toBeLessThan(272000);
+	expect(classifyPiOutgoingFit(metadata, 272000)).toBe("fits-or-unknown");
+	const unknown = estimatePiOutgoingInputTokens(
+		[{ role: "extension-role", content: "x".repeat(1200000) }],
+		envelope,
+		undefined,
+		272000,
+	);
+	expect(unknown.tokens).toBeGreaterThan(272000);
+	expect(classifyPiOutgoingFit(unknown, 272000)).toBe(
+		"upper-estimate-pressure",
+	);
+});
 
 it("Pi fit and fallback byte proxies do not price ciphertext as input text", () => {
 	const envelope = {

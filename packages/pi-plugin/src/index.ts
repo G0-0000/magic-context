@@ -1968,6 +1968,12 @@ async function startPiMagicContextRuntime(
 			ctx.ui.notify(formatProtectedTagsDeprecationNotice(), "warning");
 		}
 
+		// Inherit before saving cache-TTL preferences creates the child's metadata
+		// row: the clone guard uses that row to distinguish first open from resume.
+		await handlePiCloneSessionStart(event, ctx, {
+			db,
+			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
+		});
 		const sessionId = resolveSessionId(ctx);
 		if (
 			!piMarkerRehydrationLogged &&
@@ -1986,11 +1992,6 @@ async function startPiMagicContextRuntime(
 				modelKey: canonicalPiModelKey(model.provider, model.id),
 			});
 		}
-
-		await handlePiCloneSessionStart(event, ctx, {
-			db,
-			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
-		});
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

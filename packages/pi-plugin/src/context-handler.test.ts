@@ -73,6 +73,7 @@ import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudg
 import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import * as readSessionFormatting from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { setBootQuietPeriodForTests } from "@magic-context/core/plugin/boot-quiet";
+import * as loggerModule from "@magic-context/core/shared/logger";
 import { clearModelsDevCache } from "@magic-context/core/shared/models-dev-cache";
 import { resolvePromptSurface } from "@magic-context/core/shared/prompt-surface";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -113,6 +114,10 @@ import {
 	mustMaterializePi,
 } from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
+import {
+	classifyPiOutgoingFit,
+	estimatePiOutgoingInputTokens,
+} from "./pi-raw-fallback";
 import { observePiPublicationForTest } from "./publication-observer-fixture.test";
 import { capturePiServedArray } from "./served-array-ledger";
 import {
@@ -4335,77 +4340,79 @@ describe("registerPiContextHandler", () => {
 		).resolves.toBe(false);
 	});
 
-	it("uses live forward pressure when deciding whether to fire the historian", async () => {
-		const db = createTestDb();
-		const sessionId = "ses-forward-historian-floor";
-		try {
-			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
-			const runner = {
-				harness: "pi",
-				run: mock(async () => ({
-					ok: true as const,
-					assistantText:
-						'<compartment start="1" end="2" title="Forward"><p1>Forward pressure history.</p1></compartment>',
-					durationMs: 1,
-				})),
-			} as unknown as SubagentRunner;
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				protectedTags: 0,
-				historian: {
-					runner,
-					model: "test/historian",
-					historianChunkTokens: 20_000,
-					executeThresholdPercentage: 80,
+	for (const hasUI of [true, false])
+		it(`uses live forward pressure when deciding whether to fire the historian (hasUI=${hasUI})`, async () => {
+			const db = createTestDb();
+			const sessionId = "ses-forward-historian-floor";
+			try {
+				updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+				const runner = {
+					harness: "pi",
+					run: mock(async () => ({
+						ok: true as const,
+						assistantText:
+							'<compartment start="1" end="2" title="Forward"><p1>Forward pressure history.</p1></compartment>',
+						durationMs: 1,
+					})),
+				} as unknown as SubagentRunner;
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
 					protectedTags: 0,
-				},
-			});
-			const handler = fake.handlers.get("context") as (
-				event: { messages: never[] },
-				ctx: never,
-			) => Promise<{ messages: never[] }>;
-			const prime = [userMessage("prime", 1)] as never[];
-			await handler({ messages: prime }, {
-				...fakeContext(sessionId, process.cwd(), ["entry-prime"], prime),
-				getContextUsage: () => ({
-					tokens: 1_000,
-					percent: 1,
-					contextWindow: 100_000,
-				}),
-			} as never);
-			updateSessionMeta(db, sessionId, {
-				lastResponseTime: Date.now(),
-				cacheTtl: "59m",
-				lastContextPercentage: 68,
-				lastInputTokens: 68_000,
-			});
-			const messages = Array.from({ length: 12 }, (_, index) =>
-				index % 2 === 0
-					? userMessage(`user ${index}`, index + 2)
-					: assistantMessage(`assistant ${index}`, index + 2),
-			) as never[];
-			await handler({ messages }, {
-				...fakeContext(
-					sessionId,
-					process.cwd(),
-					messages.map((_, index) => `entry-${index + 1}`),
-					messages,
-				),
-				getContextUsage: () => ({
-					tokens: 85_000,
-					percent: 10,
-					contextWindow: 100_000,
-				}),
-			} as never);
-			await awaitInFlightHistorians();
+					historian: {
+						runner,
+						model: "test/historian",
+						historianChunkTokens: 20_000,
+						executeThresholdPercentage: 80,
+						protectedTags: 0,
+					},
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				const prime = [userMessage("prime", 1)] as never[];
+				await handler({ messages: prime }, {
+					...fakeContext(sessionId, process.cwd(), ["entry-prime"], prime),
+					getContextUsage: () => ({
+						tokens: 1_000,
+						percent: 1,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				updateSessionMeta(db, sessionId, {
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+					lastContextPercentage: 68,
+					lastInputTokens: 68_000,
+				});
+				const messages = Array.from({ length: 12 }, (_, index) =>
+					index % 2 === 0
+						? userMessage(`user ${index}`, index + 2)
+						: assistantMessage(`assistant ${index}`, index + 2),
+				) as never[];
+				await handler({ messages }, {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						messages.map((_, index) => `entry-${index + 1}`),
+						messages,
+					),
+					hasUI,
+					getContextUsage: () => ({
+						tokens: 85_000,
+						percent: 10,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				await awaitInFlightHistorians();
 
-			expect(runner.run).toHaveBeenCalledTimes(1);
-		} finally {
-			clearContextHandlerSession(sessionId);
-			closeQuietly(db);
-		}
-	});
+				expect(runner.run).toHaveBeenCalledTimes(1);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
 
 	it("skips trigger-fired historian while /ctx-wrapup is active", async () => {
 		const db = createTestDb();
@@ -9281,12 +9288,15 @@ it("Pi healthy send admits an uncalibrated protected result above the fit upper-
 		model: {
 			provider: "unmeasured-provider",
 			id: "unmeasured-model",
-			contextWindow: 16000,
+			// Injected guidance plus visible tool text prove at least 16,386 tokens.
+			// A 20k window keeps this test about an inflated estimate, not input
+			// whose proven minimum already exceeds the model's window.
+			contextWindow: 20000,
 		},
 		getContextUsage: () => ({
 			tokens: 8000,
 			percent: 50,
-			contextWindow: 16000,
+			contextWindow: 20000,
 		}),
 	};
 	try {
@@ -9296,6 +9306,201 @@ it("Pi healthy send admits an uncalibrated protected result above the fit upper-
 		);
 		expect(JSON.stringify(result)).toContain("word word");
 	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("native Pi final fence refuses proven prose overflow without protected tools", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-prose-fit-fence";
+	const fake = createFakePi();
+	Object.assign(fake.pi, { getAllTools: () => [] });
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTags: 0,
+		injection: { injectionBudgetTokens: 10000 },
+	});
+	const handler = fake.handlers.get("context") as Parameters<typeof runPass>[0];
+	try {
+		await expect(
+			handler(
+				{ messages: [userMessage("word ".repeat(100000), 1)] as never[] },
+				{
+					...fakeContext(sessionId),
+					getSystemPrompt: () => "You are helpful.",
+					model: { provider: "mock", id: "mock", contextWindow: 50000 },
+				} as never,
+			),
+		).rejects.toThrow("this turn was not sent");
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("native Pi upper-only metadata pressure reclaims but serves fitting custom text", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-metadata-fit-pressure";
+	const fake = createFakePi();
+	Object.assign(fake.pi, { getAllTools: () => [] });
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTags: 0,
+		injection: { injectionBudgetTokens: 10000 },
+	});
+	const handler = fake.handlers.get("context") as Parameters<typeof runPass>[0];
+	const custom = {
+		role: "custom",
+		content: [
+			{ type: "text", text: "small visible notice" },
+			{ type: "extension-metadata", details: "x".repeat(1000000) },
+		],
+		customType: "notice",
+		timestamp: 1,
+	};
+	expect(
+		classifyPiOutgoingFit(
+			estimatePiOutgoingInputTokens(
+				[custom],
+				{
+					modelKey: "mock/mock",
+					systemTokens: 100,
+					toolDefinitionTokens: 0,
+				},
+				undefined,
+				50000,
+			),
+			50000,
+		),
+	).toBe("upper-estimate-pressure");
+	try {
+		const result = await handler(
+			{ messages: [custom, userMessage("continue", 2)] as never[] },
+			{
+				...fakeContext(sessionId),
+				getSystemPrompt: () => "You are helpful.",
+				model: { provider: "mock", id: "mock", contextWindow: 50000 },
+			} as never,
+		);
+		expect(result?.messages?.some((message) => message.role === "custom")).toBe(
+			true,
+		);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("unknown-limit overflow floors pressure after the raw-branch guard discards a reading above 95 percent", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-raw-recovery-floor";
+	const fake = createFakePi();
+	const lines: string[] = [];
+	const log = spyOn(loggerModule, "sessionLog").mockImplementation(
+		(_id, ...parts) => {
+			lines.push(parts.join(" "));
+		},
+	);
+	registerPiContextHandler(fake.pi as never, { db });
+	const handler = fake.handlers.get("context") as Parameters<typeof runPass>[0];
+	const messages = [
+		userMessage("completed request", 1),
+		assistantMessage("completed answer", 2),
+		userMessage("resume", 3),
+	];
+	const base = fakeContext(
+		sessionId,
+		process.cwd(),
+		["u1", "a1", "u2"],
+		messages,
+	);
+	const ctx = {
+		...base,
+		model: { provider: "mock", id: "mock", contextWindow: 272000 },
+		getContextUsage: () => ({
+			tokens: 1748000,
+			percent: 642,
+			contextWindow: 272000,
+		}),
+		sessionManager: {
+			...base.sessionManager,
+			getBranch: () => [
+				...base.sessionManager.getBranch(),
+				{ type: "context_edit", id: "retry-edit" },
+			],
+		},
+	};
+	try {
+		recordOverflowDetected(db, sessionId, undefined, "mock/mock");
+		await handler({ messages: messages as never[] }, ctx as never);
+		expect(
+			lines.some((line) =>
+				line.includes("overflow recovery flag set — bumping percentage to 95%"),
+			),
+		).toBe(true);
+		expect(lines.some((line) => line.includes("EMERGENCY=true"))).toBe(true);
+	} finally {
+		log.mockRestore();
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("headless proven overflow joins its background historian before refusing", async () => {
+	const db = createTestDb();
+	const sessionId = "pi-headless-fit-join";
+	const fake = createFakePi();
+	Object.assign(fake.pi, { getAllTools: () => [] });
+	let settled = false;
+	const run = spyOn(piHistorian, "runPiHistorian").mockImplementation(
+		async () => {
+			await Bun.sleep(100);
+			settled = true;
+		},
+	);
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		protectedTags: 0,
+		injection: { injectionBudgetTokens: 10000 },
+		historian: {
+			runner: {} as SubagentRunner,
+			model: "test/model",
+			historianChunkTokens: 20000,
+			executeThresholdPercentage: 65,
+			protectedTags: 0,
+		},
+	});
+	const handler = fake.handlers.get("context") as Parameters<typeof runPass>[0];
+	const messages = Array.from({ length: 12 }, (_, i) =>
+		i % 2
+			? assistantMessage("done", i + 1)
+			: userMessage(i === 0 ? "word ".repeat(100000) : "continue", i + 1),
+	);
+	try {
+		await expect(
+			handler({ messages: messages as never[] }, {
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					messages.map((_, i) => `m${i + 1}`),
+					messages,
+				),
+				hasUI: false,
+				getSystemPrompt: () => "You are helpful.",
+				model: { provider: "mock", id: "mock", contextWindow: 50000 },
+				getContextUsage: () => ({
+					tokens: 45000,
+					percent: 90,
+					contextWindow: 50000,
+				}),
+			} as never),
+		).rejects.toThrow("this turn was not sent");
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(settled).toBe(true);
+	} finally {
+		await awaitInFlightHistorians(sessionId);
+		run.mockRestore();
 		clearContextHandlerSession(sessionId);
 		closeQuietly(db);
 	}
