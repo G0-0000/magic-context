@@ -489,6 +489,8 @@ describe("Pi context handler LKG replay", () => {
 				// The holder needs its own busy timeout: its COMMIT can meet a
 				// concurrent reader from the handler, and without one it would die
 				// with SQLITE_BUSY instead of releasing the lock as the scenario needs.
+				// Hold a real cross-process lock until the foreground request encounters it,
+				// then require that request to succeed without replaying previously served bytes.
 				const writer = spawn(
 					process.execPath,
 					[
@@ -497,47 +499,65 @@ describe("Pi context handler LKG replay", () => {
 					const db = new Database(${JSON.stringify(path)});
 					db.exec('PRAGMA busy_timeout=5000');
 					db.exec('BEGIN IMMEDIATE'); console.log('locked');
-					setTimeout(() => { db.exec('COMMIT'); db.close(); }, 80);`,
+					if ((await Bun.stdin.text()) !== 'RELEASE\\n') throw new Error('missing release signal');
+					db.exec('COMMIT'); db.close(); console.log('committed');`,
 					],
-					{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+					{ stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
 				);
-				let writerStderr = "";
-				writer.stderr.on("data", (chunk) => {
-					writerStderr += String(chunk);
+				const locked = Promise.withResolvers<void>();
+				let stdout = "";
+				let stderr = "";
+				writer.stdout.on("data", (chunk) => {
+					stdout += chunk.toString();
+					if (stdout.split("\n").includes("locked")) locked.resolve();
 				});
-				const exited = new Promise<void>((resolve, reject) => {
-					writer.once("error", reject);
-					writer.once("exit", (code) =>
-						code === 0
-							? resolve()
-							: reject(
-									new Error(`writer exit ${code}: ${writerStderr.trim()}`),
-								),
-					);
+				writer.stderr.on("data", (chunk) => {
+					stderr += chunk.toString();
+				});
+				const exited = new Promise<{ code: number | null; error?: Error }>(
+					(resolve) => {
+						writer.once("error", (error) => resolve({ code: null, error }));
+						writer.once("close", (code) => resolve({ code }));
+					},
+				);
+				const exec = db.exec.bind(db);
+				let collided = false;
+				const admission = spyOn(db, "exec").mockImplementation((sql) => {
+					try {
+						return exec(sql);
+					} catch (error) {
+						if (sql === "BEGIN IMMEDIATE" && !collided) {
+							collided = true;
+							writer.stdin.end("RELEASE\n");
+						}
+						throw error;
+					}
 				});
 				try {
-					await new Promise<void>((resolve, reject) => {
-						writer.stdout.once("data", () => resolve());
-						writer.once("error", reject);
-					});
+					await Promise.race([
+						locked.promise,
+						exited.then(({ code, error }) => {
+							throw new Error(
+								`writer exited before locked (${code}): ${error ?? ""}\n${stderr}`,
+							);
+						}),
+					]);
 					const raw = [userMessage(`first turn ${trial}`, 1)];
 					const ctx = fakeContext(sessionId, dir, ["entry-1"], raw);
-					const startedAt = performance.now();
 					await host.emit(handler as never, raw, ctx);
-					const elapsedMs = performance.now() - startedAt;
-					if (process.env.MC_BACKGROUND_BENCHMARK === "1")
-						console.info(
-							JSON.stringify({
-								scenario: "first-turn-80ms-holder",
-								trial,
-								turnMs: elapsedMs,
-								refused: host.controller.signal.aborted,
-							}),
-						);
-					expect(elapsedMs).toBeLessThan(1500);
+					expect(collided).toBe(true);
 					if (host.controller.signal.aborted) refused++;
+					// Saving the last-known-good request is queued on the event loop. Finish
+					// that write before another child starts a transaction on this database.
+					await nextImmediate();
 				} finally {
-					await exited;
+					admission.mockRestore();
+					if (!writer.stdin.writableEnded) writer.stdin.end("RELEASE\n");
+					const { code, error } = await exited;
+					expect(code, `writer exit ${code}: ${error ?? ""}\n${stderr}`).toBe(
+						0,
+					);
+					expect(stdout.split("\n")).toContain("committed");
 				}
 			}
 			expect(refused).toBe(0);
