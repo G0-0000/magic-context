@@ -334,6 +334,16 @@ import {
 	registerPiGuardedContext,
 } from "./pi-context-refusal";
 import { createPiFallbackIndex } from "./pi-fallback-index";
+import {
+	clearPiFitReclaimInput,
+	clearPiUpperReclaimSession,
+	piFitOverflowPossible,
+	piUpperReclaimCursor,
+	recordPiUpperEstimateReclaim,
+	requestPiFitReclaimInput,
+	resetPiUpperEstimateReclaim,
+	shouldReclaimPiUpperEstimate,
+} from "./pi-fit-reclaim";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import {
 	clearPiLkgSessionState,
@@ -345,6 +355,7 @@ import {
 	piStorageErrorReason,
 	reconcilePiLkgEntryIds,
 	resolvePiLkgOutputEntryIds,
+	restorePiLkgInputForFit,
 } from "./pi-lkg";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
@@ -5337,18 +5348,49 @@ export function registerPiContextHandler(
 			if (beforePipelineForTests)
 				await budget.waitMandatory(beforePipelineForTests());
 			assertCurrentPass();
-			const inputForThinkingFit = isPrefixBoundThinkingModel(
-				ctx.model?.provider,
-				ctx.model?.id,
-			)
-				? structuredClone(event.messages)
-				: null;
-			// Pipeline renderers can mutate their input parts. A second fit-reclaim
-			// pass must not inject history/guidance into an already rendered prefix.
-			const inputForFitReclaim =
-				getHarness() === "pi"
-					? (inputForThinkingFit ?? structuredClone(event.messages))
-					: undefined;
+			const fitInputStart = hasPiTransformTimingObserver()
+				? performance.now()
+				: undefined;
+			const nativeFitPossible =
+				getHarness() === "pi" &&
+				!options.compactionOff &&
+				piFitOverflowPossible({
+					hasUI: ctx.hasUI,
+					inputTokens: usageInputTokens,
+					// Reuse the saved-request rebuild signal; do not scan the old prefix here.
+					recoveryArmed: emergencyRecoveryArmed || !!recovery.rebuildReason,
+					forceMaterialization,
+					imported:
+						looksLikeImportedSession ||
+						(usageInputTokens <= 0 &&
+							(isFirstContextPassForSession ||
+								lkgPassSnapshot?.replayFailure !== null)),
+					coldInjection: !!options.injection && !sessionMeta.cachedM0Bytes,
+					cacheBusting: isCacheBusting,
+					sessionId,
+					appendedMessages:
+						lkgPassSnapshot?.pristineTail ?? event.messages.slice(-1),
+					contextLimit: rawFallbackLimit,
+					forcePercentage: forceMaterializationPercentage,
+				});
+			let inputForThinkingFit: unknown[] | null =
+				(getHarness() !== "pi" || nativeFitPossible) &&
+				isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id)
+					? structuredClone(event.messages)
+					: null;
+			// Renderers can mutate parts, and JSONL lacks context added by extensions.
+			// Preserve the original only for recovery, missing usage, near-capacity
+			// input, a large new tail, or an invalidated cache; not steady low-pressure turns.
+			let inputForFitReclaim: unknown[] | undefined = nativeFitPossible
+				? (inputForThinkingFit ?? structuredClone(event.messages))
+				: undefined;
+			if (fitInputStart !== undefined)
+				recordPiTransformTiming({
+					sessionId,
+					stage: "fitInputPreparation",
+					elapsedMs: performance.now() - fitInputStart,
+					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
+				});
 			const pipelineArgs: RunPipelineArgs = {
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
@@ -6125,13 +6167,28 @@ export function registerPiContextHandler(
 				`transform completed in ${transformElapsedMs.toFixed(1)}ms (${outputMessages.length} messages, ${result.targetCount} targets, watermark: ${result.reasoningWatermark})`,
 			);
 			runPiDebugAssertion(assertTailHygieneLastWriter);
-			if (
+			const fitSelectionStart = hasPiTransformTimingObserver()
+				? performance.now()
+				: undefined;
+			const checkOutgoingFit =
 				!options.compactionOff &&
-				(getHarness() === "pi" ||
-					result.executedWorkThisPass ||
-					isCacheBusting ||
-					schedulerDecision === "execute")
-			) {
+				(getHarness() === "pi"
+					? nativeFitPossible ||
+						result.bustedThisPass ||
+						result.materialized ||
+						isCacheBusting ||
+						schedulerDecision === "execute"
+					: result.executedWorkThisPass ||
+						isCacheBusting ||
+						schedulerDecision === "execute");
+			if (fitSelectionStart !== undefined)
+				recordPiTransformTiming({
+					sessionId,
+					stage: "fitAdmissionSelection",
+					elapsedMs: performance.now() - fitSelectionStart,
+					extra: checkOutgoingFit ? "estimate" : "skip",
+				});
+			if (checkOutgoingFit) {
 				const envelope = readPiLkgFitEnvelope(
 					ctx,
 					pi,
@@ -6158,6 +6215,20 @@ export function registerPiContextHandler(
 					measuredPrefix,
 					outgoingFitLimit,
 				);
+				let fitReclaimedThisPass = false;
+				if (
+					!inputForThinkingFit &&
+					result.strictThinkingKept &&
+					rawFallbackLimit &&
+					estimate.refusalGrade &&
+					(estimate.refusalTokens ?? estimate.tokens) > rawFallbackLimit
+				) {
+					const restored = restorePiLkgInputForFit(
+						lkgPassSnapshot,
+						branchEntries,
+					);
+					if (restored) inputForThinkingFit = restored;
+				}
 				if (
 					inputForThinkingFit &&
 					result.strictThinkingKept &&
@@ -6177,6 +6248,9 @@ export function registerPiContextHandler(
 							},
 						}),
 					);
+					fitReclaimedThisPass = true;
+					// This input was consumed by the retry; it is no longer pristine.
+					inputForFitReclaim = undefined;
 					outputMessages = result.messages as PiAgentMessage[];
 					const retryIds = resolvePiLkgOutputEntryIds(
 						outputMessages,
@@ -6240,17 +6314,59 @@ export function registerPiContextHandler(
 					);
 				if (getHarness() === "pi") {
 					const fitCase = classifyPiOutgoingFit(estimate, outgoingFitLimit);
+					const upperCursor =
+						fitCase === "upper-estimate-pressure"
+							? piUpperReclaimCursor({
+									sessionId,
+									modelKey: resolvePiContextModelKey(ctx) ?? null,
+									messageCount: fullWireMessageCount,
+									snapshot: lkgPassSnapshot,
+									input: inputForFitReclaim ?? event.messages,
+								})
+							: undefined;
+					if (fitReclaimedThisPass && upperCursor)
+						recordPiUpperEstimateReclaim(options.db, upperCursor);
+					if (fitCase === "over-window-proof") {
+						requestPiFitReclaimInput(sessionId);
+						resetPiUpperEstimateReclaim(options.db, sessionId);
+					}
+					if (fitCase === "fits-or-unknown") clearPiFitReclaimInput(sessionId);
 					// Active thinking signatures bind earlier messages to the provider's
 					// reasoning. Uncertain metadata size cannot authorize rewriting them;
 					// provider overflow or proof that the request cannot fit can do so.
 					const reclaimHeld =
-						fitCase === "upper-estimate-pressure" && result.strictThinkingKept;
+						fitCase === "upper-estimate-pressure" &&
+						(result.strictThinkingKept ||
+							!shouldReclaimPiUpperEstimate(options.db, upperCursor));
 					if (reclaimHeld)
 						sessionLog(
 							sessionId,
-							"outgoing fit: upper-estimate-pressure; reclaim held by signed prefix",
+							"outgoing fit: upper-estimate-pressure; reclaim held by signed prefix or unchanged input",
 						);
-					if (fitCase !== "fits-or-unknown" && !reclaimHeld) {
+					if (
+						fitCase === "upper-estimate-pressure" &&
+						!reclaimHeld &&
+						!inputForFitReclaim
+					)
+						// An unexpected over-count can prepare a clean input next pass.
+						// Never copy an already-rendered prefix to retry its injection.
+						requestPiFitReclaimInput(sessionId);
+					if (
+						fitCase !== "fits-or-unknown" &&
+						!reclaimHeld &&
+						!fitReclaimedThisPass &&
+						!inputForFitReclaim
+					)
+						inputForFitReclaim = restorePiLkgInputForFit(
+							lkgPassSnapshot,
+							branchEntries,
+						);
+					if (
+						fitCase !== "fits-or-unknown" &&
+						!reclaimHeld &&
+						!fitReclaimedThisPass &&
+						inputForFitReclaim
+					) {
 						sessionLog(
 							sessionId,
 							`outgoing fit: ${fitCase}; attempting emergency reclaim`,
@@ -6295,7 +6411,7 @@ export function registerPiContextHandler(
 						result = await budget.waitMandatory(
 							runPipeline({
 								...pipelineArgs,
-								messages: inputForFitReclaim ?? pipelineArgs.messages,
+								messages: inputForFitReclaim,
 								sessionMeta: freshMeta,
 								schedulerDecision: "execute",
 								schedulerDeferReason: null,
@@ -6320,6 +6436,8 @@ export function registerPiContextHandler(
 							}),
 						);
 						outputMessages = result.messages as PiAgentMessage[];
+						if (upperCursor)
+							recordPiUpperEstimateReclaim(options.db, upperCursor);
 						applyPiProactiveThinkingStrip({
 							db: options.db,
 							sessionId,
@@ -11150,6 +11268,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	clearPiUpperReclaimSession(sessionId);
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
 	clearPiLiveUsageClassification(sessionId);
 	clearPiLkgSessionState(sessionId);

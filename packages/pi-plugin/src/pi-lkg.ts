@@ -54,6 +54,8 @@ interface PiLkgInputSnapshot {
 }
 
 export interface PiLkgPassSnapshot {
+	/** Whether the request builder omits root completedAt and contextSnapshot fields. */
+	omitsBookkeeping?: boolean;
 	systemEntries?: readonly string[];
 	sessionId: string;
 	inputs: PiLkgInputSnapshot[];
@@ -552,6 +554,61 @@ function piProviderInput(message: unknown): unknown {
 	return Object.create(Object.getPrototypeOf(message), descriptors);
 }
 
+/** Rebuild retry input from session entries only when every message matches its pre-render snapshot. */
+export function restorePiLkgInputForFit(
+	snapshot: PiLkgPassSnapshot | undefined,
+	branchEntries: readonly unknown[] | null | undefined,
+): unknown[] | undefined {
+	if (
+		!snapshot ||
+		snapshot.preparationFailure ||
+		!branchEntries ||
+		!snapshot.inputs.length
+	)
+		return;
+	const byId = new Map<string, unknown>();
+	for (const value of branchEntries) {
+		const entry = value as {
+			type?: unknown;
+			id?: unknown;
+			message?: unknown;
+		} | null;
+		if (entry?.type !== "message" || typeof entry.id !== "string") continue;
+		if (byId.has(entry.id)) return;
+		byId.set(entry.id, entry.message);
+	}
+	const input: unknown[] = [];
+	for (const saved of snapshot.inputs) {
+		if (!byId.has(saved.id)) return;
+		const message = byId.get(saved.id);
+		if (
+			!message ||
+			typeof message !== "object" ||
+			Array.isArray(message) ||
+			Object.hasOwn(message, "parts")
+		)
+			return;
+		const fields = plainJsonFields(
+			snapshot.omitsBookkeeping ? piProviderInput(message) : message,
+		);
+		if (
+			!fields ||
+			fields.length !== saved.fields.length ||
+			fields.some((field, i) => field !== saved.fields[i])
+		)
+			return;
+		input.push(message);
+	}
+	// Session entries can outlive the array the renderers edited. Copy only now,
+	// after checking every input against its pre-render snapshot. Extension-only
+	// and synthetic frames have no canonical entry and must not be guessed here.
+	try {
+		return structuredClone(input);
+	} catch {
+		return;
+	}
+}
+
 /** Compact JSON arrays preserve the exact serialized rows before their closing
  * bracket. A measurement cannot cover a rewritten row, even with the same ids. */
 function extendsMeasuredRequest(
@@ -674,14 +731,16 @@ export function createPiLkgCoordinator(
 	};
 
 	const beginPass: PiLkgCoordinator["beginPass"] = (args) => {
+		const omitsBookkeeping = omitsRootBookkeeping(args);
 		const snapped = snapshotInputs(
 			args.messages,
 			args.entryIds,
-			omitsRootBookkeeping(args),
+			omitsBookkeeping,
 		);
 		const slot = getSlot(args.sessionId);
 		if (snapped.failure || !slot) {
 			return {
+				omitsBookkeeping,
 				sessionId: args.sessionId,
 				inputs: snapped.inputs,
 				preparationFailure: snapped.failure,
@@ -697,6 +756,7 @@ export function createPiLkgCoordinator(
 		);
 		if (stableAnchorIndex < 0) {
 			return {
+				omitsBookkeeping,
 				sessionId: args.sessionId,
 				inputs: snapped.inputs,
 				preparationFailure: null,
@@ -710,6 +770,7 @@ export function createPiLkgCoordinator(
 		const messageAnchorIndex = snapped.inputs[stableAnchorIndex]?.messageIndex;
 		if (messageAnchorIndex === undefined) {
 			return {
+				omitsBookkeeping,
 				sessionId: args.sessionId,
 				inputs: snapped.inputs,
 				preparationFailure: null,
@@ -722,6 +783,7 @@ export function createPiLkgCoordinator(
 		}
 		try {
 			return {
+				omitsBookkeeping,
 				sessionId: args.sessionId,
 				inputs: snapped.inputs,
 				preparationFailure: null,
@@ -735,6 +797,7 @@ export function createPiLkgCoordinator(
 			};
 		} catch {
 			return {
+				omitsBookkeeping,
 				sessionId: args.sessionId,
 				inputs: snapped.inputs,
 				preparationFailure: null,

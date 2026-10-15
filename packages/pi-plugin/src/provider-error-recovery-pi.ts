@@ -23,8 +23,9 @@ import {
 } from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
 import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { isAnthropicFamilyRoute } from "@magic-context/core/hooks/magic-context/sentinel";
+import { getHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-
+import { resetPiUpperEstimateReclaim } from "./pi-fit-reclaim";
 import { clearPiLkgSessionState } from "./pi-lkg";
 import { resolvePiStableId } from "./read-session-pi";
 
@@ -120,6 +121,16 @@ export function handlePiProviderFailure(args: {
 		overflow.reportedLimitProvenance,
 		overflow.reportedInputTokens,
 	);
+	// Unlike a metadata over-count, a provider rejection proves a capacity issue.
+	// Clear the saved repeat-reclaim suppression so recovery can run again after
+	// a restart, even when the session's content has not changed.
+	if (getHarness() === "pi") {
+		try {
+			resetPiUpperEstimateReclaim(args.db, args.sessionId);
+		} catch (error) {
+			args.report?.(`upper-estimate reclaim reset deferred: ${String(error)}`);
+		}
+	}
 	return {
 		kind: "overflow",
 		...(overflow.reportedLimit !== undefined
