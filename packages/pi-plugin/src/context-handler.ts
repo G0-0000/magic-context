@@ -113,9 +113,11 @@ import {
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
 	clearThinkingBindingRecoveryIf,
+	EMERGENCY_DRAIN_FAILURE_BACKOFF_MS,
 	flushAutoSearchHintDecisionRetirement,
 	getAutoSearchHintDecisions,
 	getEmergencyInputSample,
+	getHistorianFailureState,
 	getNoteNudgeAnchors,
 	getPersistedTodoSyntheticAnchor,
 	isProviderOverflowFailClosedProven,
@@ -300,6 +302,10 @@ import {
 } from "./heuristic-cleanup-pi";
 import { readPiHistorianTail } from "./historian-tail-pi";
 import {
+	clearPiHistoryBoundaryRepairSession,
+	repairPiHistoryBoundary,
+} from "./history-boundary-repair-pi";
+import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
 	clearPiMuralProcessCache,
@@ -335,6 +341,7 @@ import {
 } from "./pi-context-refusal";
 import { createPiFallbackIndex } from "./pi-fallback-index";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
+import { readPiHistoryRetirement } from "./pi-history-retirement";
 import {
 	clearPiLkgSessionState,
 	createPiLkgCoordinator,
@@ -4292,6 +4299,8 @@ export function registerPiContextHandler(
 			const tEntryBranch = performance.now();
 			const branchEntries = readPiBranchEntriesForContext(ctx, sessionId);
 			assertCurrentPass();
+			if (!budget.sideTurn)
+				repairPiHistoryBoundary(options.db, sessionId, ctx, branchEntries);
 			// Pi's live usage figure is a whole-raw-branch estimate while a context
 			// edit or compaction follows the last recorded usage (e.g. after a
 			// retried request); such a figure is never used as pressure.
@@ -7410,19 +7419,52 @@ function maybeFireHistorian(args: {
 
 	let triggered = false;
 	try {
-		if (isFirstContextPassForSession) {
+		if (
+			isFirstContextPassForSession &&
+			sessionMeta.compartmentInProgress &&
+			!inFlightHistorian.has(sessionId)
+		) {
+			updateSessionMeta(db, sessionId, { compartmentInProgress: false });
+			sessionMeta.compartmentInProgress = false;
+			sessionLog(
+				sessionId,
+				"historian: cleared stale compartmentInProgress flag on first context pass after restart",
+			);
+		}
+		if (readPiHistoryRetirement(db, sessionId)) {
+			const failedAt =
+				getHistorianFailureState(db, sessionId).lastFailureAt ?? 0;
+			const now = Date.now();
 			if (
-				sessionMeta.compartmentInProgress &&
-				!inFlightHistorian.has(sessionId)
-			) {
-				updateSessionMeta(db, sessionId, { compartmentInProgress: false });
-				sessionMeta.compartmentInProgress = false;
-				sessionLog(
-					sessionId,
-					"historian: cleared stale compartmentInProgress flag on first context pass after restart",
-				);
-			}
-
+				sessionMeta.compartmentInProgress ||
+				(failedAt > 0 &&
+					failedAt <= now &&
+					now - failedAt < EMERGENCY_DRAIN_FAILURE_BACKOFF_MS)
+			)
+				return;
+			const snapshot = resolveRunnablePiBoundarySnapshot();
+			if (!hasEligiblePiCompartmentHistory(db, sessionId, snapshot)) return;
+			// Retirement exposes a formerly summarized range even when it is too
+			// small for a normal tail-size trigger. All other admission, lease,
+			// protected-tail and producer checks remain on the ordinary path.
+			triggered = true;
+			spawnPiHistorianRun({
+				startGuard: args.startGuard,
+				pi: args.pi,
+				ctx,
+				sessionId,
+				db,
+				historian,
+				provider,
+				unregister,
+				boundarySnapshot: snapshot,
+				refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
+				currentContextLimit: boundaryContextLimit,
+				fallbackModelId: modelKey,
+			});
+			return;
+		}
+		if (isFirstContextPassForSession) {
 			const failureCount = historianStateSnapshot.historianFailureCount;
 			if (failureCount > 0) {
 				triggered = true;
@@ -11014,6 +11056,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	clearPiHistoryBoundaryRepairSession(sessionId);
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
 	clearPiLiveUsageClassification(sessionId);
 	clearPiLkgSessionState(sessionId);

@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/pi-tree-history.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real Pi and OMP tree navigation leaves abandoned entries in JSONL. Published compartments must retire on proven active-branch mismatch so wrapup and later provider requests use reachable history; host PID lsof proves throwaway containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["pi", "omp"]
+        },
+        {
             "path": "tests/latest-turn-thinking.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
