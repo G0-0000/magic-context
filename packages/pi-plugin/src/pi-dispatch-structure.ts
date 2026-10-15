@@ -1,3 +1,4 @@
+import { piAgentHistory } from "./pi-dispatch-agent-history";
 import {
 	type PiChatHistoryModel,
 	piChatHistoryPlan,
@@ -36,6 +37,7 @@ export interface PiPreparedStructure {
 	responsesMessages?: readonly MessageStructure[];
 	api?: string;
 	googleFunctionIds?: boolean;
+	structuralSkipReason?: string;
 }
 
 const MAX_MESSAGES = 100_000;
@@ -225,7 +227,14 @@ function buildPiPreparedStructure(
 	prepareUser?: (index: number, source: Record<string, unknown>) => void,
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
-	const projectedMessages = projectMissingToolResults(messages);
+	for (let index = 0; index < messages.length; index++) {
+		const source = object(messages[index]);
+		if (source?.role === "user" || source?.role === "compactionSummary")
+			prepareUser?.(index, source);
+	}
+	const projectedMessages = projectMissingToolResults(
+		model?.api ? piAgentHistory(messages, model.api) : messages,
+	);
 	if (projectedMessages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
 	const toolNames = new Map<string, string>();
@@ -233,20 +242,9 @@ function buildPiPreparedStructure(
 	const responsesToolIds = new Map<string, string | undefined>();
 	const byIndex = new Map<number, MessageStructure>();
 	let valid = true;
-	// The projection keeps every original message object, in order, and only
-	// inserts synthesized tool results. Track each original's index so
-	// prepareUser edits the returned array, not a projected position.
-	let originalIndex = 0;
 	for (let index = 0; index < projectedMessages.length; index++) {
 		const message = projectedMessages[index];
-		const isOriginal = message === messages[originalIndex];
-		if (isOriginal) originalIndex++;
 		const source = object(message);
-		if (
-			isOriginal &&
-			(source?.role === "user" || source?.role === "compactionSummary")
-		)
-			prepareUser?.(originalIndex - 1, source);
 		// History injection and the provider renderer both put instructions before
 		// conversation turns. Ignore only that leading system/developer prefix on
 		// both sides; a system message inside the conversation remains invalid.
@@ -267,6 +265,36 @@ function buildPiPreparedStructure(
 			valid = false;
 			continue;
 		}
+		// These providers omit a user/developer row with no nonblank text or
+		// images. In particular, a compaction summary with blocks: [] has no wrapper.
+		if (
+			[
+				"openai-completions",
+				"openrouter",
+				"anthropic-messages",
+				"bedrock-converse-stream",
+				"google-generative-ai",
+				"google-gemini-cli",
+				"google-vertex",
+				"openai-responses",
+				"azure-openai-responses",
+				"openai-codex-responses",
+			].includes(model?.api ?? "") &&
+			(source?.role === "user" || source?.role === "developer") &&
+			(typeof source.content === "string"
+				? !source.content.trim()
+				: Array.isArray(source.content) &&
+					!source.content.some((value) => {
+						const block = object(value);
+						return (
+							block?.type === "image" ||
+							(block?.type === "text" &&
+								typeof block.text === "string" &&
+								block.text.trim())
+						);
+					}))
+		)
+			continue;
 		row.calls.forEach((id, index) => {
 			toolNames.set(id, row.callNames?.[index] ?? "");
 			if (model?.api) {
@@ -297,11 +325,7 @@ function buildPiPreparedStructure(
 		byIndex.set(index, row);
 	}
 	if (!valid) return undefined;
-	const responsesApi = [
-		"openai-responses",
-		"azure-openai-responses",
-		"openai-codex-responses",
-	].includes(model?.api ?? "");
+	const responsesApi = responsesLane(model?.api);
 	let responsesMessages: MessageStructure[] | undefined = responsesApi
 		? []
 		: undefined;
@@ -353,6 +377,11 @@ function buildPiPreparedStructure(
 	});
 	return {
 		messages: rows,
+		...(responsesApi && !responsesMessages
+			? { structuralSkipReason: "Responses history transform is not modeled" }
+			: model?.api === "openai-completions" && !chatMessages
+				? { structuralSkipReason: "Chat history transform is not modeled" }
+				: {}),
 		...(chatMessages ? { chatMessages } : {}),
 		...(responsesMessages ? { responsesMessages } : {}),
 		...(model?.api ? { api: model.api } : {}),
@@ -363,6 +392,14 @@ function buildPiPreparedStructure(
 				}
 			: {}),
 	};
+}
+
+function responsesLane(api: string | undefined): boolean {
+	return [
+		"openai-responses",
+		"azure-openai-responses",
+		"openai-codex-responses",
+	].includes(api ?? "");
 }
 
 function payloadStructure(
@@ -477,7 +514,11 @@ function payloadStructure(
 				continue;
 			}
 		}
-		const row = messageStructure(message);
+		const row = messageStructure(
+			ollama && message.role === "system"
+				? { ...message, role: "user" }
+				: message,
+		);
 		if (!row) return undefined;
 		row.wireContent = message.content;
 		if (responses && responsesItems && row.role === "assistant") {
@@ -643,6 +684,7 @@ export function piPreparedStructureMismatch(
 	prepared: PiPreparedStructure | undefined,
 ): string | undefined {
 	try {
+		if (prepared?.structuralSkipReason) return undefined;
 		const body = object(payload);
 		const ollama =
 			prepared?.api === "ollama-chat" &&

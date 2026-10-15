@@ -381,6 +381,8 @@ export function registerPiGuardedContext(
 	// 32 nonces across successful context passes; receipt cleanup retires them too.
 	const unsendableNonces = new Map<string | object, Set<string>>();
 	receiptMaps.add(unsendableNonces);
+	const structureWarnings = new Map<string | object, boolean>();
+	receiptMaps.add(structureWarnings);
 	const refuse = (
 		ctx: ExtensionContext,
 		budget: PiContextBudget,
@@ -586,13 +588,32 @@ export function registerPiGuardedContext(
 					throw new Error(
 						"provider conversation identity could not be established",
 					);
-				// The provider renderer may rewrite text and images, but a first send
-				// must still contain this pass's turns and ordered tool IDs. A generic
-				// managed delimiter alone also appears in older prepared conversations.
-				const structureMismatch = piPreparedStructureMismatch(
-					payload,
-					active.preparedStructure,
-				);
+				// Compare turns and tool IDs only when we can predict the provider's
+				// serialization. Comparing one row per original message with Responses
+				// items, for example, would always refuse legitimate requests. Skipping
+				// that comparison does not skip the managed-head opener check above, run
+				// ownership checks, or byte-for-byte comparison of subsequent retries.
+				// The opener proves managed content, not freshness: stale prepared requests
+				// are not detected on this pass when no structural plan can be built.
+				const body = payload as { messages?: unknown; input?: unknown };
+				const skipReason = active.preparedStructure
+					? (active.preparedStructure.structuralSkipReason ??
+						(active.preparedStructure.api &&
+						body?.messages === undefined &&
+						Array.isArray(body?.input) &&
+						!active.preparedStructure.responsesMessages
+							? "provider selected Responses items without a matching history plan"
+							: undefined))
+					: "prepared history representation is not modeled";
+				if (skipReason && !structureWarnings.has(key)) {
+					structureWarnings.set(key, true);
+					log(
+						`[magic-context][pi] OMP structural comparison skipped: ${skipReason}; stale prepared requests are not detected on this pass; session=${String(key)}`,
+					);
+				}
+				const structureMismatch = skipReason
+					? undefined
+					: piPreparedStructureMismatch(payload, active.preparedStructure);
 				if (structureMismatch)
 					throw new Error(
 						`provider request does not match this pass's managed dispatch (prepared turn structure); ${structureMismatch}`,

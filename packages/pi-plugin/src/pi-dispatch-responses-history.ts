@@ -33,6 +33,23 @@ function signaturePhase(block: Record<string, unknown>): unknown {
 	return undefined;
 }
 
+function demotedThinking(
+	text: string,
+	model: PiChatHistoryModel,
+): string | undefined {
+	// Oh My Pi wraps earlier reasoning with the target model's thinking delimiters,
+	// not the source model's. Keep the supported catalog subset explicit; for
+	// unknown delimiters require the managed-head opener without comparing rows.
+	// pi-ai/src/dialect/demotion.ts:33-39; pi-catalog/src/identity/dialect.ts:18-41
+	// (OMP 18.10.4 and 18.11.0).
+	const id = model.id?.toLowerCase() ?? "";
+	if (/^(?:[^/]+\/)?muse-spark-1\.3(?:-|$)/u.test(id))
+		return `<thinking>\n${wellFormed(text)}\n</thinking>`;
+	if (/^(?:[^/]+\/)?(?:gpt-|o[134](?:-|$)|chatgpt-|codex-)/u.test(id))
+		return `<think>\n${wellFormed(text)}\n</think>`;
+	return undefined;
+}
+
 /**
  * Capture ordered [text, phase] pairs as JSON strings for OpenAI Responses replay.
  * Cached provider items may omit our leading ordinal only when they represent
@@ -44,6 +61,13 @@ export function piResponsesAssistantTexts(
 ): readonly string[] | undefined {
 	const message = object(value);
 	if (!message || !Array.isArray(message.content)) return undefined;
+	if (
+		["length", "error", "aborted"].includes(String(message.stopReason)) &&
+		!message.content.some((value) =>
+			["text", "toolCall"].includes(String(object(value)?.type)),
+		)
+	)
+		return [];
 	const texts: string[] = [];
 	const blocks: Record<string, unknown>[] = [];
 	const sameModel =
@@ -58,10 +82,30 @@ export function piResponsesAssistantTexts(
 	for (const value of message.content) {
 		const block = object(value);
 		if (block?.type === "toolCall") continue;
-		// The same-model Responses serializer represents canonical thinking as
-		// reasoning items (or omits it), neither of which contributes a text row.
-		// Cross-model serializers may expose thinking as text, so fail closed there.
-		if (block?.type === "thinking" && sameModel) continue;
+		// Thinking from this exact API/provider/model becomes a reasoning item or
+		// vanishes. Other thinking becomes visible text with the target's delimiters.
+		// OMP can also replay a full trace natively when its catalog identifies both
+		// deployments as the same portable model; leave that catalog-dependent case
+		// unmodeled rather than asserting it contributes visible text.
+		// transform-messages.ts:1036-1086; openai-shared.ts:2478-2531 (both versions).
+		if (block?.type === "thinking") {
+			if (sameModel) continue;
+			if (typeof block.thinking !== "string" || !model) return undefined;
+			if (!block.thinking.trim()) continue;
+			const compat = object(model.compat);
+			if (
+				block.summary === false &&
+				(compat?.requiresReasoningContentForToolCalls === true ||
+					compat?.requiresReasoningContentForAllAssistantTurns === true)
+			)
+				return undefined;
+			const text = demotedThinking(block.thinking, model);
+			if (text === undefined) return undefined;
+			units += text.length;
+			if (units > MAX_TEXT_UNITS) return undefined;
+			texts.push(textIdentity(text, undefined));
+			continue;
+		}
 		if (block?.type !== "text" || typeof block.text !== "string")
 			return undefined;
 		units += block.text.length;

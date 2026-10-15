@@ -64,6 +64,8 @@ if (
 		"mixed",
 		"materialized",
 		"responses-history",
+		"cross-model-thinking",
+		"custom-summary",
 		"composite-cross",
 		"composite-same",
 	].includes(historyCase)
@@ -283,7 +285,17 @@ const template =
 					model.provider === "cline-pass" &&
 					model.name === "Muse Spark 1.3 (C) (free)",
 			)
-		: templates.find((model: any) => model.api === api);
+		: templates.find(
+				(model: any) =>
+					model.api === api &&
+					(historyCase === "cross-model-thinking"
+						? model.provider === "opencode-zen" &&
+							model.id === "muse-spark-1.3-contributor-free"
+						: historyCase === "custom-summary" && api === "openai-completions"
+							? model.provider === "opencode-zen" &&
+								model.id === "deepseek-v4-flash-free"
+							: true),
+			);
 if (!template) throw new Error(`no bundled model for ${selector}`);
 const model = { ...template, baseUrl, preferWebsockets: false };
 const apiKey =
@@ -364,6 +376,55 @@ try {
 		);
 		let history: any[];
 		switch (historyCase) {
+			case "custom-summary":
+				history = [
+					user("HISTORY686 custom prompt", stamp),
+					...([true, false, undefined] as const).map((display, index) => ({
+						role: "custom",
+						customType: "history686",
+						display,
+						content: `HISTORY686 custom display=${display}`,
+						timestamp: stamp + index + 1,
+					})),
+					{
+						role: "compactionSummary",
+						summary: "HISTORY686 readable compaction summary",
+						timestamp: stamp + 4,
+					},
+					{
+						role: "compactionSummary",
+						summary: "",
+						blocks: [],
+						timestamp: stamp + 5,
+					},
+					call,
+					result,
+					reply,
+				];
+				break;
+			case "cross-model-thinking": {
+				const foreign = (provider: string, sourceApi: string, id: string) => ({
+					...call,
+					api: sourceApi,
+					provider,
+					model: "other-model",
+					content: [
+						{ type: "thinking", thinking: "HISTORY686 foreign reasoning" },
+						{ type: "text", text: "HISTORY686 foreign answer" },
+						{ type: "toolCall", id, name: toolName, arguments: {} },
+					],
+				});
+				history = [
+					user("HISTORY686 cross-model prompt", stamp),
+					foreign("deepseek", "openai-completions", "history_call_683"),
+					result,
+					reply,
+					foreign("google-antigravity", "google-gemini-cli", "gemini_call_686"),
+					{ ...result, toolCallId: "gemini_call_686" },
+					reply,
+				];
+				break;
+			}
 			case "composite-cross":
 			case "composite-same": {
 				const id = "call_686|fc_686";
