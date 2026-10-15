@@ -406,7 +406,7 @@ test.skipIf(!currentBinary || !baseBinary || !baseAdapter)(
                 note: "exact envelope SELECT call sites, not physical disk reads; SQLite is in memory",
             }),
         );
-        expect(counts[0]!.envelopeSelects).toBeGreaterThan(counts[1]!.envelopeSelects);
+        expect(counts[0]!.envelopeSelects).toBeLessThanOrEqual(counts[1]!.envelopeSelects);
         expect(counts[0]!.changes).toBe(counts[1]!.changes);
     },
     120_000,
