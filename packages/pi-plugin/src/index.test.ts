@@ -133,3 +133,17 @@ describe("Pi config load logging", () => {
 		}
 	});
 });
+
+describe("Pi deferred compaction marker rehydration logging", () => {
+	it("names sessions, caps the list, and reports active-session membership", () => {
+		expect(
+			__test.formatPiMarkerRehydrationLine(["active", "other"], "active"),
+		).toBe(
+			"[magic-context][pi] rehydrated 2 Pi deferred compaction marker session(s); sessionIds=active,other; activeSessionIncluded=true",
+		);
+		const many = Array.from({ length: 7 }, (_, index) => `session-${index}`);
+		expect(__test.formatPiMarkerRehydrationLine(many, "not-listed")).toBe(
+			"[magic-context][pi] rehydrated 7 Pi deferred compaction marker session(s); sessionIds=session-0,session-1,session-2,session-3,session-4 +2 more; activeSessionIncluded=false",
+		);
+	});
+});

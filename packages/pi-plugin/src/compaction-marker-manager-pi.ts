@@ -3,6 +3,7 @@ import {
 	getUncoveredCompartmentEndThrough,
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { PendingPiCompactionMarker } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { BoundedSessionMap } from "@magic-context/core/shared/bounded-session-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
@@ -37,6 +38,143 @@ export interface ApplyDeferredPiCompactionMarkerDeps {
 	) => string | undefined;
 }
 
+export type PiCompactionMarkerDrainGate =
+	| "compartment-not-found"
+	| "duplicate-compartment-end"
+	| "target-superseded"
+	| "partial-message-boundary"
+	| "ordinal-alignment-unavailable"
+	| "no-replay-safe-kept-entry"
+	| "kept-entry-not-on-branch"
+	| "current-compaction-id-unavailable"
+	| "append-compaction-returned-no-id"
+	| "manager-threw"
+	| "rendered-history-not-covering-marker"
+	| "append-compaction-unavailable"
+	| "get-branch-unavailable"
+	| "folding-system-state-unavailable"
+	| "equivalence-refused"
+	| "equivalence-unavailable"
+	| "cas-clear-lost"
+	| "drain-threw";
+
+type PiCompactionMarkerDrainGateFields = {
+	firstKeptEntryId?: string | null;
+	renderedCoverageOrdinal?: number | null;
+	renderedCoverageEndMessageId?: string | null;
+	m1CoverageOrdinal?: number | null;
+	m1CoverageEndMessageId?: string | null;
+	matchCount?: number;
+	alignment?: "unanchored" | "unresolved";
+	foldingOnlyTools?: readonly string[];
+	persistedOnlyTools?: readonly string[];
+	changedTools?: readonly string[];
+	promptLengthDelta?: number;
+	foldingPromptLength?: number;
+	persistedPromptLength?: number;
+	errorName?: string;
+	errorCode?: string;
+};
+
+interface LoggedMarkerDrainGates {
+	markerIdentity: string;
+	gates: Set<PiCompactionMarkerDrainGate>;
+}
+
+const loggedMarkerDrainGates = new BoundedSessionMap<LoggedMarkerDrainGates>(
+	1000,
+);
+
+/**
+ * Report a marker gate once per session, marker, and classified gate. Diagnostics
+ * contain identifiers, counts, prompt byte lengths, or error class/code only;
+ * prompt text and error messages are never included.
+ */
+export function logPiCompactionMarkerDrainGateOnce(
+	sessionId: string,
+	pending: PendingPiCompactionMarker,
+	gate: PiCompactionMarkerDrainGate,
+	fields: PiCompactionMarkerDrainGateFields = {},
+): void {
+	const markerIdentity = `${pending.endMessageId}\u0000${pending.ordinal}\u0000${pending.publishedAt}`;
+	let state = loggedMarkerDrainGates.get(sessionId);
+	if (!state || state.markerIdentity !== markerIdentity) {
+		state = { markerIdentity, gates: new Set() };
+	}
+	if (state.gates.has(gate)) return;
+	state.gates.add(gate);
+	loggedMarkerDrainGates.set(sessionId, state);
+	const firstKeptEntryId = Object.hasOwn(fields, "firstKeptEntryId")
+		? fields.firstKeptEntryId
+		: pending.firstKeptEntryId;
+	const parts = [
+		`gate=${gate}`,
+		`endMessageId=${pending.endMessageId}`,
+		`ordinal=${pending.ordinal}`,
+		`firstKeptEntryId=${firstKeptEntryId ?? "<none>"}`,
+		`renderedCoverageOrdinal=${fields.renderedCoverageOrdinal ?? "<none>"}`,
+	];
+	if (fields.renderedCoverageEndMessageId !== undefined)
+		parts.push(
+			`renderedCoverageEndMessageId=${fields.renderedCoverageEndMessageId ?? "<none>"}`,
+		);
+	if (fields.m1CoverageOrdinal !== undefined)
+		parts.push(`m1CoverageOrdinal=${fields.m1CoverageOrdinal ?? "<none>"}`);
+	if (fields.m1CoverageEndMessageId !== undefined)
+		parts.push(
+			`m1CoverageEndMessageId=${fields.m1CoverageEndMessageId ?? "<none>"}`,
+		);
+	if (fields.matchCount !== undefined)
+		parts.push(`matchCount=${fields.matchCount}`);
+	if (fields.alignment !== undefined)
+		parts.push(`alignment=${fields.alignment}`);
+	if (fields.foldingOnlyTools !== undefined)
+		parts.push(`foldingOnlyTools=${JSON.stringify(fields.foldingOnlyTools)}`);
+	if (fields.persistedOnlyTools !== undefined)
+		parts.push(
+			`persistedOnlyTools=${JSON.stringify(fields.persistedOnlyTools)}`,
+		);
+	if (fields.changedTools !== undefined)
+		parts.push(`changedTools=${JSON.stringify(fields.changedTools)}`);
+	if (fields.promptLengthDelta !== undefined)
+		parts.push(`promptLengthDelta=${fields.promptLengthDelta}`);
+	if (fields.foldingPromptLength !== undefined)
+		parts.push(`foldingPromptLength=${fields.foldingPromptLength}`);
+	if (fields.persistedPromptLength !== undefined)
+		parts.push(`persistedPromptLength=${fields.persistedPromptLength}`);
+	if (fields.errorName !== undefined)
+		parts.push(`errorName=${JSON.stringify(fields.errorName)}`);
+	if (fields.errorCode !== undefined)
+		parts.push(`errorCode=${JSON.stringify(fields.errorCode)}`);
+	sessionLog(sessionId, `Pi compaction-marker drain ${parts.join(" ")}`);
+}
+
+export function clearPiCompactionMarkerDrainLogState(sessionId: string): void {
+	loggedMarkerDrainGates.delete(sessionId);
+}
+
+export function getPiCompactionMarkerDrainErrorFields(error: unknown): {
+	errorName: string;
+	errorCode?: string;
+} {
+	const candidate =
+		error !== null && typeof error === "object"
+			? (error as { name?: unknown; code?: unknown })
+			: undefined;
+	const errorName =
+		typeof candidate?.name === "string"
+			? candidate.name
+			: error instanceof Error
+				? error.name
+				: "Error";
+	return {
+		errorName,
+		...(typeof candidate?.code === "string"
+			? { errorCode: candidate.code }
+			: {}),
+	};
+}
+
 export function applyDeferredPiCompactionMarker(
 	deps: ApplyDeferredPiCompactionMarkerDeps,
 	sessionId: string,
@@ -49,15 +187,22 @@ export function applyDeferredPiCompactionMarker(
 			pending.endMessageId,
 		);
 		if (matches.length === 0 || matches.length > 1) {
-			if (matches.length > 1) {
-				sessionLog(
-					sessionId,
-					`Pi compaction-marker drain: ${matches.length} compartments share endMessageId=${pending.endMessageId}; treating as stale`,
-				);
-			}
+			logPiCompactionMarkerDrainGateOnce(
+				sessionId,
+				pending,
+				matches.length === 0
+					? "compartment-not-found"
+					: "duplicate-compartment-end",
+				{ matchCount: matches.length },
+			);
 			return { kind: "stale-skip", reason: "compartment-removed" };
 		}
 		if (matches[0]?.endMessage !== pending.ordinal) {
+			logPiCompactionMarkerDrainGateOnce(
+				sessionId,
+				pending,
+				"target-superseded",
+			);
 			return { kind: "stale-skip", reason: "target-superseded" };
 		}
 
@@ -69,6 +214,11 @@ export function applyDeferredPiCompactionMarker(
 		if (
 			getUncoveredCompartmentEndThrough(deps.db, sessionId, pending.ordinal)
 		) {
+			logPiCompactionMarkerDrainGateOnce(
+				sessionId,
+				pending,
+				"partial-message-boundary",
+			);
 			return { kind: "stale-skip", reason: "partial-message-boundary" };
 		}
 
@@ -85,6 +235,12 @@ export function applyDeferredPiCompactionMarker(
 				branchEntries,
 			);
 			if (isPiOrdinalAlignmentUnanchored(alignment)) {
+				logPiCompactionMarkerDrainGateOnce(
+					sessionId,
+					pending,
+					"ordinal-alignment-unavailable",
+					{ alignment: alignment.kind },
+				);
 				return { kind: "waiting-for-entry" };
 			}
 			firstKeptEntryId = findFirstKeptEntryId(
@@ -94,9 +250,11 @@ export function applyDeferredPiCompactionMarker(
 			);
 		}
 		if (!firstKeptEntryId) {
-			sessionLog(
+			logPiCompactionMarkerDrainGateOnce(
 				sessionId,
-				`Pi compaction-marker drain: still waiting for a resolvable kept entry at or after ordinal ${pending.ordinal + 1}`,
+				pending,
+				"no-replay-safe-kept-entry",
+				{ firstKeptEntryId: null },
 			);
 			return { kind: "waiting-for-entry" };
 		}
@@ -105,6 +263,12 @@ export function applyDeferredPiCompactionMarker(
 			firstKeptEntryId,
 		);
 		if (pendingFirstKeptIndex < 0) {
+			logPiCompactionMarkerDrainGateOnce(
+				sessionId,
+				pending,
+				"kept-entry-not-on-branch",
+				{ firstKeptEntryId },
+			);
 			return { kind: "stale-skip", reason: "entry-removed" };
 		}
 
@@ -116,9 +280,19 @@ export function applyDeferredPiCompactionMarker(
 			);
 			if (latestFirstKeptIndex >= pendingFirstKeptIndex) {
 				if (latestCompaction.id === null) {
+					const error = new Error("Pi compaction entry has no id");
+					logPiCompactionMarkerDrainGateOnce(
+						sessionId,
+						pending,
+						"current-compaction-id-unavailable",
+						{
+							firstKeptEntryId: latestCompaction.firstKeptEntryId,
+							errorName: error.name,
+						},
+					);
 					return {
 						kind: "retryable-failure",
-						error: new Error("Pi compaction entry has no id"),
+						error,
 					};
 				}
 				return {
@@ -140,9 +314,16 @@ export function applyDeferredPiCompactionMarker(
 			true,
 		);
 		if (typeof compactionId !== "string" || compactionId.length === 0) {
+			const error = new Error("Pi appendCompaction returned no compaction id");
+			logPiCompactionMarkerDrainGateOnce(
+				sessionId,
+				pending,
+				"append-compaction-returned-no-id",
+				{ errorName: error.name },
+			);
 			return {
 				kind: "retryable-failure",
-				error: new Error("Pi appendCompaction returned no compaction id"),
+				error,
 			};
 		}
 		sessionLog(
@@ -152,11 +333,9 @@ export function applyDeferredPiCompactionMarker(
 		return { kind: "applied", firstKeptEntryId, compactionId };
 	} catch (err) {
 		const error = err instanceof Error ? err : new Error(String(err));
-		sessionLog(
-			sessionId,
-			`Pi compaction-marker drain: retryable failure for ordinal ${pending.ordinal}:`,
-			error,
-		);
+		logPiCompactionMarkerDrainGateOnce(sessionId, pending, "manager-threw", {
+			...getPiCompactionMarkerDrainErrorFields(err),
+		});
 		return { kind: "retryable-failure", error };
 	}
 }
