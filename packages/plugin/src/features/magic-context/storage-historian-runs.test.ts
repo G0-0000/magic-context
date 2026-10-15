@@ -101,7 +101,7 @@ test("records a success run with full metrics and reads back", () => {
     expect(row.legacy).toBe(0);
 });
 
-test("records a classified failure run with no compartments", () => {
+test("records an MC-authored failure reason without rewriting it", () => {
     const db = openDatabase();
     const id = recordHistorianRun(db, {
         sessionId: "ses-2",
@@ -116,12 +116,12 @@ test("records a classified failure run with no compartments", () => {
         )
         .get(id) as Record<string, unknown>;
     expect(row.status).toBe("failed");
-    expect(row.failure_reason).toBe("parse_failed");
+    expect(row.failure_reason).toBe("validation: bad output");
     expect(row.compartments_produced).toBe(0);
     expect(row.subagent_invocation_id).toBeNull();
 });
 
-test("classifies missing and sensitive failure details before storing them", () => {
+test("uses provider_error only for missing reasons and caps MC-authored reasons verbatim", () => {
     const db = openDatabase();
     const missingReasonId = recordHistorianRun(db, {
         sessionId: "ses-missing-reason",
@@ -137,26 +137,33 @@ test("classifies missing and sensitive failure details before storing them", () 
         status: "failed",
         failureReason: null,
     });
-    const privateDetailId = recordHistorianRun(db, {
-        sessionId: "ses-private-detail",
+    const producerReason = "producer_prompt_unfit: 32k window cannot hold the fixed prompt";
+    const producerReasonId = recordHistorianRun(db, {
+        sessionId: "ses-producer-reason",
+        harness: "pi",
+        runKind: "incremental",
+        status: "failed",
+        failureReason: producerReason,
+    });
+    const longReasonId = recordHistorianRun(db, {
+        sessionId: "ses-long-reason",
         harness: "opencode",
         runKind: "incremental",
         status: "failed",
-        failureReason: "OpenAI API error (429): private prompt and response text",
+        failureReason: `${producerReason} ${"x".repeat(600)}`,
     });
 
     const storedReasons = db
-        .prepare("SELECT failure_reason FROM historian_runs WHERE id IN (?, ?, ?) ORDER BY id")
-        .all(missingReasonId, opencodeMissingReasonId, privateDetailId) as Array<{
+        .prepare("SELECT failure_reason FROM historian_runs WHERE id IN (?, ?, ?, ?) ORDER BY id")
+        .all(missingReasonId, opencodeMissingReasonId, producerReasonId, longReasonId) as Array<{
         failure_reason: string;
     }>;
     expect(storedReasons.map((row) => row.failure_reason)).toEqual([
         "provider_error",
         "provider_error",
-        "provider_error:http_429",
+        producerReason,
+        `${producerReason} ${"x".repeat(512 - producerReason.length - 1)}`,
     ]);
-    expect(JSON.stringify(storedReasons)).not.toContain("private prompt");
-    expect(storedReasons.every((row) => row.failure_reason.length <= 96)).toBe(true);
 });
 
 test("clearSession deletes a session's historian_runs", () => {

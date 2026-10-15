@@ -47,6 +47,10 @@ import {
 	getCompartments,
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
+	externalHistorianFailureReason,
+	subprocessExitHistorianFailureReason,
+} from "@magic-context/core/features/magic-context/historian-failure-reason";
+import {
 	embedPromotedFacts,
 	promoteSessionFactsDurable,
 } from "@magic-context/core/features/magic-context/memory";
@@ -69,7 +73,6 @@ import {
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import {
-	classifyHistorianFailureReason,
 	type HistorianRunInput,
 	recordHistorianRun,
 	summarizeImportance,
@@ -291,7 +294,9 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 			result = {
 				ok: false,
 				reason: "model_failed",
-				error: desc.brief,
+				error: PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(desc.message)
+					? desc.message
+					: desc.brief,
 				durationMs: Date.now() - attemptStart,
 			};
 		}
@@ -622,7 +627,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const existingValidationError =
 				validateStoredCompartments(priorCompartments);
 			if (existingValidationError) {
-				telemetry.failureReason = "parse_failed";
+				telemetry.failureReason = existingValidationError;
 				sessionLog(
 					sessionId,
 					`historian failure: source=existing-validation reason="${existingValidationError}"`,
@@ -652,6 +657,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					? createDefaultBoundarySnapshotForTests(sessionId)
 					: null);
 			if (!boundarySnapshot) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "missing protected-tail boundary snapshot";
 				sessionLog(
 					sessionId,
 					"historian no-op: missing protected-tail boundary snapshot from Pi trigger decision",
@@ -697,6 +704,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 			if (!validation.ok) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "stale protected-tail boundary snapshot";
 				sessionLog(
 					sessionId,
 					`historian no-op: stale protected-tail snapshot (${validation.detail ?? validation.reason ?? "unknown"})`,
@@ -709,6 +718,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				protectedTailStart,
 			);
 			if (protectedTailStart <= offset || eligibleEndOrdinal <= offset) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "nothing to compact before protected tail";
 				sessionLog(
 					sessionId,
 					`historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
@@ -759,9 +770,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				memoryEnabled: memoryEnabled !== false,
 			});
 			if (!promptFit.ok) {
-				telemetry.failureReason = classifyHistorianFailureReason(
-					promptFit.reason,
-				);
+				telemetry.failureReason = promptFit.reason;
 				if (
 					getHistorianFailureState(db, sessionId).lastError === promptFit.reason
 				) {
@@ -860,7 +869,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			const chunkCoverageError = validateChunkCoverage(chunk);
 			if (chunkCoverageError) {
-				telemetry.failureReason = "parse_failed";
+				telemetry.failureReason = chunkCoverageError;
 				sessionLog(
 					sessionId,
 					`historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
@@ -880,6 +889,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 
 			if (!projectPath) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "project path unavailable";
 				rollbackDrainReservation();
 				return;
 			}
@@ -925,9 +936,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				maxOutputTokens,
 			});
 			if (producerWindowFailure) {
-				telemetry.failureReason = classifyHistorianFailureReason(
-					producerWindowFailure,
-				);
+				telemetry.failureReason = producerWindowFailure;
 				rollbackDrainReservation();
 				sessionLog(
 					sessionId,
@@ -1204,12 +1213,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 							: "historian returned no usable text";
 				telemetry.failureReason =
 					validatedPass.kind === "validation-failed"
-						? "parse_failed"
+						? validatedPass.error
 						: validatedPass.kind === "no-output"
 							? "empty_output"
-							: classifyHistorianFailureReason(
-									`${validatedPass.reason}: ${validatedPass.error}`,
-								);
+							: piSubagentFailureReason(validatedPass);
 				// A window refusal here comes from a fallback model (the primary was
 				// fitted above). Treat it like any other failed pass: count it, notify,
 				// and keep the reserved drain budget spent even though nothing was
@@ -1330,7 +1337,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				newCompartments[newCompartments.length - 1]?.endMessage ?? 0;
 			if (lastNewEnd + 1 <= offset) {
 				const errorMsg = `historian returned compartments that did not advance past raw message ${offset - 1}`;
-				telemetry.failureReason = "parse_failed";
+				telemetry.failureReason = errorMsg;
 				sessionLog(
 					sessionId,
 					`historian failure: source=no-progress newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
@@ -1427,6 +1434,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// marker for the deferred materializing drain. BEGIN IMMEDIATE keeps the
 			// holder check and writes on one fresh write-locked snapshot.
 			if (!compartmentLeaseHolderId) {
+				telemetry.status = "noop";
+				telemetry.failureReason = "missing compartment lease holder";
 				sessionLog(
 					sessionId,
 					"historian publish skipped: missing compartment lease holder",
@@ -1451,6 +1460,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			try {
 				if (!isCompartmentLeaseHeld(db, sessionId, compartmentLeaseHolderId)) {
 					db.exec("ROLLBACK");
+					telemetry.status = "noop";
+					telemetry.failureReason = "compartment lease no longer held";
 					sessionLog(
 						sessionId,
 						"historian publish skipped: compartment lease no longer held",
@@ -1741,7 +1752,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		});
 	} catch (error) {
 		const desc = describeError(error);
-		telemetry.failureReason = classifyHistorianFailureReason(desc.brief);
+		telemetry.failureReason = PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(
+			desc.message,
+		)
+			? desc.message
+			: externalHistorianFailureReason(error, "exception");
 		sessionLog(
 			sessionId,
 			`historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
@@ -1777,7 +1792,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				subagentInvocationId: invocationId,
 				runKind: telemetry.runKind ?? "incremental",
 				status: telemetry.status ?? "failed",
-				failureReason: telemetry.failureReason ?? null,
+				failureReason:
+					telemetry.failureReason ??
+					((telemetry.status ?? "failed") === "failed"
+						? "provider_error"
+						: null),
 				chunkStartOrdinal: telemetry.chunkStartOrdinal ?? null,
 				chunkEndOrdinal: telemetry.chunkEndOrdinal ?? null,
 				unprocessedFrom: telemetry.unprocessedFrom ?? null,
@@ -1829,8 +1848,46 @@ type ValidationOutcome =
 				: never;
 	  }
 	| { kind: "validation-failed"; error: string; rawText: string }
-	| { kind: "spawn-failed"; reason: string; error: string }
+	| {
+			kind: "spawn-failed";
+			reason: string;
+			error: string;
+			meta?: Record<string, unknown>;
+	  }
 	| { kind: "no-output" };
+
+function piSubagentFailureReason(
+	failure: Extract<ValidationOutcome, { kind: "spawn-failed" }>,
+): string {
+	if (PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(failure.error))
+		return failure.error;
+	if (
+		["step_limit", "token_budget", "invalid_prompt"].includes(failure.reason)
+	) {
+		return failure.error;
+	}
+	if (failure.reason === "abort") return "aborted";
+	if (failure.reason === "timeout") {
+		return externalHistorianFailureReason(failure.error, "timeout");
+	}
+	if (failure.reason === "parse_failed") return "parse_failed";
+	if (failure.reason === "non_zero_exit") {
+		const exitCode =
+			failure.meta?.exitCode ??
+			/\bcode\s*=\s*(-?\d+|null)\b/i.exec(failure.error)?.[1];
+		return subprocessExitHistorianFailureReason(exitCode, failure.meta?.stderr);
+	}
+	if (failure.reason === "no_assistant") {
+		const providerReason = externalHistorianFailureReason(failure.error);
+		return providerReason === "provider_error"
+			? "empty_output"
+			: providerReason;
+	}
+	return externalHistorianFailureReason(
+		failure.error,
+		failure.reason === "spawn_failed" ? "exception" : "provider_error",
+	);
+}
 
 async function validateHistorianResult(
 	result: SubagentRunResult,
@@ -1844,6 +1901,7 @@ async function validateHistorianResult(
 			kind: "spawn-failed",
 			reason: result.reason,
 			error: result.error,
+			...(result.meta ? { meta: result.meta } : {}),
 		};
 	}
 	if (result.assistantText.trim().length === 0) {

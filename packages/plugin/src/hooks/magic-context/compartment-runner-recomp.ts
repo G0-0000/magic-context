@@ -579,7 +579,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     subagentInvocationId: validatedPass.invocationId ?? null,
                     runKind: "recomp",
                     status: "failed",
-                    failureReason: validatedPass.error,
+                    failureReason: validatedPass.failureReason ?? validatedPass.error,
                     chunkStartOrdinal: chunk.startIndex,
                     chunkEndOrdinal: chunk.endIndex,
                     compartmentsProduced: 0,

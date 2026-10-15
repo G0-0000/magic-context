@@ -1,4 +1,5 @@
 import type { Database } from "../../shared/sqlite";
+import { capHistorianFailureReason } from "./historian-failure-reason";
 
 /**
  * Per historian-invocation telemetry.
@@ -65,73 +66,6 @@ export interface HistorianRunInput {
     legacy?: boolean;
 }
 
-const MAX_HISTORIAN_FAILURE_REASON_LENGTH = 96;
-
-/**
- * Reduce failure details to a short diagnostic class before they reach durable
- * telemetry. Provider messages can contain request or response data, so only
- * stable classes and recognized status codes are retained.
- */
-export function classifyHistorianFailureReason(reason?: string | null): string {
-    const short = (value: string): string => value.slice(0, MAX_HISTORIAN_FAILURE_REASON_LENGTH);
-    const detail = typeof reason === "string" ? reason.trim() : "";
-    if (detail.length === 0) return "provider_error";
-
-    const normalized = detail.toLowerCase();
-    if (
-        /^(?:provider_error(?::(?:http_[1-5]\d{2}|(?:invalid_api_key|authentication_error|rate_limit_error|overloaded_error|insufficient_quota|invalid_request_error|permission_error)(?::http_[1-5]\d{2})?))?|model_not_found(?::http_[1-5]\d{2})?|timeout(?::http_[1-5]\d{2})?|aborted|empty_output|parse_failed|subprocess_exit:(?:-?\d+|unknown))$/.test(
-            normalized,
-        )
-    ) {
-        return normalized.slice(0, MAX_HISTORIAN_FAILURE_REASON_LENGTH);
-    }
-    const statusMatch =
-        /(?:\bhttp(?:\s+status)?|\bstatus(?:\s+code)?|\bapi\s+error|\berror)\s*[(:= ]+([1-5]\d{2})\b/i.exec(
-            detail,
-        );
-    const httpCode = statusMatch?.[1];
-
-    if (/model[_ ]not[_ ]found|unknown model|model does not exist/.test(normalized)) {
-        return short(`model_not_found${httpCode ? `:http_${httpCode}` : ""}`);
-    }
-    if (/\btimeout\b|timed out|deadline exceeded/.test(normalized)) {
-        return short(`timeout${httpCode ? `:http_${httpCode}` : ""}`);
-    }
-    if (/\babort(?:ed)?\b|cancelled|canceled/.test(normalized)) return "aborted";
-
-    if (/\b(?:non_zero_exit|subprocess_exit)\b|\bpi exited\b/.test(normalized)) {
-        const exitCode = /\bcode\s*=\s*(-?\d+|null)\b/i.exec(detail)?.[1];
-        return short(`subprocess_exit:${exitCode && exitCode !== "null" ? exitCode : "unknown"}`);
-    }
-
-    const providerClasses: Array<[RegExp, string]> = [
-        [/\binvalid_api_key\b|invalid api key|no api key found/, "invalid_api_key"],
-        [/\bauthentication_error\b|unauthori[sz]ed|\bforbidden\b/, "authentication_error"],
-        [/\brate_limit_error\b|rate[ _-]?limit|too many requests/, "rate_limit_error"],
-        [/\boverloaded_error\b|\boverloaded\b/, "overloaded_error"],
-        [/\binsufficient_quota\b/, "insufficient_quota"],
-        [/\binvalid_request_error\b|invalid request/, "invalid_request_error"],
-        [/\bpermission_error\b/, "permission_error"],
-    ];
-    const providerClass = providerClasses.find(([pattern]) => pattern.test(normalized))?.[1];
-    if (providerClass)
-        return short(`provider_error:${providerClass}${httpCode ? `:http_${httpCode}` : ""}`);
-    if (httpCode) return `provider_error:http_${httpCode}`;
-
-    if (
-        /parse_failed|parse error|validation|invalid (?:historian )?output|historian returned (?:no usable compartments|invalid compartment output)|terminal boundary splits|tiered paraphrase structure/.test(
-            normalized,
-        )
-    ) {
-        return "parse_failed";
-    }
-    if (/empty_output|no[_ ]assistant|no usable text|empty text|empty output/.test(normalized)) {
-        return "empty_output";
-    }
-
-    return "provider_error";
-}
-
 /** Count recorded attempts for one session, regardless of their outcome. */
 export function countHistorianRuns(db: Database, sessionId: string): number {
     try {
@@ -150,9 +84,14 @@ export function countHistorianRuns(db: Database, sessionId: string): number {
 export function recordHistorianRun(db: Database, input: HistorianRunInput): number | null {
     try {
         const failureReason =
-            input.status === "failed"
-                ? classifyHistorianFailureReason(input.failureReason)
-                : (input.failureReason ?? null);
+            input.failureReason == null
+                ? input.status === "failed"
+                    ? "provider_error"
+                    : null
+                : capHistorianFailureReason(
+                      input.failureReason,
+                      input.status === "failed" ? "provider_error" : "",
+                  );
         const result = db
             .prepare(
                 `INSERT INTO historian_runs (

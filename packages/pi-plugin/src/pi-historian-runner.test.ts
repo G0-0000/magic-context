@@ -795,7 +795,9 @@ describe("runPiHistorian", () => {
 			]),
 		});
 		try {
-			expect(latestHistorianFailureReason(db)).toBe("model_not_found:http_404");
+			expect(latestHistorianFailureReason(db)).toBe(
+				"provider_error:http_404:model_not_found",
+			);
 			expect(latestHistorianFailureReason(db)).not.toContain(
 				"private provider details",
 			);
@@ -816,6 +818,52 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("preserves a safe Pi extension-load stderr diagnostic on subprocess exit", async () => {
+		const stderrLine =
+			"Error: Failed to load extension '/tmp/pi/extensions/workspace.js': TypeError: loadAccounts is not a function";
+		const { db } = await runHistorianWith({
+			runner: runnerWithSteps([
+				{
+					ok: false,
+					reason: "non_zero_exit",
+					error: "pi exited (code=1, signal=null) without emitting agent_end",
+					durationMs: 1,
+					meta: {
+						exitCode: 1,
+						stderr: `${stderrLine}\nassistant response text`,
+					},
+				},
+			]),
+		});
+		try {
+			const reason = latestHistorianFailureReason(db);
+			expect(reason).toBe(`subprocess_exit:1:${stderrLine}`);
+			expect(reason).toContain("loadAccounts is not a function");
+			expect(reason).not.toContain("assistant response text");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("does not retain arbitrary stderr after a Pi subprocess exit", async () => {
+		const { db } = await runHistorianWith({
+			runner: runnerWithSteps([
+				{
+					ok: false,
+					reason: "non_zero_exit",
+					error: "pi exited (code=2, signal=null) without emitting agent_end",
+					durationMs: 1,
+					meta: { exitCode: 2, stderr: "model output must not be stored" },
+				},
+			]),
+		});
+		try {
+			expect(latestHistorianFailureReason(db)).toBe("subprocess_exit:2");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	const failureClassCases: Array<{
 		name: string;
 		steps: Array<SubagentRunResult | string>;
@@ -829,7 +877,7 @@ describe("runPiHistorian", () => {
 				error: "OpenAI API error (429): rate_limit_error private details",
 				durationMs: 1,
 			})),
-			expected: "provider_error:rate_limit_error:http_429",
+			expected: "provider_error:http_429:rate_limit_error",
 		},
 		{
 			name: "timeout",
@@ -889,7 +937,7 @@ describe("runPiHistorian", () => {
 				const reason = latestHistorianFailureReason(db);
 				expect(reason).toBe(failureCase.expected);
 				expect(reason?.length).toBeGreaterThan(0);
-				expect(reason?.length).toBeLessThanOrEqual(96);
+				expect(reason?.length).toBeLessThanOrEqual(512);
 				expect(reason).not.toContain("private details");
 				expect(reason).not.toContain("private text");
 			} finally {
@@ -1519,6 +1567,9 @@ describe("Pi historian prompt sized to the producer window", () => {
 				1,
 			);
 			expect(getHistorianFailureState(db, "ses-historian").lastError).toContain(
+				"producer_prompt_unfit",
+			);
+			expect(latestHistorianFailureReason(db)).toContain(
 				"producer_prompt_unfit",
 			);
 			expect(notices.filter((text) => text.includes("(MC-H05)"))).toHaveLength(
