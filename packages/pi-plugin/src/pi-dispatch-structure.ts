@@ -41,6 +41,25 @@ export interface PiPreparedStructure {
 }
 
 const MAX_MESSAGES = 100_000;
+const ORPHAN_NOTE = Symbol("prepared orphan tool result");
+// These native serializers share transformMessages. Cursor, GitLab and custom
+// APIs do not, so their result rows must retain their existing expectations.
+const TRANSFORM_MESSAGES_APIS = new Set([
+	"openai-completions",
+	"openai-responses",
+	"openrouter",
+	"openai-codex-responses",
+	"azure-openai-responses",
+	"anthropic-messages",
+	"bedrock-converse-stream",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"google-vertex",
+	"ollama-chat",
+	"factory-droid-agent",
+	"devin-agent",
+	"apple-foundation-models",
+]);
 
 function object(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value)
@@ -65,6 +84,10 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	if (role !== "user" && role !== "assistant" && role !== "toolResult")
 		return undefined;
 	const row: MessageStructure = { role, calls: [], results: [] };
+	if (ORPHAN_NOTE in message && typeof message.content === "string") {
+		if (message.content.length > 32 * 1024 * 1024) return undefined;
+		row.exactText = message.content;
+	}
 	if (typeof message.timestamp === "number") row.timestamp = message.timestamp;
 	if (role === "toolResult") {
 		if (typeof message.toolCallId !== "string") return undefined;
@@ -83,9 +106,14 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	return row;
 }
 
-function projectMissingToolResults(messages: readonly unknown[]): unknown[] {
+function projectMissingToolResults(
+	messages: readonly unknown[],
+	api?: string,
+): unknown[] {
+	const projectOrphans = TRANSFORM_MESSAGES_APIS.has(api ?? "");
 	const responsesComponents = new Set<string>();
 	const opaqueIds = new Set<string>();
+	const validToolUseIds = projectOrphans ? new Set<string>() : undefined;
 	const component = (id: string) => {
 		const pipe = id.indexOf("|");
 		return pipe > 0 ? id.slice(0, pipe) : id;
@@ -103,9 +131,13 @@ function projectMissingToolResults(messages: readonly unknown[]): unknown[] {
 					"azure-openai-responses",
 					"openai-codex-responses",
 				].includes(String(message.api))
-			)
+			) {
 				responsesComponents.add(component(block.id));
-			else if (block.id.includes("|")) opaqueIds.add(block.id);
+				validToolUseIds?.add(component(block.id));
+			} else {
+				if (block.id.includes("|")) opaqueIds.add(block.id);
+				validToolUseIds?.add(block.id);
+			}
 		}
 	}
 	// Responses item suffixes are not part of the call identity; opaque Chat IDs
@@ -168,6 +200,42 @@ function projectMissingToolResults(messages: readonly unknown[]): unknown[] {
 			)
 		)
 			resolved.add(pairingId(message.toolCallId));
+		else if (
+			validToolUseIds &&
+			message?.role === "toolResult" &&
+			typeof message.toolCallId === "string" &&
+			typeof message.toolName === "string" &&
+			!validToolUseIds.has(pairingId(message.toolCallId)) &&
+			Array.isArray(message.content)
+		) {
+			// Native replay drops an orphan inside an unresolved normal or aborted
+			// result window; otherwise it preserves nonblank text as an unprivileged
+			// user note. This changes only the plan, never the returned history.
+			// @oh-my-pi/pi-ai transform-messages.ts:1406-1460 (18.11.1).
+			if (pending.some((call) => !resolved.has(pairingId(call.id)))) continue;
+			const parts = message.content.flatMap((value) => {
+				const part = object(value);
+				return part?.type === "text" &&
+					typeof part.text === "string" &&
+					part.text.trim()
+					? [part.text]
+					: [];
+			});
+			if (parts.length) {
+				const error = message.isError ? ' is-error="true"' : "";
+				const note = `<stale-tool-result tool="${message.toolName}" id="${message.toolCallId}"${error}>\n${parts.join("\n")}\n</stale-tool-result>`;
+				projected.push({
+					role: "user",
+					content:
+						api === "ollama-chat"
+							? note
+							: new TextDecoder().decode(new TextEncoder().encode(note)),
+					timestamp: message.timestamp,
+					[ORPHAN_NOTE]: true,
+				});
+			}
+			continue;
+		}
 		projected.push(value);
 		if (message?.role !== "assistant" || !Array.isArray(message.content))
 			continue;
@@ -234,6 +302,7 @@ function buildPiPreparedStructure(
 	}
 	const projectedMessages = projectMissingToolResults(
 		model?.api ? piAgentHistory(messages, model.api) : messages,
+		model?.api,
 	);
 	if (projectedMessages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
@@ -583,6 +652,8 @@ function googleStructure(contents: unknown[]): MessageStructure[] | undefined {
 			role: message.role === "model" ? "assistant" : "user",
 			calls: [],
 			results: [],
+			wireRole: message.role,
+			wireContent: message.parts,
 		};
 		const results: MessageStructure[] = [];
 		for (const value of message.parts) {
@@ -637,6 +708,34 @@ function wireId(
 		return /^[a-zA-Z0-9_-]{1,64}$/.test(callId) ? callId : undefined;
 	}
 	return id;
+}
+
+function matchesUserText(
+	content: unknown,
+	text: string,
+	api: string | undefined,
+	responses: boolean,
+	googleOrBedrock: boolean,
+): boolean {
+	if (responses || googleOrBedrock) {
+		if (!Array.isArray(content) || content.length !== 1) return false;
+		const block = object(content[0]);
+		return (
+			!!block &&
+			block.text === text &&
+			(responses
+				? block.type === "input_text"
+				: Object.keys(block).length === 1)
+		);
+	}
+	if (
+		(api === "anthropic-messages" || api === "factory-droid-agent") &&
+		Array.isArray(content)
+	) {
+		const block = content.length === 1 ? object(content[0]) : undefined;
+		return block?.type === "text" && block.text === text;
+	}
+	return content === text;
 }
 
 type StructureComparison =
@@ -744,7 +843,13 @@ export function piPreparedStructureMismatch(
 					return structureDetail(i, expectedRows, rows, "role");
 				if (
 					(expected.exactText !== undefined &&
-						actual.wireContent !== expected.exactText) ||
+						!matchesUserText(
+							actual.wireContent,
+							expected.exactText,
+							prepared?.api,
+							responses,
+							google || body.inferenceConfig !== undefined,
+						)) ||
 					(expected.exactImages !== undefined &&
 						!piMatchesChatImages(actual.wireContent, expected.exactImages))
 				)
