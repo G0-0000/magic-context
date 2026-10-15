@@ -7,6 +7,7 @@ import {
 	ensureStorageDirectorySync,
 	writeStorageFileSync,
 } from "@magic-context/core/shared/storage-permissions";
+import { PiContextSupersededError } from "./pi-context-budget";
 import type { PiLkgSerializedOutput } from "./pi-lkg";
 import {
 	PiServedEnvelopeUnavailable,
@@ -337,6 +338,9 @@ export function flushPiServedArrayLedger(): void {
 					item.assertCurrentPass?.();
 					return true;
 				} catch (error) {
+					// A deferred capture can outlive its pass. Discard that capture quietly;
+					// unexpected ownership failures still need a diagnostic.
+					if (error instanceof PiContextSupersededError) return false;
 					log(
 						"[magic-context][pi] DISCARDED CONTEXT RESULT: queued served capture",
 						error,
