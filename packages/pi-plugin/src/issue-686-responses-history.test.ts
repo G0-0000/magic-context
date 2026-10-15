@@ -30,6 +30,18 @@ const item = (text: string, phase?: string) => ({
 	...(phase ? { phase } : {}),
 	content: [{ type: "output_text", text, annotations: [] }],
 });
+const thinkingAssistant = (content: unknown[]) => ({
+	role: "assistant",
+	api: model.api,
+	provider: model.provider,
+	model: model.id,
+	content,
+});
+const thinkingBlock = () => ({
+	type: "thinking",
+	thinking: "private signed reasoning",
+	thinkingSignature: "opaque-signature",
+});
 const cache = () => ({
 	...signed("§3§ cached commentary", "rs_cached"),
 	providerPayload: {
@@ -304,4 +316,151 @@ test("issue 686 Responses text-item guard: latest turn and ordered call IDs rema
 		expect(h.aborts).toBe(1);
 		expect(h.refusals[0]).toContain("prepared turn structure");
 	}
+});
+
+test("issue 686 Responses grouping: same-model signed thinking, text and tool calls match reasoning, output text and calls", async () => {
+	const messages = [
+		userMessage("earlier prompt", 1),
+		thinkingAssistant([
+			thinkingBlock(),
+			{
+				type: "text",
+				text: "visible answer",
+				textSignature: JSON.stringify({
+					v: 1,
+					id: "rs_visible",
+					phase: "commentary",
+				}),
+			},
+			{ type: "toolCall", id: "call_686|fc_686", name: "Read", arguments: {} },
+		]),
+		signed("follow-up answer", "rs_followup"),
+		{
+			role: "toolResult",
+			toolCallId: "call_686|fc_686",
+			content: [{ type: "text", text: "read result" }],
+		},
+		userMessage("current prompt", 2),
+	];
+	const h = harness(messages);
+	await h.prepare();
+	h.dispatch({
+		input: [
+			{ role: "user", content: "earlier prompt" },
+			{ type: "reasoning", id: "rs_reasoning", encrypted_content: "opaque" },
+			item("visible answer", "commentary"),
+			{
+				type: "function_call",
+				call_id: "call_686",
+				name: "Read",
+				arguments: "{}",
+			},
+			item("follow-up answer", "commentary"),
+			{
+				type: "function_call_output",
+				call_id: "call_686",
+				output: "read result",
+			},
+			{ role: "user", content: "current prompt" },
+		],
+	});
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
+});
+
+test("issue 686 Responses grouping: thinking-only assistant adds no row between assistants", async () => {
+	const messages = [
+		userMessage("earlier prompt", 1),
+		signed("first answer", "rs_first"),
+		thinkingAssistant([thinkingBlock()]),
+		signed("second answer", "rs_second"),
+		userMessage("current prompt", 2),
+	];
+	const h = harness(messages);
+	await h.prepare();
+	h.dispatch({
+		input: [
+			{ role: "user", content: "earlier prompt" },
+			item("first answer", "commentary"),
+			{ type: "reasoning", id: "rs_reasoning", encrypted_content: "opaque" },
+			item("second answer", "commentary"),
+			{ role: "user", content: "current prompt" },
+		],
+	});
+	expect(h.aborts).toBe(0);
+	expect(h.refusals).toEqual([]);
+});
+
+test("issue 686 Responses grouping guard: thinking exemption retains every prepared text block", async () => {
+	const messages = [
+		userMessage("earlier prompt", 1),
+		thinkingAssistant([
+			thinkingBlock(),
+			{
+				type: "text",
+				text: "first answer",
+				textSignature: JSON.stringify({
+					v: 1,
+					id: "rs_first",
+					phase: "commentary",
+				}),
+			},
+			{
+				type: "text",
+				text: "second answer",
+				textSignature: JSON.stringify({
+					v: 1,
+					id: "rs_second",
+					phase: "commentary",
+				}),
+			},
+		]),
+		userMessage("current prompt", 2),
+	];
+	const variants = [
+		[item("second answer", "commentary"), item("first answer", "commentary")],
+		[item("first answer", "commentary")],
+		[
+			item("first answer", "commentary"),
+			item("<thinking>unprepared wire text</thinking>", "commentary"),
+		],
+	];
+	for (const textItems of variants) {
+		const h = harness(messages);
+		await h.prepare();
+		h.dispatch({
+			input: [
+				{ role: "user", content: "earlier prompt" },
+				{ type: "reasoning", id: "rs_reasoning", encrypted_content: "opaque" },
+				...textItems,
+				{ role: "user", content: "current prompt" },
+			],
+		});
+		expect(h.aborts).toBe(1);
+		expect(h.refusals[0]).toContain("comparison=content");
+	}
+});
+
+test("issue 686 Responses grouping: unknown and cross-model thinking keep representation unavailable", () => {
+	const unknown = piPreparedStructure(
+		[thinkingAssistant([{ type: "unknown", text: "not canonical thinking" }])],
+		model,
+	);
+	expect(unknown?.responsesMessages).toBeUndefined();
+
+	const crossModel = thinkingAssistant([thinkingBlock()]);
+	crossModel.model = "other-model";
+	expect(
+		piPreparedStructure([crossModel], model)?.responsesMessages,
+	).toBeUndefined();
+
+	const incompleteModelMessage = {
+		role: "assistant",
+		api: model.api,
+		content: [thinkingBlock()],
+	};
+	expect(
+		piPreparedStructure([incompleteModelMessage], { api: model.api })
+			?.responsesMessages,
+	).toBeUndefined();
 });

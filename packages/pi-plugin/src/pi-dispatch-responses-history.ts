@@ -46,18 +46,30 @@ export function piResponsesAssistantTexts(
 	if (!message || !Array.isArray(message.content)) return undefined;
 	const texts: string[] = [];
 	const blocks: Record<string, unknown>[] = [];
+	const sameModel =
+		message.api === model?.api &&
+		message.model === model?.id &&
+		message.provider === model?.provider;
+	const sameModelThinking =
+		model !== undefined &&
+		typeof model.api === "string" &&
+		typeof model.id === "string" &&
+		typeof model.provider === "string" &&
+		message.api === model.api &&
+		message.model === model.id &&
+		message.provider === model.provider;
 	let units = 0;
 	for (const value of message.content) {
 		const block = object(value);
 		if (block?.type === "toolCall") continue;
+		// The same-model Responses serializer represents canonical thinking as
+		// reasoning items (or omits it), neither of which contributes a text row.
+		// Cross-model serializers may expose thinking as text, so fail closed there.
+		if (block?.type === "thinking" && sameModelThinking) continue;
 		if (block?.type !== "text" || typeof block.text !== "string")
 			return undefined;
 		units += block.text.length;
 		if (units > MAX_TEXT_UNITS) return undefined;
-		const sameModel =
-			message.api === model?.api &&
-			message.model === model?.id &&
-			message.provider === model?.provider;
 		texts.push(
 			textIdentity(
 				wellFormed(block.text),
