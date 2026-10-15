@@ -276,6 +276,8 @@ import { sendCtxStatusMessage } from "./commands/pi-command-utils";
 import {
 	type ApplyDeferredPiCompactionMarkerDeps,
 	applyDeferredPiCompactionMarker,
+	clearPiCompactionMarkerDrainLogState,
+	logPiCompactionMarkerDrainGateOnce,
 } from "./compaction-marker-manager-pi";
 import {
 	commitPiCompactionModeRecord,
@@ -524,6 +526,7 @@ function isPiHardCacheExpired(
 }
 
 let injectM0M1PiForRun = injectM0M1Pi;
+let resolvePiEffectiveSystemStateForRun = resolvePiEffectiveSystemState;
 let persistReasoningWatermarkForRun = updateSessionMeta;
 let persistStableIdSchemeForRun = updateSessionMeta;
 let afterFallbackAdoptionForTests:
@@ -590,6 +593,14 @@ export const __test = {
 		injectM0M1PiForRun = fn;
 		return () => {
 			injectM0M1PiForRun = injectM0M1Pi;
+		};
+	},
+	setPiEffectiveSystemStateResolverForTests(
+		fn: typeof resolvePiEffectiveSystemState,
+	): () => void {
+		resolvePiEffectiveSystemStateForRun = fn;
+		return () => {
+			resolvePiEffectiveSystemStateForRun = resolvePiEffectiveSystemState;
 		};
 	},
 	setReasoningWatermarkPersistenceForTests(
@@ -8034,12 +8045,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// Capture the provider-visible system state before transforming the served
 		// array. A pending compaction marker must compare this input state with the
 		// system state that Pi persists in its session.
-		foldingSystemState = resolvePiEffectiveSystemState(args.messages);
-	} catch (error) {
-		sessionLog(
-			args.sessionId,
-			`Pi folding-input system state could not be resolved; native marker drain will remain pending: ${error instanceof Error ? error.message : String(error)}`,
-		);
+		foldingSystemState = resolvePiEffectiveSystemStateForRun(args.messages);
+	} catch {
+		// If effective system state is unavailable, continue without it; a pending
+		// marker's gate below logs this failure using IDs and ordinals only.
 	}
 	const forceMaterializationPercentage =
 		args.forceMaterializationPercentage ??
@@ -10070,6 +10079,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!suppressDeferredHistoryDrain &&
 		!casLost;
 	let preserveDeferredMaterializationForMarkerDrain = false;
+	let pendingForDrain: PendingPiCompactionMarker | null = null;
 	if (deferredHistoryDrainEligible) {
 		try {
 			args.assertCurrentPass?.();
@@ -10077,6 +10087,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.sessionId,
 			);
+			pendingForDrain = pending;
 			if (!pending) {
 				if (injectionResult?.contentionExhausted === true) {
 					suppressDeferredHistoryDrain = true;
@@ -10095,9 +10106,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				preserveDeferredMaterializationForMarkerDrain = true;
 				const boundary = injectionResult?.renderedBoundary;
 				const m1Coverage = injectionResult?.m1RenderedCoverage;
-				sessionLog(
+				logPiCompactionMarkerDrainGateOnce(
 					args.sessionId,
-					`Pi compaction-marker drain skipped: pending ordinal ${pending.ordinal} is newer than rendered boundary ${boundary?.ordinal ?? "<none>"} endMessageId=${boundary?.endMessageId ?? "<none>"} (m[1] coverage ${m1Coverage?.ordinal ?? "<none>"} endMessageId=${m1Coverage?.endMessageId ?? "<none>"}); preserving deferred signals`,
+					pending,
+					"rendered-history-not-covering-marker",
+					{
+						renderedCoverageOrdinal: boundary?.ordinal,
+						renderedCoverageEndMessageId: boundary?.endMessageId,
+						m1CoverageOrdinal: m1Coverage?.ordinal,
+						m1CoverageEndMessageId: m1Coverage?.endMessageId,
+					},
 				);
 			} else if (
 				!args.appendCompaction ||
@@ -10106,10 +10124,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			) {
 				suppressDeferredHistoryDrain = true;
 				preserveDeferredMaterializationForMarkerDrain = true;
-				sessionLog(
-					args.sessionId,
-					"Pi compaction-marker drain skipped: sessionManager appendCompaction/getBranch or folding system state unavailable; preserving deferred signals",
-				);
+				if (!args.appendCompaction)
+					logPiCompactionMarkerDrainGateOnce(
+						args.sessionId,
+						pending,
+						"append-compaction-unavailable",
+					);
+				if (!args.readBranchEntries)
+					logPiCompactionMarkerDrainGateOnce(
+						args.sessionId,
+						pending,
+						"get-branch-unavailable",
+					);
+				if (!foldingSystemState)
+					logPiCompactionMarkerDrainGateOnce(
+						args.sessionId,
+						pending,
+						"folding-system-state-unavailable",
+					);
 			} else {
 				args.assertCurrentPass?.();
 				const outcome = applyDeferredPiCompactionMarker(
@@ -10151,21 +10183,23 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						suppressDeferredHistoryDrain = true;
 						preserveDeferredMaterializationForMarkerDrain = true;
 						if (adoption.kind === "divergent") {
-							const promptLengthDelta =
-								adoption.persistedPromptLength - adoption.foldingPromptLength;
 							// appendCompaction has already persisted this entry. Pi exposes no
 							// retraction API, and 0.86 session-manager.js:187-190 re-emits
 							// [systemMessage, summary]. Keep MC's fold for this pass and retain
 							// the pending marker so the next pass rechecks the then-current
 							// journal instead of trusting the persisted snapshot.
-							sessionLog(
+							logPiCompactionMarkerDrainGateOnce(
 								args.sessionId,
-								`Pi compaction-marker equivalence refused compactionId=${outcome.compactionId}: foldingOnlyTools=${JSON.stringify(adoption.foldingOnlyTools)} persistedOnlyTools=${JSON.stringify(adoption.persistedOnlyTools)} changedTools=${JSON.stringify(adoption.changedTools)} promptLengthDelta=${promptLengthDelta} (folding=${adoption.foldingPromptLength}, persisted=${adoption.persistedPromptLength}); persisted entry cannot be retracted, pending marker retained for next-pass journal recheck`,
+								pending,
+								"equivalence-refused",
+								{ firstKeptEntryId: outcome.firstKeptEntryId },
 							);
 						} else {
-							sessionLog(
+							logPiCompactionMarkerDrainGateOnce(
 								args.sessionId,
-								`Pi compaction-marker equivalence unavailable for compactionId=${outcome.compactionId}: ${adoption.reason}; preserving deferred signals`,
+								pending,
+								"equivalence-unavailable",
+								{ firstKeptEntryId: outcome.firstKeptEntryId },
 							);
 						}
 					}
@@ -10174,10 +10208,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					suppressDeferredHistoryDrain = true;
 					preserveDeferredMaterializationForMarkerDrain = true;
 				} else if (outcome.kind === "retryable-failure") {
-					sessionLog(
-						args.sessionId,
-						`Pi compaction-marker drain retryable failure: ${outcome.error.message}`,
-					);
+					// The compaction marker manager logged the retryable failure's gate
+					// classification without error text.
 				} else if (
 					markerEquivalent &&
 					clearPendingPiCompactionMarkerStateIf(
@@ -10189,18 +10221,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					consumeDeferredHistoryRefresh(args.sessionId);
 				} else if (markerEquivalent) {
 					casLost = true;
-					sessionLog(
+					logPiCompactionMarkerDrainGateOnce(
 						args.sessionId,
-						"CAS-clear failed (newer blob written or another actor cleared); preserving deferred-history signal",
+						pending,
+						"cas-clear-lost",
 					);
 				}
 			}
-		} catch (err) {
+		} catch {
 			args.assertCurrentPass?.();
-			sessionLog(
-				args.sessionId,
-				`Pi compaction-marker drain failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-			);
+			if (pendingForDrain)
+				logPiCompactionMarkerDrainGateOnce(
+					args.sessionId,
+					pendingForDrain,
+					"drain-threw",
+				);
 		}
 	}
 	if (
@@ -11047,6 +11082,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	piBranchProjectionBySession.delete(sessionId);
 	piAlignmentMismatchLoggedSessions.delete(sessionId);
 	clearPiOrdinalAlignmentSession(sessionId);
+	clearPiCompactionMarkerDrainLogState(sessionId);
 	clearPiInjectionTokenCountCache(sessionId);
 	clearPiMuralProcessCache(sessionId);
 	// The content memo is shared across sessions, not owned by one session id.

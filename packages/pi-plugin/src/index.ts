@@ -627,8 +627,25 @@ export function registerConfiguredTodoLifecycle(
 		: undefined;
 }
 
+const PI_MARKER_REHYDRATION_SESSION_ID_LIMIT = 5;
+
+function formatPiMarkerRehydrationLine(
+	sessionIds: readonly string[],
+	activeSessionId: string,
+): string {
+	const shownIds = sessionIds.slice(0, PI_MARKER_REHYDRATION_SESSION_ID_LIMIT);
+	const omitted = sessionIds.length - shownIds.length;
+	const suffix = omitted > 0 ? ` +${omitted} more` : "";
+	return (
+		`${PREFIX} rehydrated ${sessionIds.length} Pi deferred compaction marker session(s)` +
+		`; sessionIds=${shownIds.join(",")}${suffix}` +
+		`; activeSessionIncluded=${sessionIds.includes(activeSessionId)}`
+	);
+}
+
 export const __test = {
 	logPiConfigLoad,
+	formatPiMarkerRehydrationLine,
 	resetLoggedPiConfigDirs(): void {
 		loggedPiConfigDirs.clear();
 	},
@@ -1383,16 +1400,13 @@ async function startPiMagicContextRuntime(
 	// boot-resolved rather than following later /cd project config changes.
 	const compactionOff = !isCompactionEnabled(config);
 	setCtxReduceRegisteredGlobally(!compactionOff);
+	let pendingPiMarkerSessions: string[] = [];
+	let piMarkerRehydrationLogged = false;
 	if (!compactionOff) {
 		try {
-			const pendingPiMarkerSessions = getSessionsWithPendingPiMarker(db);
+			pendingPiMarkerSessions = getSessionsWithPendingPiMarker(db);
 			for (const sid of pendingPiMarkerSessions) {
 				signalPiDeferredCompactionMarkerDrain(sid);
-			}
-			if (pendingPiMarkerSessions.length > 0) {
-				log(
-					`${PREFIX} rehydrated ${pendingPiMarkerSessions.length} Pi deferred compaction marker session(s)`,
-				);
 			}
 		} catch (err) {
 			warn(
@@ -1955,6 +1969,14 @@ async function startPiMagicContextRuntime(
 		}
 
 		const sessionId = resolveSessionId(ctx);
+		if (
+			!piMarkerRehydrationLogged &&
+			pendingPiMarkerSessions.length > 0 &&
+			sessionId
+		) {
+			log(formatPiMarkerRehydrationLine(pendingPiMarkerSessions, sessionId));
+			piMarkerRehydrationLogged = true;
+		}
 		const model = ctx.model;
 		if (sessionId && model?.provider && model.id) {
 			seedSessionCacheTtlIfUnsynced({
