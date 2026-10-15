@@ -28,21 +28,33 @@ const currentBinary = process.env.MC_RAW_REPLAY_PROBE;
 const baseBinary = process.env.MC_RAW_REPLAY_BASELINE;
 const baseAdapter = process.env.MC_RAW_REPLAY_BASELINE_ADAPTER;
 const baseRoot = process.env.MC_REVIEW_BASELINE_ROOT;
+const missingPrerequisites = [
+    !currentBinary && "MC_RAW_REPLAY_PROBE (staged native driver)",
+    !baseBinary && "MC_RAW_REPLAY_BASELINE (pinned master driver)",
+    !baseAdapter && "MC_RAW_REPLAY_BASELINE_ADAPTER (pinned master adapter)",
+    !baseRoot && "MC_REVIEW_BASELINE_ROOT (pinned master sources)",
+].filter((reason): reason is string => Boolean(reason));
+if (missingPrerequisites.length > 0) {
+    const reason = `Rust raw replay review prerequisites missing: ${missingPrerequisites.join(", ")}`;
+    if (process.env.MC_RAW_REPLAY_REQUIRED === "1") {
+        throw new Error(`Required ${reason}`);
+    }
+    console.info(`SKIP ${reason}`);
+}
+if (process.env.MC_RAW_REPLAY_REQUIRED === "1" && process.env.MC_REVIEW_ASSERT_LIVENESS !== "1") {
+    throw new Error("Required MC_REVIEW_ASSERT_LIVENESS=1 for the raw replay review lane");
+}
 const png =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOZcAAAAASUVORK5CYII=";
 
-if (!currentBinary)
-    console.info("SKIP Rust review module tests: staged MC_RAW_REPLAY_PROBE is missing");
-if (!baseBinary || !baseAdapter)
-    console.info("SKIP Rust review master differential: archived baseline is missing");
 console.info(
-    "SKIP real-daemon review: parent confirms sibling subconscious checkout is outside the worker sandbox; CI result is pending",
+    "SKIP real-daemon review: sibling subconscious checkout is outside this offline review lane",
 );
 
 describe.skipIf(!currentBinary || !baseBinary || !baseAdapter)(
     "independent no-LKG provider differential",
     () => {
-        for (const seed of [0xa19f37, 0xbadc0de, 0xc001d00d]) {
+        for (const seed of [0xa19f37, 0xbadc0de, 0xc001d00d, 0x92e41b, 0x67d5a3]) {
             test(`seed ${seed.toString(16)}: 128 mixed-media streaming passes equal master serialized bodies`, async () => {
                 const baselineFactory = (await import(baseAdapter!)).createRustModeTransform;
                 // The offline driver does not run the daemon's ingress lifecycle; exercise
@@ -162,7 +174,7 @@ describe.skipIf(!currentBinary || !baseBinary || !baseAdapter)(
                         sha256: hash.digest("hex"),
                     }),
                 );
-            }, 120_000);
+            }, 600_000);
         }
     },
 );

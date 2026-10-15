@@ -104,3 +104,33 @@ test("remaining Rust crates retain Bun migration oracles and hermetic archives r
     expect(unpack).toContain("ckdev-mc-e2e ckdev-mc-e2e-drive-fault ckdev-subc");
     expect(unpack).toContain('test -x "packages/e2e-tests/.cache/prebuilt/$binary"');
 });
+
+test("raw replay review reuses the hermetic driver and requires the pinned live witnesses", async () => {
+    const producer = workflow.jobs["e2e-rust-hermetic-build"]!;
+    const build = producer.steps.find((step) => step.name === "Build hermetic binary pair (including fault-injection variant)")!;
+    expect(build.run).toContain("--example transform_replay");
+    expect(build.run).toContain("rust-raw-replay-probe");
+
+    const review = workflow.jobs["rust-raw-replay-review"]!;
+    expect(review.name).toBe("Rust (raw replay review)");
+    expect(review.needs).toEqual(["e2e-rust-hermetic-build"]);
+    expect(review["timeout-minutes"]).toBe(120);
+    const wait = review.steps.find((step) => step.uses === "./.github/actions/wait-ci-artifact")!;
+    expect(wait.with!.artifact).toBe("rust-hermetic-binaries-${{ github.sha }}");
+
+    const fetch = review.steps.find((step) => step.name === "Fetch pinned master baseline")!;
+    expect(fetch.run).toContain("scripts/rust-raw-replay-baseline.commit");
+    expect(fetch.run).toContain("git fetch --no-tags --depth=1 origin");
+    const pin = await Bun.file(resolve(root, "scripts/rust-raw-replay-baseline.commit")).text();
+    expect(pin.trim()).toMatch(/^[0-9a-f]{40}$/);
+
+    const run = review.steps.find((step) => step.name === "Run staged raw replay witnesses")!;
+    expect(run.env!.MC_RAW_REPLAY_REQUIRED).toBe("1");
+    expect(run.env!.MC_REVIEW_ASSERT_LIVENESS).toBe("1");
+    expect(run.run).toContain("rust-cache-review.test.ts");
+    expect(run.run).toContain("rust-cache-r2.test.ts");
+    expect(run.run).toContain("rust-cache-restart.test.ts");
+    expect(run.run).toContain("release recovery census");
+    expect(run.run).toContain("no-freeze SQL");
+    expect(run.run).toContain("seed (a19f37|badc0de|c001d00d|92e41b|67d5a3)");
+});

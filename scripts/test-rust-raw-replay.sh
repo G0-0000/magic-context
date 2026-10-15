@@ -14,8 +14,14 @@ if [[ -n ${MC_RAW_REPLAY_BASELINE_ARCHIVE:-} ]]; then
     restore() { cp "$scratch/current-transform.rs" crates/mc-module/src/transform.rs; touch crates/mc-module/src/transform.rs; }
     trap 'restore; rm -rf "$scratch"' EXIT
     cp "$scratch/base/crates/mc-module/src/transform.rs" crates/mc-module/src/transform.rs
-    cargo build -p mc-module --example transform_replay
-    cp "${CARGO_TARGET_DIR:-target}/debug/examples/transform_replay" "$scratch/baseline-probe"
+    if [[ ${MC_RAW_REPLAY_BASELINE_RELEASE:-0} == 1 ]]; then
+        cargo build --release -p mc-module --example transform_replay
+        baseline_probe="${CARGO_TARGET_DIR:-target}/release/examples/transform_replay"
+    else
+        cargo build -p mc-module --example transform_replay
+        baseline_probe="${CARGO_TARGET_DIR:-target}/debug/examples/transform_replay"
+    fi
+    cp "$baseline_probe" "$scratch/baseline-probe"
     restore
     trap 'rm -rf "$scratch"' EXIT
     export MC_RAW_REPLAY_BASELINE="$scratch/baseline-probe"
@@ -25,10 +31,18 @@ else
     echo "Master differential skipped: set MC_RAW_REPLAY_BASELINE_ARCHIVE to an offline git archive of the baseline sources."
 fi
 
-cargo build -p mc-module --example transform_replay
-# Stage executables outside target, including when the checkout is on removable storage.
-cp "${CARGO_TARGET_DIR:-target}/debug/examples/transform_replay" "$scratch/current-probe"
-export MC_RAW_REPLAY_PROBE="$scratch/current-probe"
+if [[ -n ${MC_RAW_REPLAY_PROBE:-} ]]; then
+    if [[ ! -x "$MC_RAW_REPLAY_PROBE" ]]; then
+        echo "Required staged MC_RAW_REPLAY_PROBE is not executable: $MC_RAW_REPLAY_PROBE" >&2
+        exit 1
+    fi
+    printf 'Using staged Rust raw replay driver: %s\n' "$MC_RAW_REPLAY_PROBE"
+else
+    cargo build -p mc-module --example transform_replay
+    # Stage executables outside target, including on removable storage.
+    cp "${CARGO_TARGET_DIR:-target}/debug/examples/transform_replay" "$scratch/current-probe"
+    export MC_RAW_REPLAY_PROBE="$scratch/current-probe"
+fi
 bun --version
 cargo --version
 rustc --version
