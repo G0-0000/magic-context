@@ -13,6 +13,50 @@ import {
     replaceCompactionMarker,
 } from "./compaction-marker";
 
+it("an unloadable candidate worker reports its file once and retains the marker", async () => {
+    const f = fixture();
+    const oldHome = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = f.dir;
+    mkdirSync(join(f.dir, "opencode"));
+    const db = hostStore(join(f.dir, "opencode/opencode.db"), 20);
+    const logs = spyOn(logger, "log");
+    try {
+        expect(await prepareCompactionMarkerCandidates(SESSION)).toBe(true);
+        expect(
+            injectCompactionMarker({
+                sessionId: SESSION,
+                endMessageId: messageId(12),
+                endOrdinal: 13,
+                summaryText: "summary",
+                directory: f.dir,
+            }),
+        ).not.toBeNull();
+        const before = db.prepare("SELECT id,data FROM message ORDER BY id").all();
+        const entry = join(f.dir, "unloadable-worker.mjs");
+        writeFileSync(entry, `throw new Error("candidate worker fixture cannot load");`);
+        for (let attempt = 0; attempt < 2; attempt++)
+            expect(
+                await prepareCompactionMarkerCandidates(SESSION, {
+                    entry: new URL(`file://${entry}`),
+                }),
+            ).toBe(false);
+        expect(getPreparedCompactionMarkerSummaryIds(SESSION)).toBeUndefined();
+        expect(db.prepare("SELECT id,data FROM message ORDER BY id").all()).toEqual(before);
+        const errors = logs.mock.calls.filter(([line]) =>
+            String(line).includes("[ERROR] compaction-marker: candidate worker unavailable"),
+        );
+        expect(errors).toHaveLength(1);
+        expect(errors[0]?.[0]).toContain(entry);
+        expect(errors[0]?.[0]).toContain("marker unchanged, advancement deferred");
+    } finally {
+        logs.mockRestore();
+        closeCompactionMarkerDb();
+        db.close();
+        process.env.XDG_DATA_HOME = oldHome;
+        f.cleanup();
+    }
+});
+
 it("marker receipt mismatch defers the advance without deleting any current marker rows", async () => {
     const f = fixture();
     const oldHome = process.env.XDG_DATA_HOME;
@@ -38,7 +82,6 @@ it("marker receipt mismatch defers the advance without deleting any current mark
         };
         const current = injectCompactionMarker(args);
         expect(current).not.toBeNull();
-        const before = db.prepare("SELECT id FROM message ORDER BY id").all();
         const beforeParts = db.prepare("SELECT id FROM part ORDER BY id").all();
         const entry = join(f.dir, "delayed-candidates.mjs");
         const sqlite = new URL("../../shared/sqlite.ts", import.meta.url).href;
@@ -49,12 +92,12 @@ it("marker receipt mismatch defers the advance without deleting any current mark
             import {existsSync,writeFileSync} from 'node:fs';
             parentPort.postMessage({kind:'accepted'});
             const {Database}=await import(${JSON.stringify(sqlite)});
-            const {scanMarkerSummaryCandidates}=await import(${JSON.stringify(scan)});
+            const {scanMarkerCandidateSnapshot}=await import(${JSON.stringify(scan)});
             const db=new Database(workerData.path,{readonly:true});
-            const ids=scanMarkerSummaryCandidates(db,workerData.sessionId);db.close();
+            const snapshot=scanMarkerCandidateSnapshot(db,workerData.sessionId);db.close();
             writeFileSync(workerData.path+'.ready','ready');
             while(!existsSync(workerData.path+'.release'))await new Promise(r=>setTimeout(r,5));
-            parentPort.postMessage({kind:'candidates',ids});parentPort.close();`,
+            parentPort.postMessage({kind:'candidates',snapshot});parentPort.close();`,
         );
         const pending = prepareCompactionMarkerCandidates(SESSION, {
             entry: new URL(`file://${entry}`),
@@ -68,14 +111,19 @@ it("marker receipt mismatch defers the advance without deleting any current mark
         }
         const peer = new Database(path);
         try {
-            peer.prepare("UPDATE message SET time_updated=time_updated+1 WHERE id=?").run(
-                messageId(1),
+            peer.prepare("INSERT INTO message VALUES (?,?,?,?,?)").run(
+                "concurrent-summary",
+                SESSION,
+                null,
+                100,
+                JSON.stringify({ role: "assistant", summary: true, finish: "stop" }),
             );
         } finally {
             peer.close();
         }
         writeFileSync(`${path}.release`, "go");
         expect(await pending).toBe(false);
+        const before = db.prepare("SELECT id FROM message ORDER BY id").all();
         expect(getPreparedCompactionMarkerSummaryIds(SESSION)).toBeUndefined();
         const next = replaceCompactionMarker(current, {
             ...args,
@@ -83,12 +131,12 @@ it("marker receipt mismatch defers the advance without deleting any current mark
             endOrdinal: 16,
             resolvedBoundary: { id: messageId(15), timeCreated: 5 },
         });
-        expect(next.kind).toBe("definitely-no-cut");
+        expect(next.kind).toBe("deferred");
         expect(db.prepare("SELECT id FROM message ORDER BY id").all()).toEqual(before);
         expect(db.prepare("SELECT id FROM part ORDER BY id").all()).toEqual(beforeParts);
         expect(
             logs.mock.calls.filter(([line]) =>
-                String(line).includes("host store changed during discovery"),
+                String(line).includes("summary set or frontier changed during discovery"),
             ),
         ).toHaveLength(1);
         expect(forbidden).not.toHaveBeenCalled();

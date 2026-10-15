@@ -39,6 +39,7 @@ import {
 import { Database, withoutSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    invalidateMarkerCandidateBasis,
     isMarkerCandidateBasisCurrent,
     type MarkerCandidateBasis,
     type MarkerCandidatePreparationOptions,
@@ -700,6 +701,7 @@ function injectCompactionMarkerFromBasis(
             // The upsert can turn an existing row into a summary in place, which the
             // canonical ordinal count does not detect by itself.
             noteRawSessionSummaryRowWritten(args.sessionId, summaryMsgId);
+            invalidateMarkerCandidateBasis(db, args.sessionId);
 
             db.prepare(
                 `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
@@ -745,7 +747,10 @@ function injectCompactionMarkerFromBasis(
  */
 export type CompactionMarkerReplacementOutcome =
     | { kind: "committed"; marker: CompactionMarkerState }
+    | { kind: "deferred"; error: Error }
     | { kind: "definitely-no-cut" | "uncertain"; error: Error };
+
+class MarkerCandidateUnavailableError extends Error {}
 
 export function replaceCompactionMarker(
     existing: CompactionMarkerState | null,
@@ -760,14 +765,14 @@ export function replaceCompactionMarker(
         const basis = readMarkerCandidateBasis(db, args.sessionId);
         if (!basis) {
             return {
-                kind: "definitely-no-cut",
+                kind: "deferred",
                 error: new Error("marker candidate preparation pending; marker unchanged"),
             };
         }
         const marker = runMarkerWriteTransaction(db, "compaction-marker-replace", () => {
             entered = true;
             if (!isMarkerCandidateBasisCurrent(db, basis))
-                throw new Error(
+                throw new MarkerCandidateUnavailableError(
                     "host store changed after marker candidate preparation; marker unchanged",
                 );
             if (existing) {
@@ -786,6 +791,9 @@ export function replaceCompactionMarker(
         });
         return { kind: "committed", marker };
     } catch (error) {
+        // Detect an outdated summary-candidate list before any DELETE. Defer the
+        // marker replacement without discarding the otherwise servable request.
+        if (error instanceof MarkerCandidateUnavailableError) return { kind: "deferred", error };
         log(
             `[magic-context] compaction-marker: atomic replacement failed: ${error instanceof Error ? error.message : String(error)}`,
         );

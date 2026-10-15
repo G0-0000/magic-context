@@ -90,13 +90,16 @@ it("a built bundle missing its marker worker logs once and visibly defers withou
         expect(out).toContain("visible deferral, retained 1 row");
         const lines = readFileSync(logPath, "utf8")
             .split("\n")
-            .filter((line) => line.includes("missing candidate worker"));
+            .filter((line) =>
+                line.includes("[ERROR] compaction-marker: candidate worker unavailable"),
+            );
         expect(lines).toHaveLength(1);
         const visiblePath =
             process.env.HOME && missing.startsWith(`${process.env.HOME}/`)
                 ? `~${missing.slice(process.env.HOME.length)}`
                 : missing;
         expect(lines[0]).toContain(visiblePath);
+        expect(lines[0]).toContain("file missing");
         expect(lines[0]).toContain("marker unchanged, advancement deferred");
     } finally {
         rmSync(root, { recursive: true, force: true });

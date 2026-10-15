@@ -159,7 +159,7 @@ describe("marker removal acquisition isolation", () => {
             expect(injectCompactionMarker(args)).toBeNull();
             expect(performance.now() - startedAt).toBeLessThan(1000);
             const replacementStartedAt = performance.now();
-            expect(replaceCompactionMarker(null, args).kind).toBe("definitely-no-cut");
+            expect(replaceCompactionMarker(null, args).kind).toBe("deferred");
             expect(performance.now() - replacementStartedAt).toBeLessThan(1000);
         });
         expect(db.prepare("SELECT count(*) AS n FROM part").get()).toEqual({ n: 0 });

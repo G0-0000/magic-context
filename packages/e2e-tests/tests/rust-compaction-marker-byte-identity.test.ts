@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { closeCompactionMarkerDb, injectCompactionMarker } from "../../plugin/src/features/magic-context/compaction-marker";
+import { closeCompactionMarkerDb, injectCompactionMarker, prepareCompactionMarkerCandidates } from "../../plugin/src/features/magic-context/compaction-marker";
 import { MARKER_SUMMARY_TEXT } from "../../plugin/src/hooks/magic-context/compaction-marker-manager";
 import { stableStringify } from "../../plugin/src/shared/stable-json";
 import { RustTestHarness } from "../src/rust-harness";
@@ -375,6 +375,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
                 const previousDb = process.env.OPENCODE_DB;
                 try {
                     process.env.OPENCODE_DB = join(h.env.dataDir, "opencode", "opencode.db");
+                    expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
                     const marker = injectCompactionMarker({ sessionId, endOrdinal: 50, endMessageId: raw[49]!.id, summaryText: MARKER_SUMMARY_TEXT, directory: h.env.workdir });
                     expect(marker).not.toBeNull();
                     context.query("UPDATE session_meta SET compaction_marker_state=?, pending_compaction_marker_state=NULL WHERE session_id=?").run(JSON.stringify({ ...marker, boundaryOrdinal: 50, targetEndMessageId: raw[49]!.id }), sessionId);
@@ -488,6 +489,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         const previousDb = process.env.OPENCODE_DB;
         try {
             process.env.OPENCODE_DB = ocPath;
+            expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
             const marker = injectCompactionMarker({ sessionId, endOrdinal: 50, endMessageId: raw[49]!.id, summaryText: MARKER_SUMMARY_TEXT, directory: h.env.workdir });
             expect(marker).not.toBeNull();
             context.query("UPDATE session_meta SET compaction_marker_state=?,pending_compaction_marker_state=NULL WHERE session_id=?").run(JSON.stringify({ ...marker, boundaryOrdinal: 50, targetEndMessageId: raw[49]!.id }), sessionId);
@@ -513,6 +515,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
             const oldDb = process.env.OPENCODE_DB;
             try {
                 process.env.OPENCODE_DB = ocPath;
+                expect(await prepareCompactionMarkerCandidates(sessionId)).toBe(true);
                 const old = injectCompactionMarker({ sessionId, endOrdinal: 50, endMessageId: raw[49]!.id, summaryText: MARKER_SUMMARY_TEXT, directory: h.env.workdir });
                 expect(old).not.toBeNull();
                 context.query("UPDATE session_meta SET compaction_marker_state=?,pending_compaction_marker_state=? WHERE session_id=?").run(JSON.stringify({ ...old, boundaryOrdinal: 50, targetEndMessageId: raw[49]!.id }),JSON.stringify({ordinal:16940,endMessageId:raw[16939]!.id,publishedAt:1,injectAttempts:3,firstInjectFailedAt:1,lastInjectError:"busy"}),sessionId);

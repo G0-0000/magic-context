@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { readRawSessionMessagesFromDb } from "../../../plugin/src/hooks/magic-context/read-session-raw";
@@ -10,6 +10,7 @@ import { rawMessages } from "../../../plugin/src/v2/hooks/store";
 import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { buildMockHistorianPayload } from "../../src/mock-historian";
 import { MockProvider } from "../../src/mock-provider/server";
+import { markerWorkerBundleFixture } from "../../src/marker-worker-bundle-fixture";
 import {
     conversionFixture,
     type ConversionFixture,
@@ -473,6 +474,8 @@ function runDoctor(fixture: ConversionFixture): string {
 }
 beforeAll(async () => {
     const fixture = conversionFixture("issue-492-f1-conversion-e2e");
+    const workerMissingBundle = markerWorkerBundleFixture();
+    cleanup.push(async () => workerMissingBundle.dispose());
     const mock = new MockProvider();
     const provider = await mock.start();
     cleanup.push(() => mock.stop());
@@ -582,7 +585,13 @@ beforeAll(async () => {
                     parts: [{ type: "text", text }, ...extraParts],
                 },
             });
-            if (!result.data) throw new Error(`1.x prompt failed: ${JSON.stringify(result.error)}`);
+            if (!result.data) {
+                const logs = readdirSync(fixture.root, { recursive: true })
+                    .filter((path) => String(path).endsWith(".log"))
+                    .map((path) => `${path}:\n${readFileSync(join(fixture.root, String(path)), "utf8").slice(-30000)}`)
+                    .join("\n");
+                throw new Error(`1.x prompt failed: ${JSON.stringify(result.error)}\n${v1.stderr()}\n${logs}`);
+            }
             if (result.data.info?.error) {
                 throw new Error(`1.x assistant error: ${JSON.stringify(result.data.info.error)}`);
             }
@@ -798,6 +807,7 @@ beforeAll(async () => {
     // ── 2.0.5: same data root, same session, real conversion ──────────────────
     fixture.env.MAGIC_CONTEXT_LOG_PATH = fixture.logPath("v2");
     const v2 = await spawnOpencode2({
+        magicContextPlugin: workerMissingBundle.root,
         existingIsolation: fixture,
         existingMock: { mock, baseURL: provider.baseURL },
         magicContextConfig,
@@ -842,6 +852,8 @@ beforeAll(async () => {
         .find((request) => JSON.stringify(request.body.input ?? "").includes("first prompt on the converted store"));
     if (!firstConvertedRequest) throw new Error("the first converted prompt reached no v2 provider input");
     const firstConvertedInput = JSON.stringify(firstConvertedRequest.body.input);
+    expect(existsSync(join(workerMissingBundle.root, "dist/v2/compaction-marker-candidates-worker.js"))).toBe(false);
+    expect(readFileSync(fixture.logPath("v2"), "utf8")).not.toContain("compaction-marker-drain-failure");
     const forwardRebaseLines = rebaseLinesFor(fixture, "v2", sessionId);
     const forwardCompartments = readCompartments(fixture, sessionId);
     const forwardProjection = v2Projection(fixture, sessionId);

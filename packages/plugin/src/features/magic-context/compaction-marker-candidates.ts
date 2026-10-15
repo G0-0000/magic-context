@@ -1,19 +1,23 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { registerExitAbort } from "../../shared/exit-abort-registry";
 import { log } from "../../shared/logger";
-import { type Database, getSqliteDatabasePath, type Statement } from "../../shared/sqlite";
+import { type Database, getSqliteDatabasePath } from "../../shared/sqlite";
 
-interface MarkerStamp {
-    dataVersion: number;
-    totalChanges: number;
-    schemaVersion: number;
+interface MarkerFrontier {
+    rowid: number;
+    id: string;
 }
-export interface MarkerCandidateBasis {
+export interface MarkerCandidateSnapshot {
     ids: string[];
+    frontier: MarkerFrontier | null;
+}
+export interface MarkerCandidateBasis extends MarkerCandidateSnapshot {
     connection: Database;
-    stamp: MarkerStamp;
+    sessionId: string;
+    revisionKey: string;
+    ownWriteRevision: number;
 }
 export interface MarkerCandidatePreparationOptions {
     entry?: URL;
@@ -22,38 +26,89 @@ export interface MarkerCandidatePreparationOptions {
 }
 export type MarkerCandidateReply =
     | { kind: "accepted" }
-    | { kind: "candidates"; ids: string[] }
+    | { kind: "candidates"; snapshot: MarkerCandidateSnapshot }
     | { kind: "error"; error: string };
 
 const candidates = new WeakMap<Database, Map<string, MarkerCandidateBasis>>();
 const pending = new WeakMap<Database, Map<string, Promise<boolean>>>();
 const workers = new Set<Worker>();
 const missingWorkerWarnings = new Set<string>();
+const ownWriteRevisions = new Map<string, number>();
 let exitRegistered = false;
 
-function markerStamp(db: Database): MarkerStamp | undefined {
-    let statement: Statement | undefined;
-    try {
-        statement = db.prepare(`SELECT data_version AS dataVersion, total_changes() AS totalChanges,
-            (SELECT schema_version FROM pragma_schema_version) AS schemaVersion FROM pragma_data_version`);
-        return statement.get() as MarkerStamp | undefined;
-    } catch {
-        return undefined;
-    } finally {
-        (statement as unknown as { finalize?: () => void } | undefined)?.finalize?.();
-    }
-}
-function sameStamp(before: MarkerStamp | undefined, after: MarkerStamp | undefined): boolean {
-    return (
-        !!before &&
-        !!after &&
-        before.dataVersion === after.dataVersion &&
-        before.totalChanges === after.totalChanges &&
-        before.schemaVersion === after.schemaVersion
+function reportWorkerUnavailable(entry: URL, detail: string): void {
+    if (missingWorkerWarnings.has(entry.href)) return;
+    missingWorkerWarnings.add(entry.href);
+    const path = entry.protocol === "file:" ? fileURLToPath(entry) : entry.href;
+    log(
+        `[magic-context] [ERROR] compaction-marker: candidate worker unavailable ${path}: ${detail}; marker unchanged, advancement deferred`,
     );
 }
+
+export const MARKER_CERTIFICATION_SQL = `SELECT
+    (SELECT rowid FROM message WHERE id = ?) AS previousRowid,
+    (SELECT rowid FROM message ORDER BY rowid DESC LIMIT 1) AS newestRowid,
+    (SELECT id FROM message ORDER BY rowid DESC LIMIT 1) AS newestId,
+    EXISTS(SELECT 1 FROM message
+      WHERE rowid > ? AND +session_id = ? AND json_valid(data)
+        AND COALESCE(json_extract(data, '$.summary'), 0) = 1) AS newSummary`;
+
 export function isMarkerCandidateBasisCurrent(db: Database, basis: MarkerCandidateBasis): boolean {
-    return basis.connection === db && sameStamp(basis.stamp, markerStamp(db));
+    if (
+        basis.connection !== db ||
+        ownWriteRevisions.get(basis.revisionKey) !== basis.ownWriteRevision
+    )
+        return false;
+    try {
+        // The worker saved IDs of rows already marked summary=true and the highest
+        // SQLite rowid it saw. Normal OpenCode 1.19.x summary writers and 2.0.x
+        // compaction writers insert fresh IDs, giving new summaries higher rowids.
+        // Our own in-place summary upserts invalidate the saved candidate list.
+        // Arbitrary external SQL turning an old ordinary row into a summary is not
+        // supported. Before deleting any candidate, cleanup looks up its ID and
+        // rechecks its summary flag, parent, finish status and exact text: edits to
+        // known candidates therefore cannot delete unrelated messages or parts.
+        const current = db
+            .prepare(MARKER_CERTIFICATION_SQL)
+            .get(basis.frontier?.id ?? null, basis.frontier?.rowid ?? 0, basis.sessionId) as {
+            previousRowid: number | null;
+            newestRowid: number | null;
+            newestId: string | null;
+            newSummary: number;
+        };
+        if (
+            current.newSummary ||
+            (basis.frontier &&
+                (current.previousRowid !== basis.frontier.rowid ||
+                    current.newestRowid === null ||
+                    current.newestRowid < basis.frontier.rowid))
+        )
+            return false;
+        if (
+            current.newestRowid !== null &&
+            (!Number.isSafeInteger(current.newestRowid) || current.newestId === null)
+        )
+            return false;
+        // The saved rowid/ID pair, later inserts and newest row share one SQLite
+        // statement snapshot. Remembering the newest row lets the next certification
+        // start after the ordinary messages already checked.
+        basis.frontier =
+            current.newestRowid === null || current.newestId === null
+                ? null
+                : { rowid: current.newestRowid, id: current.newestId };
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function invalidateMarkerCandidateBasis(db: Database, sessionId: string): void {
+    candidates.get(db)?.delete(sessionId);
+    const path = getSqliteDatabasePath(db);
+    if (!path) return;
+    const key = `${realpathSync(path)}\0${sessionId}`;
+    const revision = ownWriteRevisions.get(key);
+    if (revision !== undefined) ownWriteRevisions.set(key, revision + 1);
 }
 export function readMarkerCandidateBasis(
     db: Database,
@@ -65,11 +120,9 @@ export function readMarkerCandidateBasis(
     return undefined;
 }
 
-/** Capture peer commits, local writes and schema changes on the marker's SQLite
- * connection before scanning on a worker. Reuse the discovered summary IDs only
- * if those counters still match; they do not certify message-number assignments.
- * A mismatch leaves the existing marker intact. A later history rebuild retries
- * discovery when it requests a marker advance, rather than retrying every turn. */
+/** Discover summary IDs off-thread. Defer cleanup if a new summary appears or the
+ * last scanned row is deleted or assigned a different rowid. Ordinary message
+ * updates and appends do not invalidate the discovered summary IDs. */
 export function prepareMarkerCandidateBasis(
     db: Database,
     sessionId: string,
@@ -81,29 +134,33 @@ export function prepareMarkerCandidateBasis(
     const active = pending.get(db) ?? new Map<string, Promise<boolean>>();
     const existing = active.get(sessionId);
     if (existing) return existing;
-    const before = markerStamp(db);
-    if (!before) return Promise.resolve(false);
+    const revisionKey = `${realpathSync(path)}\0${sessionId}`;
+    const ownWriteRevision = ownWriteRevisions.get(revisionKey) ?? 0;
+    ownWriteRevisions.set(revisionKey, ownWriteRevision);
     const entry = options.entry ?? markerWorkerEntry();
     if (entry.protocol === "file:" && !existsSync(fileURLToPath(entry))) {
-        if (!missingWorkerWarnings.has(entry.href)) {
-            missingWorkerWarnings.add(entry.href);
-            log(
-                `[magic-context] compaction-marker: missing candidate worker ${fileURLToPath(entry)}; marker unchanged, advancement deferred`,
-            );
-        }
+        reportWorkerUnavailable(entry, "file missing");
         return Promise.resolve(false);
     }
     const preparation = runCandidateWorker(path, sessionId, options)
-        .then((ids) => {
-            if (!ids || !sameStamp(before, markerStamp(db))) {
+        .then((snapshot) => {
+            if (!snapshot) return false;
+            const basis: MarkerCandidateBasis = {
+                ...snapshot,
+                connection: db,
+                sessionId,
+                revisionKey,
+                ownWriteRevision,
+            };
+            if (!isMarkerCandidateBasisCurrent(db, basis)) {
                 candidates.get(db)?.delete(sessionId);
                 log(
-                    `[magic-context] compaction-marker: deferred candidate preparation for ${sessionId}: ${ids ? "host store changed during discovery" : "candidate worker unavailable"}; marker unchanged`,
+                    `[magic-context] compaction-marker: deferred candidate preparation for ${sessionId}: summary set or frontier changed during discovery; marker unchanged`,
                 );
                 return false;
             }
             const sessions = candidates.get(db) ?? new Map<string, MarkerCandidateBasis>();
-            sessions.set(sessionId, { ids, connection: db, stamp: before });
+            sessions.set(sessionId, basis);
             candidates.set(db, sessions);
             return true;
         })
@@ -128,7 +185,7 @@ function runCandidateWorker(
     path: string,
     sessionId: string,
     options: MarkerCandidatePreparationOptions,
-): Promise<string[] | undefined> {
+): Promise<MarkerCandidateSnapshot | undefined> {
     if (!exitRegistered) {
         exitRegistered = true;
         const controller = new AbortController();
@@ -145,41 +202,58 @@ function runCandidateWorker(
         registerExitAbort(controller);
     }
     return new Promise((resolve) => {
+        const entry = options.entry ?? markerWorkerEntry();
         let worker: Worker | undefined;
         let timer: ReturnType<typeof setTimeout> | undefined;
         let done = false;
-        const finish = (ids?: string[]) => {
+        const finish = (snapshot?: MarkerCandidateSnapshot) => {
             if (done) return;
             done = true;
             clearTimeout(timer);
             if (!worker) {
-                resolve(ids);
+                resolve(snapshot);
                 return;
             }
             workers.delete(worker);
             const stopped = worker.terminate();
             worker.unref();
-            void stopped.finally(() => resolve(ids));
+            void stopped.then(
+                () => resolve(snapshot),
+                () => resolve(snapshot),
+            );
         };
         const deadline = (ms: number) => {
             clearTimeout(timer);
-            timer = setTimeout(() => finish(), ms);
+            timer = setTimeout(() => {
+                reportWorkerUnavailable(entry, "worker deadline exceeded");
+                finish();
+            }, ms);
             timer.unref?.();
         };
         try {
-            const entry = options.entry ?? markerWorkerEntry();
             worker = new Worker(entry, { workerData: { path, sessionId } });
             workers.add(worker);
             worker.unref();
             deadline(options.acceptMs ?? 2000);
             worker.on("message", (reply: MarkerCandidateReply) => {
                 if (reply.kind === "accepted") deadline(options.resultMs ?? 600000);
-                else if (reply.kind === "candidates") finish(reply.ids);
-                else finish();
+                else if (reply.kind === "candidates") finish(reply.snapshot);
+                else {
+                    reportWorkerUnavailable(entry, reply.error);
+                    finish();
+                }
             });
-            worker.on("error", () => finish());
-            worker.on("exit", () => finish());
-        } catch {
+            worker.on("error", (error) => {
+                reportWorkerUnavailable(entry, error.message);
+                finish();
+            });
+            worker.on("exit", (code) => {
+                if (!done)
+                    reportWorkerUnavailable(entry, `worker exited before replying (${code})`);
+                finish();
+            });
+        } catch (error) {
+            reportWorkerUnavailable(entry, error instanceof Error ? error.message : String(error));
             finish();
         }
     });
@@ -190,7 +264,8 @@ function runCandidateWorker(
  * Do not filter by creation time: imported or rewritten legacy summaries can
  * precede their parent even though the original writer used later timestamps. */
 export function scanMarkerSummaryCandidates(db: Database, sessionId: string): string[] {
-    db.exec("BEGIN");
+    const ownsSnapshot = !db.inTransaction;
+    if (ownsSnapshot) db.exec("BEGIN");
     try {
         return (
             db
@@ -199,6 +274,27 @@ export function scanMarkerSummaryCandidates(db: Database, sessionId: string): st
                 .all(sessionId) as { id: string }[]
         ).map((row) => row.id);
     } finally {
-        db.exec("ROLLBACK");
+        if (ownsSnapshot) db.exec("ROLLBACK");
+    }
+}
+
+/** Read summary IDs and the newest row in one snapshot, so an insert between
+ * those reads cannot be skipped by the next rowid-based certification. */
+export function scanMarkerCandidateSnapshot(
+    db: Database,
+    sessionId: string,
+): MarkerCandidateSnapshot {
+    const ownsSnapshot = !db.inTransaction;
+    if (ownsSnapshot) db.exec("BEGIN");
+    try {
+        const ids = scanMarkerSummaryCandidates(db, sessionId);
+        const frontier = (db
+            .prepare("SELECT rowid,id FROM message ORDER BY rowid DESC LIMIT 1")
+            .get() ?? null) as MarkerFrontier | null;
+        if (frontier && !Number.isSafeInteger(frontier.rowid))
+            throw new Error("marker frontier rowid is not a safe integer");
+        return { ids, frontier };
+    } finally {
+        if (ownsSnapshot) db.exec("ROLLBACK");
     }
 }
