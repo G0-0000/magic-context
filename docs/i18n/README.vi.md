@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <strong>Tiếng Việt</strong>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · **Tiếng Việt**
 
-*Đây là bản dịch cộng đồng. Bản tiếng Anh [README.md](./README.md) là nguồn chuẩn và có thể được cập nhật hơn.*
+*Đây là bản dịch cộng đồng. Bản tiếng Anh [README.md](../../README.md) là nguồn chuẩn và có thể được cập nhật hơn.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#củng-cố">Củng cố</a> ·
   <a href="#nhớ-lại">Nhớ lại</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Chạy một phiên cho mỗi dự án và giữ nó trong nhiều tuần, thán
 
 Chạy trình hướng dẫn thiết lập tương tác. Nó phát hiện các mô hình của bạn, cấu hình mọi thứ và xử lý tương thích.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**Hoặc chạy trực tiếp (mọi OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ Trình hướng dẫn tự phát hiện harnesses bạn có (OpenCode, Pi hoặc
 
 > **Vì sao tắt compaction tích hợp?** Magic Context tự quản lý ngữ cảnh. Compaction của host sẽ can thiệp vào các thao tác trì hoãn có nhận biết cache và nén hai lần.
 
-**Thiết lập thủ công** (OpenCode): thêm plugin và tắt compaction trong `opencode.json`, rồi đặt `magic-context.jsonc` trong `<project>/.cortexkit/` (hoặc `~/.config/cortexkit/` cho mặc định toàn người dùng). Xem [tham chiếu cấu hình](./CONFIGURATION.md).
+**Thiết lập thủ công** (OpenCode): thêm plugin và tắt compaction trong `opencode.json`, rồi đặt `magic-context.jsonc` trong `<project>/.cortexkit/` (hoặc `~/.config/cortexkit/` cho mặc định toàn người dùng). Xem [tham chiếu cấu hình](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Nó đọc trực tiếp từ cơ sở dữ liệu SQLite của Magic Context. K
 
 ## Cấu hình
 
-Thiết lập nằm trong `magic-context.jsonc`. Mọi thứ có mặc định hợp lý; cấu hình dự án được merge lên trên thiết lập toàn người dùng. Để xem tham chiếu đầy đủ, chỉnh cache TTL, ngưỡng execute theo mô hình, chọn mô hình historian và dreamer, embedding providers và thiết lập bộ nhớ, xem **[CONFIGURATION.md](./CONFIGURATION.md)** hoặc **[tham chiếu cấu hình trên docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+Thiết lập nằm trong `magic-context.jsonc`. Mọi thứ có mặc định hợp lý; cấu hình dự án được merge lên trên thiết lập toàn người dùng. Để xem tham chiếu đầy đủ, chỉnh cache TTL, ngưỡng execute theo mô hình, chọn mô hình historian và dreamer, embedding providers và thiết lập bộ nhớ, xem **[CONFIGURATION.md](../../CONFIGURATION.md)** hoặc **[tham chiếu cấu hình trên docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **Vị trí cấu hình** (một vị trí CortexKit chung, dự án ghi đè người dùng):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports và pull requests đều được hoan nghênh. Với thay đổi l�
 
 ## Giấy phép
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

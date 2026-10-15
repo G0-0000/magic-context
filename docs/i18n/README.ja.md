@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <strong>日本語</strong> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · **日本語** · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*これはコミュニティ翻訳です。英語の [README.md](./README.md) が正本であり、より新しい場合があります。*
+*これはコミュニティ翻訳です。英語の [README.md](../../README.md) が正本であり、より新しい場合があります。*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#統合">統合</a> ·
   <a href="#想起">想起</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context はその海馬を与えます。これはコーディングエー
 
 対話型のセットアップウィザードを実行します。モデルを検出し、すべてを設定し、互換性を処理します。
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**または直接実行（任意の OS）：**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **なぜ組み込み compaction を無効化するのですか?** Magic Context は自分でコンテキストを管理します。ホスト側の compaction は、キャッシュを意識した遅延操作に干渉し、二重圧縮を起こします。
 
-**手動セットアップ**（OpenCode）：`opencode.json` にプラグインを追加し、compaction をオフにしてから、`magic-context.jsonc` を `<project>/.cortexkit/` に置きます（ユーザー全体のデフォルトは `~/.config/cortexkit/`）。[設定リファレンス](./CONFIGURATION.md)を参照してください。
+**手動セットアップ**（OpenCode）：`opencode.json` にプラグインを追加し、compaction をオフにしてから、`magic-context.jsonc` を `<project>/.cortexkit/` に置きます（ユーザー全体のデフォルトは `~/.config/cortexkit/`）。[設定リファレンス](../../CONFIGURATION.md)を参照してください。
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Magic Context の SQLite データベースから直接読み込みます。追�
 
 ## 設定
 
-設定は `magic-context.jsonc` にあります。すべてに妥当なデフォルトがあります。プロジェクト設定はユーザー全体の設定の上にマージされます。完全なリファレンス、cache TTL の調整、モデルごとの execute しきい値、historian と dreamer のモデル選択、embedding providers、メモリ設定については、**[CONFIGURATION.md](./CONFIGURATION.md)** または **[docs.cortexkit.io の設定リファレンス](https://docs.cortexkit.io/magic-context/reference/configuration/)** を参照してください。
+設定は `magic-context.jsonc` にあります。すべてに妥当なデフォルトがあります。プロジェクト設定はユーザー全体の設定の上にマージされます。完全なリファレンス、cache TTL の調整、モデルごとの execute しきい値、historian と dreamer のモデル選択、embedding providers、メモリ設定については、**[CONFIGURATION.md](../../CONFIGURATION.md)** または **[docs.cortexkit.io の設定リファレンス](https://docs.cortexkit.io/magic-context/reference/configuration/)** を参照してください。
 
 **設定場所**（共有 CortexKit 位置は 1 つで、プロジェクトがユーザーを上書きします）：
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ bug reports と pull requests を歓迎します。大きな変更では、ま�
 
 ## ライセンス
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

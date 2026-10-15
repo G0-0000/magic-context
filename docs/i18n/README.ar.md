@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <strong>العربية</strong> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · **العربية** · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*هذه ترجمة مجتمعية. ملف [README.md](./README.md) الإنجليزي هو مصدر الحقيقة وقد يكون أحدث.*
+*هذه ترجمة مجتمعية. ملف [README.md](../../README.md) الإنجليزي هو مصدر الحقيقة وقد يكون أحدث.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#التوحيد">التوحيد</a> ·
   <a href="#الاستدعاء">الاستدعاء</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context يعطيهم واحدا. إنه **الحُصين** لوكلاء ا
 
 شغل معالج الإعداد التفاعلي. يكتشف نماذجك، ويضبط كل شيء، ويتعامل مع التوافق.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**أو شغله مباشرة (أي OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **لماذا نعطل compaction المدمج؟** Magic Context يدير السياق بنفسه. compaction الخاص بالمضيف سيتداخل مع عملياته المؤجلة الواعية للـ cache وسيضغط مرتين.
 
-**الإعداد اليدوي** (OpenCode): أضف plugin وأوقف compaction في `opencode.json`، ثم ضع `magic-context.jsonc` في `<project>/.cortexkit/` (أو في `~/.config/cortexkit/` للإعدادات الافتراضية على مستوى المستخدم). راجع [مرجع التهيئة](./CONFIGURATION.md).
+**الإعداد اليدوي** (OpenCode): أضف plugin وأوقف compaction في `opencode.json`، ثم ضع `magic-context.jsonc` في `<project>/.cortexkit/` (أو في `~/.config/cortexkit/` للإعدادات الافتراضية على مستوى المستخدم). راجع [مرجع التهيئة](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## التهيئة
 
-توجد الإعدادات في `magic-context.jsonc`. لكل شيء قيم افتراضية معقولة؛ تندمج تهيئة المشروع فوق إعدادات المستخدم. للمرجع الكامل، ضبط cache TTL، عتبات execute لكل نموذج، اختيار نماذج historian و dreamer، مزودي embeddings، وإعدادات الذاكرة، راجع **[CONFIGURATION.md](./CONFIGURATION.md)** أو **[مرجع التهيئة على docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+توجد الإعدادات في `magic-context.jsonc`. لكل شيء قيم افتراضية معقولة؛ تندمج تهيئة المشروع فوق إعدادات المستخدم. للمرجع الكامل، ضبط cache TTL، عتبات execute لكل نموذج، اختيار نماذج historian و dreamer، مزودي embeddings، وإعدادات الذاكرة، راجع **[CONFIGURATION.md](../../CONFIGURATION.md)** أو **[مرجع التهيئة على docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **مواقع التهيئة** (موقع CortexKit مشترك واحد، المشروع يتجاوز المستخدم):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports و pull requests مرحب بها. للتغييرات الأكبر، 
 
 ## الترخيص
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <strong>繁體中文</strong> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · **繁體中文** · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*這是社群翻譯。英文 [README.md](./README.md) 是權威來源，內容可能更新。*
+*這是社群翻譯。英文 [README.md](../../README.md) 是權威來源，內容可能更新。*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#鞏固">鞏固</a> ·
   <a href="#回憶">回憶</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context 給它們補上這一部分。它是編碼代理的**海馬體**�
 
 執行互動式安裝精靈。它會偵測你的模型，設定所有內容，並處理相容性。
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**或直接執行（任何 OS）：**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **為什麼停用內建壓縮？** Magic Context 自己管理上下文。宿主的壓縮會干擾它的快取感知延遲操作，並造成雙重壓縮。
 
-**手動設定**（OpenCode）：在 `opencode.json` 中加入外掛並關閉壓縮，然後把 `magic-context.jsonc` 放到 `<project>/.cortexkit/`（或把使用者層級預設值放到 `~/.config/cortexkit/`）。請參閱[設定參考](./CONFIGURATION.md)。
+**手動設定**（OpenCode）：在 `opencode.json` 中加入外掛並關閉壓縮，然後把 `magic-context.jsonc` 放到 `<project>/.cortexkit/`（或把使用者層級預設值放到 `~/.config/cortexkit/`）。請參閱[設定參考](../../CONFIGURATION.md)。
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## 設定
 
-設定位於 `magic-context.jsonc`。所有內容都有合理預設值；專案設定會疊加到使用者層級設定之上。完整參考，包括快取 TTL 調整、按模型設定的 execute 閾值、historian 和 dreamer 模型選擇、嵌入提供商以及記憶設定，請參閱 **[CONFIGURATION.md](./CONFIGURATION.md)** 或 **[docs.cortexkit.io 上的設定參考](https://docs.cortexkit.io/magic-context/reference/configuration/)**。
+設定位於 `magic-context.jsonc`。所有內容都有合理預設值；專案設定會疊加到使用者層級設定之上。完整參考，包括快取 TTL 調整、按模型設定的 execute 閾值、historian 和 dreamer 模型選擇、嵌入提供商以及記憶設定，請參閱 **[CONFIGURATION.md](../../CONFIGURATION.md)** 或 **[docs.cortexkit.io 上的設定參考](https://docs.cortexkit.io/magic-context/reference/configuration/)**。
 
 **設定位置**（一個共用的 CortexKit 位置，專案覆寫使用者）：
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Dream 執行需要一個正在運作的 OpenCode 伺服器（dreamer 會建立�
 
 ## 授權
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

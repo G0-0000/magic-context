@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <strong>Bosanski</strong> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · **Bosanski** · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*Ovo je prijevod zajednice. Engleski [README.md](./README.md) je izvor istine i može biti ažurniji.*
+*Ovo je prijevod zajednice. Engleski [README.md](../../README.md) je izvor istine i može biti ažurniji.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#konsolidacija">Konsolidacija</a> ·
   <a href="#prisjećanje">Prisjećanje</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Pokreni jednu sesiju po projektu i pusti je da traje sedmicama, mjesecima ili go
 
 Pokreni interaktivni čarobnjak za podešavanje. On otkriva tvoje modele, sve konfiguriše i rješava kompatibilnost.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**Ili pokreni direktno (bilo koji OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **Zašto isključiti ugrađeni compaction?** Magic Context sam upravlja kontekstom. Compaction hosta bi ometao njegove odgođene operacije svjesne cachea i kompresovao dva puta.
 
-**Ručno podešavanje** (OpenCode): dodaj plugin i isključi compaction u `opencode.json`, zatim stavi `magic-context.jsonc` u `<project>/.cortexkit/` (ili `~/.config/cortexkit/` za korisničke zadane postavke). Vidi [referencu konfiguracije](./CONFIGURATION.md).
+**Ručno podešavanje** (OpenCode): dodaj plugin i isključi compaction u `opencode.json`, zatim stavi `magic-context.jsonc` u `<project>/.cortexkit/` (ili `~/.config/cortexkit/` za korisničke zadane postavke). Vidi [referencu konfiguracije](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Prateća desktop aplikacija za pregled i upravljanje Magic Context stanjem izvan
 
 ## Konfiguracija
 
-Podešavanja žive u `magic-context.jsonc`. Sve ima razumne default vrijednosti; konfiguracija projekta se spaja preko korisničkih podešavanja. Za punu referencu, cache TTL podešavanje, execute pragove po modelu, izbor historian i dreamer modela, embedding providers i memorijska podešavanja, vidi **[CONFIGURATION.md](./CONFIGURATION.md)** ili **[referencu konfiguracije na docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+Podešavanja žive u `magic-context.jsonc`. Sve ima razumne default vrijednosti; konfiguracija projekta se spaja preko korisničkih podešavanja. Za punu referencu, cache TTL podešavanje, execute pragove po modelu, izbor historian i dreamer modela, embedding providers i memorijska podešavanja, vidi **[CONFIGURATION.md](../../CONFIGURATION.md)** ili **[referencu konfiguracije na docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **Lokacije konfiguracije** (jedna zajednička CortexKit lokacija, projekat nadjačava korisnika):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports i pull requests su dobrodošli. Za veće promjene prvo otvori issue 
 
 ## Licenca
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

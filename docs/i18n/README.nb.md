@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <strong>Norsk</strong> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · **Norsk** · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*Dette er en fellesskapsoversettelse. Den engelske [README.md](./README.md) er den autoritative kilden og kan være mer oppdatert.*
+*Dette er en fellesskapsoversettelse. Den engelske [README.md](../../README.md) er den autoritative kilden og kan være mer oppdatert.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#konsolidering">Konsolidering</a> ·
   <a href="#gjenkalling">Gjenkalling</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Kjør én økt per prosjekt og la den gå i uker, måneder eller år. Den husker
 
 Kjør den interaktive oppsettsveiviseren. Den oppdager modellene dine, konfigurerer alt og håndterer kompatibilitet.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**Eller kjør direkte (alle OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ Veiviseren oppdager automatisk hvilke harnesses du har (OpenCode, Pi eller begge
 
 > **Hvorfor deaktivere innebygd compaction?** Magic Context styrer konteksten selv. Hostens compaction ville forstyrre de cache-bevisste utsatte operasjonene og dobbeltkomprimere.
 
-**Manuelt oppsett** (OpenCode): legg til pluginet og slå av compaction i `opencode.json`, legg deretter en `magic-context.jsonc` i `<project>/.cortexkit/` (eller `~/.config/cortexkit/` for brukerbrede standarder). Se [konfigurasjonsreferansen](./CONFIGURATION.md).
+**Manuelt oppsett** (OpenCode): legg til pluginet og slå av compaction i `opencode.json`, legg deretter en `magic-context.jsonc` i `<project>/.cortexkit/` (eller `~/.config/cortexkit/` for brukerbrede standarder). Se [konfigurasjonsreferansen](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Den leser direkte fra Magic Contexts SQLite-database. Ingen ekstra server, ingen
 
 ## Konfigurasjon
 
-Innstillinger ligger i `magic-context.jsonc`. Alt har fornuftige standarder; prosjektkonfigurasjon flettes over brukerbrede innstillinger. For full referanse, cache TTL-tuning, execute-terskler per modell, valg av historian- og dreamer-modeller, embedding providers og minneinnstillinger, se **[CONFIGURATION.md](./CONFIGURATION.md)** eller **[konfigurasjonsreferansen på docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+Innstillinger ligger i `magic-context.jsonc`. Alt har fornuftige standarder; prosjektkonfigurasjon flettes over brukerbrede innstillinger. For full referanse, cache TTL-tuning, execute-terskler per modell, valg av historian- og dreamer-modeller, embedding providers og minneinnstillinger, se **[CONFIGURATION.md](../../CONFIGURATION.md)** eller **[konfigurasjonsreferansen på docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **Konfigurasjonsplasseringer** (én delt CortexKit-plassering, prosjekt overstyrer bruker):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports og pull requests er velkomne. For større endringer, åpne en issue 
 
 ## Lisens
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

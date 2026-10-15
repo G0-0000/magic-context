@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <strong>한국어</strong> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <a href="./README.gr.md">Ελληνικά</a> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · **한국어** · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · [Ελληνικά](README.el.md) · [Tiếng Việt](README.vi.md)
 
-*이 문서는 커뮤니티 번역입니다. 영어 [README.md](./README.md)가 기준 문서이며 더 최신일 수 있습니다.*
+*이 문서는 커뮤니티 번역입니다. 영어 [README.md](../../README.md)가 기준 문서이며 더 최신일 수 있습니다.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#통합">통합</a> ·
   <a href="#회상">회상</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@ Magic Context는 에이전트에게 그 부분을 제공합니다. 코딩 에이
 
 대화형 설정 마법사를 실행하세요. 모델을 감지하고, 모든 것을 구성하며, 호환성도 처리합니다.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**또는 직접 실행(모든 OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **왜 내장 compaction을 비활성화하나요?** Magic Context가 직접 컨텍스트를 관리합니다. 호스트의 compaction은 캐시를 고려한 지연 작업을 방해하고 이중 압축을 일으킬 수 있습니다.
 
-**수동 설정**(OpenCode): `opencode.json`에 플러그인을 추가하고 compaction을 끈 다음, `<project>/.cortexkit/`에 `magic-context.jsonc`를 넣으세요(사용자 전체 기본값은 `~/.config/cortexkit/`). [구성 참조](./CONFIGURATION.md)를 확인하세요.
+**수동 설정**(OpenCode): `opencode.json`에 플러그인을 추가하고 compaction을 끈 다음, `<project>/.cortexkit/`에 `magic-context.jsonc`를 넣으세요(사용자 전체 기본값은 `~/.config/cortexkit/`). [구성 참조](../../CONFIGURATION.md)를 확인하세요.
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ Magic Context의 SQLite 데이터베이스에서 직접 읽습니다. 추가 서
 
 ## 구성
 
-설정은 `magic-context.jsonc`에 있습니다. 모든 항목에는 합리적인 기본값이 있으며, 프로젝트 구성은 사용자 전체 설정 위에 병합됩니다. 전체 참조, 즉 캐시 TTL 조정, 모델별 execute 임계값, historian 및 dreamer 모델 선택, embedding providers, 메모리 설정은 **[CONFIGURATION.md](./CONFIGURATION.md)** 또는 **[docs.cortexkit.io의 구성 참조](https://docs.cortexkit.io/magic-context/reference/configuration/)**를 확인하세요.
+설정은 `magic-context.jsonc`에 있습니다. 모든 항목에는 합리적인 기본값이 있으며, 프로젝트 구성은 사용자 전체 설정 위에 병합됩니다. 전체 참조, 즉 캐시 TTL 조정, 모델별 execute 임계값, historian 및 dreamer 모델 선택, embedding providers, 메모리 설정은 **[CONFIGURATION.md](../../CONFIGURATION.md)** 또는 **[docs.cortexkit.io의 구성 참조](https://docs.cortexkit.io/magic-context/reference/configuration/)**를 확인하세요.
 
 **구성 위치**(공유 CortexKit 위치 하나, 프로젝트가 사용자를 덮어씀):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Dream 실행에는 실행 중인 OpenCode 서버가 필요합니다(dreamer가 �
 
 ## 라이선스
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)

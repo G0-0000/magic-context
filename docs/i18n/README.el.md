@@ -1,29 +1,6 @@
-<p align="center">
-  <a href="./README.md">English</a> |
-  <a href="./README.zh.md">简体中文</a> |
-  <a href="./README.zht.md">繁體中文</a> |
-  <a href="./README.ko.md">한국어</a> |
-  <a href="./README.de.md">Deutsch</a> |
-  <a href="./README.es.md">Español</a> |
-  <a href="./README.fr.md">Français</a> |
-  <a href="./README.it.md">Italiano</a> |
-  <a href="./README.da.md">Dansk</a> |
-  <a href="./README.ja.md">日本語</a> |
-  <a href="./README.pl.md">Polski</a> |
-  <a href="./README.ru.md">Русский</a> |
-  <a href="./README.bs.md">Bosanski</a> |
-  <a href="./README.ar.md">العربية</a> |
-  <a href="./README.no.md">Norsk</a> |
-  <a href="./README.br.md">Português (Brasil)</a> |
-  <a href="./README.th.md">ไทย</a> |
-  <a href="./README.tr.md">Türkçe</a> |
-  <a href="./README.uk.md">Українська</a> |
-  <a href="./README.bn.md">বাংলা</a> |
-  <strong>Ελληνικά</strong> |
-  <a href="./README.vi.md">Tiếng Việt</a>
-</p>
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [한국어](README.ko.md) · [Deutsch](README.de.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Dansk](README.da.md) · [日本語](README.ja.md) · [Polski](README.pl.md) · [Русский](README.ru.md) · [Bosanski](README.bs.md) · [العربية](README.ar.md) · [Norsk](README.nb.md) · [Português (Brasil)](README.pt-BR.md) · [ไทย](README.th.md) · [Türkçe](README.tr.md) · [Українська](README.uk.md) · [বাংলা](README.bn.md) · **Ελληνικά** · [Tiếng Việt](README.vi.md)
 
-*Αυτή είναι μια κοινοτική μετάφραση. Το αγγλικό [README.md](./README.md) είναι η πηγή αλήθειας και μπορεί να είναι πιο ενημερωμένο.*
+*Αυτή είναι μια κοινοτική μετάφραση. Το αγγλικό [README.md](../../README.md) είναι η πηγή αλήθειας και μπορεί να είναι πιο ενημερωμένο.*
 
 <h1 align="center">Magic Context</h1>
 
@@ -54,7 +31,7 @@
   <a href="#εδραίωση">Εδραίωση</a> ·
   <a href="#ανάκληση">Ανάκληση</a> ·
   <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
-  <a href="./CONFIGURATION.md">Configuration</a> ·
+  <a href="../../CONFIGURATION.md">Configuration</a> ·
   <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true">Dashboard</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
@@ -83,17 +60,6 @@
 
 Τρέξε τον διαδραστικό οδηγό εγκατάστασης. Ανιχνεύει τα μοντέλα σου, ρυθμίζει τα πάντα και χειρίζεται τη συμβατότητα.
 
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
-```
-
-**Ή τρέξε απευθείας (οποιοδήποτε OS):**
 ```bash
 npx @cortexkit/magic-context@latest setup
 ```
@@ -102,7 +68,7 @@ npx @cortexkit/magic-context@latest setup
 
 > **Γιατί να απενεργοποιηθεί το ενσωματωμένο compaction;** Το Magic Context διαχειρίζεται το πλαίσιο μόνο του. Το compaction του host θα παρενέβαινε στις cache-aware αναβαλλόμενες λειτουργίες του και θα συμπίεζε δύο φορές.
 
-**Χειροκίνητη ρύθμιση** (OpenCode): πρόσθεσε το plugin και κλείσε το compaction στο `opencode.json`, έπειτα βάλε ένα `magic-context.jsonc` στο `<project>/.cortexkit/` (ή στο `~/.config/cortexkit/` για προεπιλογές χρήστη). Δες την [αναφορά ρυθμίσεων](./CONFIGURATION.md).
+**Χειροκίνητη ρύθμιση** (OpenCode): πρόσθεσε το plugin και κλείσε το compaction στο `opencode.json`, έπειτα βάλε ένα `magic-context.jsonc` στο `<project>/.cortexkit/` (ή στο `~/.config/cortexkit/` για προεπιλογές χρήστη). Δες την [αναφορά ρυθμίσεων](../../CONFIGURATION.md).
 
 ```jsonc
 {
@@ -260,7 +226,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 ## Ρύθμιση
 
-Οι ρυθμίσεις ζουν στο `magic-context.jsonc`. Όλα έχουν λογικές προεπιλογές· η ρύθμιση έργου συγχωνεύεται πάνω από τις ρυθμίσεις χρήστη. Για την πλήρη αναφορά, cache TTL tuning, per-model execute thresholds, επιλογή μοντέλων historian και dreamer, embedding providers και memory settings, δες **[CONFIGURATION.md](./CONFIGURATION.md)** ή την **[αναφορά ρύθμισης στο docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
+Οι ρυθμίσεις ζουν στο `magic-context.jsonc`. Όλα έχουν λογικές προεπιλογές· η ρύθμιση έργου συγχωνεύεται πάνω από τις ρυθμίσεις χρήστη. Για την πλήρη αναφορά, cache TTL tuning, per-model execute thresholds, επιλογή μοντέλων historian και dreamer, embedding providers και memory settings, δες **[CONFIGURATION.md](../../CONFIGURATION.md)** ή την **[αναφορά ρύθμισης στο docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **Τοποθεσίες ρύθμισης** (μία κοινή CortexKit τοποθεσία, το έργο υπερισχύει του χρήστη):
 1. `<project-root>/.cortexkit/magic-context.jsonc`
@@ -323,4 +289,4 @@ Bug reports και pull requests είναι ευπρόσδεκτα. Για με�
 
 ## Άδεια
 
-[MIT](LICENSE)
+[MIT](../../LICENSE)
