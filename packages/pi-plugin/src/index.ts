@@ -125,7 +125,11 @@ import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shar
 import { registerStandalonePluginMarker } from "@magic-context/core/standalone-plugin-marker";
 import { startHostStallProfilerSwitch } from "../../plugin/src/shared/host-stall-profiler";
 import packageMetadata from "../package.json";
-import { handlePiCloneSessionStart } from "./clone-inheritance";
+import {
+	handlePiCloneSessionStart,
+	type PiCloneTransitionRegistrar,
+	registerPiCloneSessionTransitions,
+} from "./clone-inheritance";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
 import {
 	maybeAutoEmbedPiSession,
@@ -1940,6 +1944,16 @@ async function startPiMagicContextRuntime(
 				: "registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand, ctx_reduce (todowrite disabled)",
 	);
 
+	// Stock Pi's types omit OMP's completed-copy events. OMP reuses the extension
+	// instance when copying sessions, so finish copying durable tag state before
+	// the destination's first context preparation can assign fresh tag numbers.
+	registerPiCloneSessionTransitions(
+		pi.on.bind(pi) as unknown as PiCloneTransitionRegistrar,
+		{
+			db,
+			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
+		},
+	);
 	pi.on("session_start", async (event, ctx) => {
 		bindStaleBuildNotice(ctx, import.meta.url);
 		// Pi emits session_start for new, resumed, and reloaded sessions. Re-read
