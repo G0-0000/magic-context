@@ -1,10 +1,21 @@
 import { expect, it, spyOn } from "bun:test";
-import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
+import { join } from "node:path";
+import {
+	getPendingOps,
+	getTagsBySession,
+	queuePendingOp,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage";
 import {
 	recordOverflowDetected,
 	resetEmergencyRecoveryRegistryForTest,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import {
+	readReplayEnvelope,
+	updateReplayDocument,
+} from "@magic-context/core/features/magic-context/storage-replay-document";
 import * as logger from "@magic-context/core/shared/logger";
+import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -14,6 +25,8 @@ import {
 	piFitOverflowPossible,
 	piUpperReclaimCursor,
 	recordPiUpperEstimateReclaim,
+	releasePiUpperEstimateReclaim,
+	reservePiUpperEstimateReclaim,
 	shouldReclaimPiUpperEstimate,
 } from "./pi-fit-reclaim";
 import * as lkg from "./pi-lkg";
@@ -26,15 +39,22 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-it("upper-estimate reclaim is durable and rearms only for new content, model or overflow", () => {
+it("upper-estimate reclaim is durable and rearms only for a changed head, capacity or overflow", () => {
 	const db = createTestDb();
 	const sessionId = "fit-reclaim-cursor";
-	const cursor = (count = 1, modelKey = "mock/mock") =>
+	const cursor = (
+		count = 1,
+		modelKey = "mock/mock",
+		contextWindow = 50000,
+		head = "same head",
+	) =>
 		piUpperReclaimCursor({
 			sessionId,
 			modelKey,
+			contextWindow,
+			head: { cachedM0Bytes: Buffer.from(head) },
 			messageCount: count,
-			input: [userMessage("unchanged", 1)],
+			input: [userMessage(`ordinary append ${count}`, count)],
 		});
 	try {
 		const first = cursor();
@@ -44,7 +64,16 @@ it("upper-estimate reclaim is durable and rearms only for new content, model or 
 		expect(shouldReclaimPiUpperEstimate(db, cursor())).toBe(false);
 		clearPiUpperReclaimSession(sessionId);
 		expect(shouldReclaimPiUpperEstimate(db, cursor())).toBe(false);
-		expect(shouldReclaimPiUpperEstimate(db, cursor(2))).toBe(true);
+		expect(shouldReclaimPiUpperEstimate(db, cursor(2))).toBe(false);
+		expect(
+			shouldReclaimPiUpperEstimate(db, cursor(1, "mock/mock", 60000)),
+		).toBe(true);
+		expect(
+			shouldReclaimPiUpperEstimate(
+				db,
+				cursor(1, "mock/mock", 50000, "rebuilt head"),
+			),
+		).toBe(true);
 		expect(shouldReclaimPiUpperEstimate(db, cursor(1, "mock/other"))).toBe(
 			true,
 		);
@@ -52,6 +81,117 @@ it("upper-estimate reclaim is durable and rearms only for new content, model or 
 		expect(shouldReclaimPiUpperEstimate(db, cursor())).toBe(true);
 	} finally {
 		clearPiUpperReclaimSession(sessionId);
+		db.close();
+	}
+});
+
+it("upper-only reservations compare-and-set before work and release only a failed owner's claim", () => {
+	const { dir } = createTestTempDir("pi-fit-atomic-");
+	const path = join(dir, "claims.db");
+	const db = createTestDb(path);
+	const other = createTestDb(path);
+	const sessionId = "fit-atomic-claims";
+	const cursor = piUpperReclaimCursor({
+		sessionId,
+		modelKey: "mock/mock",
+		messageCount: 1,
+		input: [userMessage("same", 1)],
+	});
+	if (!cursor) throw new Error("fixture cursor missing");
+	try {
+		updateReplayDocument(db, sessionId, (doc) => {
+			doc.version = 2;
+			doc.unrelated = { keep: "unchanged" };
+			return true;
+		});
+		// Both contenders can observe absence, but only one may start work.
+		expect(shouldReclaimPiUpperEstimate(db, cursor)).toBe(true);
+		expect(shouldReclaimPiUpperEstimate(other, cursor)).toBe(true);
+		const first = reservePiUpperEstimateReclaim(db, cursor);
+		expect(typeof first).toBe("string");
+		if (!first) throw new Error("first reservation missing");
+		expect(reservePiUpperEstimateReclaim(other, cursor)).toBeUndefined();
+		expect(shouldReclaimPiUpperEstimate(other, cursor)).toBe(false);
+		releasePiUpperEstimateReclaim(other, cursor, "not the owner");
+		expect(shouldReclaimPiUpperEstimate(other, cursor)).toBe(false);
+		releasePiUpperEstimateReclaim(db, cursor, first);
+		const retry = reservePiUpperEstimateReclaim(other, cursor);
+		expect(typeof retry).toBe("string");
+		if (!retry) throw new Error("retry reservation missing");
+		recordPiUpperEstimateReclaim(db, cursor, first);
+		expect(
+			readReplayEnvelope(db, sessionId).piUpperEstimateReclaim,
+		).toHaveProperty("reservation", retry);
+		recordPiUpperEstimateReclaim(other, cursor, retry);
+		clearPiUpperReclaimSession(sessionId);
+		expect(reservePiUpperEstimateReclaim(db, cursor)).toBeUndefined();
+		expect(
+			readReplayEnvelope(db, sessionId).piUpperEstimateReclaim,
+		).not.toHaveProperty("reservation");
+		expect(readReplayEnvelope(db, sessionId).unrelated).toEqual({
+			keep: "unchanged",
+		});
+	} finally {
+		clearPiUpperReclaimSession(sessionId);
+		other.close();
+		db.close();
+	}
+});
+
+it("upper-only claim has one winner across simultaneous processes", async () => {
+	const { dir } = createTestTempDir("pi-fit-process-cas-");
+	const path = join(dir, "claims.db");
+	const db = createTestDb(path);
+	const script = `
+		import { Database } from "@magic-context/core/shared/sqlite";
+		import { piUpperReclaimCursor, reservePiUpperEstimateReclaim } from "./src/pi-fit-reclaim";
+		if (!process.env.MAGIC_CONTEXT_TEST_DATA_DIR) throw new Error("isolated test environment required");
+		const db = new Database(${JSON.stringify(path)});
+		db.exec("PRAGMA busy_timeout = 5000");
+		const cursor = piUpperReclaimCursor({ sessionId: "process-cas", modelKey: "mock/mock", messageCount: 1, input: [] });
+		console.log("READY");
+		await new Promise((resolve) => { process.stdin.once("end", resolve); process.stdin.resume(); });
+		console.log("CLAIM:" + Boolean(reservePiUpperEstimateReclaim(db, cursor)));
+		db.close();
+	`;
+	// Children inherit the test preload's isolated paths; its lifecycle hooks
+	// belong only to the parent test runner, not these plain Bun processes.
+	const children = Array.from({ length: 2 }, () =>
+		Bun.spawn([process.execPath, "--eval", script], {
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, OPENCODE_DB: undefined },
+		}),
+	);
+	try {
+		const readers = children.map((child) => child.stdout.getReader());
+		for (const [index, reader] of readers.entries()) {
+			const first = await reader.read();
+			if (first.done)
+				throw new Error(await new Response(children[index].stderr).text());
+			expect(new TextDecoder().decode(first.value)).toContain("READY");
+		}
+		for (const child of children) child.stdin.end();
+		const outcomes = await Promise.all(
+			readers.map(async (reader, index) => {
+				let text = "";
+				for (;;) {
+					const chunk = await reader.read();
+					if (chunk.done) break;
+					text += new TextDecoder().decode(chunk.value);
+				}
+				const exit = await children[index].exited;
+				const stderr = await new Response(children[index].stderr).text();
+				if (exit !== 0) throw new Error(stderr);
+				expect(exit).toBe(0);
+				expect(stderr).toBe("");
+				return text.trim();
+			}),
+		);
+		expect(outcomes.sort()).toEqual(["CLAIM:false", "CLAIM:true"]);
+	} finally {
+		for (const child of children) child.kill();
 		db.close();
 	}
 });
@@ -211,12 +351,81 @@ it("ordinary native defer does not clone the full input or enter the final fit b
 		}) as typeof structuredClone);
 		const estimate = spyOn(fit, "estimatePiOutgoingInputTokens");
 		const restore = spyOn(lkg, "restorePiLkgInputForFit");
+		let claimIo = 0;
+		const prepareStatement = db.prepare.bind(db);
+		const statements = spyOn(db, "prepare").mockImplementation(
+			(sql: string) => {
+				const statement = prepareStatement(sql);
+				if (!new Error().stack?.includes("/pi-fit-reclaim.ts:"))
+					return statement;
+				return new Proxy(statement, {
+					get(target, property) {
+						const value = Reflect.get(target, property, target);
+						if (typeof value !== "function") return value;
+						return (...args: unknown[]) => {
+							if (["get", "all", "run", "values"].includes(String(property)))
+								claimIo++;
+							return Reflect.apply(value, target, args);
+						};
+					},
+				});
+			},
+		);
 		try {
 			await handler(event, ctx as never);
+			expect(claimIo).toBe(0);
 			expect(fullClones).toBe(0);
 			expect(estimate).not.toHaveBeenCalled();
 			expect(restore).not.toHaveBeenCalled();
+			const cursor = piUpperReclaimCursor({
+				sessionId,
+				modelKey: "mock/mock",
+				messageCount: 1,
+				input: source,
+			});
+			if (!cursor) throw new Error("fixture cursor missing");
+			expect(reservePiUpperEstimateReclaim(db, cursor)).toBeDefined();
+			expect(claimIo).toBeGreaterThan(0);
+			console.log(
+				`upper-only claim I/O: ordinary defer=0; reservation=${claimIo}`,
+			);
+			const original = getTagsBySession(db, sessionId).find(
+				(tag) => tag.messageId === "entry-0:p0",
+			);
+			if (!original) throw new Error("initial tag missing");
+			queuePendingOp(db, sessionId, original.tagNumber, "drop");
+			const largeTail = [
+				...source,
+				{
+					role: "custom",
+					customType: "notice",
+					timestamp: 101,
+					content: [
+						{ type: "text", text: "small" },
+						{ type: "extension", details: "x".repeat(1000000) },
+					],
+				},
+			];
+			const next = prepare();
+			claimIo = 0;
+			await handler({ messages: structuredClone(largeTail) as never[] }, {
+				...next.ctx,
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					largeTail.map((_, i) => `entry-${i}`),
+					largeTail as never[],
+				),
+			} as never);
+			expect(claimIo).toBe(0);
+			expect(
+				getTagsBySession(db, sessionId).find(
+					(tag) => tag.tagNumber === original.tagNumber,
+				)?.status,
+			).toBe(original.status);
+			expect(getPendingOps(db, sessionId)).toHaveLength(1);
 		} finally {
+			statements.mockRestore();
 			restore.mockRestore();
 			estimate.mockRestore();
 			clones.mockRestore();
@@ -259,7 +468,13 @@ it("a locally refused native request remains fit-checked on an unmeasured retry"
 	try {
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const input = [
-				userMessage("word ".repeat(100000), 1),
+				userMessage(
+					[
+						{ type: "text", text: "word ".repeat(100000) },
+						{ type: "extension-metadata", details: "uncertain sibling" },
+					] as never,
+					1,
+				),
 				userMessage(`attempt ${attempt}`, 2),
 			];
 			await expect(

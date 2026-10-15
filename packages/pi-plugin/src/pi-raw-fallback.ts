@@ -107,21 +107,26 @@ export function estimatePiOutgoingInputTokens(
 		!hasTokenizerForFit()
 	)
 		return { tokens: 0, trusted: false };
-	const countable = (message: unknown) => {
+	const knownRole = (message: unknown) => {
 		if (!message || typeof message !== "object") return false;
+		return ["user", "assistant", "toolResult", "custom"].includes(
+			(message as { role?: string }).role ?? "",
+		);
+	};
+	const countable = (message: unknown) => {
+		if (!knownRole(message)) return false;
 		const m = message as { role?: string; content?: unknown };
 		return (
-			["user", "assistant", "toolResult", "custom"].includes(m.role ?? "") &&
-			(typeof m.content === "string" ||
-				(Array.isArray(m.content) &&
-					m.content.every(
-						(p) =>
-							p &&
-							typeof p === "object" &&
-							["text", "thinking", "redacted_thinking", "toolCall"].includes(
-								String(p.type),
-							),
-					)))
+			typeof m.content === "string" ||
+			(Array.isArray(m.content) &&
+				m.content.every(
+					(p) =>
+						p &&
+						typeof p === "object" &&
+						["text", "thinking", "redacted_thinking", "toolCall"].includes(
+							String(p.type),
+						),
+				))
 		);
 	};
 	const complete = messages.every(countable);
@@ -138,7 +143,7 @@ export function estimatePiOutgoingInputTokens(
 		const priced = measuredForBounds?.appendedMessages ?? messages;
 		const baseline = measuredForBounds?.inputTokens ?? 0;
 		let contentBytes = 0;
-		for (const rawMessage of priced.filter(countable)) {
+		for (const rawMessage of priced.filter(knownRole)) {
 			const message = rawMessage as {
 				content:
 					| string
@@ -155,10 +160,11 @@ export function estimatePiOutgoingInputTokens(
 			};
 			if (typeof message.content === "string")
 				contentBytes += Buffer.byteLength(message.content);
-			else
+			else if (Array.isArray(message.content))
 				for (const part of message.content) {
-					// Only serialized content is lower-bound evidence. Extension
-					// metadata on a text part must not manufacture an overflow.
+					if (!part || typeof part !== "object") continue;
+					// Count known provider text even beside an image or extension part.
+					// Unsupported parts may add input, but cannot subtract that text.
 					for (const value of [
 						part.type === "text" ? part.text : undefined,
 						part.type === "thinking" && !part.redacted

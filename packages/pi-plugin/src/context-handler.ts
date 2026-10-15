@@ -340,8 +340,9 @@ import {
 	piFitOverflowPossible,
 	piUpperReclaimCursor,
 	recordPiUpperEstimateReclaim,
+	releasePiUpperEstimateReclaim,
 	requestPiFitReclaimInput,
-	resetPiUpperEstimateReclaim,
+	reservePiUpperEstimateReclaim,
 	shouldReclaimPiUpperEstimate,
 } from "./pi-fit-reclaim";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
@@ -6314,34 +6315,43 @@ export function registerPiContextHandler(
 					);
 				if (getHarness() === "pi") {
 					const fitCase = classifyPiOutgoingFit(estimate, outgoingFitLimit);
+					const currentUpperCursor = () =>
+						piUpperReclaimCursor({
+							sessionId,
+							modelKey: resolvePiContextModelKey(ctx) ?? null,
+							contextWindow: outgoingFitLimit,
+							head: getOrCreateSessionMeta(options.db, sessionId),
+							messageCount: fullWireMessageCount,
+							snapshot: lkgPassSnapshot,
+							input: inputForFitReclaim ?? event.messages,
+						});
 					const upperCursor =
 						fitCase === "upper-estimate-pressure"
-							? piUpperReclaimCursor({
-									sessionId,
-									modelKey: resolvePiContextModelKey(ctx) ?? null,
-									messageCount: fullWireMessageCount,
-									snapshot: lkgPassSnapshot,
-									input: inputForFitReclaim ?? event.messages,
-								})
+							? currentUpperCursor()
 							: undefined;
-					if (fitReclaimedThisPass && upperCursor)
-						recordPiUpperEstimateReclaim(options.db, upperCursor);
 					if (fitCase === "over-window-proof") {
 						requestPiFitReclaimInput(sessionId);
-						resetPiUpperEstimateReclaim(options.db, sessionId);
 					}
 					if (fitCase === "fits-or-unknown") clearPiFitReclaimInput(sessionId);
 					// Active thinking signatures bind earlier messages to the provider's
 					// reasoning. Uncertain metadata size cannot authorize rewriting them;
 					// provider overflow or proof that the request cannot fit can do so.
+					const upperPassEligible =
+						schedulerDecision === "execute" ||
+						result.bustedThisPass ||
+						result.prefixRebuildAlreadyPriced ||
+						isCacheBusting ||
+						forceMaterialization ||
+						isEmergency;
 					const reclaimHeld =
 						fitCase === "upper-estimate-pressure" &&
 						(result.strictThinkingKept ||
+							!upperPassEligible ||
 							!shouldReclaimPiUpperEstimate(options.db, upperCursor));
 					if (reclaimHeld)
 						sessionLog(
 							sessionId,
-							"outgoing fit: upper-estimate-pressure; reclaim held by signed prefix or unchanged input",
+							"outgoing fit: upper-estimate-pressure; reclaim held by signed prefix, deferred pass or used session latch",
 						);
 					if (
 						fitCase === "upper-estimate-pressure" &&
@@ -6367,99 +6377,130 @@ export function registerPiContextHandler(
 						!fitReclaimedThisPass &&
 						inputForFitReclaim
 					) {
-						sessionLog(
-							sessionId,
-							`outgoing fit: ${fitCase}; attempting emergency reclaim`,
-						);
-						// Upper estimates may include metadata the provider never sees.
-						// They request reclaim; only a proven minimum above the window
-						// can block the outgoing request.
-						if (fitCase === "over-window-proof" && !ctx.hasUI && historian) {
-							maybeFireHistorian({
-								pi,
-								ctx,
-								sessionId,
-								db: options.db,
-								historian,
-								startGuard: budget.assert,
-								isFirstContextPassForSession: false,
-								activeTags: result.activeTags,
-								rawMessageProvider,
-								ordinalAlignment: ordinalAlignment(),
-								taggerFloor,
-								sessionMeta: getOrCreateSessionMeta(options.db, sessionId),
-								piUsage,
-								pressureSnapshot: {
-									percentage: Math.max(95, usagePercentage),
-									inputTokens: usageInputTokens,
-								},
-								minimumPercentage: 95,
-								publishedHistoryRide: false,
-								historianStateSnapshot: loadPiHistorianStateSnapshot(
-									options.db,
+						const reservation = upperCursor
+							? reservePiUpperEstimateReclaim(options.db, upperCursor)
+							: undefined;
+						if (!upperCursor || reservation) {
+							let reclaimCompleted = false;
+							try {
+								sessionLog(
 									sessionId,
-								),
-							});
-							const pending = inFlightHistorian.get(sessionId);
-							if (pending) {
-								budget.stage = "headless fit historian";
-								await budget.wait(pending);
+									`outgoing fit: ${fitCase}; attempting emergency reclaim`,
+								);
+								// Upper estimates may include metadata the provider never sees.
+								// They request reclaim; only a proven minimum above the window
+								// can block the outgoing request.
+								if (
+									fitCase === "over-window-proof" &&
+									!ctx.hasUI &&
+									historian
+								) {
+									maybeFireHistorian({
+										pi,
+										ctx,
+										sessionId,
+										db: options.db,
+										historian,
+										startGuard: budget.assert,
+										isFirstContextPassForSession: false,
+										activeTags: result.activeTags,
+										rawMessageProvider,
+										ordinalAlignment: ordinalAlignment(),
+										taggerFloor,
+										sessionMeta: getOrCreateSessionMeta(options.db, sessionId),
+										piUsage,
+										pressureSnapshot: {
+											percentage: Math.max(95, usagePercentage),
+											inputTokens: usageInputTokens,
+										},
+										minimumPercentage: 95,
+										publishedHistoryRide: false,
+										historianStateSnapshot: loadPiHistorianStateSnapshot(
+											options.db,
+											sessionId,
+										),
+									});
+									const pending = inFlightHistorian.get(sessionId);
+									if (pending) {
+										budget.stage = "headless fit historian";
+										await budget.wait(pending);
+									}
+								}
+								budget.stage = "outgoing fit reclaim";
+								const freshMeta = getOrCreateSessionMeta(options.db, sessionId);
+								result = await budget.waitMandatory(
+									runPipeline({
+										...pipelineArgs,
+										messages: inputForFitReclaim,
+										sessionMeta: freshMeta,
+										schedulerDecision: "execute",
+										schedulerDeferReason: null,
+										forceMaterialization: true,
+										upperEstimateOnly: fitCase === "upper-estimate-pressure",
+										forceSignedRebuildForFit: fitCase === "over-window-proof",
+										isCacheBusting:
+											historyRefreshSessions.has(sessionId) ||
+											deferredHistoryRefreshSessions.has(sessionId),
+										injectionPassSnapshot: options.injection
+											? createPiM0M1PassSnapshot({
+													db: options.db,
+													sessionId,
+													compactionOff: false,
+													sessionMeta: freshMeta,
+												})
+											: undefined,
+										contextUsage: {
+											percentage:
+												fitCase === "over-window-proof"
+													? Math.max(95, usagePercentage)
+													: usagePercentage,
+											inputTokens: usageInputTokens,
+										},
+									}),
+								);
+								outputMessages = result.messages as PiAgentMessage[];
+								if (upperCursor)
+									recordPiUpperEstimateReclaim(
+										options.db,
+										currentUpperCursor() ?? upperCursor,
+										reservation,
+									);
+								reclaimCompleted = true;
+								applyPiProactiveThinkingStrip({
+									db: options.db,
+									sessionId,
+									messages: outputMessages,
+									entryIds: resolvePiLkgOutputEntryIds(
+										outputMessages,
+										result.syntheticLeadingCount,
+										(message) =>
+											result.lkgEntryIdByRef.get(message) ??
+											result.postCommitEntryIdByRef.get(message),
+									).map((id) => id ?? undefined),
+									provider: ctx.model?.provider,
+									model: ctx.model?.id,
+									cacheBustingPass: result.bustedThisPass,
+									stripActiveTurn: result.signedPrefixRewritten,
+								});
+								estimate = estimatePiOutgoingInputTokens(
+									outputMessages,
+									envelope,
+									undefined,
+									outgoingFitLimit,
+								);
+							} finally {
+								if (!reclaimCompleted && upperCursor && reservation)
+									// Releasing this owner's claim is safe after cancellation or
+									// deadline expiry; it cannot publish a superseded request.
+									withoutSqliteTransformPass(() =>
+										releasePiUpperEstimateReclaim(
+											options.db,
+											upperCursor,
+											reservation,
+										),
+									);
 							}
 						}
-						budget.stage = "outgoing fit reclaim";
-						const freshMeta = getOrCreateSessionMeta(options.db, sessionId);
-						result = await budget.waitMandatory(
-							runPipeline({
-								...pipelineArgs,
-								messages: inputForFitReclaim,
-								sessionMeta: freshMeta,
-								schedulerDecision: "execute",
-								schedulerDeferReason: null,
-								forceMaterialization: true,
-								upperEstimateOnly: fitCase === "upper-estimate-pressure",
-								forceSignedRebuildForFit: fitCase === "over-window-proof",
-								isCacheBusting:
-									historyRefreshSessions.has(sessionId) ||
-									deferredHistoryRefreshSessions.has(sessionId),
-								injectionPassSnapshot: options.injection
-									? createPiM0M1PassSnapshot({
-											db: options.db,
-											sessionId,
-											compactionOff: false,
-											sessionMeta: freshMeta,
-										})
-									: undefined,
-								contextUsage: {
-									percentage: Math.max(95, usagePercentage),
-									inputTokens: usageInputTokens,
-								},
-							}),
-						);
-						outputMessages = result.messages as PiAgentMessage[];
-						if (upperCursor)
-							recordPiUpperEstimateReclaim(options.db, upperCursor);
-						applyPiProactiveThinkingStrip({
-							db: options.db,
-							sessionId,
-							messages: outputMessages,
-							entryIds: resolvePiLkgOutputEntryIds(
-								outputMessages,
-								result.syntheticLeadingCount,
-								(message) =>
-									result.lkgEntryIdByRef.get(message) ??
-									result.postCommitEntryIdByRef.get(message),
-							).map((id) => id ?? undefined),
-							provider: ctx.model?.provider,
-							model: ctx.model?.id,
-							cacheBustingPass: result.bustedThisPass,
-							stripActiveTurn: result.signedPrefixRewritten,
-						});
-						estimate = estimatePiOutgoingInputTokens(
-							outputMessages,
-							envelope,
-							undefined,
-							outgoingFitLimit,
-						);
 					}
 				}
 				const refusal = outgoingContextRefusal(

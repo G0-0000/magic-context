@@ -14,6 +14,56 @@ import {
 } from "./pi-raw-fallback";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
 
+it("known text, thinking and tool fields survive unsupported sibling parts in the lower bound", () => {
+	const envelope = {
+		modelKey: "mock/mock",
+		systemTokens: 10,
+		toolDefinitionTokens: 0,
+	};
+	for (const unsupported of [
+		{ type: "image", mimeType: "image/png", data: "opaque" },
+		{ type: "extension-metadata", details: "not provider text" },
+		null,
+	]) {
+		for (const known of [
+			{ type: "text", text: "word ".repeat(100000) },
+			{ type: "thinking", thinking: "word ".repeat(100000) },
+			{
+				type: "toolCall",
+				name: "probe",
+				arguments: { text: "word ".repeat(100000) },
+			},
+		]) {
+			const estimate = estimatePiOutgoingInputTokens(
+				[{ role: "assistant", content: [unsupported, known] }],
+				envelope,
+				undefined,
+				50000,
+			);
+			expect(estimate.refusalTokens).toBeGreaterThanOrEqual(125000);
+			expect(classifyPiOutgoingFit(estimate, 50000)).toBe("over-window-proof");
+		}
+		const uncertain = estimatePiOutgoingInputTokens(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "small" },
+						unsupported,
+						{ type: "extension", text: "x".repeat(1000000) },
+					],
+				},
+			],
+			envelope,
+			undefined,
+			50000,
+		);
+		expect(classifyPiOutgoingFit(uncertain, 50000)).toBe(
+			"upper-estimate-pressure",
+		);
+	}
+});
+
 it("custom text keeps lower-bound overflow evidence without pricing notice metadata", () => {
 	const envelope = {
 		modelKey: "unknown/unknown",

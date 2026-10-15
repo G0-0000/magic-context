@@ -1,24 +1,23 @@
+import { createHash, randomUUID } from "node:crypto";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getEmergencyRecoveryArmedAt } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	readReplayEnvelope,
 	updateReplayDocument,
 } from "@magic-context/core/features/magic-context/storage-replay-document";
-import {
-	lkgContentDigestFromFields,
-	lkgContentFields,
-} from "@magic-context/core/hooks/magic-context/lkg-slot";
 import type { PiLkgPassSnapshot } from "./pi-lkg";
 import { piFitMessageBytes } from "./tokenize-pi-messages";
 
 interface UpperReclaimCursor {
 	sessionId: string;
 	modelKey: string | null;
-	messageCount: number;
-	tail: string;
+	contextWindow: number | null;
+	head: string | null;
 	recoveryArmedAt: number | null;
 }
-const cursors = new Map<string, UpperReclaimCursor | null>();
+interface UpperReclaimClaim extends UpperReclaimCursor {
+	reservation?: string;
+}
 const pendingInput = new Set<string>();
 const KEY = "piUpperEstimateReclaim";
 
@@ -64,7 +63,6 @@ export function piFitOverflowPossible(args: {
 }
 
 export function clearPiUpperReclaimSession(sessionId: string): void {
-	cursors.delete(sessionId);
 	pendingInput.delete(sessionId);
 }
 export function requestPiFitReclaimInput(sessionId: string): void {
@@ -74,45 +72,65 @@ export function clearPiFitReclaimInput(sessionId: string): void {
 	pendingInput.delete(sessionId);
 }
 
-/** Hash only the last input message; total message count also detects appends with identical text. */
+/** Only a rebuilt head, changed capacity or provider overflow starts a new reclaim cycle. */
 export function piUpperReclaimCursor(args: {
 	sessionId: string;
 	modelKey: string | null;
+	contextWindow?: number;
+	head?: {
+		cachedM0Bytes?: Uint8Array | null;
+		cachedM1Bytes?: Uint8Array | null;
+		cachedM0MuralDataUrl?: string | null;
+	};
 	messageCount: number;
 	snapshot?: PiLkgPassSnapshot;
 	input: readonly unknown[];
 }): UpperReclaimCursor | undefined {
-	const last = args.snapshot?.inputs.at(-1);
-	const fields = last?.fields ?? lkgContentFields(args.input.at(-1));
-	if (!fields) return;
+	const head = args.head;
 	return {
 		sessionId: args.sessionId,
 		modelKey: args.modelKey,
-		messageCount: args.messageCount,
-		tail: `${last?.id ?? "unmapped"}:${lkgContentDigestFromFields(fields)}`,
+		contextWindow: args.contextWindow ?? null,
+		// Length-delimited fields distinguish different prefix layouts. Tail
+		// appends and byte-identical fold attempts never change this fingerprint.
+		head: head
+			? createHash("sha256")
+					.update(
+						JSON.stringify([
+							Buffer.from(head.cachedM0Bytes ?? []).toString("base64"),
+							Buffer.from(head.cachedM1Bytes ?? []).toString("base64"),
+							head.cachedM0MuralDataUrl ?? null,
+						]),
+					)
+					.digest("hex")
+			: null,
 		recoveryArmedAt: getEmergencyRecoveryArmedAt(args.sessionId),
 	};
 }
 
-function load(
-	db: ContextDatabase,
+function claimFrom(
+	value: unknown,
 	sessionId: string,
-): UpperReclaimCursor | null {
-	if (cursors.has(sessionId)) return cursors.get(sessionId) ?? null;
-	const value = readReplayEnvelope(db, sessionId)[KEY] as
-		| Partial<UpperReclaimCursor>
-		| undefined;
-	const cursor =
-		value?.sessionId === sessionId &&
-		(typeof value.modelKey === "string" || value.modelKey === null) &&
-		typeof value.messageCount === "number" &&
-		typeof value.tail === "string" &&
-		(typeof value.recoveryArmedAt === "number" ||
-			value.recoveryArmedAt === null)
-			? (value as UpperReclaimCursor)
-			: null;
-	cursors.set(sessionId, cursor);
-	return cursor;
+): UpperReclaimClaim | null {
+	const claim = value as Partial<UpperReclaimClaim> | undefined;
+	return claim?.sessionId === sessionId &&
+		(typeof claim.modelKey === "string" || claim.modelKey === null)
+		? (claim as UpperReclaimClaim)
+		: null;
+}
+
+function canReclaim(
+	previous: UpperReclaimClaim | null,
+	cursor: UpperReclaimCursor,
+): boolean {
+	return (
+		!previous ||
+		previous.modelKey !== cursor.modelKey ||
+		(previous.contextWindow ?? null) !== cursor.contextWindow ||
+		(previous.head ?? null) !== cursor.head ||
+		(cursor.recoveryArmedAt !== null &&
+			cursor.recoveryArmedAt !== previous.recoveryArmedAt)
+	);
 }
 
 export function shouldReclaimPiUpperEstimate(
@@ -120,41 +138,82 @@ export function shouldReclaimPiUpperEstimate(
 	cursor: UpperReclaimCursor | undefined,
 ): boolean {
 	if (!cursor) return false;
-	const previous = load(db, cursor.sessionId);
-	return (
-		!previous ||
-		previous.modelKey !== cursor.modelKey ||
-		previous.messageCount !== cursor.messageCount ||
-		previous.tail !== cursor.tail ||
-		(cursor.recoveryArmedAt !== null &&
-			cursor.recoveryArmedAt !== previous.recoveryArmedAt)
+	// Never cache an absent claim: another process can reserve it immediately.
+	return canReclaim(
+		claimFrom(readReplayEnvelope(db, cursor.sessionId)[KEY], cursor.sessionId),
+		cursor,
 	);
+}
+
+/** Reserve before any asynchronous reclaim work; the outcome must name this owner. */
+export function reservePiUpperEstimateReclaim(
+	db: ContextDatabase,
+	cursor: UpperReclaimCursor,
+): string | undefined {
+	const reservation = randomUUID();
+	return db
+		.transaction(() => {
+			let claimed = false;
+			if (
+				!updateReplayDocument(db, cursor.sessionId, (doc) => {
+					claimed = canReclaim(claimFrom(doc[KEY], cursor.sessionId), cursor);
+					if (!claimed) return false;
+					doc.version = 2;
+					doc[KEY] = { ...cursor, reservation };
+					return true;
+				})
+			)
+				throw new Error("Could not reserve upper-estimate reclaim");
+			return claimed ? reservation : undefined;
+		})
+		.immediate();
 }
 
 export function recordPiUpperEstimateReclaim(
 	db: ContextDatabase,
 	cursor: UpperReclaimCursor,
+	reservation?: string,
 ): void {
+	const owner = reservation ?? reservePiUpperEstimateReclaim(db, cursor);
+	if (!owner) return;
 	// Forks copy extra fields from the replay JSON. A session id prevents the
 	// parent's "already reclaimed" decision from suppressing its child's first
 	// attempt, without adding a database column.
 	if (
 		!updateReplayDocument(db, cursor.sessionId, (doc) => {
+			if (claimFrom(doc[KEY], cursor.sessionId)?.reservation !== owner)
+				return false;
 			doc.version = 2;
 			doc[KEY] = cursor;
 			return true;
 		})
 	)
 		throw new Error("Could not persist upper-estimate reclaim cursor");
-	cursors.set(cursor.sessionId, cursor);
 	pendingInput.delete(cursor.sessionId);
+}
+
+/** A failed attempt releases only its own reservation, never a newer process's claim. */
+export function releasePiUpperEstimateReclaim(
+	db: ContextDatabase,
+	cursor: UpperReclaimCursor,
+	reservation: string,
+): void {
+	if (
+		!updateReplayDocument(db, cursor.sessionId, (doc) => {
+			if (claimFrom(doc[KEY], cursor.sessionId)?.reservation !== reservation)
+				return false;
+			delete doc[KEY];
+			return true;
+		})
+	)
+		throw new Error("Could not release upper-estimate reclaim");
 }
 
 export function resetPiUpperEstimateReclaim(
 	db: ContextDatabase,
 	sessionId: string,
 ): void {
-	if (!load(db, sessionId)) return;
+	if (!claimFrom(readReplayEnvelope(db, sessionId)[KEY], sessionId)) return;
 	if (
 		!updateReplayDocument(db, sessionId, (doc) => {
 			delete doc[KEY];
@@ -162,5 +221,4 @@ export function resetPiUpperEstimateReclaim(
 		})
 	)
 		throw new Error("Could not clear upper-estimate reclaim cursor");
-	cursors.delete(sessionId);
 }
