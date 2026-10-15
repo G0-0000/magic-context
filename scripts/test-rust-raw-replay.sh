@@ -20,6 +20,7 @@ if [[ -n ${MC_RAW_REPLAY_BASELINE_ARCHIVE:-} ]]; then
     trap 'rm -rf "$scratch"' EXIT
     export MC_RAW_REPLAY_BASELINE="$scratch/baseline-probe"
     export MC_RAW_REPLAY_BASELINE_ADAPTER="$scratch/base/packages/plugin/src/hooks/magic-context/rust-mode-transform.ts"
+    export MC_REVIEW_BASELINE_ROOT="$scratch/base"
 else
     echo "Master differential skipped: set MC_RAW_REPLAY_BASELINE_ARCHIVE to an offline git archive of the baseline sources."
 fi

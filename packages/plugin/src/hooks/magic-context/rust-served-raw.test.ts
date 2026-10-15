@@ -1,9 +1,15 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import {
+    invalidateReplayEnvelopeSnapshot,
+    readReplayEnvelope,
+    updateReplayDocument,
+    withReplayEnvelopeSnapshot,
+} from "../../features/magic-context/storage-replay-document";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
@@ -65,7 +71,7 @@ test("served raw evidence survives a new database connection and matches native 
     const candidate = structuredClone(served);
     candidate[0]!.parts.shift();
     (candidate[0]!.parts[0] as { state: { output: string } }).state.output = "§9§ raw result";
-    preserveRustServedRaw(reopened, "raw", candidate);
+    preserveRustServedRaw(reopened, "raw", candidate, input);
     expect(JSON.stringify(candidate)).toBe(JSON.stringify(served));
     releaseRustServedRaw(reopened, "raw", candidate);
     expect(servedRawBlockIds(reopened, "raw")).toEqual([
@@ -91,7 +97,7 @@ test("every raw serve refreshes a completed part and its newly projected result 
     noteRustServedRaw(db, "raw", input, input);
     const candidate = structuredClone(input);
     (candidate[0]!.parts[1] as { state: { output: string } }).state.output = "§5§ updated result";
-    preserveRustServedRaw(db, "raw", candidate);
+    preserveRustServedRaw(db, "raw", candidate, input);
     expect(candidate).toEqual(input);
 });
 
@@ -101,7 +107,9 @@ test("ambiguous ID-less raw parts fail closed rather than overwriting a same-typ
     noteRustServedRaw(db, "raw", input, input);
     const candidate = structuredClone(input);
     (candidate[0]!.parts[2] as { text: string }).text = "different neighbor";
-    expect(() => preserveRustServedRaw(db, "raw", candidate)).toThrow(EmergencyFailClosedError);
+    expect(() => preserveRustServedRaw(db, "raw", candidate, input)).toThrow(
+        EmergencyFailClosedError,
+    );
 });
 
 test("a session with no raw replay evidence has no output normalization or persistence", () => {
@@ -113,4 +121,108 @@ test("a session with no raw replay evidence has no output normalization or persi
     expect(
         db.query("SELECT session_id FROM session_meta WHERE session_id = ?").get("untouched"),
     ).toBeNull();
+});
+
+test("raw receipts contain structural digests, not duplicate native payloads, and key order does not consume them", () => {
+    const { db, input } = fixture();
+    (input[0]!.parts[1] as { state: { output: string } }).state.output =
+        "large native output ".repeat(1000);
+    const shared = { label: "same value" };
+    (input[0]!.parts[1] as Record<string, unknown>).metadata = { first: shared, second: shared };
+    const reordered = JSON.parse(JSON.stringify(input)) as MessageLike[];
+    reordered[0]!.parts = reordered[0]!.parts.map((part) =>
+        Object.fromEntries(Object.entries(part as object).reverse()),
+    );
+    noteRustServedRaw(db, "raw", input, reordered);
+    expect(servedRawBlockIds(db, "raw")).toHaveLength(4);
+    const stored = db
+        .prepare("SELECT trailing_blank_decisions AS doc FROM session_meta WHERE session_id=?")
+        .get("raw") as { doc: string };
+    expect(Buffer.byteLength(stored.doc)).toBeLessThan(1024);
+    expect(stored.doc).not.toContain("large native output");
+    preserveRustServedRaw(db, "raw", reordered, input);
+    releaseRustServedRaw(db, "raw", reordered);
+    expect(servedRawBlockIds(db, "raw")).toHaveLength(4);
+    const before = db.prepare("SELECT total_changes() AS n").get() as { n: number };
+    noteRustServedRaw(db, "raw", input, reordered);
+    expect((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n).toBe(before.n);
+});
+
+test("a replay-envelope read view is invalidated by writes and explicit module handoffs", async () => {
+    const { db } = fixture();
+    const original = db.prepare.bind(db);
+    let reads = 0;
+    const spy = spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (sql === "SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?")
+            reads++;
+        return original(sql);
+    }) as typeof db.prepare);
+    try {
+        await withReplayEnvelopeSnapshot(db, "raw", async () => {
+            readReplayEnvelope(db, "raw");
+            servedRawBlockIds(db, "raw");
+            readReplayEnvelope(db, "raw");
+            expect(reads).toBe(1);
+            expect(
+                updateReplayDocument(db, "raw", (doc) => {
+                    doc.version = 2;
+                    doc.marker = "own";
+                    return true;
+                }),
+            ).toBe(true);
+            expect(readReplayEnvelope(db, "raw").marker).toBe("own");
+            const prior = reads;
+            invalidateReplayEnvelopeSnapshot(db, "raw");
+            expect(readReplayEnvelope(db, "raw").marker).toBe("own");
+            expect(reads).toBe(prior + 1);
+            db.prepare("UPDATE session_meta SET trailing_blank_decisions=? WHERE session_id=?").run(
+                JSON.stringify({ version: 2, trailingBlank: {}, peer: "retained" }),
+                "raw",
+            );
+            expect(
+                updateReplayDocument(db, "raw", (doc) => {
+                    doc.marker = "merged";
+                    return true;
+                }),
+            ).toBe(true);
+            expect(readReplayEnvelope(db, "raw")).toMatchObject({
+                peer: "retained",
+                marker: "merged",
+            });
+        });
+        const prior = reads;
+        readReplayEnvelope(db, "raw");
+        readReplayEnvelope(db, "raw");
+        expect(reads).toBe(prior + 2);
+    } finally {
+        spy.mockRestore();
+    }
+});
+
+test("background work inherited from a finished pass cannot reuse its stale replay snapshot", async () => {
+    const { db } = fixture();
+    expect(
+        updateReplayDocument(db, "raw", (doc) => {
+            doc.version = 2;
+            doc.marker = "before";
+            return true;
+        }),
+    ).toBe(true);
+    let resume: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+        resume = resolve;
+    });
+    let later: Promise<unknown> = Promise.resolve(undefined);
+    await withReplayEnvelopeSnapshot(db, "raw", async () => {
+        expect(readReplayEnvelope(db, "raw").marker).toBe("before");
+        later = gate.then(() => readReplayEnvelope(db, "raw").marker);
+    });
+    expect(
+        updateReplayDocument(db, "raw", (doc) => {
+            doc.marker = "after";
+            return true;
+        }),
+    ).toBe(true);
+    resume();
+    expect(await later).toBe("after");
 });

@@ -41,8 +41,10 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { hasPendingDropOps } from "../../features/magic-context/storage-ops";
 import {
+    invalidateReplayEnvelopeSnapshot,
     isRustMarkerAdmissionFenced,
     setRustMarkerAdmissionFence,
+    withReplayEnvelopeSnapshot,
 } from "../../features/magic-context/storage-replay-document";
 import { writeRustTransformDecision } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
@@ -182,9 +184,14 @@ import {
     registerRustLkgReplayParticipant,
 } from "./rust-lkg-freeze-registry";
 import {
+    checkRustServedRawIngress,
     noteRustServedRaw,
     preserveRustServedRaw,
+    type RustRawRebuild,
+    RustServedRawConflict,
     releaseRustServedRaw,
+    requestRustRawRebuild,
+    rustRawRebuild,
     servedRawBlockIds,
 } from "./rust-served-raw";
 import { isAnthropicFamilyRoute } from "./sentinel";
@@ -1669,6 +1676,7 @@ function buildTransformBody(args: {
     input: unknown[];
     nativeMessages: unknown[];
     servedRawBlockIds?: string[];
+    rawRebuild?: RustRawRebuild;
     toolInputKeyOrders?: Record<string, string[]>;
     passInputs: Record<string, unknown>;
     usage: Record<string, number | boolean>;
@@ -1705,6 +1713,7 @@ function buildTransformBody(args: {
             args.modelKey ? `model:${args.modelKey}` : "",
             args.variant ? `variant:${args.variant}` : "",
             args.systemPromptHash ? `system:${args.systemPromptHash}` : "",
+            args.rawRebuild ? `raw_replay:${args.rawRebuild.identity}` : "",
         ]
             .filter(Boolean)
             .join("|"),
@@ -1715,6 +1724,15 @@ function buildTransformBody(args: {
         messages: args.input,
         native_messages: args.nativeMessages,
         served_raw_block_ids: args.servedRawBlockIds ?? [],
+        ...(args.rawRebuild?.pending
+            ? {
+                  raw_replay_rebuild: {
+                      identity: args.rawRebuild.identity,
+                      reason: args.rawRebuild.reason,
+                      message_ids: args.rawRebuild.messageIds,
+                  },
+              }
+            : {}),
         tool_input_key_orders: args.toolInputKeyOrders ?? toolInputKeyOrders(args.input),
         ...(args.fullArrayFingerprint ? { full_array_fingerprint: args.fullArrayFingerprint } : {}),
         ...(args.tailDelta
@@ -2042,6 +2060,7 @@ export function createRustModeTransform(
             throw error;
         } finally {
             clock.clearTimeout(timer);
+            invalidateReplayEnvelopeSnapshot(deps.db, args.sessionId);
         }
     };
 
@@ -2216,6 +2235,31 @@ export function createRustModeTransform(
         }
     };
 
+    const recordRawConflict = (sessionId: string, error: RustServedRawConflict): void => {
+        requestRustRawRebuild(deps.db, sessionId, error);
+        dropSlot(sessionId, `raw_replay_${error.reason}`);
+        const state = ensureState(states, sessionId);
+        state.forceFullWire = true;
+        state.parked = false;
+        sessionLog(
+            sessionId,
+            `raw_replay_rebuild_requested reason=${error.reason} first_changed=${error.firstBlockId}`,
+        );
+    };
+    const observeRawReplay = (
+        sessionId: string,
+        input: MessageLike[],
+        served: MessageLike[],
+    ): void => {
+        try {
+            checkRustServedRawIngress(deps.db, sessionId, input);
+            noteRustServedRaw(deps.db, sessionId, input, served);
+        } catch (error) {
+            if (error instanceof RustServedRawConflict) recordRawConflict(sessionId, error);
+            throw error;
+        }
+    };
+
     const replayLastGood = (
         sessionId: string,
         currentMessages: MessageLike[],
@@ -2312,7 +2356,7 @@ export function createRustModeTransform(
             }),
         );
         const replayInputCount = currentMessages.length;
-        noteRustServedRaw(deps.db, sessionId, currentMessages, replay.messages);
+        observeRawReplay(sessionId, currentMessages, replay.messages);
         replaceMessagesInPlace(output, replay.messages);
         ensureState(states, sessionId).lkgLatestServedDigest = lkgServedArrayDigest(
             JSON.stringify(replay.messages),
@@ -2432,7 +2476,7 @@ export function createRustModeTransform(
         lastPassStamp: (sessionId) =>
             states.has(sessionId) ? passStampBySession.get(sessionId) : undefined,
         enterFreezeFromExternalServe: (sessionId, inputMessages, servedMessages) => {
-            noteRustServedRaw(deps.db, sessionId, inputMessages, servedMessages);
+            observeRawReplay(sessionId, inputMessages, servedMessages);
             enterLkgReplayFreeze(ensureState(states, sessionId), inputMessages.length);
         },
         replayFits: (sessionId, messages, inputMessages) => {
@@ -2658,6 +2702,24 @@ export function createRustModeTransform(
         bindSystemDateRequest(output, dateRequest);
         const passObservedAtMs = Date.now();
         const state = ensureState(states, sessionId);
+        let rawRebuild: RustRawRebuild | undefined;
+        let rawReadError: unknown;
+        try {
+            rawRebuild = rustRawRebuild(deps.db, sessionId);
+            try {
+                checkRustServedRawIngress(deps.db, sessionId, messages);
+            } catch (error) {
+                if (!(error instanceof RustServedRawConflict) || !rawRebuild?.pending) throw error;
+                requestRustRawRebuild(deps.db, sessionId, error);
+                rawRebuild = rustRawRebuild(deps.db, sessionId);
+            }
+        } catch (error) {
+            if (error instanceof RustServedRawConflict) throw error;
+            // Preserve the existing typed storage/overflow refusal, rather than
+            // letting an earlier envelope read leak a raw SQLite exception.
+            rawReadError = error;
+        }
+        const reconstructRaw = new Set(rawRebuild?.messageIds ?? []);
         let entrySlot = getSlot(sessionId);
         try {
             entrySlot = loadPersistedLkgSlot(deps.db, sessionId, true) ?? entrySlot;
@@ -2742,7 +2804,7 @@ export function createRustModeTransform(
         // and is the same value copied onto the module request when this pass runs.
         const passUsageSnapshot = loadContextUsage(deps.contextUsageMap, deps.db, sessionId);
         requestInputTokens = Math.max(0, Math.floor(passUsageSnapshot.inputTokens));
-        let preflightError: unknown;
+        let preflightError: unknown = rawReadError;
         let markerAdmissionRecovery = state.markerAdmissionFenced;
         try {
             markerAdmissionRecovery ||= isRustMarkerAdmissionFenced(deps.db, sessionId);
@@ -3155,7 +3217,7 @@ export function createRustModeTransform(
                 if (detail) sessionLog(sessionId, `rust module stages (slow pass): ${detail}`);
             }
         };
-        if (state.parked) {
+        if (state.parked && !preflightError) {
             state.passesSincePark += 1;
             // The fifth live pass is the first retry opportunity after the
             // three-failure park; later retries use the same global cadence.
@@ -3831,6 +3893,7 @@ export function createRustModeTransform(
             };
             let body = buildTransformBody({
                 sessionId,
+                rawRebuild,
                 servedRawBlockIds: servedRawBlockIds(deps.db, sessionId),
                 input: encodedInput,
                 nativeMessages: wireDelta ? messages.slice(wireDelta.rawStart) : messages,
@@ -4163,6 +4226,7 @@ export function createRustModeTransform(
                     const retryWireBuildStartedAt = performance.now();
                     body = buildTransformBody({
                         sessionId,
+                        rawRebuild,
                         servedRawBlockIds: servedRawBlockIds(deps.db, sessionId),
                         input: retryEncodedInput,
                         nativeMessages: messages,
@@ -4276,6 +4340,15 @@ export function createRustModeTransform(
             // Only the producer grants prefix-rebuild authority. A local safety escape
             // may replace the frozen representation, but cannot grant any other edits.
             const cacheBustingPass = moduleDecisionBusts;
+            if (rawRebuild?.pending && !moduleDecisionBusts) {
+                throw new EmergencyFailClosedError(
+                    "Rust raw-rebuild request was not authorized by the module",
+                );
+            }
+            if (rawRebuild?.pending) {
+                frozenReleaseReason = `raw_replay_${rawRebuild.reason}`;
+                frozenReleaseFirstChanged = rawRebuild.firstBlockId;
+            }
             let frozenReplayReleased = false;
             if (markerAdmissionRecovery && !moduleDecisionBusts)
                 throw new RustTransformProtocolError(
@@ -4336,6 +4409,7 @@ export function createRustModeTransform(
                 let appliedMessages = moduleMessages as MessageLike[];
                 let markerStrategyFailure: Error | undefined;
                 let replayedFrozenRepresentation = false;
+                let reconstructedRaw = false;
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     // An invalid Rust m[0] must not move the host marker. Check its
@@ -4442,7 +4516,7 @@ export function createRustModeTransform(
                 }
                 if (recoveryFenceRebuild) {
                     frozenReplayReleased = true;
-                    frozenReleaseReason = "lkg_recovery_fence_unproven";
+                    frozenReleaseReason ??= "lkg_recovery_fence_unproven";
                     frozenReleaseLastServed = { messages: null, proven: false };
                 }
                 if (
@@ -4527,8 +4601,29 @@ export function createRustModeTransform(
                 if (!replayedFrozenRepresentation) {
                     const outputCloneStartedAt = performance.now();
                     appliedMessages = cloneModuleNativeOutput(moduleMessages) as MessageLike[];
-                    if (!moduleDecisionBusts) {
-                        preserveRustServedRaw(deps.db, sessionId, appliedMessages);
+                    if (
+                        !moduleDecisionBusts ||
+                        (rawRebuild?.pending && rawRebuild.reason.startsWith("candidate"))
+                    ) {
+                        const covered =
+                            moduleDecisionBusts && typeof response.coverage_ordinal === "number"
+                                ? new Set(
+                                      [...state.idOrdinalMemo]
+                                          .filter(
+                                              ([, ordinal]) =>
+                                                  ordinal <= Number(response.coverage_ordinal),
+                                          )
+                                          .map(([id]) => id),
+                                  )
+                                : new Set<string>();
+                        reconstructedRaw = preserveRustServedRaw(
+                            deps.db,
+                            sessionId,
+                            appliedMessages,
+                            messages,
+                            reconstructRaw,
+                            covered,
+                        );
                     }
                     timings.outputClone += performance.now() - outputCloneStartedAt;
                 }
@@ -4633,7 +4728,14 @@ export function createRustModeTransform(
                     if (markerStrategyFailure) throw markerStrategyFailure;
                 }
                 if (!moduleDecisionBusts && !replayedFrozenRepresentation) {
-                    preserveRustServedRaw(deps.db, sessionId, appliedMessages);
+                    reconstructedRaw =
+                        preserveRustServedRaw(
+                            deps.db,
+                            sessionId,
+                            appliedMessages,
+                            messages,
+                            reconstructRaw,
+                        ) || reconstructedRaw;
                     // Persisted thinking-removal decisions are already authorized.
                     // Restoring saved raw parts must not reintroduce those blocks.
                     replayRustModeBindingMismatchStrips({
@@ -4661,8 +4763,16 @@ export function createRustModeTransform(
                                     })),
                                 )))
                     ) {
-                        throw new EmergencyFailClosedError(
-                            "Rust served-raw replacement has no valid tool/thinking seam",
+                        throw new RustServedRawConflict(
+                            "candidate_conflict",
+                            [
+                                ...new Set(
+                                    servedRawBlockIds(deps.db, sessionId).map((id) =>
+                                        id.replace(/#\d+$/, ""),
+                                    ),
+                                ),
+                            ],
+                            servedRawBlockIds(deps.db, sessionId)[0] ?? "unknown",
                         );
                     }
                 }
@@ -4773,7 +4883,7 @@ export function createRustModeTransform(
                         }
                     }
                 }
-                if (replayedFrozenRepresentation) {
+                if (replayedFrozenRepresentation || reconstructedRaw) {
                     noteRustServedRaw(deps.db, sessionId, messages, appliedMessages);
                 }
                 // output.messages commonly aliases the raw input array, so preserve the entry ids
@@ -5181,7 +5291,12 @@ export function createRustModeTransform(
             // A rejected capture or bookkeeping fault did not replace the provider's
             // raw bytes. Clear served-raw records only after the entire pass succeeds.
             if (moduleDecisionBusts) {
-                releaseRustServedRaw(deps.db, sessionId, output.messages as MessageLike[]);
+                releaseRustServedRaw(
+                    deps.db,
+                    sessionId,
+                    output.messages as MessageLike[],
+                    rawRebuild?.identity,
+                );
             }
         } catch (error) {
             if (markerDefinitelyNoCut) {
@@ -5408,7 +5523,14 @@ export function createRustModeTransform(
             sessionMeta: ReturnType<typeof getOrCreateSessionMeta>,
         ): Promise<void> => {
             try {
-                await withSqliteTransformPass(() => run(sessionId, messages, output, sessionMeta));
+                await withReplayEnvelopeSnapshot(deps.db, sessionId, () =>
+                    withSqliteTransformPass(() => run(sessionId, messages, output, sessionMeta)),
+                );
+            } catch (error) {
+                if (error instanceof RustServedRawConflict) {
+                    recordRawConflict(sessionId, error);
+                }
+                throw error;
             } finally {
                 // The pass is the loop's clock. A run can only be queued by a pass, so
                 // looking right after one is when there is most likely something to

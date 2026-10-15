@@ -131,7 +131,7 @@ import {
     RUST_PARK_RETRY_INTERVAL,
     type RustModeModuleClient,
 } from "./rust-mode-transform";
-import { servedRawBlockIds } from "./rust-served-raw";
+import { rustRawRebuild, servedRawBlockIds } from "./rust-served-raw";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { registerSystemDateRefresh } from "./system-date-refresh";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
@@ -10841,6 +10841,116 @@ describe.skipIf(!rawReplayProbe)("Rust external raw-tail provider bytes", () => 
         transform.dispose();
         rmSync(directory, { recursive: true, force: true });
     });
+
+    for (const loss of ["source", "candidate", "external-source"] as const) {
+        it(`${loss} raw-history loss refuses once then automatically records and admits an identity rebuild`, async () => {
+            const sessionId = `raw-recovery-${loss}-${Date.now()}`;
+            sessions.push(sessionId);
+            const directory = createTestTempDirFromPath("raw-recovery-module-");
+            availabilityDataHomes.push(directory);
+            const db = makeDb();
+            installRawProvider(sessionId);
+            let dropCandidate = false;
+            let response: Record<string, unknown> = {};
+            let request: Record<string, unknown> = {};
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method, body }) => {
+                    if (method !== "transform") return { ok: true };
+                    request = body as Record<string, unknown>;
+                    response = probe(rawReplayProbe!, directory, {
+                        ...body,
+                        tool_present: true,
+                        auto_search_enabled: false,
+                        cache_ttl: "never",
+                    });
+                    if (dropCandidate)
+                        response.native_messages = (
+                            response.native_messages as MessageLike[]
+                        ).filter((message) => message.info.id !== "raw");
+                    return response;
+                },
+            };
+            const deps = makeDeps(db, moduleClient);
+            deps.liveModelBySession?.set(sessionId, route);
+            deps.getModelKey = () => `${route.providerID}/${route.modelID}`;
+            const host = createRustModeTransform(deps, { moduleClient });
+            const run = async (input: MessageLike[]) => {
+                host.invalidateWireState(sessionId);
+                const output = { messages: structuredClone(input) as unknown[] };
+                await host.run(sessionId, input, output, makeMeta(db, sessionId));
+                return output.messages;
+            };
+            try {
+                const input = [user(sessionId, "prompt")];
+                await run(input);
+                recordDetectedContextLimit(
+                    db,
+                    sessionId,
+                    200_000,
+                    `${route.providerID}/${route.modelID}`,
+                );
+                input.push(tool(sessionId, "raw"));
+                const replay = { messages: structuredClone(input) as unknown[] };
+                expect(
+                    tryMessagesTransformLkgReplay({
+                        output: replay,
+                        sessionId,
+                        error: new Error("outage"),
+                        rust: host.replayParticipant,
+                    }),
+                ).toBe(true);
+                if (loss !== "external-source") {
+                    await run(input);
+                    lkgSlot.dropSlot(sessionId, "message_removed");
+                }
+                if (loss !== "candidate") input.pop();
+                else dropCandidate = true;
+                input.push(user(sessionId, "continued"));
+                if (loss === "external-source") {
+                    const declined = { messages: structuredClone(input) as unknown[] };
+                    expect(
+                        tryMessagesTransformLkgReplay({
+                            output: declined,
+                            sessionId,
+                            error: new Error("outage after source removal"),
+                            rust: host.replayParticipant,
+                        }),
+                    ).toBe(false);
+                    expect(declined.messages).toEqual(input);
+                } else await expect(run(input)).rejects.toBeInstanceOf(EmergencyFailClosedError);
+                const reason = loss !== "candidate" ? "source_removed" : "candidate_loss";
+                expect(rustRawRebuild(db, sessionId)).toMatchObject({
+                    pending: true,
+                    reason,
+                    messageIds: ["raw"],
+                });
+                expect(servedRawBlockIds(db, sessionId)).toContain("raw#1");
+                const recovered = await requestBody(await run(input));
+                expect(request.raw_replay_rebuild).toMatchObject({ reason, message_ids: ["raw"] });
+                expect(response.prefix_bust_permitted).toBe(true);
+                expect(response.materialize_reason).toBe("raw_replay_identity_rebuild");
+                expect(
+                    transformDecisionTest.getPending(sessionId)?.lkgFrozenReleaseReason,
+                ).toStartWith(`raw_replay_${reason};first_changed=raw#`);
+                expect(rustRawRebuild(db, sessionId)?.pending).toBe(false);
+                if (loss !== "candidate") {
+                    expect(JSON.stringify(recovered)).not.toContain("raw-call");
+                    expect(JSON.stringify(recovered)).not.toContain("output raw");
+                    expect(servedRawBlockIds(db, sessionId)).not.toContain("raw#1");
+                } else {
+                    expect(JSON.stringify(recovered)).toContain("output raw");
+                    expect(servedRawBlockIds(db, sessionId)).toContain("raw#1");
+                }
+                expect(JSON.stringify(await requestBody(await run(input)))).toBe(
+                    JSON.stringify(recovered),
+                );
+                expect(request.raw_replay_rebuild).toBeUndefined();
+                expect(response.prefix_bust_permitted).toBe(false);
+            } finally {
+                host.dispose();
+            }
+        });
+    }
 
     it.skipIf(!process.env.MC_RAW_REPLAY_BASELINE || !process.env.MC_RAW_REPLAY_BASELINE_ADAPTER)(
         "no-LKG randomized passes have master-identical provider bytes",
