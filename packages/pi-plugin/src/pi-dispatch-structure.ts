@@ -77,16 +77,124 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	return row;
 }
 
+function projectMissingToolResults(messages: readonly unknown[]): unknown[] {
+	const responsesComponents = new Set<string>();
+	const opaqueIds = new Set<string>();
+	const component = (id: string) => {
+		const pipe = id.indexOf("|");
+		return pipe > 0 ? id.slice(0, pipe) : id;
+	};
+	for (const value of messages) {
+		const message = object(value);
+		if (message?.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		for (const value of message.content) {
+			const block = object(value);
+			if (block?.type !== "toolCall" || typeof block.id !== "string") continue;
+			if (
+				[
+					"openai-responses",
+					"azure-openai-responses",
+					"openai-codex-responses",
+				].includes(String(message.api))
+			)
+				responsesComponents.add(component(block.id));
+			else if (block.id.includes("|")) opaqueIds.add(block.id);
+		}
+	}
+	// Responses item suffixes are not part of the call identity; opaque Chat IDs
+	// containing a pipe remain whole (transform-messages.ts:56-59,94-143).
+	const pairingId = (id: string) =>
+		!opaqueIds.has(id) && responsesComponents.has(component(id))
+			? component(id)
+			: id;
+	const lastResult = new Map<string, number>();
+	messages.forEach((value, index) => {
+		const message = object(value);
+		if (
+			message?.role === "toolResult" &&
+			typeof message.toolCallId === "string"
+		)
+			lastResult.set(pairingId(message.toolCallId), index);
+	});
+	const projected: unknown[] = [];
+	const resolved = new Set<string>();
+	let pending: { id: string; name: string }[] = [];
+	let start = -1;
+	let aborted = false;
+	let timestamp: unknown;
+	const flush = (boundaryTimestamp?: unknown) => {
+		for (const call of pending) {
+			const key = pairingId(call.id);
+			if (resolved.has(key) || (lastResult.get(key) ?? -1) > start) continue;
+			projected.push({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: [
+					{ type: "text", text: aborted ? "aborted" : "No result provided" },
+				],
+				isError: true,
+				timestamp: aborted ? timestamp : boundaryTimestamp,
+			});
+			resolved.add(key);
+		}
+		pending = [];
+	};
+	for (let index = 0; index < messages.length; index++) {
+		const value = messages[index];
+		const message = object(value);
+		if (
+			(message?.role === "bashExecution" ||
+				message?.role === "pythonExecution") &&
+			message.excludeFromContext === true
+		)
+			continue;
+		// OMP flushes unresolved calls at every non-result boundary and at EOF,
+		// not only on the latest turn. A later real result prevents synthesis;
+		// its reordering and all other history rewrites still fail comparison.
+		// @oh-my-pi/pi-ai transform-messages.ts:1256-1303,1305-1327,1457-1469 (18.10.4).
+		if (message?.role !== "toolResult") flush(message?.timestamp);
+		else if (
+			typeof message.toolCallId === "string" &&
+			pending.some(
+				(call) => pairingId(call.id) === pairingId(String(message.toolCallId)),
+			)
+		)
+			resolved.add(pairingId(message.toolCallId));
+		projected.push(value);
+		if (message?.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		start = index;
+		aborted =
+			message.stopReason === "aborted" || message.stopReason === "error";
+		timestamp = message.timestamp;
+		if (aborted && typeof timestamp !== "number") continue;
+		for (const value of message.content) {
+			const block = object(value);
+			if (block?.type === "toolCall" && typeof block.id === "string")
+				pending.push({
+					id: block.id,
+					name: typeof block.name === "string" ? block.name : "",
+				});
+		}
+	}
+	flush();
+	return projected;
+}
+
 export function piPreparedStructure(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
+	const projectedMessages = projectMissingToolResults(messages);
+	if (projectedMessages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
 	const toolNames = new Map<string, string>();
 	const byIndex = new Map<number, MessageStructure>();
-	for (let index = 0; index < messages.length; index++) {
-		const message = messages[index];
+	for (let index = 0; index < projectedMessages.length; index++) {
+		const message = projectedMessages[index];
 		const source = object(message);
 		// History injection and the provider renderer both put instructions before
 		// conversation turns. Ignore only that leading system/developer prefix on
@@ -126,7 +234,7 @@ export function piPreparedStructure(
 				responsesMessages.push(row);
 				continue;
 			}
-			const texts = piResponsesAssistantTexts(messages[index], model);
+			const texts = piResponsesAssistantTexts(projectedMessages[index], model);
 			if (!texts) {
 				responsesMessages = undefined;
 				break;
@@ -147,7 +255,7 @@ export function piPreparedStructure(
 				});
 		}
 	}
-	const plan = piChatHistoryPlan(messages, model);
+	const plan = piChatHistoryPlan(projectedMessages, model);
 	const chatMessages = plan?.flatMap((step): MessageStructure[] => {
 		if (step.kind === "source") {
 			const row = byIndex.get(step.index);

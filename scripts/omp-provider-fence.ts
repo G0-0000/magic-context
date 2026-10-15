@@ -37,8 +37,8 @@ const host = join(
 const version = JSON.parse(
 	readFileSync(join(host, "package.json"), "utf8"),
 ).version;
-if (version !== "18.10.4")
-	throw new Error(`expected OMP 18.10.4, got ${version}`);
+if (!["18.10.4", "18.11.0"].includes(version))
+	throw new Error(`expected OMP 18.10.4 or 18.11.0, got ${version}`);
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";
@@ -59,6 +59,7 @@ if (
 		"removed-tool",
 		"orphan-result",
 		"missing-result",
+		"interrupted-tool",
 		"summary",
 		"mixed",
 		"materialized",
@@ -209,6 +210,7 @@ import magic from ${JSON.stringify(plugin)};
 import {appendFileSync} from 'node:fs';
 import {Database} from 'bun:sqlite';
 import {appendCompartments} from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin/src/features/magic-context/compartment-storage.ts"))};
+import {piPreparedStructure} from ${JSON.stringify(resolve(import.meta.dir, "../packages/pi-plugin/src/pi-dispatch-structure.ts"))};
 const log = value => appendFileSync(${JSON.stringify(join(root, "hooks.jsonl"))},JSON.stringify({at:Date.now(),...value})+'\\n');
 export default async pi => {
   let seeded=false;
@@ -237,7 +239,7 @@ export default async pi => {
       });
       const result=await handler(event,wrapped);
       if(name==='context') {
-        log({phase:'prepared',messages:result?.messages});
+        log({phase:'prepared',messages:result?.messages,structure:piPreparedStructure(result?.messages??[],ctx.model)});
         if(${JSON.stringify(historyCase)}==='materialized' && result?.messages) {
           const db=new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR+'/context.db',{readonly:true});
           try {log({phase:'materialized-proof',leadingRoles:result.messages.map(message=>message.role),rows:db.query('SELECT cached_m0_bytes,cached_m1_bytes FROM session_meta WHERE session_id=?').all(ctx.sessionManager.getSessionId()).map(row=>({m0:new TextDecoder().decode(row.cached_m0_bytes),m1:new TextDecoder().decode(row.cached_m1_bytes)}))});}
@@ -296,6 +298,7 @@ writeFileSync(
 );
 audit({ phase: "catalog-model", selector, model });
 let session: any;
+let interruptedCall: unknown;
 try {
 	const { SessionManager } = await import(
 		join(host, "src/session/session-manager.ts")
@@ -476,6 +479,12 @@ try {
 			case "missing-result":
 				history = [user("HISTORY683 first user", stamp), call, reply];
 				break;
+			case "interrupted-tool":
+				// A crash after the assistant's message_end persists the toolUse turn
+				// before tool execution can persist a toolResult (agent-session.ts:3939).
+				history = [user("HISTORY686 interrupted tool turn", stamp), call];
+				interruptedCall = call;
+				break;
 			case "mixed":
 				history = [
 					user("HISTORY683 first user", stamp),
@@ -561,11 +570,20 @@ try {
 		const file = historyManager.getSessionFile();
 		if (!file || !historyManager.isSessionOnDisk())
 			throw new Error("history was not persisted");
+		if (historyCase === "interrupted-tool")
+			audit({
+				phase: "interrupted-persisted",
+				entries: readFileSync(file, "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line)),
+			});
 		if (
 			historyCase === "resume" ||
 			historyCase === "summary" ||
 			historyCase === "mixed" ||
-			historyCase === "responses-history"
+			historyCase === "responses-history" ||
+			historyCase === "interrupted-tool"
 		) {
 			await historyManager.close();
 			historyManager = await SessionManager.open(file, undefined, undefined, {
@@ -598,6 +616,18 @@ try {
 		reportSendError: (_: unknown, error: unknown) =>
 			audit({ phase: "send-error", error: String(error) }),
 	});
+	if (interruptedCall) {
+		// Session replay trims incomplete tail calls. Restore the persisted call
+		// to the active agent to model interruption before the tool result arrives.
+		session.agent.appendMessage(interruptedCall);
+		const messages = session.agent.state.messages;
+		if (
+			messages.at(-1) !== interruptedCall ||
+			messages.some((message: any) => message.role === "toolResult")
+		)
+			throw new Error("interrupted call must have no result before prompting");
+		audit({ phase: "interrupted-session", messages });
+	}
 	const isolation = (label: string) => {
 		const text = execFileSync("/usr/sbin/lsof", ["-p", String(process.pid)], {
 			encoding: "utf8",
