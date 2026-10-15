@@ -27,6 +27,15 @@ export const PI_CONTEXT_BUDGET = {
 
 export class PiContextDeadlineError extends Error {}
 
+export class PiContextSupersededError extends Error {
+	constructor(
+		message: string,
+		readonly origin = "context ownership",
+	) {
+		super(message);
+	}
+}
+
 /** One cooperative clock shared by preparation, admission, normal work and recovery. */
 export class PiContextBudget {
 	sideTurn = false;

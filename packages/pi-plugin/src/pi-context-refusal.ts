@@ -23,6 +23,7 @@ import {
 	PI_CONTEXT_BUDGET,
 	PiContextBudget,
 	PiContextDeadlineError,
+	PiContextSupersededError,
 } from "./pi-context-budget";
 import {
 	piConversationFields as conversationFields,
@@ -41,14 +42,7 @@ const RETRY_MESSAGE =
 	"Magic Context could not safely prepare this turn; send your message again.";
 const MAX_UNSENDABLE_NONCES_PER_SESSION = 32;
 
-export class PiContextSupersededError extends Error {
-	constructor(
-		message: string,
-		readonly origin = "context ownership",
-	) {
-		super(message);
-	}
-}
+export { PiContextSupersededError } from "./pi-context-budget";
 
 interface Operation {
 	// One pass prepares a context-hook input; its ready receipt records returned

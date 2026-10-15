@@ -37,8 +37,8 @@ const host = join(
 const version = JSON.parse(
 	readFileSync(join(host, "package.json"), "utf8"),
 ).version;
-if (!["18.10.4", "18.11.0"].includes(version))
-	throw new Error(`expected OMP 18.10.4 or 18.11.0, got ${version}`);
+if (!["18.10.4", "18.11.0", "18.11.1"].includes(version))
+	throw new Error(`expected OMP 18.10.4, 18.11.0 or 18.11.1, got ${version}`);
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";

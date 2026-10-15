@@ -47,7 +47,13 @@ beforeAll(async () => {
 	await writeFile(
 		sourcePath,
 		transpiler
-			.transformSync(sources.join("\n").replace(/^import\b[\s\S]*?;\n/gm, ""))
+			.transformSync(
+				sources
+					.join("\n")
+					.replace(/^import\b[\s\S]*?;\n/gm, "")
+					// Joined modules already contain the declarations behind re-exports.
+					.replace(/^export \{[^}]*\} from [^\n]+;\n/gm, ""),
+			)
 			.replace(/^export /gm, ""),
 	);
 });
