@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stageExecutable } from "../../../../e2e-tests/src/rust-runner/executable-staging";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -38,7 +39,10 @@ import type { MessageLike } from "./transform-operations";
 
 const route = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 const modelKey = `${route.providerID}/${route.modelID}`;
-let bridge: ChildProcessWithoutNullStreams;
+const fixtureBinary = process.env.MC_SYSTEM_DELIVERY_FIXTURE_BINARY;
+const rustIt = fixtureBinary ? it : it.skip;
+const rustDescribe = fixtureBinary ? describe : describe.skip;
+let bridge: ChildProcessWithoutNullStreams | undefined;
 let waiting:
     | { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }
     | undefined;
@@ -46,30 +50,32 @@ let output = "";
 let sequence = 0;
 const root = resolve(import.meta.dir, "../../../../..");
 
+if (!fixtureBinary)
+    console.info(
+        "Skipping Rust-backed system-delivery cases: set MC_SYSTEM_DELIVERY_FIXTURE_BINARY to a prebuilt mc-module test binary.",
+    );
+
 beforeAll(async () => {
+    if (!fixtureBinary) return;
     let ready: () => void = () => {};
     let failed: (error: Error) => void = () => {};
     const started = new Promise<void>((resolve, reject) => {
         ready = resolve;
         failed = reject;
     });
-    bridge = spawn(
-        "cargo",
-        [
-            "test",
-            "-p",
-            "mc-module",
-            "--lib",
-            "tests::system_delivery_adapter_fixture",
-            "--",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-        ],
+    const stagedFixture = stageExecutable(
+        fixtureBinary,
+        "mc-module-system-delivery-fixture",
+        "com.cortexkit.magic-context.system-delivery-fixture",
+    );
+    const child = spawn(
+        stagedFixture,
+        ["tests::system_delivery_adapter_fixture", "--exact", "--ignored", "--nocapture"],
         { cwd: root, windowsHide: true },
     );
+    bridge = child;
     let lines = "";
-    bridge.stdout.on("data", (chunk) => {
+    child.stdout.on("data", (chunk) => {
         lines += String(chunk);
         output = (output + String(chunk)).slice(-2000);
         let end: number;
@@ -84,10 +90,10 @@ beforeAll(async () => {
             }
         }
     });
-    bridge.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
         output = (output + String(chunk)).slice(-2000);
     });
-    bridge.on("exit", (code) => {
+    child.on("exit", (code) => {
         const error = new Error(`module bridge exited ${code}: ${output}`);
         waiting?.reject(error);
         failed(error);
@@ -95,16 +101,18 @@ beforeAll(async () => {
     await started;
 }, 120_000);
 afterAll(async () => {
-    if (bridge.exitCode !== null) return;
-    bridge.stdin.end();
-    await new Promise<void>((done) => bridge.on("exit", () => done()));
+    const runningBridge = bridge;
+    if (!runningBridge || runningBridge.exitCode !== null) return;
+    runningBridge.stdin.end();
+    await new Promise<void>((done) => runningBridge.on("exit", () => done()));
 });
 
 function rpc(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (bridge.exitCode !== null) return Promise.reject(new Error(output));
+    const runningBridge = bridge;
+    if (!runningBridge || runningBridge.exitCode !== null) return Promise.reject(new Error(output));
     return new Promise((resolve, reject) => {
         waiting = { resolve, reject };
-        bridge.stdin.write(`${JSON.stringify(body)}\n`);
+        runningBridge.stdin.write(`${JSON.stringify(body)}\n`);
     });
 }
 
@@ -377,7 +385,7 @@ async function fixture(mode: "rust" | "ts" = "rust", generation: "v1" | "v2" = "
 
 const head = (messages: unknown[]) => JSON.stringify(messages.slice(0, 2));
 
-describe("accepted external system delivery through Rust mode", () => {
+rustDescribe("accepted external system delivery through Rust mode", () => {
     it("already_delivered_system_change_does_not_hard_after_signed_head_hold", async () => {
         const f = await fixture();
         try {
@@ -436,8 +444,9 @@ describe("accepted external system delivery through Rust mode", () => {
 });
 
 for (const mode of ["rust", "ts"] as const) {
+    const test = mode === "rust" ? rustIt : it;
     for (const finish of ["aborted", "error", "unaccepted"]) {
-        it(`${mode}: ${finish} system delivery is not acknowledged`, async () => {
+        test(`${mode}: ${finish} system delivery is not acknowledged`, async () => {
             const f = await fixture(mode);
             try {
                 (await f.serve()).accept("stop");
@@ -460,7 +469,7 @@ for (const mode of ["rust", "ts"] as const) {
         }, 120_000);
     }
     for (const order of ["system-first", "messages-first"]) {
-        it(`${mode}: plugin_env_date_only_change_stays_frozen_through_signed_head_hold (${order})`, async () => {
+        test(`${mode}: plugin_env_date_only_change_stays_frozen_through_signed_head_hold (${order})`, async () => {
             const f = await fixture(mode);
             try {
                 (await f.serve()).accept("stop");
@@ -478,7 +487,7 @@ for (const mode of ["rust", "ts"] as const) {
             }
         }, 120_000);
     }
-    it(`${mode}: a real unheld system-first edit folds on its first request`, async () => {
+    test(`${mode}: a real unheld system-first edit folds on its first request`, async () => {
         const f = await fixture(mode);
         try {
             const before = await f.serve();
@@ -535,30 +544,35 @@ it("TypeScript: already_delivered_system_change_does_not_hard_after_signed_head_
 }, 120_000);
 
 for (const input of ["model", "renderer", "workspace"]) {
-    it(`rust: delivered system identity cannot waive a simultaneous ${input} change`, async () => {
-        const f = await fixture();
-        try {
-            (await f.serve()).accept("stop");
-            // Give the stored head a previous model, renderer or workspace input.
-            // Receipt of new system instructions must not hide that difference:
-            // the unchanged-other-inputs comparison must still require rebuilding.
-            await f.rpc("test.other_identity", { input });
-            f.hold();
-            const held = await f.serve("changed instruction");
-            held.accept();
-            const next = await f.serve("changed instruction");
-            expect(
-                (next.request.pass_inputs as Record<string, unknown>).adopted_system_prompt_hash,
-            ).toBe(getOrCreateSessionMeta(f.db, f.sessionId).systemPromptHash);
-            next.accept();
-            f.source.push(f.user("wake", "continue"));
-            const wake = await f.serve("changed instruction");
-            expect(wake.response.decision).toBe("HARD");
-            expect(wake.response.materialize_reason).toBe("epoch_change");
-        } finally {
-            f.close();
-        }
-    }, 120_000);
+    rustIt(
+        `rust: delivered system identity cannot waive a simultaneous ${input} change`,
+        async () => {
+            const f = await fixture();
+            try {
+                (await f.serve()).accept("stop");
+                // Give the stored head a previous model, renderer or workspace input.
+                // Receipt of new system instructions must not hide that difference:
+                // the unchanged-other-inputs comparison must still require rebuilding.
+                await f.rpc("test.other_identity", { input });
+                f.hold();
+                const held = await f.serve("changed instruction");
+                held.accept();
+                const next = await f.serve("changed instruction");
+                expect(
+                    (next.request.pass_inputs as Record<string, unknown>)
+                        .adopted_system_prompt_hash,
+                ).toBe(getOrCreateSessionMeta(f.db, f.sessionId).systemPromptHash);
+                next.accept();
+                f.source.push(f.user("wake", "continue"));
+                const wake = await f.serve("changed instruction");
+                expect(wake.response.decision).toBe("HARD");
+                expect(wake.response.materialize_reason).toBe("epoch_change");
+            } finally {
+                f.close();
+            }
+        },
+        120_000,
+    );
 }
 
 for (const [input, patch] of [
@@ -593,7 +607,8 @@ for (const [input, patch] of [
 }
 
 for (const mode of ["rust", "ts"] as const) {
-    it(`${mode}: OpenCode2 already_delivered_system_change_does_not_hard_after_signed_head_hold`, async () => {
+    const test = mode === "rust" ? rustIt : it;
+    test(`${mode}: OpenCode2 already_delivered_system_change_does_not_hard_after_signed_head_hold`, async () => {
         const f = await fixture(mode, "v2");
         try {
             (await f.serve()).accept("stop");
@@ -634,7 +649,7 @@ for (const mode of ["rust", "ts"] as const) {
         }
     }, 120_000);
 
-    it(`${mode}: unheld provider-byte differential`, async () => {
+    test(`${mode}: unheld provider-byte differential`, async () => {
         const f = await fixture(mode);
         try {
             const bodies: unknown[] = [];
@@ -675,7 +690,8 @@ for (const mode of ["rust", "ts"] as const) {
 }
 
 for (const mode of ["rust", "ts"] as const) {
-    it(`${mode}: aborted messages-first delivery is not acknowledged`, async () => {
+    const test = mode === "rust" ? rustIt : it;
+    test(`${mode}: aborted messages-first delivery is not acknowledged`, async () => {
         const f = await fixture(mode);
         try {
             (await f.serve()).accept("stop");
