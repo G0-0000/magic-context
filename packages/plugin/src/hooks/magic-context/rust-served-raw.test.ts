@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
     noteRustServedRaw,
@@ -22,7 +23,7 @@ afterEach(() => {
 });
 
 function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), "rust-served-raw-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "rust-served-raw-"));
     directories.push(dir);
     const path = join(dir, "context.db");
     const db = new Database(path);

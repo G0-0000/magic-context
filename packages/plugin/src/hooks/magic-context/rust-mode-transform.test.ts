@@ -10660,6 +10660,7 @@ describe.skipIf(!rawReplayProbe)("Rust external raw-tail provider bytes", () => 
 
     function probe(binary: string, directory: string, body: unknown): Record<string, unknown> {
         const result = spawnSync(binary, [directory], {
+            windowsHide: true,
             input: JSON.stringify(body),
             encoding: "utf8",
             timeout: 30_000,
