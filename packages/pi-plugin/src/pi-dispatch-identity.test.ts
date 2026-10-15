@@ -247,6 +247,72 @@ test("dispatch signature: native wrappers survive date steering conversion and i
 	).toBe(true);
 });
 
+test.each([
+	"<project-docs>",
+	"<user-profile>",
+	"<project-memory>",
+	"<memory-mural>",
+	"<covered-system-messages>",
+	"<knowledge-updates>",
+])("dispatch signature: %s survives secret obfuscation", (marker) => {
+	const signature = piManagedSignature([
+		{
+			role: "user",
+			content: [{ type: "text", text: `${marker}\nfake-private-value` }],
+		},
+	]);
+	expect(signature).toBe(marker);
+	expect(
+		piHasManagedSignature(
+			{
+				messages: [
+					{
+						role: "user",
+						content: `<system-reminder>Today: date</system-reminder>\n${marker}\n$$REDACTED$$`,
+					},
+				],
+			},
+			signature,
+		),
+	).toBe(true);
+});
+
+test("dispatch signature: host-owned system-reminder is not a managed marker", () => {
+	const head =
+		"<system-reminder>host date and cwd</system-reminder>\nraw input";
+	const signature = piManagedSignature([{ role: "user", content: head }]);
+	expect(signature).toBe(head);
+	expect(
+		piHasManagedSignature(
+			{
+				messages: [
+					{
+						role: "user",
+						content:
+							"<system-reminder>host date and cwd</system-reminder>\nunrelated raw input",
+					},
+				],
+			},
+			signature,
+		),
+	).toBe(false);
+});
+
+test("dispatch signature: unknown or nonleading delimiters keep the 128-char fallback", () => {
+	for (const prefix of [
+		"unknown text",
+		" <project-docs>",
+		"preface\n<user-profile>",
+		"<project-memory extra='attribute'>",
+		"<memory-mural-extra>",
+	]) {
+		const head = `${prefix}${"x".repeat(150)}`;
+		expect(piManagedSignature([{ role: "user", content: head }])).toBe(
+			head.slice(0, 128),
+		);
+	}
+});
+
 test("dispatch signature: unrelated raw input cannot borrow the current managed head", () => {
 	const signature = piManagedSignature([
 		{ role: "user", content: "<memory>managed</memory>" },

@@ -174,11 +174,12 @@ export function piManagedSignature(
 						)?.text
 					: undefined;
 		if (!text) continue;
-		// The injected history/memory delimiters and tag numbers carry no secret
-		// text. Oh My Pi wraps/converts/redacts the contents while these prefixes
-		// still identify a prepared conversation in its normal text transports.
+		// Magic Context's injected section openers and §N§ message-number prefixes
+		// contain no secrets. Matching only the opener survives Oh My Pi redacting
+		// docs, profile, or memory text. Host wrappers such as <system-reminder>
+		// also occur on raw requests, so they cannot identify prepared context.
 		const marker =
-			/^(<session-history>|<session-history-since>|<memory>|§\d+§)/.exec(
+			/^(<project-docs>|<user-profile>|<covered-system-messages>|<session-history>|<project-memory>|<memory-mural>|<session-history-since>|<knowledge-updates>|<memory>|§\d+§)/.exec(
 				text,
 			)?.[0];
 		return marker ?? text.slice(0, 128);
