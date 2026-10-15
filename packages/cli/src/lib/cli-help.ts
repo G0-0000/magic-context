@@ -93,7 +93,7 @@ export const SINGLE_STORE_HELP = [
 
 export const MERGE_IDENTITY_HELP = [
     "",
-    "  Usage: magic-context doctor merge-identities [--from <identity> --to <identity>] [--apply] [--force] [--db <path>]",
+    "  Usage: magic-context doctor merge-identities [--from <identity> --to <identity>] [--apply] [--force] [--verbose] [--db <path>] [--backup-root <dir>]",
     "",
     "  Merge every project-scoped row from one project identity into another.",
     "",
@@ -103,8 +103,10 @@ export const MERGE_IDENTITY_HELP = [
     "    (no flags)          List splits; --from/--to previews without writing",
     "    --apply             Confirm the reviewed preview; hosts must be closed",
     "    --force             Permit a target not resolving on this machine",
+    "    --verbose           List every missing source-only folder and orphaned sidecar",
     "    --db <path>         Use this context.db instead of the shared one",
     "    --host-db <path>    Read session directories from this host database",
+    "    --backup-root <dir> Store the backup under this directory",
     "    Legacy alias: doctor merge-identity; --dry-run previews, --yes applies",
     "",
 ].join("\n");
