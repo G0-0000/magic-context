@@ -8,11 +8,14 @@ import {
 	piResponsesAssistantTexts,
 	piResponsesWireTexts,
 } from "./pi-dispatch-responses-history";
+import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 
 interface MessageStructure {
 	role: "user" | "assistant" | "toolResult";
 	calls: string[];
 	results: string[];
+	wireCalls?: (string | undefined)[];
+	wireResults?: (string | undefined)[];
 	callNames?: string[];
 	resultNames?: string[];
 	timestamp?: number;
@@ -32,6 +35,7 @@ export interface PiPreparedStructure {
 	chatMessages?: readonly MessageStructure[];
 	responsesMessages?: readonly MessageStructure[];
 	api?: string;
+	googleFunctionIds?: boolean;
 }
 
 const MAX_MESSAGES = 100_000;
@@ -225,6 +229,8 @@ function buildPiPreparedStructure(
 	if (projectedMessages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
 	const toolNames = new Map<string, string>();
+	const toolIds = new Map<string, string | undefined>();
+	const responsesToolIds = new Map<string, string | undefined>();
 	const byIndex = new Map<number, MessageStructure>();
 	let valid = true;
 	// The projection keeps every original message object, in order, and only
@@ -263,9 +269,30 @@ function buildPiPreparedStructure(
 		}
 		row.calls.forEach((id, index) => {
 			toolNames.set(id, row.callNames?.[index] ?? "");
+			if (model?.api) {
+				const normalized = piToolCallWireId(id, model, source);
+				row.wireCalls ??= [];
+				row.wireCalls.push(normalized);
+				toolIds.set(id, normalized);
+				if (
+					[
+						"openai-responses",
+						"azure-openai-responses",
+						"openai-codex-responses",
+					].includes(String(source?.api))
+				)
+					responsesToolIds.set(id.split("|", 1)[0], normalized);
+			}
 		});
-		if (row.results.length)
+		if (row.results.length) {
 			row.resultNames = row.results.map((id) => toolNames.get(id) ?? "");
+			if (model?.api)
+				row.wireResults = row.results.map((id) =>
+					toolIds.has(id)
+						? toolIds.get(id)
+						: responsesToolIds.get(id.split("|", 1)[0]),
+				);
+		}
 		rows.push(row);
 		byIndex.set(index, row);
 	}
@@ -296,11 +323,13 @@ function buildPiPreparedStructure(
 			const previous = responsesMessages.at(-1);
 			if (previous?.role === "assistant") {
 				previous.calls.push(...row.calls);
+				previous.wireCalls?.push(...(row.wireCalls ?? []));
 				previous.responseTexts?.push(...texts);
 			} else
 				responsesMessages.push({
 					...row,
 					calls: [...row.calls],
+					...(row.wireCalls ? { wireCalls: [...row.wireCalls] } : {}),
 					responseTexts: [...texts],
 				});
 		}
@@ -327,6 +356,12 @@ function buildPiPreparedStructure(
 		...(chatMessages ? { chatMessages } : {}),
 		...(responsesMessages ? { responsesMessages } : {}),
 		...(model?.api ? { api: model.api } : {}),
+		...(model?.api?.startsWith("google-")
+			? {
+					googleFunctionIds:
+						object(model.compat)?.supportsFunctionPartId === true,
+				}
+			: {}),
 	};
 }
 
@@ -626,7 +661,7 @@ export function piPreparedStructureMismatch(
 		const chat =
 			!!body &&
 			Array.isArray(body.messages) &&
-			body.system === undefined &&
+			(prepared?.api === "openai-completions" || body.system === undefined) &&
 			body.input === undefined &&
 			body.inferenceConfig === undefined;
 		const expectedRows =
@@ -642,8 +677,10 @@ export function piPreparedStructureMismatch(
 		const anthropic =
 			google ||
 			body.inferenceConfig !== undefined ||
-			typeof body.system === "string" ||
-			Array.isArray(body.system);
+			prepared?.api === "anthropic-messages" ||
+			(!prepared?.api &&
+				body.max_tokens !== undefined &&
+				Array.isArray(body.system));
 		for (let i = 0; i < Math.min(rows.length, expectedRows.length); i++) {
 			const expected = expectedRows[i];
 			const actual = rows[i];
@@ -683,12 +720,17 @@ export function piPreparedStructureMismatch(
 				return structureDetail(i, expectedRows, rows, "timestamp");
 			for (let j = 0; j < actual.calls.length; j++)
 				if (
-					(google && actual.calls[j] === "") ||
+					(google &&
+						actual.calls[j] === "" &&
+						prepared?.googleFunctionIds !== true) ||
 					(ollama && actual.idlessCalls?.[j] === true)
 						? !expected.callNames?.[j] ||
 							actual.callNames?.[j] !== expected.callNames[j]
-						: actual.calls[j] !==
-							wireId(expected.calls[j], anthropic, responses)
+						: (google && prepared?.googleFunctionIds === false) ||
+							actual.calls[j] !==
+								(expected.wireCalls
+									? expected.wireCalls[j]
+									: wireId(expected.calls[j], anthropic, responses))
 				)
 					return structureDetail(
 						i,
@@ -701,12 +743,17 @@ export function piPreparedStructureMismatch(
 					);
 			for (let j = 0; j < actual.results.length; j++)
 				if (
-					(google && actual.results[j] === "") ||
+					(google &&
+						actual.results[j] === "" &&
+						prepared?.googleFunctionIds !== true) ||
 					(ollama && actual.idlessResults?.[j] === true)
 						? !expected.resultNames?.[j] ||
 							actual.resultNames?.[j] !== expected.resultNames[j]
-						: actual.results[j] !==
-							wireId(expected.results[j], anthropic, responses)
+						: (google && prepared?.googleFunctionIds === false) ||
+							actual.results[j] !==
+								(expected.wireResults
+									? expected.wireResults[j]
+									: wireId(expected.results[j], anthropic, responses))
 				)
 					return structureDetail(
 						i,

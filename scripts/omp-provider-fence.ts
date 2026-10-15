@@ -64,6 +64,8 @@ if (
 		"mixed",
 		"materialized",
 		"responses-history",
+		"composite-cross",
+		"composite-same",
 	].includes(historyCase)
 )
 	throw new Error("unknown history case");
@@ -362,6 +364,39 @@ try {
 		);
 		let history: any[];
 		switch (historyCase) {
+			case "composite-cross":
+			case "composite-same": {
+				const id = "call_686|fc_686";
+				const source =
+					historyCase === "composite-same"
+						? { api: model.api, provider: model.provider, model: model.id }
+						: {
+								api:
+									api === "openai-completions"
+										? "openai-responses"
+										: "openai-completions",
+								provider: "mock-history",
+								model: "mock-history-model",
+							};
+				history = [
+					user("HISTORY686 composite first user", stamp),
+					{
+						...call,
+						...source,
+						content: [
+							{
+								type: "toolCall",
+								id,
+								name: toolName,
+								arguments: { path: "seed.txt" },
+							},
+						],
+					},
+					{ ...result, toolCallId: id },
+					reply,
+				];
+				break;
+			}
 			case "responses-history": {
 				const signed = (text: string, id: string, timestamp: number) => ({
 					...assistant(
@@ -583,6 +618,8 @@ try {
 			historyCase === "summary" ||
 			historyCase === "mixed" ||
 			historyCase === "responses-history" ||
+			historyCase === "composite-cross" ||
+			historyCase === "composite-same" ||
 			historyCase === "interrupted-tool"
 		) {
 			await historyManager.close();
