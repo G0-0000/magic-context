@@ -87,6 +87,9 @@ interface BaselineRow {
     boundary: string | null;
 }
 
+type HistoryBoundary = Pick<Compartment, "sequence" | "endMessageId">;
+type HistoryAnchor = HistoryBoundary & Pick<Compartment, "endMessage">;
+
 function readBaseline(db: Database, sessionId: string): BaselineRow {
     const row = db
         .prepare(
@@ -101,10 +104,10 @@ function readBaseline(db: Database, sessionId: string): BaselineRow {
 
 /** The newest compartment, older than `latestIndex`, whose end message the store holds. */
 function findAnchor(
-    compartments: readonly Compartment[],
+    compartments: readonly HistoryBoundary[],
     latestIndex: number,
     isInHostStore: HostMessagePresence,
-): Compartment | "unknown" | null {
+): HistoryBoundary | "unknown" | null {
     for (let index = latestIndex - 1; index >= 0; index -= 1) {
         const candidate = compartments[index];
         const endId = candidate?.endMessageId;
@@ -125,7 +128,7 @@ function forgetCachedPrefix(sessionId: string): void {
 function dropCompartmentsAfter(
     db: Database,
     sessionId: string,
-    anchor: Compartment | null,
+    anchor: HistoryAnchor | null,
     holderId: string,
     activeBranch = false,
     onRetire?: () => void,
@@ -195,10 +198,17 @@ export function repairMissingHistoryBoundary(args: {
     /** `active-branch` requires a complete host ancestry lookup, never a request window. */
     scope?: "store" | "active-branch";
     /** Queue historian recovery in the same transaction that deletes stale summaries. */
-    onRetire?: (retired: readonly Compartment[], anchor: Compartment | null) => void;
+    onRetire?: (retired: readonly HistoryBoundary[], anchor: HistoryBoundary | null) => void;
 }): HistoryBoundaryRepair {
     const { db, sessionId, isInHostStore, scope = "store" } = args;
-    const compartments = getCompartments(db, sessionId);
+    const compartments: HistoryBoundary[] =
+        scope === "active-branch"
+            ? (db
+                  .prepare(
+                      "SELECT sequence, COALESCE(end_message_id, '') AS endMessageId FROM compartments WHERE session_id = ? ORDER BY sequence",
+                  )
+                  .all(sessionId) as HistoryBoundary[])
+            : getCompartments(db, sessionId);
     // The boundary is the newest compartment that has an end id at all. Newer
     // compartments without one (legacy rows, or rows carried into a forked
     // session) are not the boundary: they keep rendering, and the boundary
@@ -221,7 +231,7 @@ export function repairMissingHistoryBoundary(args: {
             }
         }
     }
-    const latestEnd = (compartments[latestIndex] as Compartment).endMessageId;
+    const latestEnd = (compartments[latestIndex] as HistoryBoundary).endMessageId;
 
     const latestPresent = isInHostStore(latestEnd);
     if (latestPresent === null) return { kind: "unknown" };
@@ -248,11 +258,24 @@ export function repairMissingHistoryBoundary(args: {
             return { kind: "unresolved", reason: "busy", missingEndMessageId: missing };
         }
         let dropped: number[] | null;
+        let anchorForDrop = anchor as HistoryAnchor | null;
         try {
+            // An intact branch check never reads summary bodies or ordinals.
+            // Only an actual retirement needs the surviving anchor's ordinal.
+            if (scope === "active-branch" && anchor) {
+                const row = db
+                    .prepare(
+                        "SELECT end_message AS endMessage FROM compartments WHERE session_id = ? AND sequence = ?",
+                    )
+                    .get(sessionId, anchor.sequence) as { endMessage: number } | undefined;
+                if (!row)
+                    return { kind: "unresolved", reason: "busy", missingEndMessageId: missing };
+                anchorForDrop = { ...anchor, endMessage: row.endMessage };
+            }
             dropped = dropCompartmentsAfter(
                 db,
                 sessionId,
-                anchor,
+                anchorForDrop,
                 holderId,
                 scope === "active-branch",
                 () => args.onRetire?.(compartments.slice(latestIndex), anchor),
@@ -271,7 +294,7 @@ export function repairMissingHistoryBoundary(args: {
                 : `${dropped[0]}-${dropped[dropped.length - 1]} (${dropped.length})`;
         sessionLog(
             sessionId,
-            `history boundary repair: ${problem}; re-anchored on ${anchor ? `compartment ${anchor.sequence} ending at ${anchor.endMessageId} (ordinal ${anchor.endMessage})` : "the start of history"}; removed compartments ${range} for the historian to rebuild; the cached prefix is rebuilt on this pass`,
+            `history boundary repair: ${problem}; re-anchored on ${anchorForDrop ? `compartment ${anchorForDrop.sequence} ending at ${anchorForDrop.endMessageId} (ordinal ${anchorForDrop.endMessage})` : "the start of history"}; removed compartments ${range} for the historian to rebuild; the cached prefix is rebuilt on this pass`,
         );
         return {
             kind: "repaired",

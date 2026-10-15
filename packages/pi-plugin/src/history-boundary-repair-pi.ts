@@ -10,6 +10,44 @@ import {
 	SYNTH_USER_ID_PREFIX,
 } from "./read-session-pi";
 
+interface CleanCheck {
+	db: ContextDatabase;
+	leafId: string | null;
+	entryCount: number;
+	revision: string;
+}
+
+const lastCleanBySession = new Map<string, CleanCheck>();
+
+export function clearPiHistoryBoundaryRepairSession(sessionId: string): void {
+	lastCleanBySession.delete(sessionId);
+}
+
+function compartmentRevision(
+	db: ContextDatabase,
+	sessionId: string,
+): string | null {
+	try {
+		const row = db
+			.prepare(
+				"SELECT generation, version FROM compartment_history_versions WHERE session_id = ?",
+			)
+			.get(sessionId) as { generation: string; version: number } | undefined;
+		// The existing persistent triggers advance this row for inserts, deletes
+		// and updates, including summary rewrites with unchanged sequences and count.
+		if (!row) return "empty";
+		return typeof row.generation === "string" &&
+			row.generation.length > 0 &&
+			Number.isSafeInteger(row.version) &&
+			row.version >= 0
+			? `${row.generation}:${row.version}`
+			: null;
+	} catch {
+		// A store without an authoritative revision must be checked, not cached.
+		return null;
+	}
+}
+
 function realId(id: string): string {
 	return id.startsWith(SYNTH_USER_ID_PREFIX)
 		? id.slice(SYNTH_USER_ID_PREFIX.length)
@@ -49,6 +87,34 @@ export function repairPiHistoryBoundary(
 		return;
 	}
 	if (!Array.isArray(entries)) return;
+	if (leaf !== null && typeof leaf !== "string") return;
+	if (
+		(entries.at(-1) as { id?: unknown } | undefined)?.id !== (leaf ?? undefined)
+	)
+		return;
+	const revision = compartmentRevision(db, sessionId);
+	const previous = lastCleanBySession.get(sessionId);
+	if (
+		revision !== null &&
+		previous?.db === db &&
+		previous.revision === revision &&
+		entries.length >= previous.entryCount &&
+		(previous.entryCount === 0 ||
+			(entries[previous.entryCount - 1] as { id?: unknown })?.id ===
+				previous.leafId)
+	) {
+		// Pi and OMP append entries or move the active leaf, never reparent old
+		// entries. The checked leaf at its old position therefore proves an
+		// appended tail without revisiting older entries or compartment boundaries.
+		lastCleanBySession.set(sessionId, {
+			db,
+			leafId: leaf,
+			entryCount: entries.length,
+			revision,
+		});
+		return;
+	}
+	lastCleanBySession.delete(sessionId);
 	const ids = new Set<string>();
 	let parent: string | null = null;
 	for (const entry of entries) {
@@ -115,4 +181,17 @@ export function repairPiHistoryBoundary(
 	});
 	if (result.kind === "repaired" || result.kind === "baseline-reset")
 		clearPiMuralProcessCache(sessionId);
+	if (result.kind === "intact" || result.kind === "repaired") {
+		const checkedRevision =
+			result.kind === "repaired"
+				? compartmentRevision(db, sessionId)
+				: revision;
+		if (checkedRevision !== null)
+			lastCleanBySession.set(sessionId, {
+				db,
+				leafId: leaf,
+				entryCount: entries.length,
+				revision: checkedRevision,
+			});
+	}
 }

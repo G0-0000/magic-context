@@ -301,7 +301,10 @@ import {
 	type PiHeuristicCleanupResult,
 } from "./heuristic-cleanup-pi";
 import { readPiHistorianTail } from "./historian-tail-pi";
-import { repairPiHistoryBoundary } from "./history-boundary-repair-pi";
+import {
+	clearPiHistoryBoundaryRepairSession,
+	repairPiHistoryBoundary,
+} from "./history-boundary-repair-pi";
 import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
@@ -11049,6 +11052,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	clearPiHistoryBoundaryRepairSession(sessionId);
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
 	clearPiLiveUsageClassification(sessionId);
 	clearPiLkgSessionState(sessionId);
