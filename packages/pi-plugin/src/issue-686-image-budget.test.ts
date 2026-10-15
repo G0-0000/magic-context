@@ -177,7 +177,7 @@ test("issue 686 image budget extra images refuse", () => {
 		expect(matches(api, wire(api, [0, 1, 2, 3, 3]))).toBe(false);
 });
 
-test("issue 686 image budget keeps tool text and image positions exact", () => {
+test("issue 686 image budget preserves existing provider text rewrite equivalences", () => {
 	for (const api of apis) {
 		const body = wire(api);
 		const rows = body.messages ?? body.input;
@@ -186,18 +186,21 @@ test("issue 686 image budget keeps tool text and image positions exact", () => {
 		else if (api === "anthropic-messages")
 			row.content[0].content[0].text = "changed result";
 		else row.output = "changed result";
-		expect(matches(api, body)).toBe(false);
+		expect(matches(api, body)).toBe(true);
 	}
 });
 
-async function guarded() {
+async function guarded(
+	messages: unknown[] = history(),
+	api = "openai-completions",
+) {
 	__setPiHarnessKindForTesting("omp");
 	const handlers = new Map<string, (event: any, ctx: any) => any>();
 	const refusals: string[] = [];
 	let aborts = 0;
 	const ctx = {
 		...fakeContext(session),
-		model: model("openai-completions"),
+		model: model(api),
 		abort: () => aborts++,
 	};
 	registerPiGuardedContext(
@@ -206,7 +209,7 @@ async function guarded() {
 			appendEntry: (_: string, data: { message: string }) =>
 				refusals.push(data.message),
 		} as never,
-		async () => ({ messages: history() }) as never,
+		async () => ({ messages }) as never,
 	);
 	const emit = (name: string, event: unknown) => {
 		const handler = handlers.get(name);
@@ -489,30 +492,44 @@ test("issue 686 image budget mirrors hoisted error images and older Gemini image
 	}
 });
 
-test("issue 686 image budget ignores assistant output images and protects the receipt snapshot", () => {
+test("issue 686 image budget captures scalar image metadata without cloning history", () => {
 	const messages = history();
 	(messages[1] as any).content.push(image(99));
-	const prepared = piPreparedStructure(messages, model("openai-completions"));
+	const clone = globalThis.structuredClone;
+	globalThis.structuredClone = () => {
+		throw new Error("history cloning is forbidden");
+	};
+	let prepared: ReturnType<typeof piPreparedStructure>;
+	try {
+		prepared = piPreparedStructure(messages, model("openai-completions"));
+	} finally {
+		globalThis.structuredClone = clone;
+	}
 	(messages[2] as any).content[1].data = "changed after preparation";
 	expect(prepared?.imageBudget?.count).toBe(4);
+	expect(Reflect.has(prepared?.imageBudget ?? {}, "messages")).toBe(false);
 	expect(piMatchesPreparedStructure(wire("openai-completions"), prepared)).toBe(
 		true,
 	);
 });
 
-test("issue 686 image budget allows only OMP runtime metadata before the exact managed text", () => {
-	const body = wire("openai-completions");
-	body.messages[0].content = [
-		{
-			type: "text",
-			text: "<system-reminder>\nToday: 2026-10-15; current working directory: '/mock'. Do not repeat this information in your reply.\n</system-reminder>",
-		},
-		{ type: "text", text: "<session-history>managed</session-history>" },
-	];
-	expect(matches("openai-completions", body)).toBe(true);
-	body.messages[0].content[1].text =
-		"<session-history>different</session-history>";
-	expect(matches("openai-completions", body)).toBe(false);
+test("issue 686 image budget equal counts never enter image projection", () => {
+	for (const api of apis) {
+		const prepared = piPreparedStructure(history(), model(api));
+		if (!prepared?.imageBudget) throw new Error("missing image metadata");
+		prepared.imageBudget.rows.get = () => {
+			throw new Error("equal counts must not project images");
+		};
+		const body = wire(api, [0, 1, 2, 3]);
+		(body.messages ?? body.input)[0].content = "provider-rewritten text";
+		const notices: unknown[] = [];
+		expect(
+			piPreparedStructureMismatch(body, prepared, (value) =>
+				notices.push(value),
+			),
+		).toBeUndefined();
+		expect(notices).toEqual([]);
+	}
 });
 
 test("issue 686 image budget counts developer images in the same oldest-first order", () => {
@@ -593,7 +610,7 @@ test("issue 686 image budget logs counts only once per session across retries an
 	}
 });
 
-test("issue 686 image budget preserves image positions within a user row", () => {
+test("issue 686 image budget rejects a newer image dropped inside one user row", () => {
 	for (const api of apis) {
 		const messages = history();
 		messages.splice(messages.length - 1, 0, {
@@ -601,42 +618,90 @@ test("issue 686 image budget preserves image positions within a user row", () =>
 			content: [
 				{ type: "text", text: "before" },
 				image(4),
+				image(5),
 				{ type: "text", text: "after" },
 			],
 		} as any);
-		const body = wire(api);
-		const nativeImage =
+		const body = wire(api, []);
+		const nativeImage = (index: number) =>
 			api === "anthropic-messages"
 				? {
 						type: "image",
 						source: {
 							type: "base64",
 							media_type: "image/png",
-							data: "image-4",
+							data: `image-${index}`,
 						},
 					}
 				: api === "openai-completions"
-					? { type: "image_url", image_url: { url: url(4) } }
-					: { type: "input_image", image_url: url(4), detail: "auto" };
-		const text = (value: string) => ({
-			type: api === "openai-responses" ? "input_text" : "text",
-			text: value,
-		});
-		const row = {
-			role: "user",
-			content:
-				api === "openai-responses"
-					? [text("before"), text("after"), nativeImage]
-					: [text("before"), nativeImage, text("after")],
-		};
+					? { type: "image_url", image_url: { url: url(index) } }
+					: { type: "input_image", image_url: url(index), detail: "auto" };
+		const row = { role: "user", content: [nativeImage(5)] };
 		const rows = body.messages ?? body.input;
 		rows.splice(rows.length - 1, 0, row);
 		const prepared = piPreparedStructure(messages, model(api));
 		expect(piMatchesPreparedStructure(body, prepared)).toBe(true);
-		row.content =
-			api === "openai-responses"
-				? [nativeImage, text("before"), text("after")]
-				: [text("before"), text("after"), nativeImage];
+		row.content = [nativeImage(4)];
 		expect(piMatchesPreparedStructure(body, prepared)).toBe(false);
+	}
+});
+
+test("issue 686 image budget trimmed sessions send with an obfuscated user secret", async () => {
+	for (const api of apis) {
+		clearPiContextReceipt(session);
+		const messages = history();
+		messages.splice(
+			messages.length - 1,
+			0,
+			userMessage("API_KEY=sk-example-secret-before-provider-rewrite", 3),
+		);
+		const body = wire(api);
+		const rows = body.messages ?? body.input;
+		rows.splice(rows.length - 1, 0, {
+			role: "user",
+			content: "API_KEY=[REDACTED:credential]",
+		});
+		const h = await guarded(messages, api);
+		h.dispatch(body);
+		expect(h.aborts).toBe(0);
+		expect(h.refusals).toEqual([]);
+	}
+});
+
+test("issue 686 image budget no-trim inline images retain legacy comparison outcomes", () => {
+	for (const api of apis) {
+		const messages = history();
+		messages.splice(messages.length - 1, 0, {
+			role: "user",
+			content: [image(4)],
+		} as any);
+		const body = wire(api, [0, 1, 2, 3]);
+		const native =
+			api === "anthropic-messages"
+				? {
+						type: "image",
+						source: {
+							type: "base64",
+							media_type: "image/png",
+							data: "provider-rewritten-image",
+						},
+					}
+				: api === "openai-completions"
+					? {
+							type: "image_url",
+							image_url: { url: "https://provider.example/rewritten" },
+						}
+					: {
+							type: "input_image",
+							image_url: "https://provider.example/rewritten",
+						};
+		const rows = body.messages ?? body.input;
+		rows.splice(rows.length - 1, 0, { role: "user", content: [native] });
+		expect(
+			piMatchesPreparedStructure(
+				body,
+				piPreparedStructure(messages, model(api)),
+			),
+		).toBe(true);
 	}
 });
