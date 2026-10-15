@@ -101,7 +101,7 @@ test("records a success run with full metrics and reads back", () => {
     expect(row.legacy).toBe(0);
 });
 
-test("records a failure run with a reason and no compartments", () => {
+test("records a classified failure run with no compartments", () => {
     const db = openDatabase();
     const id = recordHistorianRun(db, {
         sessionId: "ses-2",
@@ -116,9 +116,47 @@ test("records a failure run with a reason and no compartments", () => {
         )
         .get(id) as Record<string, unknown>;
     expect(row.status).toBe("failed");
-    expect(row.failure_reason).toBe("validation: bad output");
+    expect(row.failure_reason).toBe("parse_failed");
     expect(row.compartments_produced).toBe(0);
     expect(row.subagent_invocation_id).toBeNull();
+});
+
+test("classifies missing and sensitive failure details before storing them", () => {
+    const db = openDatabase();
+    const missingReasonId = recordHistorianRun(db, {
+        sessionId: "ses-missing-reason",
+        harness: "pi",
+        runKind: "incremental",
+        status: "failed",
+        failureReason: "  ",
+    });
+    const opencodeMissingReasonId = recordHistorianRun(db, {
+        sessionId: "ses-opencode-missing-reason",
+        harness: "opencode",
+        runKind: "incremental",
+        status: "failed",
+        failureReason: null,
+    });
+    const privateDetailId = recordHistorianRun(db, {
+        sessionId: "ses-private-detail",
+        harness: "opencode",
+        runKind: "incremental",
+        status: "failed",
+        failureReason: "OpenAI API error (429): private prompt and response text",
+    });
+
+    const storedReasons = db
+        .prepare("SELECT failure_reason FROM historian_runs WHERE id IN (?, ?, ?) ORDER BY id")
+        .all(missingReasonId, opencodeMissingReasonId, privateDetailId) as Array<{
+        failure_reason: string;
+    }>;
+    expect(storedReasons.map((row) => row.failure_reason)).toEqual([
+        "provider_error",
+        "provider_error",
+        "provider_error:http_429",
+    ]);
+    expect(JSON.stringify(storedReasons)).not.toContain("private prompt");
+    expect(storedReasons.every((row) => row.failure_reason.length <= 96)).toBe(true);
 });
 
 test("clearSession deletes a session's historian_runs", () => {

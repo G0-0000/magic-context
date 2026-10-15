@@ -69,6 +69,7 @@ import {
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import {
+	classifyHistorianFailureReason,
 	type HistorianRunInput,
 	recordHistorianRun,
 	summarizeImportance,
@@ -621,6 +622,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const existingValidationError =
 				validateStoredCompartments(priorCompartments);
 			if (existingValidationError) {
+				telemetry.failureReason = "parse_failed";
 				sessionLog(
 					sessionId,
 					`historian failure: source=existing-validation reason="${existingValidationError}"`,
@@ -757,7 +759,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				memoryEnabled: memoryEnabled !== false,
 			});
 			if (!promptFit.ok) {
-				telemetry.failureReason = promptFit.reason;
+				telemetry.failureReason = classifyHistorianFailureReason(
+					promptFit.reason,
+				);
 				if (
 					getHistorianFailureState(db, sessionId).lastError === promptFit.reason
 				) {
@@ -856,6 +860,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			const chunkCoverageError = validateChunkCoverage(chunk);
 			if (chunkCoverageError) {
+				telemetry.failureReason = "parse_failed";
 				sessionLog(
 					sessionId,
 					`historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
@@ -920,7 +925,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				maxOutputTokens,
 			});
 			if (producerWindowFailure) {
-				telemetry.failureReason = producerWindowFailure;
+				telemetry.failureReason = classifyHistorianFailureReason(
+					producerWindowFailure,
+				);
 				rollbackDrainReservation();
 				sessionLog(
 					sessionId,
@@ -1195,6 +1202,14 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						: validatedPass.kind === "spawn-failed"
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
+				telemetry.failureReason =
+					validatedPass.kind === "validation-failed"
+						? "parse_failed"
+						: validatedPass.kind === "no-output"
+							? "empty_output"
+							: classifyHistorianFailureReason(
+									`${validatedPass.reason}: ${validatedPass.error}`,
+								);
 				// A window refusal here comes from a fallback model (the primary was
 				// fitted above). Treat it like any other failed pass: count it, notify,
 				// and keep the reserved drain budget spent even though nothing was
@@ -1315,6 +1330,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				newCompartments[newCompartments.length - 1]?.endMessage ?? 0;
 			if (lastNewEnd + 1 <= offset) {
 				const errorMsg = `historian returned compartments that did not advance past raw message ${offset - 1}`;
+				telemetry.failureReason = "parse_failed";
 				sessionLog(
 					sessionId,
 					`historian failure: source=no-progress newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
@@ -1725,7 +1741,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		});
 	} catch (error) {
 		const desc = describeError(error);
-		telemetry.failureReason = `exception: ${desc.brief}`;
+		telemetry.failureReason = classifyHistorianFailureReason(desc.brief);
 		sessionLog(
 			sessionId,
 			`historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,

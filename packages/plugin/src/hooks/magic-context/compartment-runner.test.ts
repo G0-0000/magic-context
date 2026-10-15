@@ -677,7 +677,7 @@ describe("executeContextRecomp", () => {
                 .get(sessionId),
         ).toEqual({
             status: "failed",
-            failure_reason: expect.stringContaining("missing the tiered paraphrase structure"),
+            failure_reason: "parse_failed",
         });
     });
 
