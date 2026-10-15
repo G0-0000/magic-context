@@ -62,6 +62,53 @@ describe("OpenCode model catalog parsing", () => {
             ),
         ).toEqual([{ agent: "historian", model: "provider/model", variant: "medium" }]);
     });
+    it("checks variants on host catalog models whose IDs contain slashes", () => {
+        const catalog = [
+            { providerID: "openrouter", id: "openrouter/free", variants: { high: {} } },
+        ];
+        expect(
+            findUndeclaredConfiguredVariants(
+                [
+                    { agent: "historian", model: "openrouter/openrouter/free", variant: "medium" },
+                    { agent: "dreamer", model: "openrouter/openrouter/free", variant: "high" },
+                ],
+                catalog,
+            ),
+        ).toEqual([{ agent: "historian", model: "openrouter/openrouter/free", variant: "medium" }]);
+    });
+    it("matches v2 host catalog entries whose model IDs contain slashes, as OpenRouter serves them", () => {
+        const warnings: string[] = [];
+        checkConfiguredVariantCatalog(
+            {
+                historian: { model: "openrouter/openrouter/free" },
+                dreamer: { model: "openrouter/dots-studio/dots-3-note-preview:free" },
+            },
+            "v2",
+            (message) => warnings.push(message),
+            () => ({
+                stdout: JSON.stringify({
+                    location: { directory: "/tmp/project" },
+                    data: [
+                        {
+                            id: "openrouter/free",
+                            modelID: "openrouter/free",
+                            providerID: "openrouter",
+                            variants: [],
+                        },
+                        {
+                            id: "dots-studio/dots-3-note-preview:free",
+                            modelID: "dots-studio/dots-3-note-preview:free",
+                            providerID: "openrouter",
+                            variants: [],
+                        },
+                    ],
+                }),
+                status: 0,
+            }),
+            "/tmp/project",
+        );
+        expect(warnings).toEqual([]);
+    });
     it("checks real v2 model.list variant IDs for both missing and declared variants", () => {
         // Captured from OpenCode 2.0.12 in an isolated root with a dummy API key.
         const output = readFileSync(
