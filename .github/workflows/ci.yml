@@ -736,7 +736,7 @@ jobs:
         run: |
           set -euo pipefail
           artifacts="$RUNNER_TEMP/mc-module-lib-test-artifacts.json"
-          cargo test --locked -p mc-module --lib --no-run --message-format=json > "$artifacts"
+          cargo test --locked -p mc-module --lib --no-run --no-fail-fast --message-format=json > "$artifacts"
           binary="$(python3 - "$artifacts" <<'PY'
           import json
           import sys
