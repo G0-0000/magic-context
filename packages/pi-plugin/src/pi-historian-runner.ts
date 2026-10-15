@@ -150,9 +150,9 @@ import type {
 } from "@magic-context/core/shared/subagent-runner";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
 import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
-
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
+import { acknowledgePiHistoryRetirement } from "./pi-history-retirement";
 import {
 	isPiOrdinalAlignmentUnanchored,
 	resolvePiOrdinalAlignment,
@@ -1493,6 +1493,14 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				// reaches the keep watermark.
 				clearHistorianDrainFailure(db, sessionId);
 				recordProtectedTailPublicationFloor(db, sessionId, lastNewEnd + 1);
+				acknowledgePiHistoryRetirement(
+					db,
+					sessionId,
+					lastNewEnd,
+					(id) =>
+						provider.readMessages().find((message) => message.id === id)
+							?.ordinal,
+				);
 				if (!isWrapupInProgress(db, sessionId))
 					clearEmergencyRecovery(db, sessionId);
 				// userObservations are inserted POST-COMMIT

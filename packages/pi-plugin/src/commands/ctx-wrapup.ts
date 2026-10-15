@@ -39,6 +39,7 @@ import {
 	signalPiDeferredMaterialization,
 } from "../context-handler";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
+import { repairPiHistoryBoundary } from "../history-boundary-repair-pi";
 import { resolvePiUsableContextLimit } from "../pi-context-limit";
 import { runPiHistorian } from "../pi-historian-runner";
 import {
@@ -217,6 +218,7 @@ export async function runPiWrapup(
 		return "## Magic Wrapup — Skipped\n\nA recomp or upgrade is already running for this session. Wait for it to finish, then try `/ctx-wrapup` again.";
 	}
 
+	repairPiHistoryBoundary(deps.db, sessionId, ctx);
 	const ordinalAlignment = resolvePiOrdinalAlignmentForContext(
 		deps.db,
 		sessionId,

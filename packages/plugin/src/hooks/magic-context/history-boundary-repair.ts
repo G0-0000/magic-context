@@ -9,6 +9,10 @@ import {
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutation-log";
+import {
+    clearPendingPiCompactionMarkerStateIf,
+    getPendingPiCompactionMarkerState,
+} from "../../features/magic-context/storage-meta-persisted";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
@@ -45,10 +49,18 @@ import { clearInjectionCache, resetPrefixTrimFallbackState } from "./inject-comp
 // the removed compartments and its recorded boundary names the missing row. The
 // next pass materializes a fresh pair against the new anchor: one cache-busting
 // pass, after which ordinary replay resumes.
+//
+// Tree hosts can supply an active-branch lookup instead of a store lookup. A
+// complete parent chain proves that an entry belongs to a different branch even
+// when the store still holds it. In that mode every compartment end is checked;
+// retirement starts at the first mismatch and can include the first compartment.
+// Returning to an old branch does not resurrect its retired summaries: the
+// historian rebuilds them from the reachable raw messages.
 
 /**
- * Whether the host store holds a message: `true` or `false` when the store
- * answered, `null` when it could not be asked. Only `false` proves absence.
+ * Whether the host holds a message in the history being checked: `true` or
+ * `false` when the host answered, `null` when it could not be asked. Only
+ * `false` proves absence; a request window is never an authoritative lookup.
  */
 export type HostMessagePresence = (messageId: string) => boolean | null;
 
@@ -61,6 +73,7 @@ export type HistoryBoundaryRepair =
     | {
           kind: "repaired";
           missingEndMessageId: string;
+          /** Empty when retirement reached the first compartment. */
           anchorEndMessageId: string;
           droppedSequences: number[];
       }
@@ -112,8 +125,10 @@ function forgetCachedPrefix(sessionId: string): void {
 function dropCompartmentsAfter(
     db: Database,
     sessionId: string,
-    anchor: Compartment,
+    anchor: Compartment | null,
     holderId: string,
+    activeBranch = false,
+    onRetire?: () => void,
 ): number[] | null {
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
@@ -127,20 +142,31 @@ function dropCompartmentsAfter(
             .prepare(
                 "SELECT id, sequence FROM compartments WHERE session_id = ? AND sequence > ? ORDER BY sequence",
             )
-            .all(sessionId, anchor.sequence) as Array<{ id: number; sequence: number }>;
+            .all(sessionId, anchor?.sequence ?? -1) as Array<{ id: number; sequence: number }>;
+        onRetire?.();
         const deleteEmbeddings = db.prepare(
             "DELETE FROM compartment_chunk_embeddings WHERE compartment_id = ?",
         );
         for (const row of dropped) deleteEmbeddings.run(row.id);
         db.prepare("DELETE FROM compartments WHERE session_id = ? AND sequence > ?").run(
             sessionId,
-            anchor.sequence,
+            anchor?.sequence ?? -1,
         );
         // Depth counters past the anchor belonged to the removed compartments;
         // the rebuilt ones start fresh, as a partial recomp's do.
         db.prepare(
             "DELETE FROM compression_depth WHERE session_id = ? AND message_ordinal > ?",
-        ).run(sessionId, anchor.endMessage);
+        ).run(sessionId, anchor?.endMessage ?? 0);
+        if (activeBranch) {
+            // Reset the ordinal below which history was already published, and
+            // discard the queued host compaction marker. Both described the old
+            // branch and could otherwise hide unsummarized messages on the new one.
+            db.prepare(
+                "UPDATE session_meta SET prior_boundary_ordinal = ? WHERE session_id = ?",
+            ).run((anchor?.endMessage ?? 0) + 1, sessionId);
+            const marker = getPendingPiCompactionMarkerState(db, sessionId);
+            if (marker) clearPendingPiCompactionMarkerStateIf(db, sessionId, marker);
+        }
         deleteChunkEmbedBackoffForSession(db, sessionId);
         queueM0Mutation(db, { sessionId, mutationType: "recomp_boundary_change" });
         clearCachedM0M1(db, sessionId);
@@ -166,8 +192,12 @@ export function repairMissingHistoryBoundary(args: {
     db: Database;
     sessionId: string;
     isInHostStore: HostMessagePresence;
+    /** `active-branch` requires a complete host ancestry lookup, never a request window. */
+    scope?: "store" | "active-branch";
+    /** Queue historian recovery in the same transaction that deletes stale summaries. */
+    onRetire?: (retired: readonly Compartment[], anchor: Compartment | null) => void;
 }): HistoryBoundaryRepair {
-    const { db, sessionId, isInHostStore } = args;
+    const { db, sessionId, isInHostStore, scope = "store" } = args;
     const compartments = getCompartments(db, sessionId);
     // The boundary is the newest compartment that has an end id at all. Newer
     // compartments without one (legacy rows, or rows carried into a forked
@@ -177,6 +207,20 @@ export function repairMissingHistoryBoundary(args: {
     let latestIndex = compartments.length - 1;
     while (latestIndex >= 0 && !compartments[latestIndex]?.endMessageId) latestIndex -= 1;
     if (latestIndex < 0) return { kind: "intact" };
+    // A tree can contain a newer on-branch summary after an older off-branch
+    // one. Check every end, and retire from the first mismatch, not just the tail.
+    if (scope === "active-branch") {
+        for (let index = 0; index <= latestIndex; index += 1) {
+            const endId = compartments[index]?.endMessageId;
+            if (!endId) continue;
+            const present = isInHostStore(endId);
+            if (present === null) return { kind: "unknown" };
+            if (!present) {
+                latestIndex = index;
+                break;
+            }
+        }
+    }
     const latestEnd = (compartments[latestIndex] as Compartment).endMessageId;
 
     const latestPresent = isInHostStore(latestEnd);
@@ -184,10 +228,10 @@ export function repairMissingHistoryBoundary(args: {
 
     if (!latestPresent) {
         const missing = latestEnd;
-        const problem = `newest compartment end ${latestEnd} is not in the host store`;
+        const problem = `compartment end ${latestEnd} is not in ${scope === "active-branch" ? "the active host branch" : "the host store"}`;
         const anchor = findAnchor(compartments, latestIndex, isInHostStore);
         if (anchor === "unknown") return { kind: "unknown" };
-        if (anchor === null) {
+        if (anchor === null && scope === "store") {
             sessionLog(
                 sessionId,
                 `history boundary unresolved: ${problem} and no older compartment end is in the host store; nothing to re-anchor on`,
@@ -205,7 +249,14 @@ export function repairMissingHistoryBoundary(args: {
         }
         let dropped: number[] | null;
         try {
-            dropped = dropCompartmentsAfter(db, sessionId, anchor, holderId);
+            dropped = dropCompartmentsAfter(
+                db,
+                sessionId,
+                anchor,
+                holderId,
+                scope === "active-branch",
+                () => args.onRetire?.(compartments.slice(latestIndex), anchor),
+            );
         } finally {
             releaseCompartmentLeaseBestEffort(db, sessionId, holderId);
         }
@@ -220,15 +271,17 @@ export function repairMissingHistoryBoundary(args: {
                 : `${dropped[0]}-${dropped[dropped.length - 1]} (${dropped.length})`;
         sessionLog(
             sessionId,
-            `history boundary repair: ${problem}; re-anchored on compartment ${anchor.sequence} ending at ${anchor.endMessageId} (ordinal ${anchor.endMessage}); removed compartments ${range} for the historian to rebuild; the cached prefix is rebuilt on this pass`,
+            `history boundary repair: ${problem}; re-anchored on ${anchor ? `compartment ${anchor.sequence} ending at ${anchor.endMessageId} (ordinal ${anchor.endMessage})` : "the start of history"}; removed compartments ${range} for the historian to rebuild; the cached prefix is rebuilt on this pass`,
         );
         return {
             kind: "repaired",
             missingEndMessageId: missing,
-            anchorEndMessageId: anchor.endMessageId,
+            anchorEndMessageId: anchor?.endMessageId ?? "",
             droppedSequences: dropped,
         };
     }
+
+    if (scope === "active-branch") return { kind: "intact" };
 
     // An empty cached boundary is left alone: it means the pair was recorded
     // before the first compartment, so replay covers none of them and their raw
