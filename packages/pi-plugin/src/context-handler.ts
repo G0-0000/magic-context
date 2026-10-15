@@ -5500,6 +5500,7 @@ export function registerPiContextHandler(
 				},
 				resolvedProviderID: ctx.model?.provider,
 				resolvedModelID: ctx.model?.id,
+				providerApi: ctx.model?.api,
 				canUseEmptySentinels,
 				temporalAwareness: options.injection?.temporalAwareness === true,
 				appendCompaction: guardedPiAppendCompaction(ctx, assertCurrentPass),
@@ -7939,6 +7940,7 @@ interface RunPipelineArgs {
 	forceSignedRebuildForFit?: boolean;
 	resolvedProviderID?: string;
 	resolvedModelID?: string;
+	providerApi?: string;
 	assertCurrentPass?: () => void;
 	db: ContextDatabase;
 	tagger: Tagger;
@@ -10388,6 +10390,22 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.
 		canFirstApply: isCacheBustingPass,
+		onLegacyReplay: (previous, next) => {
+			const id = postCommitStableIdByRef.get(previous);
+			if (id) postCommitStableIdByRef.set(next, id);
+		},
+		// Oh My Pi converts a tool result whose call is absent into a
+		// <stale-tool-result> user message (pi-ai providers/transform-messages.ts,
+		// 18.10.4:1395-1449, 18.11.0:1391-1445). Responses/Anthropic request
+		// validation rejects that role change, so remove dropped results first.
+		// Chat validation accepts the exact placeholder note; defer its removal
+		// until another change already invalidates the provider's cached prefix.
+		retireOrphansBeforeRefusal: [
+			"openai-responses",
+			"openai-codex-responses",
+			"azure-openai-responses",
+			"anthropic-messages",
+		].includes(args.providerApi ?? ""),
 		onFirstApplication: (message, index) =>
 			recordFirstApplicationAt(message, index, 0, (item) =>
 				item && typeof item === "object"

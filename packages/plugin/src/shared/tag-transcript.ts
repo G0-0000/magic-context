@@ -1106,7 +1106,8 @@ function buildAggregateTarget(
     const role = occurrences[0]?.message.info.role ?? "user";
     const messageId = occurrences[0]?.message.info.id;
 
-    const truncate = (): "truncated" | "absent" => {
+    const truncate = (): "truncated" | "absent" | "incomplete" => {
+        if (!complete()) return "incomplete";
         // Keep the tool call and its result, but replace the call arguments with
         // a non-executable marker and the result content with the dropped marker.
         // Legacy render, replayed only for `drop_mode = 'truncated'` tags until a
