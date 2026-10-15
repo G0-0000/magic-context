@@ -1,0 +1,6 @@
+{
+	"extends": "../../../tsconfig.json",
+	"compilerOptions": { "types": ["node", "bun"] },
+	"include": ["run.ts", "compare.ts"],
+	"exclude": ["node_modules", "dist"]
+}

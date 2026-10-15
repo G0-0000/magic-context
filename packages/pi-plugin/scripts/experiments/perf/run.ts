@@ -5,7 +5,9 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +39,9 @@ type PerfLane =
 	| "auto-search-sticky";
 
 interface RunnerOptions {
+	stepwise?: boolean;
+	settledUsage?: boolean;
+	contextWindow?: number;
 	fixture?: string;
 	database?: string;
 	wireOutput?: string;
@@ -95,6 +100,13 @@ interface RunnerOptions {
 }
 
 export interface PerfPassReport {
+	decision?: "execute" | "defer";
+	usagePercentage?: number;
+	/** Complete handler wall time, including fit admission and publication. */
+	handlerMs: number;
+	fullArrayClones: number;
+	fullArrayCloneMs: number;
+	fitEnvelopeReads: number;
 	pass: number;
 	requestedMessages: number;
 	inputMessages: number;
@@ -117,6 +129,7 @@ export interface PerfPassReport {
 }
 
 export interface PerfRunReport {
+	contextWindow?: number;
 	schemaVersion: 2;
 	fixture: string;
 	fixtureBytes: number;
@@ -170,10 +183,9 @@ async function main(): Promise<void> {
 	const finalPass = passes.at(-1);
 	if (finalPass) {
 		for (let repeat = 0; repeat < options.repeatFinal; repeat += 1) {
-			passes.push({
-				...finalPass,
-				messages: structuredClone(finalPass.messages),
-			});
+			// Each event is cloned immediately before invocation, so repeats can
+			// share their immutable fixture instead of retaining hundreds of copies.
+			passes.push(finalPass);
 		}
 	}
 
@@ -187,6 +199,16 @@ async function main(): Promise<void> {
 	process.env.XDG_RUNTIME_DIR = join(dataDir, "runtime");
 	process.env.OPENCODE_DB = join(dataDir, "opencode.db");
 	process.env.MAGIC_CONTEXT_STORAGE_DIR = dataDir;
+	process.env.MAGIC_CONTEXT_LOG_PATH = join(dataDir, "magic-context.log");
+	process.env.PI_CODING_AGENT_DIR = join(dataDir, "pi");
+	mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
+	process.env.NODE_ENV = "test";
+	// The test logger is silent. Import it before restoring test mode so the
+	// actual execute/defer decisions are logged, rather than inferred from timing.
+	delete process.env.NODE_ENV;
+	const { flushLogger, getLogFilePath } = await import(
+		"@magic-context/core/shared/logger"
+	);
 	process.env.NODE_ENV = "test";
 
 	const [
@@ -213,6 +235,12 @@ async function main(): Promise<void> {
 	]);
 
 	setHarness("pi");
+	const { updateSessionMeta } = await import(
+		"@magic-context/core/features/magic-context/storage-meta"
+	);
+	const logStart = existsSync(getLogFilePath())
+		? statSync(getLogFilePath()).size
+		: 0;
 	const dbPath = join(dataDir, "context.db");
 	if (options.database) {
 		const seed = resolve(options.database);
@@ -310,7 +338,12 @@ async function main(): Promise<void> {
 	);
 
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
+	let registryReads = 0;
 	const pi = {
+		getAllTools: () => {
+			registryReads++;
+			return [];
+		},
 		on(event: string, handler: (...args: unknown[]) => unknown) {
 			handlers.set(event, handler);
 		},
@@ -362,10 +395,20 @@ async function main(): Promise<void> {
 		for (let index = 0; index < passes.length; index += 1) {
 			const pass = passes[index];
 			if (!pass) continue;
+			if (options.stepwise) {
+				const next = new Promise<void>((resolve) =>
+					process.stdin.once("data", () => resolve()),
+				);
+				console.log("PERF_READY");
+				process.stdin.resume();
+				await next;
+				process.stdin.pause();
+			}
 			externalDb
 				?.prepare("INSERT INTO perf_external_writes (pass) VALUES (?)")
 				.run(index);
 			timings.reset();
+			registryReads = 0;
 			dbTimer.reset();
 			if (options.lane === "execute-compacted" && index > 0) {
 				rawDb
@@ -402,6 +445,7 @@ async function main(): Promise<void> {
 				pass.branchEntries,
 				usagePercentage,
 				chaosOps?.model,
+				options.contextWindow,
 			);
 			const event = {
 				messages: structuredClone(
@@ -413,9 +457,34 @@ async function main(): Promise<void> {
 				),
 			};
 			const inputMessageCount = event.messages.length;
-			const result = (await handler(event, context)) as
-				| { messages?: unknown[] }
-				| undefined;
+			const originalClone = globalThis.structuredClone;
+			let fullArrayClones = 0;
+			let fullArrayCloneMs = 0;
+			globalThis.structuredClone = ((
+				value: unknown,
+				options?: Parameters<typeof structuredClone>[1],
+			) => {
+				if (!Array.isArray(value) || value.length < inputMessageCount)
+					return originalClone(value, options);
+				const start = performance.now();
+				try {
+					return originalClone(value, options);
+				} finally {
+					fullArrayClones++;
+					fullArrayCloneMs += performance.now() - start;
+				}
+			}) as typeof structuredClone;
+			const handlerStart = performance.now();
+			let result: { messages?: unknown[] } | undefined;
+			try {
+				result = (await handler(event, context)) as
+					| { messages?: unknown[] }
+					| undefined;
+			} finally {
+				globalThis.structuredClone = originalClone;
+			}
+			const handlerMs = performance.now() - handlerStart;
+			const fitEnvelopeReads = registryReads;
 			const output = result?.messages ?? event.messages;
 			if (options.wireOutput)
 				writeFileSync(
@@ -444,6 +513,10 @@ async function main(): Promise<void> {
 			const deferredDb = subtractDatabaseTiming(afterDrainDb, dbSnapshot);
 			const tagRows = readTagRows(rawDb, fixture.sessionId);
 			reports.push({
+				handlerMs,
+				fitEnvelopeReads,
+				fullArrayClones,
+				fullArrayCloneMs,
 				pass: index + 1,
 				requestedMessages: pass.requestedMessages,
 				inputMessages: inputMessageCount,
@@ -469,7 +542,33 @@ async function main(): Promise<void> {
 				pass.requestedMessages >= options.historicalTagsAfterMessages
 			)
 				seedHistoricalTags();
+			if (options.settledUsage)
+				updateSessionMeta(rawDb, fixture.sessionId, {
+					lastResponseTime: Date.now(),
+					lastContextPercentage: usagePercentage,
+					lastInputTokens: Math.round(
+						((options.contextWindow ?? 400000) * usagePercentage) / 100,
+					),
+				});
+			if (options.stepwise) console.log("PERF_DONE");
 		}
+		flushLogger();
+		const decisionLines = readFileSync(getLogFilePath())
+			.subarray(logStart)
+			.toString("utf8")
+			.split("\n")
+			.filter((line) => line.includes(`[${fixture.sessionId}] transform:`));
+		if (decisionLines.length !== reports.length)
+			throw new Error(
+				`Expected ${reports.length} transform decisions, read ${decisionLines.length}`,
+			);
+		reports.forEach((report, index) => {
+			report.decision = decisionLines[index]?.match(
+				/decision=(execute|defer)/,
+			)?.[1] as "execute" | "defer";
+			const pressure = decisionLines[index]?.match(/usage=([\d.]+)%/);
+			if (pressure) report.usagePercentage = Number(pressure[1]);
+		});
 	} finally {
 		restoreObserver();
 		clearContextHandlerSession(fixture.sessionId);
@@ -479,6 +578,7 @@ async function main(): Promise<void> {
 	}
 
 	const report: PerfRunReport = {
+		contextWindow: options.contextWindow ?? 400_000,
 		schemaVersion: 2,
 		fixture: fixture.name,
 		fixtureBytes: fixture.sourceBytes,
@@ -498,17 +598,19 @@ function fakeContext(
 	branchEntries: readonly SessionEntry[],
 	usagePercentage: number,
 	modelId = "claude-sonnet-4-5",
+	contextWindow = 400_000,
 ): ExtensionContext {
 	const byId = new Map(branchEntries.map((entry) => [entry.id, entry]));
 	return {
 		cwd,
 		hasUI: false,
+		getSystemPrompt: () => "You are a synthetic coding agent.",
 		signal: new AbortController().signal,
 		ui: { notify: () => undefined },
 		model: {
 			provider: "anthropic",
 			id: modelId,
-			contextWindow: 400_000,
+			contextWindow,
 		},
 		sessionManager: {
 			getSessionId: () => sessionId,
@@ -517,9 +619,9 @@ function fakeContext(
 			getEntry: (id: string) => byId.get(id),
 		},
 		getContextUsage: () => ({
-			tokens: Math.round((400_000 * usagePercentage) / 100),
+			tokens: Math.round((contextWindow * usagePercentage) / 100),
 			percent: usagePercentage,
-			contextWindow: 400_000,
+			contextWindow,
 		}),
 	} as unknown as ExtensionContext;
 }
@@ -709,7 +811,14 @@ function parseOptions(args: readonly string[]): RunnerOptions {
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
 		const value = args[index + 1];
-		if (arg === "--fixture" && value) {
+		if (arg === "--stepwise") {
+			options.stepwise = true;
+		} else if (arg === "--settled-usage") {
+			options.settledUsage = true;
+		} else if (arg === "--context-window" && value) {
+			options.contextWindow = positiveInteger(value, arg);
+			index += 1;
+		} else if (arg === "--fixture" && value) {
 			options.fixture = value;
 			index += 1;
 		} else if (arg === "--database" && value) {

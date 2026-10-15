@@ -54,3 +54,46 @@ bun scripts/experiments/perf/compare.ts --fixture <path>
 ```
 
 Passing a directory to `--fixture` recursively compares every JSONL fixture and fails on the first mismatch. The default baseline is the first commit containing this harness; override it with `--baseline <git-ref>`. `compare.ts` archives that revision into a temporary directory, runs both real handlers against independently initialized copies of the same empty DB seed, and compares canonical-JSON SHA-256 hashes for every output message array and every persisted behavioral tag row on every accumulation pass. Timing/creation columns are excluded from the tag-row comparison. Any mismatch exits non-zero.
+
+## Settled defer measurements and complete-handler cost
+
+The default synthetic runner has no successful provider response. Without
+`--settled-usage`, a session can remain on the scheduler's first-response execute
+path, even after its caches are warm. Do not label repeated final passes as
+ordinary defers without checking their recorded `decision`.
+
+Use `--settled-usage` to record simulated successful usage between passes. The
+runner reads the real transform-decision log afterward and records each decision
+in the JSON report. Both compared revisions execute the same current measurement
+driver; their product modules still come from their respective revisions.
+
+```bash
+bun scripts/experiments/perf/compare.ts \
+  --baseline cc654a68fd0441d245712be76eb23087e70b7ef0 \
+  --messages 13800 --step 2300 --repeat-final 200 \
+  --context-window 10000000 --settled-usage --interleave \
+  --report-dir /tmp/pi-fit-comparison
+```
+
+The larger synthetic window keeps this message-count fixture far from genuine
+capacity pressure; it is not a claim about a real model's supported window.
+`--interleave` alternates AB/BA process steps, never running both handlers at once.
+Each process has its own HOME, temporary directories, store and log. On Linux,
+launch the comparison with `taskset` if both processes should use one CPU.
+
+Reports include `handlerMs`, measured around the complete handler call, and
+`fullArrayClones`/`fullArrayCloneMs` for clones at least as long as the input.
+`fitEnvelopeReads` counts actual tool-registry reads. The older `phases.total`
+ends before fit admission and publication, so it is not a substitute for full
+handler wall time. Input fixture cloning, output serialization and the 150 ms
+post-handler drain are outside `handlerMs`.
+
+The comparison prints p50, p95 and p99 for the final repeated passes using linear
+interpolation. `--report-dir` retains both JSON reports. It compares literal
+served-JSON `wireHash` values in addition to canonical output and persisted-tag
+hashes. Use `--lane execute-compacted` for a separate execute-pass differential.
+The performance driver's dedicated typecheck is:
+
+```bash
+bun run tsc --noEmit -p scripts/experiments/perf/tsconfig.json
+```
