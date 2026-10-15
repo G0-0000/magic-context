@@ -66,6 +66,14 @@ type PiCompactionMarkerDrainGateFields = {
 	m1CoverageEndMessageId?: string | null;
 	matchCount?: number;
 	alignment?: "unanchored" | "unresolved";
+	foldingOnlyTools?: readonly string[];
+	persistedOnlyTools?: readonly string[];
+	changedTools?: readonly string[];
+	promptLengthDelta?: number;
+	foldingPromptLength?: number;
+	persistedPromptLength?: number;
+	errorName?: string;
+	errorCode?: string;
 };
 
 interface LoggedMarkerDrainGates {
@@ -78,9 +86,9 @@ const loggedMarkerDrainGates = new BoundedSessionMap<LoggedMarkerDrainGates>(
 );
 
 /**
- * Report a marker gate once per session, marker, and classified gate. Gate fields
- * are deliberately restricted to IDs, ordinals, and counts so transcript or
- * prompt content cannot leak into diagnostic logs.
+ * Report a marker gate once per session, marker, and classified gate. Diagnostics
+ * contain identifiers, counts, prompt byte lengths, or error class/code only;
+ * prompt text and error messages are never included.
  */
 export function logPiCompactionMarkerDrainGateOnce(
 	sessionId: string,
@@ -120,11 +128,51 @@ export function logPiCompactionMarkerDrainGateOnce(
 		parts.push(`matchCount=${fields.matchCount}`);
 	if (fields.alignment !== undefined)
 		parts.push(`alignment=${fields.alignment}`);
+	if (fields.foldingOnlyTools !== undefined)
+		parts.push(`foldingOnlyTools=${JSON.stringify(fields.foldingOnlyTools)}`);
+	if (fields.persistedOnlyTools !== undefined)
+		parts.push(
+			`persistedOnlyTools=${JSON.stringify(fields.persistedOnlyTools)}`,
+		);
+	if (fields.changedTools !== undefined)
+		parts.push(`changedTools=${JSON.stringify(fields.changedTools)}`);
+	if (fields.promptLengthDelta !== undefined)
+		parts.push(`promptLengthDelta=${fields.promptLengthDelta}`);
+	if (fields.foldingPromptLength !== undefined)
+		parts.push(`foldingPromptLength=${fields.foldingPromptLength}`);
+	if (fields.persistedPromptLength !== undefined)
+		parts.push(`persistedPromptLength=${fields.persistedPromptLength}`);
+	if (fields.errorName !== undefined)
+		parts.push(`errorName=${JSON.stringify(fields.errorName)}`);
+	if (fields.errorCode !== undefined)
+		parts.push(`errorCode=${JSON.stringify(fields.errorCode)}`);
 	sessionLog(sessionId, `Pi compaction-marker drain ${parts.join(" ")}`);
 }
 
 export function clearPiCompactionMarkerDrainLogState(sessionId: string): void {
 	loggedMarkerDrainGates.delete(sessionId);
+}
+
+export function getPiCompactionMarkerDrainErrorFields(error: unknown): {
+	errorName: string;
+	errorCode?: string;
+} {
+	const candidate =
+		error !== null && typeof error === "object"
+			? (error as { name?: unknown; code?: unknown })
+			: undefined;
+	const errorName =
+		typeof candidate?.name === "string"
+			? candidate.name
+			: error instanceof Error
+				? error.name
+				: "Error";
+	return {
+		errorName,
+		...(typeof candidate?.code === "string"
+			? { errorCode: candidate.code }
+			: {}),
+	};
 }
 
 export function applyDeferredPiCompactionMarker(
@@ -232,15 +280,19 @@ export function applyDeferredPiCompactionMarker(
 			);
 			if (latestFirstKeptIndex >= pendingFirstKeptIndex) {
 				if (latestCompaction.id === null) {
+					const error = new Error("Pi compaction entry has no id");
 					logPiCompactionMarkerDrainGateOnce(
 						sessionId,
 						pending,
 						"current-compaction-id-unavailable",
-						{ firstKeptEntryId: latestCompaction.firstKeptEntryId },
+						{
+							firstKeptEntryId: latestCompaction.firstKeptEntryId,
+							errorName: error.name,
+						},
 					);
 					return {
 						kind: "retryable-failure",
-						error: new Error("Pi compaction entry has no id"),
+						error,
 					};
 				}
 				return {
@@ -262,14 +314,16 @@ export function applyDeferredPiCompactionMarker(
 			true,
 		);
 		if (typeof compactionId !== "string" || compactionId.length === 0) {
+			const error = new Error("Pi appendCompaction returned no compaction id");
 			logPiCompactionMarkerDrainGateOnce(
 				sessionId,
 				pending,
 				"append-compaction-returned-no-id",
+				{ errorName: error.name },
 			);
 			return {
 				kind: "retryable-failure",
-				error: new Error("Pi appendCompaction returned no compaction id"),
+				error,
 			};
 		}
 		sessionLog(
@@ -279,7 +333,9 @@ export function applyDeferredPiCompactionMarker(
 		return { kind: "applied", firstKeptEntryId, compactionId };
 	} catch (err) {
 		const error = err instanceof Error ? err : new Error(String(err));
-		logPiCompactionMarkerDrainGateOnce(sessionId, pending, "manager-threw");
+		logPiCompactionMarkerDrainGateOnce(sessionId, pending, "manager-threw", {
+			...getPiCompactionMarkerDrainErrorFields(err),
+		});
 		return { kind: "retryable-failure", error };
 	}
 }

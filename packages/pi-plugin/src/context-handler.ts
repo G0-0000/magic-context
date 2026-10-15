@@ -277,6 +277,7 @@ import {
 	type ApplyDeferredPiCompactionMarkerDeps,
 	applyDeferredPiCompactionMarker,
 	clearPiCompactionMarkerDrainLogState,
+	getPiCompactionMarkerDrainErrorFields,
 	logPiCompactionMarkerDrainGateOnce,
 } from "./compaction-marker-manager-pi";
 import {
@@ -10192,7 +10193,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 								args.sessionId,
 								pending,
 								"equivalence-refused",
-								{ firstKeptEntryId: outcome.firstKeptEntryId },
+								{
+									firstKeptEntryId: outcome.firstKeptEntryId,
+									foldingOnlyTools: adoption.foldingOnlyTools,
+									persistedOnlyTools: adoption.persistedOnlyTools,
+									changedTools: adoption.changedTools,
+									promptLengthDelta:
+										adoption.persistedPromptLength -
+										adoption.foldingPromptLength,
+									foldingPromptLength: adoption.foldingPromptLength,
+									persistedPromptLength: adoption.persistedPromptLength,
+								},
 							);
 						} else {
 							logPiCompactionMarkerDrainGateOnce(
@@ -10228,13 +10239,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					);
 				}
 			}
-		} catch {
+		} catch (err) {
 			args.assertCurrentPass?.();
 			if (pendingForDrain)
 				logPiCompactionMarkerDrainGateOnce(
 					args.sessionId,
 					pendingForDrain,
 					"drain-threw",
+					getPiCompactionMarkerDrainErrorFields(err),
 				);
 		}
 	}

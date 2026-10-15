@@ -600,7 +600,10 @@ describe("Pi deferred compaction marker manager", () => {
 							readBranchEntries:
 								scenario.gate === "manager-threw"
 									? () => {
-											throw new Error("private transcript text");
+											throw Object.assign(
+												new Error("private transcript text"),
+												{ code: "TEST_MANAGER_FAILURE" },
+											);
 										}
 									: () => configured.entries,
 							appendCompaction: configured.appendCompaction,
@@ -619,6 +622,12 @@ describe("Pi deferred compaction marker manager", () => {
 				expect(lines, scenario.gate).toHaveLength(1);
 				expect(lines[0]).toContain("endMessageId=m2 ordinal=2");
 				expect(lines[0]).not.toContain("private transcript text");
+				if (scenario.gate === "manager-threw") {
+					expect(lines[0]).toContain('errorName="Error"');
+					expect(lines[0]).toContain('errorCode="TEST_MANAGER_FAILURE"');
+				}
+				if (scenario.gate === "append-compaction-returned-no-id")
+					expect(lines[0]).toContain('errorName="Error"');
 			}
 
 			clearPiCompactionMarkerDrainLogState(sessionId);

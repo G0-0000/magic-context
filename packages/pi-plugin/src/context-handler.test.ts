@@ -7062,7 +7062,22 @@ describe("registerPiContextHandler", () => {
 			const foldingPrompt = "private folding prompt";
 			const persistedPrompt = "private persisted prompt";
 			const makeMessages = () => [
-				{ role: "system", content: foldingPrompt },
+				{
+					role: "system",
+					content: foldingPrompt,
+					toolsAdded: [
+						{
+							name: "folding-only-tool",
+							description: "private folding tool description",
+							parameters: { type: "object", properties: {} },
+						},
+						{
+							name: "shared-tool",
+							description: "private folding version",
+							parameters: { type: "object", properties: {} },
+						},
+					],
+				},
 				userMessage("first", 1),
 				assistantMessage("second", 2),
 				userMessage("third", 3),
@@ -7087,7 +7102,22 @@ describe("registerPiContextHandler", () => {
 						messages: makeMessages(),
 						entryIds: ["system-entry", "entry-1", "entry-2", "entry-3"],
 						appendedEntryFields: {
-							systemMessage: { role: "system", content: persistedPrompt },
+							systemMessage: {
+								role: "system",
+								content: persistedPrompt,
+								toolsAdded: [
+									{
+										name: "persisted-only-tool",
+										description: "private persisted tool description",
+										parameters: { type: "object", properties: {} },
+									},
+									{
+										name: "shared-tool",
+										description: "private persisted version",
+										parameters: { type: "object", properties: {} },
+									},
+								],
+							},
 						},
 						appendCompaction: mock(() => "compact-1"),
 						contextPercent: 90,
@@ -7104,6 +7134,28 @@ describe("registerPiContextHandler", () => {
 				expect(gateLines.join("\n")).not.toContain(foldingPrompt);
 				expect(gateLines.join("\n")).not.toContain(persistedPrompt);
 				expect(gateLines.join("\n")).not.toContain("private summary text");
+				expect(gateLines[0]).toContain(
+					'foldingOnlyTools=["folding-only-tool"]',
+				);
+				expect(gateLines[0]).toContain(
+					'persistedOnlyTools=["persisted-only-tool"]',
+				);
+				expect(gateLines[0]).toContain('changedTools=["shared-tool"]');
+				expect(gateLines[0]).toContain(
+					`promptLengthDelta=${new TextEncoder().encode(persistedPrompt).byteLength - new TextEncoder().encode(foldingPrompt).byteLength}`,
+				);
+				expect(gateLines[0]).toContain(
+					`foldingPromptLength=${new TextEncoder().encode(foldingPrompt).byteLength}`,
+				);
+				expect(gateLines[0]).toContain(
+					`persistedPromptLength=${new TextEncoder().encode(persistedPrompt).byteLength}`,
+				);
+				expect(gateLines.join("\n")).not.toContain(
+					"private folding tool description",
+				);
+				expect(gateLines.join("\n")).not.toContain(
+					"private persisted tool description",
+				);
 			} finally {
 				clearContextHandlerSession(sessionId);
 				logCalls.mockRestore();
@@ -7147,6 +7199,64 @@ describe("registerPiContextHandler", () => {
 				);
 				expect(gateLines).toHaveLength(1);
 				expect(String(gateLines[0]?.[1])).not.toContain("private summary text");
+			} finally {
+				clearContextHandlerSession(sessionId);
+				logCalls.mockRestore();
+				closeQuietly(db);
+			}
+		});
+
+		it("logs drain exceptions by class and code without their messages", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-drain-error-metadata";
+			const logger = await import("@magic-context/core/shared/logger");
+			const logCalls = spyOn(logger, "sessionLog").mockImplementation(
+				() => undefined,
+			);
+			try {
+				seedCompartment(db, sessionId);
+				setPendingPiCompactionMarkerState(db, sessionId, {
+					firstKeptEntryId: "entry-3",
+					endMessageId: "entry-2",
+					ordinal: 2,
+					tokensBefore: 10,
+					summary: "private summary text",
+					publishedAt: 1,
+				});
+				db.exec(`
+					CREATE TRIGGER fail_pi_marker_clear
+					BEFORE UPDATE OF pending_pi_compaction_marker_state ON session_meta
+					WHEN OLD.session_id = '${sessionId}'
+						AND NEW.pending_pi_compaction_marker_state IS NULL
+					BEGIN
+						SELECT RAISE(ABORT, 'private drain failure message');
+					END;
+				`);
+				for (let pass = 0; pass < 2; pass++) {
+					signalPiDeferredHistoryRefresh(sessionId);
+					signalPiDeferredMaterialization(sessionId);
+					signalPiPendingMaterialization(sessionId);
+					await runDrainPass({
+						db,
+						sessionId,
+						appendCompaction: mock(() => "compact-1"),
+						contextPercent: 90,
+					});
+				}
+				const gateLines = logCalls.mock.calls
+					.filter(
+						([id, message]) =>
+							id === sessionId && String(message).includes("gate=drain-threw"),
+					)
+					.map(([, message]) => String(message));
+				expect(gateLines).toHaveLength(1);
+				expect(gateLines[0]).toMatch(/errorName="[^"]+"/);
+				expect(gateLines[0]).toContain('errorCode="SQLITE_CONSTRAINT_TRIGGER"');
+				expect(gateLines.join("\n")).not.toContain(
+					"private drain failure message",
+				);
+				expect(gateLines.join("\n")).not.toContain("private summary text");
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).not.toBeNull();
 			} finally {
 				clearContextHandlerSession(sessionId);
 				logCalls.mockRestore();
