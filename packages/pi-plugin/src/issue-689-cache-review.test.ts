@@ -258,6 +258,7 @@ review(
 				stdout: "pipe",
 				stderr: "pipe",
 				env: { ...process.env },
+				windowsHide: true,
 			},
 		);
 		try {

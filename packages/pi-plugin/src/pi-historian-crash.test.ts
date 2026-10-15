@@ -1,6 +1,5 @@
 import { expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
 	acquireCompartmentLease,
@@ -13,10 +12,11 @@ import {
 	getPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 
 for (const phase of ["provider", "before-commit", "after-commit"]) {
 	it(`headless historian SIGKILL at ${phase} leaves atomic publication and a reclaimable lease`, async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-historian-crash-"));
+		const { dir: root, cleanup } = createTestTempDir("pi-historian-crash-");
 		const path = join(root, "context.db");
 		const env: Record<string, string> = {
 			PATH: process.env.PATH ?? "",
@@ -44,7 +44,7 @@ for (const phase of ["provider", "before-commit", "after-commit"]) {
 				path,
 				phase,
 			],
-			{ env, stdout: "pipe", stderr: "pipe" },
+			{ env, stdout: "pipe", stderr: "pipe", windowsHide: true },
 		);
 		const stderr = new Response(child.stderr).text();
 		const reader = child.stdout.getReader();
@@ -99,7 +99,7 @@ for (const phase of ["provider", "before-commit", "after-commit"]) {
 			child.kill("SIGKILL");
 			await child.exited;
 			db?.close();
-			rmSync(root, { recursive: true, force: true });
+			cleanup();
 		}
 	}, 20000);
 }

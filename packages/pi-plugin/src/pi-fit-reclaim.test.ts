@@ -162,6 +162,7 @@ it("upper-only claim has one winner across simultaneous processes", async () => 
 			stdout: "pipe",
 			stderr: "pipe",
 			env: { ...process.env, OPENCODE_DB: undefined },
+			windowsHide: true,
 		}),
 	);
 	try {

@@ -1,20 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { acquireCompartmentLease } from "@magic-context/core/features/magic-context/compartment-lease";
-import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { insertTag } from "@magic-context/core/features/magic-context/storage";
-import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
-import { setHarness } from "@magic-context/core/shared/harness";
-import { Database } from "@magic-context/core/shared/sqlite";
 import { runPiHistorian } from "../pi-historian-runner";
+import { createTestDb } from "../test-utils.test";
 
-setHarness("pi");
 const [path, phase] = process.argv.slice(2);
 if (!path || !process.env.HOME)
 	throw new Error("missing isolated fixture paths");
-const db = new Database(path);
-initializeDatabase(db);
-runMigrations(db);
+const db = createTestDb(path);
 const sessionId = "crash-historian";
 const directory = join(process.env.HOME, "project");
 mkdirSync(directory, { recursive: true });
