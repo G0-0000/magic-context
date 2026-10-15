@@ -81,13 +81,49 @@ export function piPreparedStructure(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
 ): PiPreparedStructure | undefined {
+	return buildPiPreparedStructure(messages, model);
+}
+
+/** Prepare the returned OMP messages and their dispatch receipt in one walk. */
+export function preparePiDispatch<T>(
+	messages: T[],
+	model: PiChatHistoryModel | undefined,
+	omp: boolean,
+): { messages: T[]; structure: PiPreparedStructure | undefined } {
+	let output = messages;
+	const structure = buildPiPreparedStructure(
+		messages,
+		model,
+		omp
+			? (index, source) => {
+					// OMP replays a user compaction carrier instead of its readable summary.
+					// Assistant payloads may be the only copy of encrypted reasoning.
+					if (object(source.providerPayload)?.type !== "openaiResponsesHistory")
+						return;
+					if (output === messages) output = messages.slice();
+					const { providerPayload: _payload, ...copy } = source;
+					output[index] = copy as T;
+				}
+			: undefined,
+	);
+	return { messages: output, structure };
+}
+
+function buildPiPreparedStructure(
+	messages: readonly unknown[],
+	model?: PiChatHistoryModel,
+	prepareUser?: (index: number, source: Record<string, unknown>) => void,
+): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];
 	const toolNames = new Map<string, string>();
 	const byIndex = new Map<number, MessageStructure>();
+	let valid = true;
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		const source = object(message);
+		if (source?.role === "user" || source?.role === "compactionSummary")
+			prepareUser?.(index, source);
 		// History injection and the provider renderer both put instructions before
 		// conversation turns. Ignore only that leading system/developer prefix on
 		// both sides; a system message inside the conversation remains invalid.
@@ -103,7 +139,11 @@ export function piPreparedStructure(
 		)
 			continue;
 		const row = messageStructure(message);
-		if (!row) return undefined;
+		if (!row) {
+			if (!prepareUser) return undefined;
+			valid = false;
+			continue;
+		}
 		row.calls.forEach((id, index) => {
 			toolNames.set(id, row.callNames?.[index] ?? "");
 		});
@@ -112,6 +152,7 @@ export function piPreparedStructure(
 		rows.push(row);
 		byIndex.set(index, row);
 	}
+	if (!valid) return undefined;
 	const responsesApi = [
 		"openai-responses",
 		"azure-openai-responses",

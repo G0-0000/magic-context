@@ -31,8 +31,8 @@ import {
 } from "./pi-dispatch-identity";
 import {
 	type PiPreparedStructure,
-	piPreparedStructure,
 	piPreparedStructureMismatch,
+	preparePiDispatch,
 } from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 
@@ -728,11 +728,15 @@ export function registerPiGuardedContext(
 				),
 			);
 			if (result?.messages) {
-				active.managedSignature = piManagedSignature(result.messages);
-				active.preparedStructure = piPreparedStructure(
+				const prepared = preparePiDispatch(
 					result.messages,
 					fenceEnabled ? ctx.model : undefined,
+					fenceEnabled,
 				);
+				if (prepared.messages !== result.messages)
+					result.messages = prepared.messages;
+				active.managedSignature = piManagedSignature(result.messages);
+				active.preparedStructure = prepared.structure;
 				budget.completed = true;
 				active.ready = true;
 				// Oh My Pi persists the new prompt concurrently with preparation; its

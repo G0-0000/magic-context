@@ -44,7 +44,7 @@ const sandbox = {
 	log() {},
 	Text: class {},
 	piManagedSignature: () => "synthetic-signature",
-	piPreparedStructure: () => ({}),
+	preparePiDispatch: (messages) => ({ messages, structure: {} }),
 	lkgContentFields(message) {
 		const fields = message.content.map((part) => part.text);
 		weakSnapshots.push(new WeakRef(fields));
