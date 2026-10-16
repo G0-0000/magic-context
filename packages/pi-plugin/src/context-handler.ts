@@ -10112,11 +10112,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	// 4c. Processed-image replay/detection. Pi carries base64 image data in
-	// user and tool-result parts. Frozen ids replay on every Anthropic pass;
-	// newly aged ids are detected only while this pass is already busting and
-	// are persisted before their bytes are replaced with empty text sentinels.
-	if (args.canUseEmptySentinels) {
+	// 4c. Replace answered images at/below the dropped-tag watermark with
+	// non-empty text markers. Discover new message ids only when this pass is
+	// already allowed to rewrite the prefix, and persist them before editing.
+	// Replay saved ids on every provider and pass so removed bytes cannot return.
+	{
 		const tProcessedImages = performance.now();
 		try {
 			const imageResult = stripPiProcessedImages({
