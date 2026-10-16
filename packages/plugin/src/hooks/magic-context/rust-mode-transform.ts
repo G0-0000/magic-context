@@ -669,6 +669,8 @@ function rustCaptureDigests(
     return { ...incremental, inputContentSignatures };
 }
 
+let contentSnapshotFieldVisitObserverForTests: (() => void) | undefined;
+
 function messageMatchesContentSnapshot(
     message: MessageLike,
     snapshot: Pick<MessageContentSnapshot, "fields">,
@@ -678,11 +680,13 @@ function messageMatchesContentSnapshot(
     // OpenCode can add an empty user diff summary after the message was served.
     const matched = visitMessageContentFields(contentSnapshotValue(message), {
         field(value) {
+            contentSnapshotFieldVisitObserverForTests?.();
             if (!Object.is(value, snapshot.fields[fieldIndex])) return false;
             fieldIndex += 1;
             return true;
         },
         beginObject() {
+            contentSnapshotFieldVisitObserverForTests?.();
             const expectedCount = snapshot.fields[fieldIndex];
             if (typeof expectedCount !== "number") return undefined;
             fieldIndex += 1;
@@ -5409,6 +5413,9 @@ export async function runRustModeTransform(
 export const __rustModeTransformTest = {
     applyNativeMessagesVerbatim,
     contentSnapshotsFor,
+    setContentSnapshotFieldVisitObserverForTests(observer: (() => void) | null): void {
+        contentSnapshotFieldVisitObserverForTests = observer ?? undefined;
+    },
     rustCaptureDigests,
     snapshotTags: {
         array: LKG_SNAPSHOT_ARRAY,

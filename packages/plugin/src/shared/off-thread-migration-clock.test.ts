@@ -97,14 +97,24 @@ describe("boot deadline that excludes off-thread migration time", () => {
     });
 
     test("time between migrations still counts", async () => {
+        const clock = createFakeClock();
+        __setOffThreadMigrationClockForTests(clock);
         const deadline = startBootDeadline(60);
-        await sleep(40);
+        clock.advanceBy(40);
         const end = beginOffThreadMigration();
-        await sleep(80);
+        clock.advanceBy(80);
+        expect(await isSettled(deadline.expired)).toBe(false);
+
+        const nextTimer = clock.waitForTimerCount(1).then(() => "scheduled" as const);
         end();
-        const endedAt = performance.now();
+        expect(
+            await Promise.race([nextTimer, deadline.expired.then(() => "expired" as const)]),
+        ).toBe("scheduled");
+
+        clock.advanceBy(19);
+        expect(await isSettled(deadline.expired)).toBe(false);
+        clock.advanceBy(1);
         await deadline.expired;
-        expect(performance.now() - endedAt).toBeLessThan(45);
     });
 
     test("a cancelled deadline never expires", async () => {
