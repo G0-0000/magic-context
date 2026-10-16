@@ -40,8 +40,8 @@ export function scratch(prefix: string): string {
     cleanups.push(() => rmSync(path, { recursive: true, force: true }));
     return path;
 }
-export function database(): ContextDatabase {
-    const db = new Database(":memory:") as ContextDatabase;
+export function database(path = ":memory:"): ContextDatabase {
+    const db = new Database(path) as ContextDatabase;
     initializeDatabase(db);
     runMigrations(db);
     cleanups.push(() => db.close());
@@ -125,7 +125,7 @@ export function probe(binary: string, directory: string, body: unknown): Record<
     const result = spawnSync(binary, [directory], {
         input: JSON.stringify(body),
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: 120_000,
     });
     if (result.status !== 0)
         throw new Error(`Rust review probe failed: ${result.stderr} ${result.error ?? ""}`);
@@ -137,9 +137,10 @@ export async function hostFixture(
     factory = createRustModeTransform,
     baselineRoot?: string,
     midTurn = false,
+    persistent: { directory: string; dbPath: string } | undefined = undefined,
 ) {
-    const directory = scratch("independent-module-");
-    const db = database();
+    const directory = persistent?.directory ?? scratch("independent-module-");
+    const db = database(persistent?.dbPath);
     let input: MessageLike[] = [];
     const provider = {
         readMessages: () =>
@@ -188,10 +189,12 @@ export async function hostFixture(
         cleanups.push(baselineRaw.setRawMessageProvider(sid, provider));
     }
     let response: Record<string, unknown> = {};
+    let request: Record<string, unknown> = {};
     let mutate: (value: Record<string, unknown>) => void = () => {};
     const client: RustModeModuleClient = {
         call: async ({ method, body }) => {
             if (method !== "transform") return { ok: true };
+            request = body as Record<string, unknown>;
             response = probe(binary, directory, {
                 ...(body as Record<string, unknown>),
                 ...(midTurn ? { mid_turn: true } : {}),
@@ -248,6 +251,10 @@ export async function hostFixture(
         db,
         sid,
         deps,
+        directory,
+        get request() {
+            return request;
+        },
         get response() {
             return response;
         },

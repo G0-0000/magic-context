@@ -1025,8 +1025,9 @@ jobs:
           set -euo pipefail
           target="$GITHUB_WORKSPACE/packages/e2e-tests/.cache/rust-e2e-cargo-target"
           mkdir -p "$target/prebuilt"
-          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module
+          CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --bin ck-mc --example transform_replay
           cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e"
+          cp "$target/release/examples/transform_replay" "$target/prebuilt/rust-raw-replay-probe"
           CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --features drive-fault
           cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
           (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
@@ -1098,11 +1099,79 @@ jobs:
           MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
         run: scripts/run-rust-hermetic-e2e.sh
 
+  rust-raw-replay-review:
+    name: Rust (raw replay review)
+    runs-on: ubuntu-latest
+    needs: [e2e-rust-hermetic-build]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+      - uses: ./.github/actions/wait-ci-artifact
+        id: binaries
+        with:
+          artifact: rust-hermetic-binaries-${{ github.sha }}
+          producer: E2E (Rust hermetic build)
+          timeout-minutes: "120"
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.binaries.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/raw-replay-download
+      - name: Restore staged native driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/raw-replay-download" && sha256sum --check rust-hermetic-binaries.sha256)
+          mkdir -p "$RUNNER_TEMP/raw-replay-artifact"
+          tar -xzf "$RUNNER_TEMP/raw-replay-download/rust-hermetic-binaries.tar.gz" -C "$RUNNER_TEMP/raw-replay-artifact"
+          test "$(cat "$RUNNER_TEMP/raw-replay-artifact/commit.txt")" = "$GITHUB_SHA"
+          test -x "$RUNNER_TEMP/raw-replay-artifact/rust-raw-replay-probe"
+      - name: Fetch pinned master baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_commit="$(tr -d '\r\n' < scripts/rust-raw-replay-baseline.commit)"
+          if [[ ! "$baseline_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid pinned Rust raw replay baseline commit: $baseline_commit" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$baseline_commit"
+          git cat-file -e "${baseline_commit}^{commit}"
+          baseline_archive="$RUNNER_TEMP/rust-raw-replay-baseline.tar"
+          git archive --format=tar "$baseline_commit" \
+            crates/mc-module/src packages/plugin/src packages/plugin/package.json \
+            packages/retina-local-fs/src packages/retina-local-fs/package.json package.json \
+            > "$baseline_archive"
+          test -s "$baseline_archive"
+          echo "Pinned Rust raw replay baseline: $baseline_commit"
+      - name: Run staged raw replay witnesses
+        env:
+          MC_RAW_REPLAY_REQUIRED: "1"
+          MC_RAW_REPLAY_BASELINE_RELEASE: "1"
+          MC_REVIEW_ASSERT_LIVENESS: "1"
+          MC_RAW_REPLAY_PROBE: ${{ runner.temp }}/raw-replay-artifact/rust-raw-replay-probe
+          MC_RAW_REPLAY_BASELINE_ARCHIVE: ${{ runner.temp }}/rust-raw-replay-baseline.tar
+        run: |
+          bash scripts/test-rust-raw-replay.sh \
+            packages/plugin/review-tests/rust-cache-review.test.ts \
+            packages/plugin/review-tests/rust-cache-r2.test.ts \
+            packages/plugin/review-tests/rust-cache-restart.test.ts \
+            -t 'round-two|provider-invisible|JSON number|sorted digest|SIGKILL|release recovery census|raw ctx_reduce|durable replay cost|unchanged ID-less native|no-freeze SQL|seed (a19f37|badc0de|c001d00d|92e41b|67d5a3)'
+
   ci-summary:
     name: CI (required)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic]
+    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic, rust-raw-replay-review]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
