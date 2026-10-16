@@ -85,9 +85,9 @@ async function readImageSession(options: OpenCode2SpawnOptions, imageData = PNG_
 	});
 	mock.setDefault({ text: "ok", usage: { input_tokens: 100, output_tokens: 20 } });
 	/** Run one user turn; returns the session model's requests that carry its text. */
-	const turn = async (text: string): Promise<Body[]> => {
+	const turn = async (text: string, files?: Array<{ uri: string; name: string }>): Promise<Body[]> => {
 		const before = mock.requests().length;
-		await client.session.prompt({ sessionID: session.id, text });
+		await client.session.prompt({ sessionID: session.id, text, ...(files ? { files } : {}) });
 		await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60_000) });
 		const listed = (await client.message.list({ sessionID: session.id })) as { data: Row[] };
 		expect({ text, outcome: listed.data.find((row) => row.type === "idle")?.outcome }).toEqual({
@@ -288,4 +288,29 @@ test("issue 699 OpenCode 2 strips aged read images on a rewrite and replays the 
         } finally { mc.close(); }
     } catch (error) { console.error(run.host().stderr().slice(-4000)); throw error; }
     finally { await run.host().stop(); }
+}, 240_000);
+
+
+test("issue 699 OpenCode 2 native user assets strip to text without invalidating host schemas", async () => {
+    const run = await readImageSession({});
+    const data = processedImagePng().toString("base64");
+    try {
+        const first = (await run.turn("NATIVE-USER-IMAGE inspect this", [{ uri: `data:image/png;base64,${data}`, name: "pixel.png" }])).at(-1)!;
+        expect(JSON.stringify(first)).toContain(data);
+        await run.turn("NATIVE-USER-AGE");
+        const mc = new Database(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        try {
+            mc.exec("PRAGMA busy_timeout = 5000");
+            const tag = mc.prepare("SELECT MAX(tag_number) AS n FROM tags WHERE session_id = ? AND type = 'message'").get(run.session.id) as { n: number };
+            expect(tag.n).toBeGreaterThan(0);
+            mc.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?").run(run.session.id, tag.n);
+            mc.prepare("UPDATE session_meta SET cached_m0_system_hash = 'stale' WHERE session_id = ?").run(run.session.id);
+            const rewritten = (await run.turn("NATIVE-USER-REWRITE")).at(-1)!;
+            expect(JSON.stringify(rewritten)).not.toContain(data);
+            expect(JSON.stringify(rewritten)).toContain("[image stripped]");
+            const replay = (await run.turn("NATIVE-USER-DEFER")).at(-1)!;
+            expect(JSON.stringify(replay)).not.toContain(data);
+            expect(replay.input!.slice(0, rewritten.input!.length)).toEqual(rewritten.input!);
+        } finally { mc.close(); }
+    } finally { await run.host().stop(); }
 }, 240_000);

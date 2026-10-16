@@ -1078,7 +1078,7 @@ export function stripProcessedImages(
                     : msg.info.role === "user"
                       ? [part]
                       : [];
-            if (images.some(isProcessedImageFile)) {
+            if (images.some(isProcessedImagePart)) {
                 planned.push({
                     message: msg,
                     partIndex: j,
@@ -1118,7 +1118,7 @@ export function stripProcessedImages(
             Array.isArray(original.state.attachments)
         ) {
             const attachments = original.state.attachments;
-            const count = attachments.filter(isProcessedImageFile).length;
+            const count = attachments.filter(isProcessedImagePart).length;
             const output = typeof original.state.output === "string" ? original.state.output : "";
             // Attachments only admit files. Put non-empty replacement text in the
             // tool's output, retaining non-image files and the call/result pairing.
@@ -1129,7 +1129,7 @@ export function stripProcessedImages(
                     output: [output, ...Array<string>(count).fill(marker)]
                         .filter(Boolean)
                         .join("\n"),
-                    attachments: attachments.filter((part) => !isProcessedImageFile(part)),
+                    attachments: attachments.filter((part) => !isProcessedImagePart(part)),
                 },
             };
             stripped += count;
@@ -1142,7 +1142,21 @@ export function stripProcessedImages(
     return { stripped, newlyStrippedIds };
 }
 
-function isProcessedImageFile(part: unknown): boolean {
+function isProcessedImagePart(part: unknown): boolean {
+    // The OpenCode 2 host validates media using its own Media.Asset class.
+    // Inspect inline bytes without cloning: unchanged assets must retain their
+    // class identity, while stripped parts become ordinary text content.
+    if (isRecord(part) && part.type === "media" && isRecord(part.media)) {
+        const { source, mediaType } = part.media;
+        return (
+            typeof mediaType === "string" &&
+            mediaType.startsWith("image/") &&
+            isRecord(source) &&
+            source.type === "base64" &&
+            typeof source.data === "string" &&
+            source.data.length + `data:${mediaType};base64,`.length > 200
+        );
+    }
     return (
         isRecord(part) &&
         part.type === "file" &&

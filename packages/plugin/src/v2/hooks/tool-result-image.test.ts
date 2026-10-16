@@ -133,7 +133,9 @@ describe("a tool result carrying an image, through the tagging pass", () => {
         });
         expect((result?.result as { value: unknown[] }).value[1]).toBe(fileEntry);
         for (const message of draft.messages)
-            expect(() => Message.make(message as unknown as Parameters<typeof Message.make>[0])).not.toThrow();
+            expect(() =>
+                Message.make(message as unknown as Parameters<typeof Message.make>[0]),
+            ).not.toThrow();
     });
 
     it("OpenCode 1: tags the text output, leaves the attachment untouched, and bills it by pixels", () => {
@@ -231,5 +233,7 @@ it("issue 699 OpenCode 2 commits processed-image strips and replays the same non
     });
     expect(JSON.stringify(serve(false))).toBe(JSON.stringify(rewritten));
     for (const msg of rewritten)
-        expect(() => Message.make(msg as unknown as Parameters<typeof Message.make>[0])).not.toThrow();
+        expect(() =>
+            Message.make(msg as unknown as Parameters<typeof Message.make>[0]),
+        ).not.toThrow();
 });
