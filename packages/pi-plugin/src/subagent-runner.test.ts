@@ -3773,6 +3773,60 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(child.killSignals).toEqual(["SIGTERM"]);
 	});
 
+	it("preserves mapping decisions from intermediate turns on abort", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const controller = new AbortController();
+		const resultPromise = runner.run({
+			...baseOptions,
+			agent: "dreamer-memory-mapper",
+			signal: controller.signal,
+		});
+		const message = {
+			role: "assistant",
+			stopReason: "toolUse",
+			content: [
+				{
+					type: "text",
+					text: '<mappings><memory id="1" files="src/fact.ts"/>',
+				},
+				{
+					type: "toolCall",
+					id: "read-1",
+					name: "read",
+					arguments: { path: "src/next.ts" },
+				},
+			],
+		};
+		child.writeStdoutLine({ type: "message_end", message });
+		controller.abort();
+		const result = await resultPromise;
+		expect(result.ok).toBe(false);
+		expect(result.meta?.mappingMessages).toEqual([message]);
+	});
+
+	it("preserves the mapping emitted on the token-stop turn", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run({
+			...baseOptions,
+			agent: "dreamer-memory-mapper",
+			tokenBudget: 10,
+		});
+		const message = {
+			role: "assistant",
+			stopReason: "toolUse",
+			usage: { input: 100 },
+			content: [
+				{ type: "text", text: '<mappings><memory id="1" independent="true"/>' },
+			],
+		};
+		child.writeStdoutLine({ type: "message_end", message });
+		const result = await resultPromise;
+		expect(!result.ok && result.reason).toBe("token_budget");
+		expect(result.meta?.mappingMessages).toEqual([message]);
+	});
+
 	it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", async () => {
 		const child = createMockChild();
 
