@@ -5994,9 +5994,8 @@ fn apply_once(
         plan,
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     ) && !marker_hard_serves_frozen_prefix;
-    // The reductions-only child branch preserves inherited history and accepts
-    // reduction units only. Image/system/age-reasoning strip units stay primary-only;
-    // an execute ride must not silently widen that separate replay contract.
+    // Only primary sessions rebuild M0/M1 and remove old system or reasoning content.
+    // Child image removal uses a narrower permission below so it can share tool cleanup.
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
     if replay_legacy_treatment && is_provider_prefix_mutation_pass {
         return Err(TransformError::SyntheticTreatmentBust);
@@ -6115,6 +6114,16 @@ fn apply_once(
     let unit_mint_started_at = Instant::now();
     let new_strip_units = if is_bust_pass {
         planned_strip_units
+    } else if req.is_subagent && subagent_execute_permitted && is_provider_prefix_mutation_pass {
+        planned_strip_units
+            .into_iter()
+            .filter(|unit| {
+                matches!(
+                    unit.kind.as_str(),
+                    "image" | "strip_processed_image" | "strip_processed_tool_image"
+                )
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -6231,8 +6240,9 @@ fn apply_once(
                 None,
                 suppress_bootstrap_reduction_tag_overlay,
             );
-            // A subagent's only strip units: a signed-thinking reset's removals, which its
-            // output replays on every later pass like a primary's.
+            // The child's scheduler-authorized cleanup persists image and tool reductions
+            // together before returning the modified request.
+            rendered_units.extend(new_strip_units.iter().cloned());
             rendered_units.extend(signed_thinking_reset_units.iter().cloned());
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
@@ -14646,7 +14656,7 @@ fn new_frozen_strip_units(
                     if message.ck.role == "user" && image_block_is_large(block) {
                         ("processed_image", image_marker)
                     } else if tool_image_block_is_large(block) {
-                    // An image-only tool result must not become empty when its media is removed.
+                        // An image-only tool result must not become empty when its media is removed.
                         ("processed_tool_image", "[image stripped]")
                     } else {
                         continue;

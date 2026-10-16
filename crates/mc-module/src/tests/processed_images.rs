@@ -326,3 +326,118 @@ fn processed_images_nested_tool_decisions_persist_and_replay_on_defer() {
         serde_json::to_vec(replay.messages()).unwrap()
     );
 }
+
+fn child_processed_image_request() -> TransformRequest {
+    let mut request = with_usage(
+        req(
+            "child-image",
+            "cfg",
+            vec![
+                processed_image_message("image", 1),
+                wire_item("assistant", "answer", 2, &["processed"]),
+                item("dropper", 3, "spent"),
+            ],
+        ),
+        20,
+        100,
+    );
+    request.is_subagent = true;
+    request.provider_id = Some("openai".into());
+    request
+}
+
+fn seed_child_image_watermark(s: &McStore, request: &TransformRequest) {
+    s.seed_tags_for_test(
+        &request.session_id,
+        &[mc_store::TagMintInput {
+            block_id: "dropper#0".into(),
+            kind: "message".into(),
+            token_count: 1,
+            source_bytes: b"spent".to_vec(),
+        }],
+        0,
+    )
+    .unwrap();
+    let mut loaded = s.load(&request.session_id).unwrap();
+    loaded
+        .core
+        .frozen_units
+        .push(red_unit("dropper#0", "drop", ""));
+    s.commit(
+        &request.session_id,
+        loaded.row_version,
+        &loaded.core,
+        &loaded.meta,
+    )
+    .unwrap();
+}
+
+#[test]
+fn processed_images_child_discovers_only_on_admitted_execute_then_replays() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let mut request = child_processed_image_request();
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    seed_child_image_watermark(&s, &request);
+    let defer = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(defer.action, "SOFT+");
+    assert!(defer
+        .messages()
+        .iter()
+        .any(|m| m.content.iter().any(image_block_is_large)));
+    assert!(!s
+        .load(&request.session_id)
+        .unwrap()
+        .core
+        .frozen_units
+        .iter()
+        .any(|u| u.key == "strip:processed_image:image"));
+    request = with_usage(request, 70, 100);
+    let execute = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(execute.scheduler_decision.as_deref(), Some("execute"));
+    assert_eq!(execute.action, "SOFT");
+    assert_eq!(tail_bytes(&execute, "image"), "[image stripped]");
+    assert!(s
+        .load(&request.session_id)
+        .unwrap()
+        .core
+        .frozen_units
+        .iter()
+        .any(|u| u.key == "strip:processed_image:image"));
+    request = with_usage(request, 20, 100);
+    let replay = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(replay.action, "SOFT+");
+    assert_eq!(
+        serde_json::to_vec(execute.messages()).unwrap(),
+        serde_json::to_vec(replay.messages()).unwrap()
+    );
+}
+
+#[test]
+fn processed_images_child_replays_inherited_frozen_images_without_execute_or_watermark() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let request = child_processed_image_request();
+    let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+    transform(&s, &request, &ctx).unwrap();
+    let mut loaded = s.load(&request.session_id).unwrap();
+    loaded
+        .core
+        .frozen_units
+        .push(strip_unit("processed_image", "image", ""));
+    s.commit(
+        &request.session_id,
+        loaded.row_version,
+        &loaded.core,
+        &loaded.meta,
+    )
+    .unwrap();
+    let inherited = transform(&s, &request, &ctx).unwrap();
+    assert_eq!(inherited.action, "SOFT+");
+    assert_eq!(tail_bytes(&inherited, "image"), "");
+    assert_eq!(
+        serde_json::to_vec(inherited.messages()).unwrap(),
+        serde_json::to_vec(transform(&s, &request, &ctx).unwrap().messages()).unwrap()
+    );
+}
