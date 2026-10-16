@@ -265,6 +265,7 @@ import {
 } from "@magic-context/core/shared/sqlite";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
+	buildPersistedDropTargets,
 	TEXT_TAG_IDENTITY_MARKER,
 	tagTranscript,
 } from "@magic-context/core/shared/tag-transcript";
@@ -4243,6 +4244,7 @@ export function registerPiContextHandler(
 		let sessionIdForError: string | undefined;
 		let lkgPassSnapshot: PiLkgPassSnapshot | undefined;
 		let lkgCompactionOff = baseOptions.compactionOff === true;
+		let lkgOptions = baseOptions;
 		let lkgEmergencyRecoveryArmed = false;
 		const captureServedEvidence = (
 			...args: Parameters<typeof capturePiServedArray>
@@ -4293,6 +4295,7 @@ export function registerPiContextHandler(
 			// resolver is wired (tests) or the resolver returns nothing.
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
+			lkgOptions = options;
 			const deliveryModelKey = resolvePiContextModelKey(ctx);
 			if (!budget.sideTurn && deliveryModelKey) {
 				const parentId = ctx.sessionManager.getLeafId?.();
@@ -6818,6 +6821,50 @@ export function registerPiContextHandler(
 								(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
 							);
 					if (replay.ok) {
+						// A later write can fail after earlier drops committed. Render those
+						// decisions on the saved request now, not for the first time on defer.
+						const entryIds = lkgCoordinator.recoveryEntryIds(lkgPassSnapshot);
+						const recoverySessionId = sessionIdForError;
+						const recoveryTranscript = createPiTranscript(
+							replay.messages,
+							sessionIdForError,
+							entryIds.map((id) => id ?? undefined),
+							{
+								preserveReasoningToolArcs:
+									ctx.model?.api !== "openai-codex-responses" &&
+									ctx.model?.api !== "openai-responses",
+								authorizeToolRemoval: (callId) =>
+									authorizePiToolRemoval({
+										db: lkgOptions.db,
+										sessionId: recoverySessionId,
+										callId,
+										saved: getNativeReplayState(
+											lkgOptions.db,
+											recoverySessionId,
+										).toolInputs,
+										canApply: false,
+									}),
+							},
+						);
+						const drops = getTagsBySession(
+							lkgOptions.db,
+							sessionIdForError,
+						).filter((tag) => tag.status === "dropped");
+						const changed = applyFlushedStatuses(
+							sessionIdForError,
+							lkgOptions.db,
+							buildPersistedDropTargets(recoveryTranscript, drops),
+							drops,
+						);
+						const working = recoveryTranscript.getWorkingMessages();
+						recoveryTranscript.commit();
+						const idsByOutput = new Map<unknown, string | null>(
+							working.map((message, index) => [message, entryIds[index]]),
+						);
+						recoveryTranscript.finalizeToolRemovals();
+						const recoveryIds = replay.messages.map(
+							(message) => idsByOutput.get(message) ?? null,
+						);
 						// A valid stored prefix does not bound the newly appended raw tail.
 						assertPiRawFallbackFits(
 							replay.messages,
@@ -6834,7 +6881,7 @@ export function registerPiContextHandler(
 								sessionDecisionCalibration(baseOptions.db, sessionIdForError),
 								toolWireSchema,
 							),
-							replay.measuredPrefix,
+							changed ? undefined : replay.measuredPrefix,
 						);
 						const reason = piStorageErrorReason(err);
 						logPiLkgRecovery(
@@ -6842,7 +6889,11 @@ export function registerPiContextHandler(
 							`${failureLabel} ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
 						);
 						budget.assertOutcome();
-						lkgCoordinator.noteRecovery(lkgPassSnapshot, replay.messages);
+						lkgCoordinator.noteRecovery(
+							lkgPassSnapshot,
+							replay.messages,
+							recoveryIds,
+						);
 						if (!budget.sideTurn)
 							captureServedEvidence(sessionIdForError, replay.messages, {
 								recoveryWithoutTagState: true,
@@ -9746,7 +9797,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						? protectionWindowForPass.cutoff
 						: undefined,
 					routine: routineCleanupApplied,
-					staleReduceStripEnabled: args.canUseEmptySentinels,
+					staleReduceStripEnabled: true,
 					onStaleReduceEdit: recordStaleReduceEdit,
 					// Tiered emergency drop fires only at the derived force band AND when the
 					// ceiling is known. forceMaterialization already incorporates
@@ -9783,7 +9834,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							? protectionWindowForPass.cutoff
 							: undefined,
 						routine: true,
-						staleReduceStripEnabled: args.canUseEmptySentinels,
+						staleReduceStripEnabled: true,
 						onStaleReduceEdit: recordStaleReduceEdit,
 						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
 					},
@@ -10119,13 +10170,80 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	{
 		const tProcessedImages = performance.now();
 		try {
+			const imagePositionTags = new Map<string, number>();
+			const noteImagePosition = (id: string | undefined, tag: number) => {
+				if (id && tag > (imagePositionTags.get(id) ?? 0))
+					imagePositionTags.set(id, tag);
+			};
+			for (const [tagNumber, target] of targets) {
+				for (const { message, part } of target.mutationParts ?? []) {
+					if (
+						typeof part === "object" &&
+						part !== null &&
+						"kind" in part &&
+						part.kind === "text"
+					)
+						noteImagePosition(message.info.id, tagNumber);
+				}
+			}
+			// Transcript user rows can contain several results and a later user's
+			// text. Associate tool tags with their native occurrences, never that row.
+			const imageToolTags = new Map(
+				allTagsForPass
+					.filter((tag) => tag.type === "tool")
+					.map((tag) => [
+						`${tag.toolOwnerMessageId ?? ""}\0${tag.messageId}`,
+						tag.tagNumber,
+					]),
+			);
+			const imageToolOwners = new Map<string, string>();
+			for (let index = 0; index < workingMessages.length; index++) {
+				const message = workingMessages[index];
+				const id = stableIdResolver(message, index);
+				if (message.role === "assistant" && Array.isArray(message.content)) {
+					for (const part of message.content) {
+						if (part.type !== "toolCall") continue;
+						imageToolOwners.set(part.id, id ?? "");
+						noteImagePosition(
+							id,
+							imageToolTags.get(`${id ?? ""}\0${part.id}`) ?? 0,
+						);
+					}
+				} else if (message.role === "toolResult") {
+					noteImagePosition(
+						id,
+						imageToolTags.get(
+							`${imageToolOwners.get(message.toolCallId) ?? ""}\0${message.toolCallId}`,
+						) ?? 0,
+					);
+				}
+			}
+			const protectedImageToolKeys = new Set(
+				activeTags
+					.filter(
+						(tag) =>
+							tag.type === "tool" && protectedToolTags.has(tag.tagNumber),
+					)
+					.map((tag) =>
+						tag.toolOwnerMessageId
+							? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
+							: tag.messageId,
+					),
+			);
 			const imageResult = stripPiProcessedImages({
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
 				detect: isCacheBustingPass && !protectedSignedPrefix,
 				watermark: getMaxDroppedTagNumber(args.db, args.sessionId),
-				messageIdToMaxTag,
+				messageIdToMaxTag: imagePositionTags,
+				protectedCutoff: usesTokenProtection
+					? protectionWindowForPass.cutoff
+					: protectedTagNumbersForPass.size > 0
+						? Math.min(...protectedTagNumbersForPass)
+						: null,
+				usagePercentage: args.contextUsage.percentage,
+				protectedToolKeys: protectedImageToolKeys,
 				stableId: stableIdResolver,
 				onFirstApplication: recordFirstApplicationAt,
 			});

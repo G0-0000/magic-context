@@ -84,20 +84,34 @@ export interface NewToolDropOutcome {
  */
 export function applyNewToolDrop(
     target: TagTarget | undefined,
-    options: { inWindow: boolean; keepSkeleton?: boolean },
+    options: {
+        inWindow: boolean;
+        keepSkeleton?: boolean;
+        /** Commit the complete durable decision before any transcript mutation. */
+        persist?: (mode: NewToolDropOutcome["mode"]) => void;
+    },
 ): NewToolDropOutcome {
-    if (!target) return { result: "absent", mode: "full" };
+    if (options.persist && (target?.canDrop?.() === false || target?.prepareDrop?.() === false)) {
+        return { result: "incomplete", mode: "full" };
+    }
+    if (!target) {
+        options.persist?.("full");
+        return { result: "absent", mode: "full" };
+    }
     if (
         (options.inWindow && hasSmallToolInput(target)) ||
         options.keepSkeleton === true ||
-        target.cannotRemove?.() === true
+        target.cannotRemove?.() === true ||
+        target.wouldStrandConversationEnd?.() === true
     ) {
         const strip = target.hasAttachments?.() === true;
+        options.persist?.(strip ? "skeleton_stripped" : "skeleton_real");
         return {
             result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
             mode: strip ? "skeleton_stripped" : "skeleton_real",
         };
     }
+    options.persist?.("full");
     const result = target.drop?.() ?? "absent";
     // A result at the end of the request cannot be removed without leaving a
     // dangling call. When drop() keeps that call as a skeleton, strip its media
@@ -106,6 +120,27 @@ export function applyNewToolDrop(
         return { result: target.skeletonStripped?.() ?? "absent", mode: "skeleton_stripped" };
     }
     return { result, mode: result === "truncated" ? "skeleton_real" : "full" };
+}
+
+/** Persist one drop atomically before applying it; earlier drops survive a later write failure. */
+export function applyPersistedToolDrop(
+    db: ContextDatabase,
+    sessionId: string,
+    tagNumber: number,
+    target: TagTarget | undefined,
+    options: { inWindow: boolean; keepSkeleton?: boolean },
+    afterWrite?: () => void,
+): NewToolDropOutcome {
+    return applyNewToolDrop(target, {
+        ...options,
+        persist: (mode) => {
+            db.transaction(() => {
+                updateTagDropMode(db, sessionId, tagNumber, mode);
+                updateTagStatus(db, sessionId, tagNumber, "dropped");
+                afterWrite?.();
+            }).immediate();
+        },
+    });
 }
 
 /** True when a drop of this call inside the newest-call window keeps real arguments. */
@@ -333,11 +368,11 @@ export function applyPendingOperations(
         diagnostics.reasons[reason] = (diagnostics.reasons[reason] ?? 0) + 1;
     };
     let admitted = false;
-    let startedAt = 0;
     try {
         db.transaction(() => {
             admitted = true;
-            startedAt = performance.now();
+        }).immediate();
+        {
             const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
             // Load only the rows this batch reads: the operations' own tags. A
             // full getTagsBySession load (every tag the session ever had, about
@@ -423,6 +458,20 @@ export function applyPendingOperations(
                     }
                 }
 
+                const persistDrop = (mode?: TagEntry["dropMode"]): void => {
+                    let startedAt = 0;
+                    try {
+                        db.transaction(() => {
+                            startedAt = performance.now();
+                            if (mode) updateTagDropMode(db, sessionId, pendingOp.tagId, mode);
+                            updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
+                            if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
+                        }).immediate();
+                    } finally {
+                        if (startedAt)
+                            logSlowWriteTransaction("apply_pending_operation", startedAt);
+                    }
+                };
                 let shouldPersistDrop = false;
                 if (isToolTag) {
                     if (editMarkerTagIds.has(pendingOp.tagId)) {
@@ -430,6 +479,15 @@ export function applyPendingOperations(
                         // marker even when the tag is inside the recent skeleton
                         // window. Freeze the chosen render mode for later replay.
                         const strip = target?.hasAttachments?.() === true;
+                        if (
+                            target?.canDrop?.() === false ||
+                            target?.prepareDrop?.() === false ||
+                            !target
+                        ) {
+                            reject("edit_marker_incomplete");
+                            continue;
+                        }
+                        persistDrop(strip ? "edit_marker_stripped" : "edit_marker");
                         const markResult =
                             (strip ? target?.editMarkerStripped?.() : target?.editMarker?.()) ??
                             "absent";
@@ -440,12 +498,6 @@ export function applyPendingOperations(
                         didMutateMessage = true;
                         operationMutated = true;
                         onTagReduced?.({ tagNumber: pendingOp.tagId, mode: "edit_marker" });
-                        updateTagDropMode(
-                            db,
-                            sessionId,
-                            pendingOp.tagId,
-                            strip ? "edit_marker_stripped" : "edit_marker",
-                        );
                         shouldPersistDrop = true;
                     } else {
                         // Real-or-absent: a small input inside the newest-call
@@ -455,6 +507,7 @@ export function applyPendingOperations(
                         // applied so replays match this pass.
                         const { result: dropResult, mode: appliedMode } = applyNewToolDrop(target, {
                             inWindow: skeletonWindow.has(pendingOp.tagId),
+                            persist: persistDrop,
                         });
                         if (
                             dropResult === "incomplete" ||
@@ -473,12 +526,12 @@ export function applyPendingOperations(
                         } else {
                             reject(`drop_${dropResult}`);
                         }
-                        updateTagDropMode(db, sessionId, pendingOp.tagId, appliedMode);
                         shouldPersistDrop = true;
                     }
                 } else if (target) {
                     const replacement = buildReplacementContent(pendingOp.tagId);
                     const priorContent = target.getContent?.();
+                    persistDrop();
                     const changed = target.setContent(replacement);
                     if (changed) {
                         didMutateMessage = true;
@@ -498,6 +551,7 @@ export function applyPendingOperations(
                     shouldPersistDrop = true;
                 } else if (!synthetic) {
                     reject("target_absent");
+                    persistDrop();
                     shouldPersistDrop = true;
                 }
 
@@ -505,12 +559,10 @@ export function applyPendingOperations(
                     reject("not_persisted");
                     continue;
                 }
-                updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
-                if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                 if (operationMutated) diagnostics.mutated += 1;
                 else diagnostics.persistedWithoutMutation += 1;
             }
-        }).immediate();
+        }
     } catch (error) {
         // Acquire the writer before reading tags or changing wire bytes. A WAL
         // read-to-write upgrade cannot wait under busy_timeout. Failed admission
@@ -525,10 +577,9 @@ export function applyPendingOperations(
             );
             return false;
         }
-        // Once mutation starts, rollback of SQLite alone cannot restore the wire.
+        // Earlier operations are already durable; stop before applying the failed
+        // operation or inspecting later operations. The next admitted pass retries.
         throw error;
-    } finally {
-        if (admitted) logSlowWriteTransaction("apply_pending_operations", startedAt);
     }
     if (diagnostics) {
         onBatchComplete?.(diagnostics);

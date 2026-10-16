@@ -342,6 +342,8 @@ export type TagTarget = {
     /** Non-mutating: would drop()/truncate() actually reclaim bytes? Tool
      * targets only; absent on message/file targets. */
     canDrop?: () => boolean;
+    /** Prepare durable host removal authorization; false defers the new drop without changing bytes. */
+    prepareDrop?: () => boolean;
     /** A full arc removal would strand or merge native reasoning, so keep a paired skeleton. */
     requiresToolArcSkeleton?: boolean;
     /** Non-mutating read of the tool invocation's input object (e.g. to read

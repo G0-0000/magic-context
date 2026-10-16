@@ -235,7 +235,12 @@ export function clearPiLkgSessionState(sessionId: string): void {
 
 export interface PiLkgCoordinator {
 	/** Retain the AgentMessage[] sent during recovery without reading tag assignments or allocating numbers. */
-	noteRecovery(snapshot: PiLkgPassSnapshot, messages: readonly unknown[]): void;
+	noteRecovery(
+		snapshot: PiLkgPassSnapshot,
+		messages: readonly unknown[],
+		entryIds?: readonly (string | null)[],
+	): void;
+	recoveryEntryIds(snapshot: PiLkgPassSnapshot): (string | null)[];
 	recoveryFor(snapshot: PiLkgPassSnapshot): {
 		prefix?: PiLkgRecoveryPrefix;
 		rebuildReason?: string;
@@ -684,11 +689,7 @@ export function createPiLkgCoordinator(
 			return { rebuildReason: "lkg_recovery_input_rebuild" };
 		return { prefix };
 	};
-	const noteRecovery: PiLkgCoordinator["noteRecovery"] = (
-		snapshot,
-		messages,
-	) => {
-		const state = stateFor(snapshot.sessionId);
+	const recoveryEntryIds: PiLkgCoordinator["recoveryEntryIds"] = (snapshot) => {
 		const anchor = snapshot.replayAnchorInputIndex;
 		const slot = getSlot(snapshot.sessionId);
 		if (
@@ -701,10 +702,30 @@ export function createPiLkgCoordinator(
 				"Cannot retain recovered output ownership",
 			);
 		const surviving = new Set(snapshot.inputs.map((input) => input.id));
-		const outputEntryIds = [
+		return [
 			...slot.piOutputEntryIds.filter((id) => id === null || surviving.has(id)),
 			...snapshot.inputs.slice(anchor + 1).map((input) => input.id),
 		];
+	};
+	const noteRecovery: PiLkgCoordinator["noteRecovery"] = (
+		snapshot,
+		messages,
+		entryIds,
+	) => {
+		const state = stateFor(snapshot.sessionId);
+		const slot = getSlot(snapshot.sessionId);
+		if (!slot)
+			throw new PiLkgUncapturable(
+				"lkg_miss",
+				"Cannot retain recovery without a saved request",
+			);
+		const anchor = snapshot.replayAnchorInputIndex;
+		if (anchor === null)
+			throw new PiLkgUncapturable(
+				"lkg_miss",
+				"Cannot retain recovery without an input anchor",
+			);
+		const outputEntryIds = entryIds ?? recoveryEntryIds(snapshot);
 		if (outputEntryIds.length !== messages.length)
 			throw new PiLkgUncapturable(
 				"lkg_output_mapping_unavailable",
@@ -1356,6 +1377,7 @@ export function createPiLkgCoordinator(
 
 	return {
 		noteRecovery,
+		recoveryEntryIds,
 		recoveryFor,
 		beginPass(args) {
 			return {
