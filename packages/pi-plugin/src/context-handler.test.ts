@@ -6373,6 +6373,59 @@ describe("registerPiContextHandler", () => {
 			await handler({ messages }, ctx as never);
 		}
 
+		it("retires a permanently synthetic kept boundary once without appending", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-marker-synthetic-kept";
+			const logger = await import("@magic-context/core/shared/logger");
+			const log = spyOn(logger, "sessionLog");
+			try {
+				seedCompartment(db, sessionId);
+				setPendingPiCompactionMarkerState(db, sessionId, {
+					firstKeptEntryId: null,
+					endMessageId: "entry-2",
+					ordinal: 2,
+					tokensBefore: 2151,
+					summary: "Mock history",
+					publishedAt: 1,
+				});
+				signalPiDeferredHistoryRefresh(sessionId);
+				signalPiPendingMaterialization(sessionId);
+				const appendCompaction = mock(() => "compact-1");
+				const args = {
+					db,
+					sessionId,
+					appendCompaction,
+					messages: [
+						userMessage("first", 1),
+						assistantMessage("second", 2),
+						toolResultMessage("call", "result", 3),
+						assistantMessage("fourth", 4),
+					],
+					entryIds: ["entry-1", "entry-2", "result-3", "entry-4"],
+				};
+				await runDrainPass(args);
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
+				await runDrainPass(args);
+				expect(appendCompaction).not.toHaveBeenCalled();
+				expect(
+					log.mock.calls.filter(
+						([id, text]) =>
+							id === sessionId &&
+							text.startsWith("Pi compaction-marker clear:"),
+					),
+				).toEqual([
+					[
+						sessionId,
+						"Pi compaction-marker clear: reason=synthetic-kept-entry endMessageId=entry-2 ordinal=2 firstKeptEntryId=<none>",
+					],
+				]);
+			} finally {
+				log.mockRestore();
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
 		it("drains a deferred Pi marker only on a materializing pass", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-drain";
@@ -6508,6 +6561,8 @@ describe("registerPiContextHandler", () => {
 		it("defers rehydrated Pi marker signals until the next natural bust", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-rehydrated-deferred";
+			const logger = await import("@magic-context/core/shared/logger");
+			const log = spyOn(logger, "sessionLog");
 			try {
 				const { signalPiDeferredCompactionMarkerDrain } = await import(
 					"./index"
@@ -6537,6 +6592,18 @@ describe("registerPiContextHandler", () => {
 
 				expect(appendCompaction).not.toHaveBeenCalled();
 				expect(getPendingPiCompactionMarkerState(db, sessionId)).not.toBeNull();
+				await runDrainPass({
+					db,
+					sessionId,
+					appendCompaction,
+					contextPercent: 0,
+				});
+				expect(
+					log.mock.calls.filter(
+						([id, text]) =>
+							id === sessionId && text.includes("gate=drain-not-eligible"),
+					),
+				).toHaveLength(1);
 
 				await runDrainPass({
 					db,
@@ -6549,6 +6616,7 @@ describe("registerPiContextHandler", () => {
 				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
 				expect(consumePendingMaterialization(sessionId)).toBe(false);
 			} finally {
+				log.mockRestore();
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);
 			}

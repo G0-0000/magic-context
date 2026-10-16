@@ -154,7 +154,12 @@ export function queueAndApplyPiRecompMarker(args: {
 		return;
 	}
 	if (
-		!clearPendingPiCompactionMarkerStateIf(args.db, args.sessionId, pending)
+		!clearPendingPiCompactionMarkerStateIf(
+			args.db,
+			args.sessionId,
+			pending,
+			outcome.kind === "stale-skip" ? outcome.reason : outcome.kind,
+		)
 	) {
 		signalPiDeferredHistoryRefresh(args.sessionId);
 	}

@@ -12,6 +12,8 @@ import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutatio
 import {
     clearPendingPiCompactionMarkerStateIf,
     getPendingPiCompactionMarkerState,
+    logPiCompactionMarkerClear,
+    type PendingPiCompactionMarker,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { sessionLog } from "../../shared/logger";
@@ -135,6 +137,7 @@ function dropCompartmentsAfter(
 ): number[] | null {
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
+    let clearedMarker: PendingPiCompactionMarker | null = null;
     try {
         if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
             db.exec("ROLLBACK");
@@ -168,13 +171,16 @@ function dropCompartmentsAfter(
                 "UPDATE session_meta SET prior_boundary_ordinal = ? WHERE session_id = ?",
             ).run((anchor?.endMessage ?? 0) + 1, sessionId);
             const marker = getPendingPiCompactionMarkerState(db, sessionId);
-            if (marker) clearPendingPiCompactionMarkerStateIf(db, sessionId, marker);
+            if (marker && clearPendingPiCompactionMarkerStateIf(db, sessionId, marker, null))
+                clearedMarker = marker;
         }
         deleteChunkEmbedBackoffForSession(db, sessionId);
         queueM0Mutation(db, { sessionId, mutationType: "recomp_boundary_change" });
         clearCachedM0M1(db, sessionId);
         db.exec("COMMIT");
         finished = true;
+        if (clearedMarker)
+            logPiCompactionMarkerClear(sessionId, clearedMarker, "active-branch-retired");
         return dropped.map((row) => row.sequence);
     } finally {
         if (!finished) {

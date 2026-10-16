@@ -9,6 +9,9 @@ import {
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 import {
     parseProcessedImageMarkers,
+    getPendingPiCompactionMarkerState,
+    logPiCompactionMarkerClear,
+    type PendingPiCompactionMarker,
     parseStrippedPlaceholderState,
     serializeProcessedImageMarkers,
     serializeStrippedPlaceholderState,
@@ -473,7 +476,8 @@ export function copySessionStateForClone(
     destinationSessionId: string,
     filter: CloneSessionStateFilter,
 ): CopySessionStateForCloneResult {
-    return runImmediate(db, () => {
+    let clearedMarker: PendingPiCompactionMarker | null = null;
+    const result: CopySessionStateForCloneResult = runImmediate(db, () => {
         // The offline clone command also supports pre-v95 stores without
         // upgrading them; only current stores have indexed temporal choices.
         const hasTemporalDecisions = tableExists(db, "temporal_decisions");
@@ -721,6 +725,8 @@ export function copySessionStateForClone(
             meta?.pending_pi_compaction_marker_state ?? null,
             copiedCompartments,
         );
+        if (pendingMarker === null)
+            clearedMarker = getPendingPiCompactionMarkerState(db, destinationSessionId);
         const todoAnchor = meta?.todo_synthetic_anchor_message_id ?? "";
         const migrateTodo = todoAnchor.length > 0 && filter.includeMessageId(todoAnchor);
 
@@ -799,4 +805,7 @@ export function copySessionStateForClone(
             pendingMarkerMigrated: pendingMarker !== null,
         };
     });
+    if (clearedMarker)
+        logPiCompactionMarkerClear(destinationSessionId, clearedMarker, "clone-replaced");
+    return result;
 }

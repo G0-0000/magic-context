@@ -6,11 +6,12 @@ import type { PendingPiCompactionMarker } from "@magic-context/core/features/mag
 import { BoundedSessionMap } from "@magic-context/core/shared/bounded-session-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
-import { findFirstKeptEntryId } from "./pi-historian-runner";
+import { resolvePiFirstKeptEntry } from "./pi-historian-runner";
 import {
 	isPiOrdinalAlignmentUnanchored,
 	resolvePiOrdinalAlignment,
 } from "./pi-ordinal-alignment";
+import { SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 export type PiMarkerUpdateOutcome =
 	| { kind: "applied"; firstKeptEntryId: string; compactionId: string }
@@ -21,6 +22,8 @@ export type PiMarkerUpdateOutcome =
 				| "compartment-removed"
 				| "target-superseded"
 				| "entry-removed"
+				| "synthetic-kept-entry"
+				| "synthetic-boundary-merged"
 				| "partial-message-boundary";
 	  }
 	| { kind: "waiting-for-entry" }
@@ -39,6 +42,7 @@ export interface ApplyDeferredPiCompactionMarkerDeps {
 }
 
 export type PiCompactionMarkerDrainGate =
+	| "drain-not-eligible"
 	| "compartment-not-found"
 	| "duplicate-compartment-end"
 	| "target-superseded"
@@ -66,6 +70,11 @@ type PiCompactionMarkerDrainGateFields = {
 	m1CoverageEndMessageId?: string | null;
 	matchCount?: number;
 	alignment?: "unanchored" | "unresolved";
+	alignmentReason?: "anchor-missing" | "anchors-disagree";
+	historyConsumed?: boolean;
+	materializationSatisfied?: boolean;
+	drainSuppressed?: boolean;
+	casLost?: boolean;
 	foldingOnlyTools?: readonly string[];
 	persistedOnlyTools?: readonly string[];
 	changedTools?: readonly string[];
@@ -112,6 +121,7 @@ export function logPiCompactionMarkerDrainGateOnce(
 		`endMessageId=${pending.endMessageId}`,
 		`ordinal=${pending.ordinal}`,
 		`firstKeptEntryId=${firstKeptEntryId ?? "<none>"}`,
+		`boundaryKind=${pending.endMessageId.startsWith(SYNTH_USER_ID_PREFIX) ? "folded-tool-result" : "session-entry"}`,
 		`renderedCoverageOrdinal=${fields.renderedCoverageOrdinal ?? "<none>"}`,
 	];
 	if (fields.renderedCoverageEndMessageId !== undefined)
@@ -128,6 +138,16 @@ export function logPiCompactionMarkerDrainGateOnce(
 		parts.push(`matchCount=${fields.matchCount}`);
 	if (fields.alignment !== undefined)
 		parts.push(`alignment=${fields.alignment}`);
+	if (fields.alignmentReason !== undefined)
+		parts.push(`alignmentReason=${fields.alignmentReason}`);
+	for (const key of [
+		"historyConsumed",
+		"materializationSatisfied",
+		"drainSuppressed",
+		"casLost",
+	] as const) {
+		if (fields[key] !== undefined) parts.push(`${key}=${fields[key]}`);
+	}
 	if (fields.foldingOnlyTools !== undefined)
 		parts.push(`foldingOnlyTools=${JSON.stringify(fields.foldingOnlyTools)}`);
 	if (fields.persistedOnlyTools !== undefined)
@@ -235,19 +255,35 @@ export function applyDeferredPiCompactionMarker(
 				branchEntries,
 			);
 			if (isPiOrdinalAlignmentUnanchored(alignment)) {
+				if (
+					alignment.kind === "unanchored" &&
+					alignment.reason === "anchor-missing" &&
+					hasMergedSyntheticBoundary(branchEntries, pending.endMessageId)
+				) {
+					return { kind: "stale-skip", reason: "synthetic-boundary-merged" };
+				}
 				logPiCompactionMarkerDrainGateOnce(
 					sessionId,
 					pending,
 					"ordinal-alignment-unavailable",
-					{ alignment: alignment.kind },
+					{
+						alignment: alignment.kind,
+						...(alignment.kind === "unanchored"
+							? { alignmentReason: alignment.reason }
+							: {}),
+					},
 				);
 				return { kind: "waiting-for-entry" };
 			}
-			firstKeptEntryId = findFirstKeptEntryId(
+			const boundary = resolvePiFirstKeptEntry(
 				branchEntries,
 				pending.ordinal,
 				alignment.offset,
 			);
+			if (boundary.kind === "unplaceable") {
+				return { kind: "stale-skip", reason: "synthetic-kept-entry" };
+			}
+			firstKeptEntryId = boundary.kind === "resolved" ? boundary.entryId : null;
 		}
 		if (!firstKeptEntryId) {
 			logPiCompactionMarkerDrainGateOnce(
@@ -338,6 +374,39 @@ export function applyDeferredPiCompactionMarker(
 		});
 		return { kind: "retryable-failure", error };
 	}
+}
+
+function hasMergedSyntheticBoundary(
+	entries: readonly unknown[],
+	endMessageId: string,
+): boolean {
+	if (!endMessageId.startsWith(SYNTH_USER_ID_PREFIX)) return false;
+	const resultId = endMessageId.slice(SYNTH_USER_ID_PREFIX.length);
+	let foundResult = false;
+	for (const entry of entries) {
+		const row = entry as {
+			type?: unknown;
+			id?: unknown;
+			message?: { role?: unknown; toolCallId?: unknown };
+		} | null;
+		if (row?.type !== "message") continue;
+		const message = row.message;
+		if (!foundResult) {
+			foundResult =
+				row.id === resultId &&
+				message?.role === "toolResult" &&
+				typeof message.toolCallId === "string" &&
+				message.toolCallId.length > 0;
+			continue;
+		}
+		// iterateEntriesToRawMessageRange puts these results in the next real
+		// user's RawMessage instead of emitting synth-user-<id>. Appending entries
+		// cannot restore that old id. Guessing the next ordinal could trim the
+		// user's new, unsummarized request instead.
+		if (message?.role === "user") return true;
+		if (message?.role === "assistant") return false;
+	}
+	return false;
 }
 
 function findLatestCompaction(
