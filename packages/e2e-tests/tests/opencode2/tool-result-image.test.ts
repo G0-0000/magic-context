@@ -314,3 +314,55 @@ test("issue 699 OpenCode 2 native user assets strip to text without invalidating
         } finally { mc.close(); }
     } finally { await run.host().stop(); }
 }, 240_000);
+
+test("independent frozen user and tool images survive an OC2 checkpoint and process restart", async () => {
+    const data = processedImagePng().toString("base64");
+    const run = await readImageSession({ modelContextLimit: 16_000, modelOutputLimit: 1024 }, data);
+    const userImageRow = (body: Body) => body.input?.find((item) => JSON.stringify(item).includes("READ-IMAGE inspect both carriers"));
+    try {
+        const first = (await run.turn("READ-IMAGE inspect both carriers", [{ uri: `data:image/png;base64,${data}`, name: "user.png" }])).at(-1)!;
+        expect(JSON.stringify(first)).toContain(data);
+        expect(imageBlock(first)).toContain(data);
+        const host = run.host();
+        const reader = new V2StoreReader(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env));
+        let ids: string[];
+        try {
+            const history = reader.history(run.session.id);
+            const user = history.find((row) => row.type === "user" && JSON.stringify(row.data).includes("READ-IMAGE inspect both carriers"));
+            const tool = history.find((row) => row.type === "assistant" && JSON.stringify(row.data).includes(CALL_ID));
+            expect(user).toBeDefined();
+            expect(tool).toBeDefined();
+            ids = [user!.id, tool!.id];
+        } finally { reader.close(); }
+        // Seed an already committed non-empty freeze to isolate replay from new
+        // discovery. The host's raw store still contains both original images.
+        const mc = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        try {
+            mc.exec("PRAGMA busy_timeout = 5000");
+            mc.prepare("UPDATE session_meta SET processed_image_stripped_ids = ? WHERE session_id = ?")
+                .run(JSON.stringify({ ids, textMarkerIds: ids }), run.session.id);
+        } finally { mc.close(); }
+        const frozen = (await run.turn("FROZEN-BEFORE-CHECKPOINT")).at(-1)!;
+        expect(JSON.stringify(frozen)).not.toContain(data);
+        expect(JSON.stringify(readResult(frozen))).toContain("[image stripped]");
+        expect(JSON.stringify(userImageRow(frozen))).toContain("[image stripped]");
+        run.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 15_000, output_tokens: 10 } });
+        await run.turn("FROZEN-PRESSURE");
+        run.mock.setDefault({ text: "ok", usage: { input_tokens: 100, output_tokens: 20 } });
+        const after = [(await run.turn("FROZEN-AFTER-CHECKPOINT")).at(-1)!];
+        await run.restart();
+        after.push((await run.turn("FROZEN-AFTER-RESTART")).at(-1)!);
+        const restored = new V2StoreReader(gaDatabasePath(run.host().env.XDG_DATA_HOME!, "latest", run.host().env));
+        try {
+            const cut = restored.latestCompaction(run.session.id);
+            expect(cut?.data.status).toBe("completed");
+            for (const id of ids) expect(restored.sequenceForId(run.session.id, id)!).toBeLessThan(cut!.seq);
+        } finally { restored.close(); }
+        for (const body of after) {
+            expect(JSON.stringify(body)).not.toContain(data);
+            expect(readResult(body)).toEqual(readResult(frozen));
+            expect(userImageRow(body)).toEqual(userImageRow(frozen));
+        }
+    } catch (error) { console.error(run.host().stderr().slice(-4000)); throw error; }
+    finally { await run.host().stop(); }
+}, 240_000);

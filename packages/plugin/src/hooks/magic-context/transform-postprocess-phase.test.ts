@@ -69,6 +69,8 @@ import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { adaptPayload } from "../../v2/hooks/payload";
+import type { SessionContext } from "../../v2/hooks/types";
 import {
     createAutoSearchReplayFixture,
     replayHint,
@@ -13272,6 +13274,255 @@ describe("issue 699 position-based recent-image retention", () => {
                 bust: false,
             });
             expect(replay[0].parts).toEqual(aged[0].parts);
+        });
+    }
+});
+
+describe("independent image cache safety through both host projections", () => {
+    for (const host of ["oc1", "oc2-base64", "oc2-bytes"] as const) {
+        function project(provider: string, signed = false) {
+            const file = {
+                type: "file",
+                mime: "image/png",
+                url: `data:image/png;base64,${"a".repeat(300)}`,
+            };
+            const signature = {
+                type: "reasoning",
+                text: "kept signed thinking",
+                metadata: { anthropic: { signature: "sig-independent" } },
+            };
+            if (host === "oc1") {
+                const messages: MessageLike[] = [
+                    { info: { id: "independent-image", role: "user" }, parts: [file] },
+                    {
+                        info: { id: "independent-tool", role: "assistant" },
+                        parts: [
+                            {
+                                type: "tool",
+                                callID: "independent-read",
+                                tool: "read",
+                                state: {
+                                    status: "completed",
+                                    input: {},
+                                    output: "read",
+                                    attachments: [file],
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        info: { id: "independent-answer", role: "assistant" },
+                        parts: [...(signed ? [signature] : []), { type: "text", text: "seen" }],
+                    },
+                ];
+                return { messages, commit: () => {}, bytes: () => JSON.stringify(messages) };
+            }
+            class NativeAsset {
+                readonly mediaType = "image/png";
+                readonly source =
+                    host === "oc2-bytes"
+                        ? { type: "bytes", data: new Uint8Array(300) }
+                        : { type: "base64", data: "a".repeat(300) };
+            }
+            const draft: SessionContext = {
+                sessionID: "independent-host-projection",
+                model: { providerID: provider, id: "model" },
+                agent: "build",
+                system: [],
+                tools: {},
+                options: {},
+                messages: [
+                    {
+                        id: "independent-image",
+                        role: "user",
+                        content: [{ type: "media", media: new NativeAsset() }],
+                    },
+                    {
+                        id: "independent-tool",
+                        role: "assistant",
+                        content: [
+                            { type: "tool-call", id: "independent-read", name: "read", input: {} },
+                        ],
+                    },
+                    {
+                        role: "tool",
+                        content: [
+                            {
+                                type: "tool-result",
+                                id: "independent-read",
+                                name: "read",
+                                result: {
+                                    type: "content",
+                                    value: [
+                                        { type: "text", text: "read" },
+                                        { type: "file", mime: file.mime, uri: file.url },
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        id: "independent-answer",
+                        role: "assistant",
+                        content: [...(signed ? [signature] : []), { type: "text", text: "seen" }],
+                    },
+                ],
+            };
+            return { ...adaptPayload(draft), bytes: () => JSON.stringify(draft.messages) };
+        }
+
+        async function serve(
+            sessionId: string,
+            bust: boolean,
+            provider = "openai",
+            signed = false,
+        ) {
+            const projected = project(provider, signed);
+            const before = projected.bytes();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, projected.messages, {
+                    resolvedProviderID: provider,
+                    resolvedModelID: "claude-opus-5-5",
+                    watermark: 5,
+                    messageTagNumbers: new Map(
+                        projected.messages.map((message, i) => [message, i + 1]),
+                    ),
+                    protectedCutoff: 4,
+                    pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                    schedulerDecision: bust ? "execute" : "defer",
+                    activeThinkingPrefixHold: signed,
+                    contextUsage: { percentage: 60, inputTokens: 1000 },
+                }),
+            );
+            projected.commit();
+            return { ...projected, before };
+        }
+
+        it(`independent ${host}: signed hold preserves image-only and tool-result images before kept thinking`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `independent-signed-${host}`;
+            const result = await serve(sessionId, true, "anthropic", true);
+            expect(result.bytes()).toBe(result.before);
+            expect(result.bytes()).toContain("sig-independent");
+            expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual([]);
+        });
+
+        it(`independent ${host}: failed durable freeze leaves both image carriers native and defer cannot retry`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `independent-fault-${host}`;
+            getOrCreateSessionMeta(db, sessionId);
+            db.exec(
+                `CREATE TRIGGER fail_independent_image_freeze BEFORE UPDATE OF processed_image_stripped_ids ON session_meta BEGIN SELECT RAISE(ABORT, 'independent image persistence fault'); END`,
+            );
+            const projected = project("openai");
+            const before = projected.bytes();
+            await expect(
+                runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, projected.messages, {
+                        resolvedProviderID: "openai",
+                        watermark: 5,
+                        messageTagNumbers: new Map(
+                            projected.messages.map((message, i) => [message, i + 1]),
+                        ),
+                        pendingMaterializationSessions: new Set([sessionId]),
+                        schedulerDecision: "execute",
+                    }),
+                ),
+            ).rejects.toThrow();
+            projected.commit();
+            expect(projected.bytes()).toBe(before);
+            expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual([]);
+            db.exec("DROP TRIGGER fail_independent_image_freeze");
+            const deferred = await serve(sessionId, false);
+            expect(deferred.bytes()).toBe(deferred.before);
+            const retry = await serve(sessionId, true);
+            expect(retry.bytes()).not.toContain("data:image");
+            expect(retry.bytes()).not.toContain('"type":"media"');
+            expect([...getProcessedImageStrippedIds(db, sessionId)].sort()).toEqual([
+                "independent-image",
+                "independent-tool",
+            ]);
+        });
+
+        it(`independent ${host}: post-drain watermark admits both carriers on the same rewrite, never on defer`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `independent-post-drain-${host}`;
+            insertTag(db, sessionId, "independent-drop", "tool", 4000, 8, 0, "bash");
+            queuePendingOp(db, sessionId, 8, "drop", 1);
+            const pass = async (bust: boolean) => {
+                const projected = project("openai");
+                const before = projected.bytes();
+                const drop = makeToolMessage("independent-drop");
+                projected.messages.push(drop);
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, projected.messages, {
+                        resolvedProviderID: "openai",
+                        watermark: 0,
+                        tags: getActiveTagsBySession(db, sessionId),
+                        targets: new Map([[8, makeDropTarget(drop)]]),
+                        messageTagNumbers: new Map(
+                            projected.messages.map((message, i) => [message, i === 3 ? 8 : i + 1]),
+                        ),
+                        batch: { finalize: () => {} } as PostTransformArgs["batch"],
+                        pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                        schedulerDecision: bust ? "execute" : "defer",
+                        contextUsage: { percentage: 60, inputTokens: 1000 },
+                    }),
+                );
+                // Inspect only the original image carriers; the separate drop
+                // target is a fixture for advancing the persisted watermark.
+                projected.messages.splice(3);
+                projected.commit();
+                return { bytes: projected.bytes(), before };
+            };
+            const deferred = await pass(false);
+            expect(deferred.bytes).toBe(deferred.before);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 8)?.status).toBe(
+                "active",
+            );
+            const rewritten = await pass(true);
+            expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 8)?.status).toBe(
+                "dropped",
+            );
+            expect(rewritten.bytes).not.toContain("data:image");
+            expect(rewritten.bytes).not.toContain('"type":"media"');
+            expect([...getProcessedImageStrippedIds(db, sessionId)].sort()).toEqual([
+                "independent-image",
+                "independent-tool",
+            ]);
+            expect((await pass(false)).bytes).toBe(rewritten.bytes);
+        });
+
+        it(`independent ${host}: reopen reconstructs frozen output before and after both provider switches`, async () => {
+            const dir = createTestTempDirFromPath(
+                join(tmpdir(), `independent-image-restart-${host}-`),
+            );
+            tempDirs.push(dir);
+            const path = join(dir, "review.sqlite");
+            db = new Database(path);
+            initializeDatabase(db);
+            for (const initialProvider of ["openai", "anthropic"]) {
+                const sessionId = `independent-restart-${host}-${initialProvider}`;
+                const firstDefer = await serve(sessionId, false, initialProvider);
+                expect(firstDefer.bytes()).toBe(firstDefer.before);
+                const first = await serve(sessionId, true, initialProvider);
+                const bytes = first.bytes();
+                db.close();
+                db = new Database(path);
+                expect((await serve(sessionId, false, initialProvider)).bytes()).toBe(bytes);
+                const otherProvider = initialProvider === "openai" ? "anthropic" : "openai";
+                const switched = (await serve(sessionId, false, otherProvider)).bytes();
+                // OpenCode 2 removes empty image markers only on Anthropic, so a
+                // switch to OpenAI restores an empty row. The opt-in parity test in
+                // image-cache-independent-review.test.ts asserts the desired equality
+                // and fails on this difference; this test records the observed bytes.
+                if (host === "oc1" || initialProvider === "openai") expect(switched).toBe(bytes);
+                else expect(switched).not.toBe(bytes);
+                expect((await serve(sessionId, false, initialProvider)).bytes()).toBe(bytes);
+            }
         });
     }
 });
