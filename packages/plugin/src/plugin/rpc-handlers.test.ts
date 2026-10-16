@@ -388,6 +388,68 @@ describe("sidebar snapshot RPC failures", () => {
     });
 });
 
+describe("buildStatusDetail — per-model execute threshold", () => {
+    test.each([
+        {
+            name: "persisted model",
+            persisted: "test/model-a",
+            explicit: undefined,
+            threshold: 50,
+            tokens: 250_000,
+        },
+        {
+            name: "explicit model takes precedence",
+            persisted: "test/model-a",
+            explicit: "test/model-b",
+            threshold: 20,
+            tokens: 100_000,
+        },
+        {
+            name: "unknown model keeps the default",
+            persisted: null,
+            explicit: undefined,
+            threshold: 65,
+            tokens: undefined,
+        },
+    ])("$name", ({ persisted, explicit, threshold, tokens }) => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-status-threshold";
+            db.prepare(
+                "INSERT INTO session_meta (session_id, last_observed_model_key) VALUES (?, ?)",
+            ).run(sessionId, persisted);
+            const detail = buildStatusDetail(
+                db,
+                sessionId,
+                process.cwd(),
+                explicit,
+                {
+                    execute_threshold_tokens: {
+                        "test/model-a": 250_000,
+                        "test/model-b": 100_000,
+                    },
+                },
+                undefined,
+                undefined,
+                {
+                    usage: {
+                        current_total_input_tokens: 100_000,
+                        context_limit_tokens: 500_000,
+                    },
+                },
+            );
+
+            expect(detail.executeThreshold).toBe(threshold);
+            expect(detail.executeThresholdTokens).toBe(tokens);
+            expect(detail.executeThresholdMode).toBe(
+                tokens === undefined ? "percentage" : "tokens",
+            );
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — active profile", () => {
     test("includes the resolved profile name in the RPC status payload", () => {
         const db = createTestDb();

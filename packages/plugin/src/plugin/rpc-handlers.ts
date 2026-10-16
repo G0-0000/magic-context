@@ -983,6 +983,7 @@ export function buildStatusDetail(
             // pending_ops may not exist
         }
 
+        modelKey ??= persistedModelKey ?? undefined;
         const modelSlash = modelKey?.indexOf("/") ?? -1;
         if (modelKey && modelSlash > 0) {
             detail.windowGeometry = resolveContextWindowGeometry(
