@@ -13121,3 +13121,63 @@ describe("issue 699 processed-image provider replay", () => {
         expect(messages[1].parts).toEqual(source()[1].parts);
     });
 });
+
+describe("issue 699 post-drain image watermark", () => {
+    it("issue 699 uses newly drained drops for image discovery on the same admitted bust, never defer", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "image-post-drain";
+        insertTag(db, sessionId, "drop-tool", "tool", 4000, 5, 0, "bash");
+        queuePendingOp(db, sessionId, 5, "drop", 1);
+        const source = (): MessageLike[] =>
+            [
+                {
+                    info: { id: "aged-image", role: "user" },
+                    parts: [
+                        {
+                            type: "file",
+                            mime: "image/png",
+                            url: `data:image/png;base64,${"a".repeat(300)}`,
+                        },
+                    ],
+                },
+                makeToolMessage("drop-tool"),
+                {
+                    info: { id: "answer", role: "assistant" },
+                    parts: [{ type: "text", text: "seen" }],
+                },
+            ] as MessageLike[];
+        const pass = async (bust: boolean) => {
+            const messages = source();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    resolvedProviderID: "openai",
+                    watermark: 0,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets: new Map([[5, makeDropTarget(messages[1])]]),
+                    messageTagNumbers: new Map([
+                        [messages[0], 1],
+                        [messages[1], 5],
+                    ]),
+                    batch: { finalize: () => {} } as PostTransformArgs["batch"],
+                    pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                    schedulerDecision: bust ? "execute" : "defer",
+                    contextUsage: { percentage: 60, inputTokens: 1000 },
+                }),
+            );
+            return messages;
+        };
+        const deferred = await pass(false);
+        expect(deferred[0].parts).toEqual(source()[0].parts);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 5)?.status).toBe(
+            "active",
+        );
+        const rewritten = await pass(true);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 5)?.status).toBe(
+            "dropped",
+        );
+        expect(rewritten[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+        const replay = await pass(false);
+        expect(replay[0].parts).toEqual(rewritten[0].parts);
+    });
+});

@@ -21,6 +21,7 @@ import {
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
+    getMaxDroppedTagNumber,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
@@ -3309,12 +3310,19 @@ export async function runPostTransformPhase(
     if (!compactionOff && replaySnapshot) {
         try {
             const tImg = performance.now();
+            // Applying queued reductions and emergency cleanup above can mark
+            // additional tags dropped after the input watermark was sampled.
+            // Refresh the maximum dropped tag only when the prefix may change;
+            // cache-preserving passes restore saved decisions without discovery.
+            const imageWatermark = canEditWholePrefix
+                ? Math.max(args.watermark, getMaxDroppedTagNumber(args.db, args.sessionId))
+                : args.watermark;
             const frozenImageIds = replaySnapshot.processedImageStrippedIds;
             const frozenMarkers = replaySnapshot.processedImageMarkers;
             const replacementText = canUseEmptySentinels ? "" : "[image stripped]";
             stripProcessedImages(args.messages, frozenImageIds, {
-                detect: canEditWholePrefix && args.watermark > 0,
-                watermark: args.watermark,
+                detect: canEditWholePrefix && imageWatermark > 0,
+                watermark: imageWatermark,
                 messageTagNumbers: args.messageTagNumbers,
                 replacementText,
                 frozenMarkers,
