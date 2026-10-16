@@ -21,6 +21,7 @@ import {
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
+    getMaxDroppedTagNumber,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
@@ -46,6 +47,7 @@ import {
     getEmergencyInputSample,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
+    getProcessedImageMarkers,
     getThinkingBindingRecoveryTarget,
     getTrailingBlankDecisions,
     type PersistedCompactionMarkerState,
@@ -3308,21 +3310,45 @@ export async function runPostTransformPhase(
         }
     }
 
-    // Processed-image strip — same REPLAY/DETECT freeze as stale ctx_reduce.
-    // The empty image sentinel is filtered off the Anthropic wire, so the first
-    // strip of a message removes its image blocks (a real byte change). Keying
-    // that first strip on the live watermark let a DEFER pass cross an older
-    // image message and remove its images mid-prefix, busting the cache.
-    // Freeze the id set on cache-busting passes; replay it every pass.
-    if (canUseEmptySentinels && !compactionOff && replaySnapshot) {
+    // Persist image ids and replacement text only when the cached prefix may
+    // change. Later cache-preserving passes restore only those saved decisions,
+    // including after a provider switch, instead of discovering new strips.
+    if (!compactionOff && replaySnapshot) {
         try {
             const tImg = performance.now();
+            // Applying queued reductions and emergency cleanup above can mark
+            // additional tags dropped after the input watermark was sampled.
+            // Refresh the maximum dropped tag only when the prefix may change;
+            // cache-preserving passes restore saved decisions without discovery.
+            const imageWatermark = canEditWholePrefix
+                ? Math.max(args.watermark, getMaxDroppedTagNumber(args.db, args.sessionId))
+                : args.watermark;
             const frozenImageIds = replaySnapshot.processedImageStrippedIds;
+            const frozenMarkers = replaySnapshot.processedImageMarkers;
+            const replacementText = canUseEmptySentinels ? "" : "[image stripped]";
             stripProcessedImages(args.messages, frozenImageIds, {
-                detect: canEditWholePrefix && args.watermark > 0,
-                watermark: args.watermark,
+                detect: canEditWholePrefix && imageWatermark > 0,
+                watermark: imageWatermark,
                 messageTagNumbers: args.messageTagNumbers,
-                persistNewIds: (ids) => addProcessedImageStrippedIds(args.db, args.sessionId, ids),
+                protectedCutoff: args.protectedCutoff,
+                contextPercentage: args.contextUsage.percentage,
+                replacementText,
+                frozenMarkers,
+                protectedMessageIds: new Set([
+                    ...args.tags
+                        .filter((tag) => protectedToolTags.has(tag.tagNumber))
+                        .map((tag) => tag.toolOwnerMessageId ?? tag.messageId),
+                ]),
+                persistNewIds: (ids, markers) => {
+                    if (!addProcessedImageStrippedIds(args.db, args.sessionId, ids, markers))
+                        return false;
+                    // Another plugin process sharing this session may have saved
+                    // a different marker before our compare-and-swap completed.
+                    const committed = getProcessedImageMarkers(args.db, args.sessionId);
+                    for (const id of ids)
+                        frozenMarkers.set(id, committed.get(id) ?? replacementText);
+                    return true;
+                },
                 onFirstApplication: recordFirstApplicationAt,
             });
             logTransformTiming(args.sessionId, "stripProcessedImages", tImg);

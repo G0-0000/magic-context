@@ -3,6 +3,7 @@ import {
     MERGED_REASONING_PARTS_PREFIX,
     readFrozenMergedReasoningParts,
 } from "../../features/magic-context/merged-reasoning-decisions";
+import { createProcessedImageEligibility } from "../../shared/processed-image-eligibility";
 import { isRecord } from "../../shared/record-type-guard";
 import {
     isSentinel,
@@ -988,30 +989,45 @@ export interface StripProcessedImagesResult {
     newlyStrippedIds: string[];
 }
 
+// Remember which empty text parts replaced images, without adding metadata to
+// serialized messages. Message ids and part indices survive message copies made
+// later in the transform. Replaying saved image markers rebuilds this per-pass map.
+const emptyImageParts = new WeakMap<readonly MessageLike[], Map<string, Set<number>>>();
+
+export function getEmptyImageParts(
+    messages: readonly MessageLike[],
+): ReadonlyMap<string, ReadonlySet<number>> {
+    return emptyImageParts.get(messages) ?? new Map();
+}
+
+function imageOmissionBreaksStructure(
+    messages: MessageLike[],
+    index: number,
+    omitted: ReadonlySet<number>,
+): boolean {
+    let before = index - 1;
+    let after = index + 1;
+    while (omitted.has(before)) before--;
+    while (omitted.has(after)) after++;
+    const previous = messages[before];
+    const next = messages[after];
+    return previous !== undefined && next !== undefined && previous.info.role === next.info.role;
+}
+
 /**
- * Neutralize large image-data-URL file parts on already-processed user
- * messages, replacing them in place with empty-text sentinels (which the
- * Anthropic adapter then filters off the wire entirely).
+ * Remove answered inline images older than content already dropped from the
+ * transcript. Tags number transcript content in order; the watermark is the
+ * largest tag number marked dropped. First replacements require permission to
+ * rewrite the cached conversation prefix, since removing image bytes invalidates
+ * that cache. Persist ids and marker text before applying any replacement.
+ * Later passes replay those decisions without consulting the moving age boundary or
+ * current provider, so growing history cannot silently change cached bytes.
  *
- * REPLAY/DETECT split — mirrors `dropStaleReduceCalls`, and for the same
- * reason. The empty sentinel is filtered for Anthropic, so the FIRST time a
- * message is sentinelized its image blocks VANISH from the wire — a real byte
- * change. The earlier "strip every pass when `maxTag <= watermark`" version
- * keyed that first-strip on the live watermark, which advances with tail
- * growth: a DEFER pass could newly cross an older image message and strip it
- * mid-prefix, busting the Anthropic cache on a pass that must replay
- * byte-identically (observed live — a processed-screenshot message lost its
- * images on a defer pass and collapsed the cached prefix). Freezing the id set
- * on cache-busting passes and replaying it everywhere removes the moving
- * boundary: DETECT (cache-busting passes only) finds newly-aged processed image
- * messages, persists their ids before stripping them; REPLAY (every pass,
- * incl. defer) re-strips only already-frozen ids, byte-identical regardless of
- * how the live array grew.
- *
- * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is
- * true, because non-Anthropic adapters can forward the empty text replacement
- * to the wire. Hosts detecting new images must supply `persistNewIds` so a
- * failed freeze cannot serve a strip that disappears on the next replay.
+ * User images prefer empty text on Anthropic and `[image stripped]` elsewhere.
+ * New empty forms retain a non-empty separator if omitting the row would join
+ * same-role neighbors or disturb a tool arc. Historical forms replay unchanged.
+ * Tool attachments always put non-empty markers in the result's text output,
+ * because the attachment array admits files only and a result must not be empty.
  */
 export function stripProcessedImages(
     messages: MessageLike[],
@@ -1020,35 +1036,57 @@ export function stripProcessedImages(
         detect: boolean;
         watermark: number;
         messageTagNumbers: Map<MessageLike, number>;
+        protectedCutoff?: number | null;
+        contextPercentage?: number;
+        /** Marker for newly discovered ids only; legacy frozen ids keep empty sentinels. */
+        replacementText?: "" | "[image stripped]";
+        /** Stored text takes precedence if another process already persisted the same id. */
+        frozenMarkers?: ReadonlyMap<string, "" | "[image stripped]">;
+        /** Per-tool result exemptions still block stripping when emergency cleanup waives recency protection. */
+        protectedMessageIds?: ReadonlySet<string>;
         /** Commit new replay IDs before changing bytes; false leaves new images intact. */
-        persistNewIds?: (ids: readonly string[]) => boolean;
+        persistNewIds?: (
+            ids: readonly string[],
+            markers: ReadonlyMap<string, "" | "[image stripped]">,
+        ) => boolean;
         /** Reports only first strips, never restoring an already frozen image. */
         onFirstApplication?: (message: MessageLike, partIndex: number) => void;
     },
 ): StripProcessedImagesResult {
-    const { detect, watermark, messageTagNumbers } = options;
+    const omissions = new Map<string, Set<number>>();
+    emptyImageParts.set(messages, omissions);
+    const { detect, messageTagNumbers } = options;
+    const eligibility = createProcessedImageEligibility(messages, messageTagNumbers, options);
     let stripped = 0;
     const newlyStrippedIds: string[] = [];
-    const planned: { message: MessageLike; partIndex: number; firstApplication: boolean }[] = [];
+    const planned: {
+        message: MessageLike;
+        partIndex: number;
+        firstApplication: boolean;
+        tool: boolean;
+    }[] = [];
+    const newMarkers = new Map<string, "" | "[image stripped]">();
     let hasAssistantResponse = false;
 
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
+        const answered = hasAssistantResponse;
         if (msg.info.role === "assistant") {
             hasAssistantResponse = true;
-            continue;
         }
-        if (msg.info.role !== "user") {
+        if (msg.info.role !== "user" && msg.info.role !== "assistant") {
             continue;
         }
 
         const id = typeof msg.info.id === "string" ? msg.info.id : undefined;
         const inFrozen = id !== undefined && frozenIds.has(id);
-        // DETECT (cache-busting passes only): a processed (assistant-answered),
-        // aged (maxTag <= watermark) user message not yet frozen.
-        const maxTag = messageTagNumbers.get(msg) ?? 0;
         const isNewDetection =
-            !inFrozen && detect && hasAssistantResponse && id !== undefined && maxTag <= watermark;
+            !inFrozen &&
+            detect &&
+            answered &&
+            id !== undefined &&
+            eligibility.mayStrip(msg) &&
+            !options.protectedMessageIds?.has(id);
 
         if (!inFrozen && !isNewDetection) {
             continue;
@@ -1057,35 +1095,159 @@ export function stripProcessedImages(
         let touchedThisMsg = false;
         for (let j = 0; j < msg.parts.length; j++) {
             const part = msg.parts[j];
-            if (!isRecord(part) || part.type !== "file") {
-                continue;
-            }
-            if (typeof part.mime !== "string" || !part.mime.startsWith("image/")) {
-                continue;
-            }
-            if (
-                typeof part.url === "string" &&
-                part.url.startsWith("data:") &&
-                part.url.length > 200
-            ) {
-                planned.push({ message: msg, partIndex: j, firstApplication: isNewDetection });
+            const tool =
+                msg.info.role === "assistant" &&
+                isRecord(part) &&
+                part.type === "tool" &&
+                isRecord(part.state) &&
+                part.state.status === "completed";
+            const images =
+                tool &&
+                isRecord(part) &&
+                isRecord(part.state) &&
+                Array.isArray(part.state.attachments)
+                    ? part.state.attachments
+                    : msg.info.role === "user"
+                      ? [part]
+                      : [];
+            if (images.some(isProcessedImagePart)) {
+                planned.push({
+                    message: msg,
+                    partIndex: j,
+                    firstApplication: isNewDetection,
+                    tool,
+                });
                 touchedThisMsg = true;
             }
         }
         if (touchedThisMsg && isNewDetection && id !== undefined) {
             newlyStrippedIds.push(id);
+            newMarkers.set(
+                id,
+                msg.info.role === "assistant"
+                    ? "[image stripped]"
+                    : (options.replacementText ?? ""),
+            );
         }
     }
 
+    const imageIndices = new Map<MessageLike, Set<number>>();
+    for (const { message, partIndex, tool } of planned) {
+        if (tool) continue;
+        const indices = imageIndices.get(message) ?? new Set<number>();
+        indices.add(partIndex);
+        imageIndices.set(message, indices);
+    }
+    const emptiedRows = new Set<number>();
+    const newEmptyRows: { index: number; id: string }[] = [];
+    for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
+        if (
+            message.parts.every(
+                (part) => isRecord(part) && part.type === "text" && part.text === "",
+            )
+        )
+            emptiedRows.add(index);
+        const id = message.info.id;
+        const indices = imageIndices.get(message);
+        if (!id || !indices) continue;
+        const marker = options.frozenMarkers?.get(id) ?? newMarkers.get(id) ?? "";
+        // Only an image/text-only user row can disappear. Any tool call or
+        // result keeps the row alive, so image omission cannot delete a pair.
+        if (
+            marker !== "" ||
+            !message.parts.every(
+                (part, partIndex) =>
+                    indices.has(partIndex) ||
+                    (isRecord(part) && part.type === "text" && part.text === ""),
+            )
+        )
+            continue;
+        if (newMarkers.has(id)) newEmptyRows.push({ index, id });
+        else emptiedRows.add(index);
+    }
+    for (const { index, id } of newEmptyRows) {
+        if (imageOmissionBreaksStructure(messages, index, emptiedRows))
+            newMarkers.set(id, "[image stripped]");
+        else emptiedRows.add(index);
+    }
+
     const persisted =
-        newlyStrippedIds.length === 0 || options.persistNewIds?.(newlyStrippedIds) !== false;
+        newlyStrippedIds.length === 0 ||
+        options.persistNewIds?.(newlyStrippedIds, newMarkers) !== false;
     if (!persisted) newlyStrippedIds.length = 0;
-    for (const { message, partIndex, firstApplication } of planned) {
+    for (const { message, partIndex, firstApplication, tool } of planned) {
         if (firstApplication && !persisted) continue;
         if (firstApplication) options.onFirstApplication?.(message, partIndex);
-        message.parts[partIndex] = makeSentinel(message.parts[partIndex]);
-        stripped++;
+        const marker = tool
+            ? "[image stripped]"
+            : (options.frozenMarkers?.get(message.info.id ?? "") ??
+              (firstApplication ? newMarkers.get(message.info.id ?? "") : "") ??
+              "");
+        const original = message.parts[partIndex];
+        if (
+            tool &&
+            isRecord(original) &&
+            isRecord(original.state) &&
+            Array.isArray(original.state.attachments)
+        ) {
+            const attachments = original.state.attachments;
+            const count = attachments.filter(isProcessedImagePart).length;
+            const output = typeof original.state.output === "string" ? original.state.output : "";
+            // Attachments only admit files. Put non-empty replacement text in the
+            // tool's output, retaining non-image files and the call/result pairing.
+            message.parts[partIndex] = {
+                ...original,
+                state: {
+                    ...original.state,
+                    output: [output, ...Array<string>(count).fill(marker)]
+                        .filter(Boolean)
+                        .join("\n"),
+                    attachments: attachments.filter((part) => !isProcessedImagePart(part)),
+                },
+            };
+            stripped += count;
+        } else {
+            message.parts[partIndex] = { ...makeSentinel(original), text: marker };
+            if (marker === "" && message.info.id) {
+                const indices = omissions.get(message.info.id) ?? new Set<number>();
+                indices.add(partIndex);
+                omissions.set(message.info.id, indices);
+            }
+            stripped++;
+        }
     }
 
     return { stripped, newlyStrippedIds };
+}
+
+function isProcessedImagePart(part: unknown): boolean {
+    // The OpenCode 2 host validates media using its own Media.Asset class.
+    // Inspect inline bytes without cloning: unchanged assets must retain their
+    // class identity, while stripped parts become ordinary text content.
+    if (isRecord(part) && part.type === "media" && isRecord(part.media)) {
+        const { source, mediaType } = part.media;
+        const inlineLength = isRecord(source)
+            ? source.type === "base64" && typeof source.data === "string"
+                ? source.data.length
+                : source.type === "bytes" && source.data instanceof Uint8Array
+                  ? Math.ceil(source.data.byteLength / 3) * 4
+                  : 0
+            : 0;
+        return (
+            typeof mediaType === "string" &&
+            mediaType.startsWith("image/") &&
+            inlineLength > 0 &&
+            inlineLength + `data:${mediaType};base64,`.length > 200
+        );
+    }
+    return (
+        isRecord(part) &&
+        part.type === "file" &&
+        typeof part.mime === "string" &&
+        part.mime.startsWith("image/") &&
+        typeof part.url === "string" &&
+        part.url.startsWith("data:") &&
+        part.url.length > 200
+    );
 }

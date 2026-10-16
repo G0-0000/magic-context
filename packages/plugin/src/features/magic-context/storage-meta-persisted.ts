@@ -2949,10 +2949,48 @@ export function addStaleReduceStrippedIds(
  * because the empty sentinel is filtered off the Anthropic wire).
  */
 export function getProcessedImageStrippedIds(db: Database, sessionId: string): Set<string> {
+    return new Set(getProcessedImageMarkers(db, sessionId).keys());
+}
+
+export type ProcessedImageMarker = "" | "[image stripped]";
+
+/** Old string arrays stored message ids rendered with empty text; provider switches must preserve that text. */
+export function parseProcessedImageMarkers(
+    raw: string | null | undefined,
+): Map<string, ProcessedImageMarker> {
+    if (!raw) return new Map();
+    try {
+        const parsed = JSON.parse(raw);
+        const ids = Array.isArray(parsed) ? parsed : parsed?.ids;
+        const textIds = new Set(Array.isArray(parsed?.textMarkerIds) ? parsed.textMarkerIds : []);
+        return new Map(
+            (Array.isArray(ids) ? ids : [])
+                .filter((id): id is string => typeof id === "string")
+                .map((id) => [id, textIds.has(id) ? "[image stripped]" : ""]),
+        );
+    } catch {
+        return new Map();
+    }
+}
+
+export function serializeProcessedImageMarkers(
+    markers: ReadonlyMap<string, ProcessedImageMarker>,
+): string {
+    const ids = [...markers.keys()];
+    if (ids.length === 0) return "";
+    const textMarkerIds = ids.filter((id) => markers.get(id) === "[image stripped]");
+    // Sessions using only empty markers retain the original JSON id-array encoding.
+    return JSON.stringify(textMarkerIds.length > 0 ? { ids, textMarkerIds } : ids);
+}
+
+export function getProcessedImageMarkers(
+    db: Database,
+    sessionId: string,
+): Map<string, ProcessedImageMarker> {
     const row = db
         .prepare("SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?")
         .get(sessionId) as { processed_image_stripped_ids?: string } | null;
-    return new Set(parseStrippedBlob(row?.processed_image_stripped_ids));
+    return parseProcessedImageMarkers(row?.processed_image_stripped_ids);
 }
 
 /**
@@ -2965,6 +3003,7 @@ export function addProcessedImageStrippedIds(
     db: Database,
     sessionId: string,
     ids: Iterable<string>,
+    marker: ProcessedImageMarker | ReadonlyMap<string, ProcessedImageMarker> = "",
 ): boolean {
     const add = [...ids];
     if (add.length === 0) return true;
@@ -2975,16 +3014,16 @@ export function addProcessedImageStrippedIds(
             .prepare("SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?")
             .get(sessionId) as { processed_image_stripped_ids?: string | null } | undefined;
         const rawStored = row ? (row.processed_image_stripped_ids ?? null) : null;
-        const current = new Set<string>(parseStrippedBlob(rawStored));
+        const current = parseProcessedImageMarkers(rawStored);
         let changed = false;
         for (const id of add) {
             if (!current.has(id)) {
-                current.add(id);
+                current.set(id, typeof marker === "string" ? marker : (marker.get(id) ?? ""));
                 changed = true;
             }
         }
         if (!changed) return true;
-        const nextBlob = JSON.stringify([...current]);
+        const nextBlob = serializeProcessedImageMarkers(current);
         const result = db
             .prepare(
                 "UPDATE session_meta SET processed_image_stripped_ids = ? WHERE session_id = ? AND processed_image_stripped_ids IS ?",
@@ -3106,6 +3145,7 @@ export function getCompactionMarkerHealth(
 export interface PostprocessReplaySnapshot {
     staleReduceStrippedIds: Set<string>;
     processedImageStrippedIds: Set<string>;
+    processedImageMarkers: Map<string, ProcessedImageMarker>;
     strippedPlaceholderIds: Set<string>;
     hiddenSeamPlaceholderIds: Set<string>;
     noteNudgeAnchors: NoteNudgeAnchor[];
@@ -3165,7 +3205,10 @@ export function loadPostprocessReplaySnapshot(
     const thinkingBindingRecoveryTarget = row?.thinking_binding_recovery_target;
     return {
         staleReduceStrippedIds: new Set(parseStrippedBlob(row?.stale_reduce_stripped_ids)),
-        processedImageStrippedIds: new Set(parseStrippedBlob(row?.processed_image_stripped_ids)),
+        processedImageStrippedIds: new Set(
+            parseProcessedImageMarkers(row?.processed_image_stripped_ids).keys(),
+        ),
+        processedImageMarkers: parseProcessedImageMarkers(row?.processed_image_stripped_ids),
         strippedPlaceholderIds: new Set(placeholders.ids),
         hiddenSeamPlaceholderIds: new Set(placeholders.hiddenSeamIds),
         noteNudgeAnchors: parseJsonArray(row?.note_nudge_anchors, isValidNoteNudgeAnchor),
