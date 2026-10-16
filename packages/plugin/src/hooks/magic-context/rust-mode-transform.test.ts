@@ -469,6 +469,10 @@ function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string
     const dbPath = join(dataHome, "opencode", "opencode.db");
     mkdirSync(dirname(dbPath), { recursive: true });
     const opencodeDb = new Database(dbPath);
+    // Create the fixture in WAL mode like OpenCode. Schema writes create the
+    // -wal/-shm files; without them, macOS SQLite can reject a readonly worker's
+    // first read after a late switch from rollback journaling to WAL.
+    opencodeDb.exec("PRAGMA journal_mode=WAL");
     opencodeDb.exec(`
         CREATE TABLE message (
             id TEXT PRIMARY KEY,

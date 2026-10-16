@@ -419,6 +419,10 @@ for (const contentChange of [false, true]) {
                 );
             mkdirSync(join(root!, "opencode"), { recursive: true });
             const hostDb = new Database(join(root!, "opencode", "opencode.db"));
+            // Create the fixture in WAL mode like OpenCode. Schema writes create the
+            // -wal/-shm files; without them, macOS SQLite can reject a readonly worker's
+            // first read after a late switch from rollback journaling to WAL.
+            hostDb.exec("PRAGMA journal_mode=WAL");
             hostDb.exec(
                 "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
             );

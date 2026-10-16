@@ -139,6 +139,10 @@ function createOpenCodeDbWithoutMessages(prefix: string): void {
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
     const opencodeDb = new Database(join(dir, "opencode", "opencode.db"));
+    // Create the fixture in WAL mode like OpenCode. Schema writes create the
+    // -wal/-shm files; without them, macOS SQLite can reject a readonly worker's
+    // first read after a late switch from rollback journaling to WAL.
+    opencodeDb.exec("PRAGMA journal_mode=WAL");
     opencodeDb.exec(
         "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
@@ -2406,6 +2410,7 @@ describe("deferred compaction marker representation", () => {
 
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
         const opencodeDb = new Database(join(dataHome, "opencode", "opencode.db"));
+        opencodeDb.exec("PRAGMA journal_mode=WAL");
         opencodeDb.exec(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
         );
@@ -2573,6 +2578,7 @@ describe("deferred compaction marker representation", () => {
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
         const opencodeDb = new Database(join(dataHome, "opencode", "opencode.db"));
+        opencodeDb.exec("PRAGMA journal_mode=WAL");
         opencodeDb.exec(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
         );
@@ -2887,6 +2893,7 @@ describe("deferred compaction marker advance representation", () => {
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
         const opencodeDb = new Database(join(dataHome, "opencode", "opencode.db"));
+        opencodeDb.exec("PRAGMA journal_mode=WAL");
         opencodeDb.exec(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
         );
@@ -4947,6 +4954,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         process.env.XDG_DATA_HOME = dataHome;
         mkdirSync(join(dataHome, "opencode"), { recursive: true });
         const opencodeDb = new Database(join(dataHome, "opencode", "opencode.db"));
+        opencodeDb.exec("PRAGMA journal_mode=WAL");
         opencodeDb.exec(
             "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
         );
