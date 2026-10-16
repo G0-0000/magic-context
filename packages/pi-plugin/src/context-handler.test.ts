@@ -784,7 +784,7 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals)",
+				"isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals)",
 			);
 			expect(src).toContain("if (identityRebuild) {");
 			expect(src).toMatch(

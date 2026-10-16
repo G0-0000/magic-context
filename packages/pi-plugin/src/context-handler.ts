@@ -429,6 +429,7 @@ import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
 	frozenBindingEntryIds,
+	hasUnfrozenPiThinking,
 	resolvePiBindingStripOrder,
 	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
@@ -5889,7 +5890,8 @@ export function registerPiContextHandler(
 					bindingEntryIdByRef.get(message),
 			).map((entryId) => entryId ?? undefined);
 			const thinkingBindingRecoveryApplied =
-				bindingStripOrder === "end" && !result.signedPrefixRewritten
+				bindingStripOrder === "end" &&
+				(!result.signedPrefixRewritten || !result.prefixBustPermitted)
 					? applyPiThinkingBindingRecovery({
 							db: options.db,
 							sessionId,
@@ -5920,15 +5922,14 @@ export function registerPiContextHandler(
 						// signatures bind all preceding bytes. A permitted prefix rewrite
 						// omits every signed block, including those in the active turn.
 						cacheBustingPass:
-							!!recovery.rebuildReason ||
-							result.signedPrefixRewritten ||
-							(result.prefixBustPermitted &&
-								!result.strictThinkingKept &&
-								(isCacheBusting ||
-									result.prefixRebuildAlreadyPriced ||
-									(result.executedWorkThisPass &&
-										(result.prefixEditBesidesReasoningTrim ||
-											hostEditBeforeNewestThinking)))),
+							result.prefixBustPermitted &&
+							!result.strictThinkingKept &&
+							(result.signedPrefixRewritten ||
+								isCacheBusting ||
+								result.prefixRebuildAlreadyPriced ||
+								(result.executedWorkThisPass &&
+									(result.prefixEditBesidesReasoningTrim ||
+										hostEditBeforeNewestThinking))),
 						stripActiveTurn: result.signedPrefixRewritten,
 						requirePersistence: !!recovery.rebuildReason,
 						report: (line) => sessionLog(sessionId, line),
@@ -6301,7 +6302,7 @@ export function registerPiContextHandler(
 						entryIds: retryIds.map((id) => id ?? undefined),
 						provider: ctx.model?.provider,
 						model: ctx.model?.id,
-						cacheBustingPass: true,
+						cacheBustingPass: result.prefixBustPermitted,
 						stripActiveTurn: true,
 					});
 					estimate = estimatePiOutgoingInputTokens(
@@ -6516,7 +6517,7 @@ export function registerPiContextHandler(
 									).map((id) => id ?? undefined),
 									provider: ctx.model?.provider,
 									model: ctx.model?.id,
-									cacheBustingPass: result.bustedThisPass,
+									cacheBustingPass: result.prefixBustPermitted,
 									stripActiveTurn: result.signedPrefixRewritten,
 								});
 								estimate = estimatePiOutgoingInputTokens(
@@ -8405,8 +8406,31 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let protectedSignedPrefix =
 		activeThinkingTurn && args.reasoningClearing?.prefixBound === true;
 	let rewritingSignedPrefix = false;
+	// A changed recovery input or a new thinking omission rewrites the request.
+	// A restart that only replays already recorded decisions does not price cleanup.
+	let isCacheBustingPass =
+		args.recoveryRebuildReason === "lkg_recovery_input_rebuild" ||
+		((!!args.recoveryRebuildReason || args.forceSignedRebuildForFit === true) &&
+			hasUnfrozenPiThinking({
+				messages: args.messages,
+				entryIds: args.messages.map((message, index) =>
+					resolvePiStableId(
+						message,
+						index,
+						args.entryIds,
+						args.entryIdByRef ?? undefined,
+					),
+				),
+				frozen: frozenBindingEntryIds(args.db, args.sessionId),
+				provider: args.resolvedProviderID,
+				model: args.resolvedModelID,
+			}));
 	let workingForRewrite: unknown[] | undefined;
-	const stripForPrefixRewrite = () => {
+	const stripForPrefixRewrite = (permitRewrite = true) => {
+		// Required prefix rewrites permit queued drops and cleanup on this request.
+		// Recovery that only replays stored decisions passes false instead, so it
+		// cannot introduce a fresh edit into an otherwise unchanged saved request.
+		isCacheBustingPass ||= permitRewrite;
 		const messages = workingForRewrite ?? args.messages;
 		const result = applyPiProactiveThinkingStrip({
 			db: args.db,
@@ -8422,12 +8446,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			),
 			provider: args.resolvedProviderID,
 			model: args.resolvedModelID,
-			cacheBustingPass: true,
+			cacheBustingPass: isCacheBustingPass,
 			stripActiveTurn: true,
 			persistOnly: true,
 			requirePersistence: !!args.recoveryRebuildReason,
 		});
-		if (activeThinkingTurn && !result)
+		if (activeThinkingTurn && isCacheBustingPass && !result)
 			throw new Error(
 				"Cannot persist signed thinking omission before prefix rewrite",
 			);
@@ -8439,7 +8463,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.recoveryRebuildReason ||
 		(args.forceSignedRebuildForFit && protectedSignedPrefix)
 	)
-		stripForPrefixRewrite();
+		stripForPrefixRewrite(isCacheBustingPass);
 	// Messages without a real entry id get a position-independent fallback id
 	// computed once from this pass's input, before any stage edits content.
 	// Every stage below resolves by the index it was given into this same array
@@ -8942,7 +8966,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		subagentExecute:
 			args.sessionMeta.isSubagent && args.schedulerDecision === "execute",
 		hardFold:
-			foldBustsServedPrefixThisPass || firstRenderBust || heldIdleExpiryRebuild,
+			foldBustsServedPrefixThisPass ||
+			firstRenderBust ||
+			heldIdleExpiryRebuild ||
+			isCacheBustingPass,
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
 			(args.contextUsage.percentage >= 95 ||
@@ -8965,7 +8992,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		firstRenderBust ||
 		heldIdleExpiryRebuild ||
 		emergencyDropEligible;
-	let isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals);
+	isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals);
 	let publishedWorkDrainAllowed = isCacheBustingPass;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
@@ -8992,6 +9019,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			foldBustsServedPrefixThisPass ||
 			firstRenderBust ||
 			heldIdleExpiryRebuild ||
+			(args.recoveryRebuildReason !== undefined && isCacheBustingPass) ||
 			rideSignals.subagentExecute ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 	let unavoidableCarriedIdentityRebuild = false;
@@ -11002,7 +11030,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		prefixMutationAllowed,
 		strictThinkingKept: protectedSignedPrefix,
 		signedPrefixRewritten: rewritingSignedPrefix,
-		prefixRebuildAlreadyPriced: firstRenderBust || heldIdleExpiryRebuild,
+		prefixRebuildAlreadyPriced:
+			firstRenderBust ||
+			heldIdleExpiryRebuild ||
+			(!!args.recoveryRebuildReason && isCacheBustingPass),
 		identityRebuilt: identityRebuild,
 		servedTagNumbers,
 		heuristicsExecuted,

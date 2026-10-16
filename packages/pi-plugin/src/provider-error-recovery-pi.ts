@@ -290,6 +290,25 @@ export interface PiProactiveThinkingStrip {
 	entryIds: string[];
 }
 
+/** Previously recorded omissions are replay, not a new reason to rewrite a saved request. */
+export function hasUnfrozenPiThinking(args: {
+	messages: readonly unknown[];
+	entryIds: readonly (string | undefined)[];
+	frozen: ReadonlySet<string>;
+	provider?: string;
+	model?: string;
+}): boolean {
+	return (
+		isPrefixBoundThinkingModel(args.provider, args.model) &&
+		args.messages.some((message, index) => {
+			const entryId = args.entryIds[index];
+			return (
+				hasThinkingPart(message) && (!entryId || !args.frozen.has(entryId))
+			);
+		})
+	);
+}
+
 /**
  * Persist and replay thinking omissions when a prefix-bound model's prompt changes.
  *
