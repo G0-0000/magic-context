@@ -467,7 +467,7 @@ async function mapOneBatch(
     try {
         const prompt = buildMapMemoriesPrompt(
             args.projectIdentity,
-            seedIdentifierCandidates(batch, args.sessionDirectory),
+            await seedIdentifierCandidates(batch, args.sessionDirectory),
         );
         if (args.hiddenCompletionExecutor) {
             const run = await runHiddenSingleShotPrompt({

@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import {
     assertNoDuplicateManifestIds,
@@ -90,12 +91,14 @@ export interface MapMemoryInput {
     candidates: string[];
 }
 
+const execFileAsync = promisify(execFile);
+
 /** One bounded literal source search per batch; only paths enter the model context.
  * An unavailable repository or oversized/slow search leaves path seeds intact. */
-export function seedIdentifierCandidates(
+export async function seedIdentifierCandidates(
     memories: MapMemoryInput[],
     repoDir: string,
-): MapMemoryInput[] {
+): Promise<MapMemoryInput[]> {
     const identifiers = new Map(
         memories
             .filter((memory) => memory.candidates.length === 0)
@@ -112,32 +115,39 @@ export function seedIdentifierCandidates(
     );
     const terms = [...new Set([...identifiers.values()].flat())];
     if (terms.length === 0) return memories;
-    const result = spawnSync(
-        "git",
-        [
-            "-c",
-            "core.quotePath=false",
-            "grep",
-            "--no-color",
-            "-n",
-            "-I",
-            "-F",
-            ...terms.flatMap((term) => ["-e", term]),
-            "--",
-            ...["ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "go", "py", "sql", "sh"].map(
-                (extension) => `*.${extension}`,
-            ),
-        ],
-        {
-            cwd: repoDir,
-            encoding: "utf8",
-            timeout: 2_000,
-            maxBuffer: 256 * 1024,
-            windowsHide: true,
-        },
-    );
-    if (result.error || result.status !== 0) return memories;
-    const matches = result.stdout.split("\n").flatMap((line) => {
+    let stdout: string;
+    try {
+        const result = await execFileAsync(
+            "git",
+            [
+                "-c",
+                "core.quotePath=false",
+                "grep",
+                "--no-color",
+                "-n",
+                "-I",
+                "-F",
+                ...terms.flatMap((term) => ["-e", term]),
+                "--",
+                ...["ts", "tsx", "js", "jsx", "mjs", "cjs", "rs", "go", "py", "sql", "sh"].map(
+                    (extension) => `*.${extension}`,
+                ),
+            ],
+            {
+                cwd: repoDir,
+                encoding: "utf8",
+                timeout: 2_000,
+                maxBuffer: 256 * 1024,
+                windowsHide: true,
+                // A timed-out or oversized lookup must terminate even if Git ignores SIGTERM.
+                killSignal: "SIGKILL",
+            },
+        );
+        stdout = result.stdout;
+    } catch {
+        return memories;
+    }
+    const matches = stdout.split("\n").flatMap((line) => {
         const match = line.match(/^([^:]+):\d+:(.*)$/);
         return match ? [{ file: match[1], text: match[2] }] : [];
     });
