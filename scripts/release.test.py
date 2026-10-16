@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Run release gates in disposable repositories, with offline gh and runner fixtures.
+
+Run: timeout 180s python3 scripts/release.test.py -v
+"""
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from typing import Any
+import unittest
+
+SCRIPTS = Path(__file__).resolve().parent
+REAL_GIT = shutil.which("git")
+REAL_BUN = shutil.which("bun")
+
+
+class ReleaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="release-gate-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        self.env.update(TEST_ROOT=str(self.root), REAL_GIT=str(REAL_GIT), REAL_BUN=str(REAL_BUN),
+                        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                        PYTHONDONTWRITEBYTECODE="1", HOME=str(self.root / "home"))
+        self.git("init", "-b", "master")
+        self.git("config", "user.name", "Release Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        scripts = self.repo / "scripts"
+        scripts.mkdir()
+        for name in ("release.sh", "ci-gate.py", "check-release-bump.py", "version-sync.mjs"):
+            shutil.copyfile(SCRIPTS / name, scripts / name)
+        for name in ("run-rust-hermetic-e2e.sh", "release-e2e-docker.sh"):
+            path = scripts / name
+            path.write_text("#!/bin/sh\necho 'Unexpected local e2e gate' >&2\nexit 42\n")
+            path.chmod(0o755)
+        for package in ("plugin", "pi-plugin", "cli"):
+            path = self.repo / "packages" / package
+            path.mkdir(parents=True)
+            (path / "package.json").write_text(json.dumps({"name": package, "version": "1.0.0"}) + "\n")
+        (self.repo / "README.md").write_text("fixture readme\n")
+        (self.repo / "packages/plugin/README.md").write_text("fixture readme\n")
+        (self.repo / "CHANGELOG.md").write_text("# Changelog\n")
+        (self.repo / "source.ts").write_text("certified source\n")
+        notes = self.repo / ".cortexkit/release-notes/v9.8.7.md"
+        notes.parent.mkdir(parents=True)
+        notes.write_text("Public release notes\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Fixture base")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.scenario: dict[str, Any] = {"base": self.base}
+        shims = self.root / "shims"
+        shims.mkdir()
+        fixture = (SCRIPTS / "release-test-fixtures/command-shim.py").read_text().split("\n", 1)[1]
+        for name in ("gh", "git", "bun", "curl"):
+            path = shims / name
+            path.write_text(f"#!{shutil.which('python3')}\n" + fixture)
+            path.chmod(0o755)
+        self.env["PATH"] = str(shims) + os.pathsep + os.environ["PATH"]
+
+    def git(self, *args):
+        result = subprocess.run([str(REAL_GIT), *args], cwd=self.repo, env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def run_script(self, sha=None):
+        (self.root / "scenario.json").write_text(json.dumps(self.scenario))
+        return subprocess.run(["bash", "scripts/release.sh", "9.8.7", "--ci-gate=" + (sha or self.base)],
+                              cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30)
+
+    def commands(self, name):
+        path = self.root / "commands.jsonl"
+        entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [entry["args"] for entry in entries if entry["name"] == name]
+
+    def assert_no_publish(self):
+        self.assertFalse(any(args[0] == "push" or args[:2] == ["tag", "-a"] for args in self.commands("git")))
+
+    def test_each_workflow_must_succeed_on_exact_sha(self):
+        for workflow in ("CI", "Mutations", "Smoke"):
+            for override in ({"conclusion": "failure"}, {"status": "in_progress", "conclusion": None}, {"head_sha": "a" * 40}):
+                with self.subTest(workflow=workflow, override=override):
+                    self.scenario["workflows"] = {workflow: override}
+                    run = self.run_script()
+                    self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                    self.assertIn(workflow + " for " + self.base, run.stderr)
+                    self.assertIn("not completed/success", run.stderr)
+                    self.assert_no_publish()
+                    self.assertFalse(self.commands("bun"))
+
+    def test_missing_workflow_refuses(self):
+        self.scenario["missing"] = "Smoke"
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("Smoke for " + self.base + ": missing", run.stderr)
+        self.assert_no_publish()
+
+    def test_newer_failed_run_cannot_reuse_older_success(self):
+        self.scenario["extra_runs"] = [{"id": 100, "name": "CI", "head_sha": self.base, "status": "completed", "conclusion": "failure"}]
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("completed/failure", run.stderr)
+        self.assert_no_publish()
+
+    def test_api_failure_refuses(self):
+        self.scenario["api_failure"] = True
+        self.assertNotEqual(self.run_script().returncode, 0)
+        self.assert_no_publish()
+
+    def test_tag_workflow_always_requires_rust_build_and_shards(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("RELEASE_SKIP_RUST_E2E", workflow)
+        for name in ("e2e-rust-hermetic-build", "e2e-rust-hermetic", "publish-npm", "publish-npm-pi", "publish-npm-cli"):
+            block = re.search(r"^  " + name + r":\n(.*?)(?=^  [\w-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL)
+            self.assertIsNotNone(block, name)
+            assert block is not None
+            if name.startswith("e2e-"):
+                self.assertNotRegex(block.group(1), r"(?m)^    if:")
+            else:
+                condition = block.group(1).split("    if: >-\n", 1)[1].split("    steps:", 1)[0]
+                self.assertIn("needs.e2e-rust-hermetic-build.result == 'success'", condition)
+                self.assertIn("needs.e2e-rust-hermetic.result == 'success'", condition)
+                self.assertNotIn("||", condition)
+
+    def test_green_exact_sha_skips_all_local_gates_but_builds_and_checks_artifacts(self):
+        run = self.run_script(sha=self.base[:12])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("host and Rust legs: covered by CI", run.stdout)
+        runners = self.commands("bun")
+        self.assertEqual(sum(args[-1] == "build" for args in runners), 3)
+        self.assertTrue(any(args[-1] == "audit:packed-packages" for args in runners))
+        self.assertTrue(any(args[:1] == ["scripts/version-sync.mjs"] for args in runners))
+        self.assertFalse(any(arg in ("lint", "typecheck", "test") for args in runners for arg in args))
+        changed = set(self.git("diff", "--name-only", self.base, "HEAD").splitlines())
+        self.assertEqual(changed, {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")})
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertTrue(any(args[:2] == ["tag", "-a"] for args in self.commands("git")))
+        self.assertTrue(any(args[:2] == ["run", "watch"] for args in self.commands("gh")))
+
+    def test_bump_refuses_non_version_notes_file_before_commit(self):
+        self.scenario["stage_source"] = True
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CI reuse refuses non-version/notes change: source.ts", run.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assert_no_publish()
+
+    def test_bump_refuses_non_version_manifest_content(self):
+        self.scenario["manifest_dependency"] = True
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CI reuse refuses non-version manifest change", run.stderr)
+        self.assert_no_publish()
+
+    def test_committed_bump_is_rechecked_before_tag(self):
+        self.scenario["amend_source"] = True
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CI reuse refuses non-version/notes change: source.ts", run.stderr)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assert_no_publish()
+
+    def test_non_exact_head_runs_local_gates(self):
+        (self.repo / "source.ts").write_text("new uncertified code\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "Fixture untested change")
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("running all local gates instead", run.stdout)
+        self.assertTrue(any(args[-1] == "lint" for args in self.commands("bun")))
+        self.assertFalse(self.commands("gh"))
+        self.assert_no_publish()
+
+    def test_notes_and_changelog_are_required(self):
+        for path in ("CHANGELOG.md", ".cortexkit/release-notes/v9.8.7.md"):
+            with self.subTest(path=path):
+                original = (self.repo / path).read_text()
+                (self.repo / path).write_text("")
+                self.git("add", ".")
+                self.git("commit", "-m", "Fixture empty notes")
+                self.base = self.git("rev-parse", "HEAD").strip()
+                self.scenario["base"] = self.base
+                run = self.run_script()
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn(path, run.stdout)
+                self.assert_no_publish()
+                (self.repo / path).write_text(original)
+                self.git("add", ".")
+                self.git("commit", "-m", "Fixture restore notes")
+
+
+if __name__ == "__main__":
+    unittest.main()
