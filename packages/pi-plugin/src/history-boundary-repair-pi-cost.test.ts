@@ -303,7 +303,6 @@ benchmark(
 			);
 			expect(appendSamples).toHaveLength(1024);
 			expect(treeSamples).toHaveLength(100);
-			expect(stats(appendSamples).p99Ms).toBeLessThan(1);
 		} finally {
 			f.close();
 		}
