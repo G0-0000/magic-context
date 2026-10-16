@@ -430,7 +430,9 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
                 !/^\s*(?:SELECT|EXPLAIN|PRAGMA|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(sql)
             ) {
                 try {
-                    return withAutocommitTimeout(db, () => nativeExec(sql));
+                    // exec can commit a script prefix before BUSY. Run it once;
+                    // only prepared statements are safe to probe and retry.
+                    return withAutocommitTimeout(db, () => nativeExec(sql), false);
                 } finally {
                     if (mayChangeTagIdentity(sql)) tagIdentityWriteGeneration += 1;
                 }
@@ -1012,33 +1014,58 @@ function foregroundWaitLease() {
         : undefined;
 }
 
-/** Bound implicit writer admission too, including prepared INSERT OR IGNORE and
- * writes with RETURNING. Charge successful execution time conservatively: the
- * native API cannot separate lock waiting from statement execution. Exhaustion
- * switches to zero-wait acquisition, not a refusal when the writer is free. */
-function withAutocommitTimeout<T>(db: Database, operation: () => T): T {
+/** Prepared statements can probe implicit admission without spending the lease
+ * on uncontended execution. Scripts cannot safely replay a committed prefix, so
+ * their single attempt conservatively charges its whole execution time. */
+function withAutocommitTimeout<T>(db: Database, operation: () => T, singleStatement = true): T {
     assertTransformWrite();
     const lease = foregroundWaitLease();
     if (isInTransaction(db)) return operation();
     const scoped = lease || backgroundWriterScope.getStore();
     const previous = scoped ? pragmaNumber(db, "busy_timeout") : null;
-    if (scoped)
-        db.exec(
-            `PRAGMA busy_timeout=${lease ? Math.floor(Math.min(lease.remainingWaitMs, lease.guard?.remainingMs() ?? Infinity)) : SHORT_BUSY_TIMEOUT_MS}`,
-        );
     const started = performance.now();
     let completed = false;
-    try {
+    const execute = () => {
         const result = operation();
         completed = true;
         return result;
+    };
+    try {
+        if (!scoped) return execute();
+        if (singleStatement) {
+            db.exec("PRAGMA busy_timeout=0");
+            try {
+                return execute();
+            } catch (error) {
+                if (!isTransientSqliteError(error) || isInTransaction(db)) throw error;
+            }
+            assertTransformWrite();
+        }
+        const timeout = Math.floor(
+            Math.min(
+                lease?.remainingWaitMs ?? SHORT_BUSY_TIMEOUT_MS,
+                lease?.guard?.remainingMs() ?? Infinity,
+            ),
+        );
+        db.exec(`PRAGMA busy_timeout=${timeout}`);
+        const waitStarted = performance.now();
+        try {
+            return execute();
+        } finally {
+            // A prepared retry encountered contention; an exec script cannot be
+            // probed safely. Both charge execution as an upper bound on waiting.
+            if (lease)
+                lease.remainingWaitMs = Math.max(
+                    0,
+                    lease.remainingWaitMs - (performance.now() - waitStarted),
+                );
+        }
     } catch (error) {
         if (lease && isTransientSqliteError(error))
             throw new SqliteAcquisitionBusyError(error, "autocommit");
         throw error;
     } finally {
         const elapsed = performance.now() - started;
-        if (lease) lease.remainingWaitMs = Math.max(0, lease.remainingWaitMs - elapsed);
         if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
         // Native autocommit does not expose the instant its lock was acquired.
         // Label the upper bound so a waiting statement is not blamed as a holder.
