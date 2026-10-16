@@ -3308,9 +3308,13 @@ export function getPendingPiCompactionMarkerState(
     } catch {
         // Fall through to clear malformed durable state below.
     }
-    db.prepare(
-        "UPDATE session_meta SET pending_pi_compaction_marker_state = NULL WHERE session_id = ? AND pending_pi_compaction_marker_state = ?",
-    ).run(sessionId, raw);
+    const cleared = db
+        .prepare(
+            "UPDATE session_meta SET pending_pi_compaction_marker_state = NULL WHERE session_id = ? AND pending_pi_compaction_marker_state = ?",
+        )
+        .run(sessionId, raw);
+    if (cleared.changes > 0)
+        sessionLog(sessionId, "Pi compaction-marker clear: reason=malformed-state");
     return null;
 }
 
@@ -3318,9 +3322,19 @@ export function setPendingPiCompactionMarkerState(
     db: Database,
     sessionId: string,
     state: PendingPiCompactionMarker | null,
+    clearReason = "explicit-reset",
 ): void {
     ensureSessionMetaRow(db, sessionId);
-    const blob = state ? stableStringify(state) : null;
+    if (state === null) {
+        const pending = getPendingPiCompactionMarkerState(db, sessionId);
+        if (pending) clearPendingPiCompactionMarkerStateIf(db, sessionId, pending, clearReason);
+        else
+            db.prepare(
+                "UPDATE session_meta SET pending_pi_compaction_marker_state = NULL WHERE session_id = ? AND pending_pi_compaction_marker_state = ''",
+            ).run(sessionId);
+        return;
+    }
+    const blob = stableStringify(state);
     db.prepare(
         "UPDATE session_meta SET pending_pi_compaction_marker_state = ? WHERE session_id = ?",
     ).run(blob, sessionId);
@@ -3330,6 +3344,8 @@ export function clearPendingPiCompactionMarkerStateIf(
     db: Database,
     sessionId: string,
     expected: PendingPiCompactionMarker,
+    // Pass null to log this marker's removal only after the caller commits its surrounding transaction.
+    reason: string | null = "explicit-clear",
 ): boolean {
     const expectedBlob = stableStringify(expected);
     const result = db
@@ -3338,7 +3354,20 @@ export function clearPendingPiCompactionMarkerStateIf(
              WHERE session_id = ? AND pending_pi_compaction_marker_state = ?`,
         )
         .run(sessionId, expectedBlob);
+    if (result.changes > 0 && reason !== null)
+        logPiCompactionMarkerClear(sessionId, expected, reason);
     return result.changes > 0;
+}
+
+export function logPiCompactionMarkerClear(
+    sessionId: string,
+    marker: PendingPiCompactionMarker,
+    reason: string,
+): void {
+    sessionLog(
+        sessionId,
+        `Pi compaction-marker clear: reason=${reason} endMessageId=${marker.endMessageId} ordinal=${marker.ordinal} firstKeptEntryId=${marker.firstKeptEntryId ?? "<none>"}`,
+    );
 }
 
 export function getSessionsWithPendingPiMarker(db: Database): string[] {

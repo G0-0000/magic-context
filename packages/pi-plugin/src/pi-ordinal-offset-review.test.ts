@@ -280,7 +280,9 @@ describe("Pi ordinal offset independent review", () => {
 	it("marker cuts use stored ordinals at the anchor, first entry, and newest entry", async () => {
 		await withFixture((db, sessionId, entries) => {
 			// The combined results after the anchor have no single JSONL entry ID.
-			// Pi must wait rather than use that synthetic ID as its first kept entry.
+			// A later assistant has fixed that synthetic group in place. Retire this
+			// native marker rather than waiting forever or dropping the kept results;
+			// the newer summary below supplies a replayable boundary instead.
 			expect(findFirstKeptEntryId(entries, END, LOST)).toBeNull();
 			expect(findFirstKeptEntryId(entries, LOST, LOST)).toBe("b1");
 			expect(findFirstKeptEntryId(entries, LOST + 1, LOST)).toBe("b2");
@@ -304,7 +306,7 @@ describe("Pi ordinal offset independent review", () => {
 				publishedAt: 1,
 			};
 			expect(applyDeferredPiCompactionMarker(deps, sessionId, pending)).toEqual(
-				{ kind: "waiting-for-entry" },
+				{ kind: "stale-skip", reason: "synthetic-kept-entry" },
 			);
 			expect(appended).toEqual([]);
 			appendCompartments(db, sessionId, [

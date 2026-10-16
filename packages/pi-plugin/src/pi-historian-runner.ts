@@ -1981,7 +1981,9 @@ export function buildPiCompactionSummary(
  * Empty-id slots cannot anchor Pi's native compaction marker, but may be followed
  * by a real entry that can. Folded tool-result slots are different: their
  * synthesized id represents kept-tail content, so advancing past one would drop
- * that content; leave the marker pending until a safe boundary is available.
+ * that content. resolvePiFirstKeptEntry distinguishes a trailing result group that
+ * can merge into a future user entry from an interior group that needs a newer
+ * summary boundary before a native marker can be placed.
  * System slots keep their ordinals but cannot anchor the kept conversation tail;
  * Pi's compaction snapshot preserves their effective state instead.
  *
@@ -1994,10 +1996,27 @@ export function findFirstKeptEntryId(
 	lastCompactedOrdinal: number,
 	ordinalOffset = 0,
 ): string | null {
+	const boundary = resolvePiFirstKeptEntry(
+		entries,
+		lastCompactedOrdinal,
+		ordinalOffset,
+	);
+	return boundary.kind === "resolved" ? boundary.entryId : null;
+}
+
+export function resolvePiFirstKeptEntry(
+	entries: readonly unknown[],
+	lastCompactedOrdinal: number,
+	ordinalOffset = 0,
+):
+	| { kind: "resolved"; entryId: string }
+	| { kind: "waiting" }
+	| { kind: "unplaceable"; rawId: string } {
 	const target = lastCompactedOrdinal + 1;
 	const afterOrdinal = Number.isNaN(lastCompactedOrdinal)
 		? 0
 		: Math.max(0, lastCompactedOrdinal);
+	let syntheticKeptId: string | undefined;
 	for (const message of iterateEntriesToRawMessageRange(
 		entries,
 		afterOrdinal,
@@ -2006,9 +2025,18 @@ export function findFirstKeptEntryId(
 		ordinalOffset,
 	)) {
 		if (message.ordinal < target || isPiSystemEntry(message)) continue;
-		if (message.id.startsWith(SYNTH_USER_ID_PREFIX)) return null;
+		// iterateEntriesToRawMessageRange groups consecutive tool results into a
+		// generated user message without a real SessionEntry id. A real user appended
+		// at the session tail can carry those results instead. Once another chat
+		// message follows the group, appends cannot change it. Skipping the group
+		// would discard tool results outside the summary.
+		if (syntheticKeptId) return { kind: "unplaceable", rawId: syntheticKeptId };
+		if (message.id.startsWith(SYNTH_USER_ID_PREFIX)) {
+			syntheticKeptId = message.id;
+			continue;
+		}
 		if (message.id.length === 0) continue;
-		return message.id;
+		return { kind: "resolved", entryId: message.id };
 	}
-	return null;
+	return { kind: "waiting" };
 }

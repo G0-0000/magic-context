@@ -10446,6 +10446,31 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!casLost;
 	let preserveDeferredMaterializationForMarkerDrain = false;
 	let pendingForDrain: PendingPiCompactionMarker | null = null;
+	if (
+		!deferredHistoryDrainEligible &&
+		(deferredHistoryWasPendingAtPassStart || hasPendingMaterializeSignal)
+	) {
+		try {
+			const pending = getPendingPiCompactionMarkerState(
+				args.db,
+				args.sessionId,
+			);
+			if (pending)
+				logPiCompactionMarkerDrainGateOnce(
+					args.sessionId,
+					pending,
+					"drain-not-eligible",
+					{
+						historyConsumed: historyWasConsumedThisPass,
+						materializationSatisfied: materializationSatisfiedThisPass,
+						drainSuppressed: suppressDeferredHistoryDrain,
+						casLost,
+					},
+				);
+		} catch {
+			// A failed marker-state read for logging must not abort sending the unchanged conversation.
+		}
+	}
 	if (deferredHistoryDrainEligible) {
 		try {
 			args.assertCurrentPass?.();
@@ -10592,6 +10617,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.db,
 						args.sessionId,
 						pending,
+						outcome.kind === "stale-skip" ? outcome.reason : outcome.kind,
 					)
 				) {
 					consumeDeferredHistoryRefresh(args.sessionId);

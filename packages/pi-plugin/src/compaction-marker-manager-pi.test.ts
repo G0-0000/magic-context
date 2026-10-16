@@ -528,11 +528,6 @@ describe("Pi deferred compaction marker manager", () => {
 								id: "result-entry",
 								message: { role: "toolResult", toolCallId: "call-1" },
 							},
-							{
-								type: "message",
-								id: "assistant-after-tool",
-								message: { role: "assistant", content: "answer" },
-							},
 						],
 						appendCompaction: () => "compact-1",
 					};
