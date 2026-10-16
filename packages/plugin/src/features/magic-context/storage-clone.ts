@@ -18,6 +18,7 @@ import {
     readReplayDocument,
     writeReplayDocument,
 } from "./storage-replay-document";
+import { clearTrimRetirement } from "./trim-retirement-cache";
 
 export interface CloneCompartmentRow {
     sequence: number;
@@ -546,6 +547,7 @@ export function copySessionStateForClone(
             });
         }
 
+        clearTrimRetirement(db, destinationSessionId);
         const sourceTags = db
             .prepare(
                 `SELECT id, message_id, type, status, byte_size, tag_number, harness,

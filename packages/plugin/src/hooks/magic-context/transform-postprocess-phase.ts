@@ -72,6 +72,7 @@ import {
     freezeTemporalDecisions,
     getTemporalDecisions,
 } from "../../features/magic-context/temporal-decisions";
+import { retireTrimmedSources } from "../../features/magic-context/trim-retirement-cache";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { getUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
@@ -3583,7 +3584,9 @@ export async function runPostTransformPhase(
             .map((message) => message.info.id)
             .filter((id): id is string => typeof id === "string");
         if (trimmedMessageIds.length > 0) {
-            markTagsCompactedByMessageIds(args.db, args.sessionId, trimmedMessageIds);
+            retireTrimmedSources(args.db, args.sessionId, trimmedMessageIds, (ids) =>
+                markTagsCompactedByMessageIds(args.db, args.sessionId, ids),
+            );
         }
         logTransformTiming(args.sessionId, "pp.placeholderNeutralize", tPlaceholder);
     }

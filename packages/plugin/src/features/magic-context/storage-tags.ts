@@ -15,6 +15,7 @@ import {
 import { tagOrderConstraintIndex } from "./migration-v95-perf-indexes";
 import { queuePendingOp, removePendingOp } from "./storage-ops";
 import { tagIdentityRevisionKey } from "./storage-tag-identity-revision";
+import { hasTrimRetirement, invalidateTrimRetirement } from "./trim-retirement-cache";
 import type { TagEntry } from "./types";
 
 declare module "./types" {
@@ -1606,6 +1607,7 @@ export function insertTag(
     entryFingerprint: string | null = null,
     tokenCounts: TagTokenCounts | null = null,
 ): number {
+    invalidateTrimRetirement(db, sessionId, messageId, toolOwnerMessageId);
     getInsertTagStatement(db).run(
         sessionId,
         messageId,
@@ -1632,6 +1634,19 @@ export function updateTagStatus(
     tagId: number,
     status: TagEntry["status"],
 ): void {
+    if (status !== "compacted" && hasTrimRetirement(db, sessionId)) {
+        const row = db
+            .prepare(
+                "SELECT status, message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ?",
+            )
+            .get(sessionId, tagId) as {
+            status: string;
+            message_id: string;
+            tool_owner_message_id: string | null;
+        } | null;
+        if (row?.status === "compacted")
+            invalidateTrimRetirement(db, sessionId, row.message_id, row.tool_owner_message_id);
+    }
     getUpdateTagStatusStatement(db).run(status, sessionId, tagId);
 }
 
@@ -1807,6 +1822,7 @@ export function updateTagMessageId(
     tagId: number,
     messageId: string,
 ): void {
+    invalidateTrimRetirement(db, sessionId, messageId);
     getUpdateTagMessageIdStatement(db).run(messageId, sessionId, tagId);
 }
 
@@ -1869,6 +1885,7 @@ export function adoptFallbackTagMessageId(
     newRealMessageId: string,
 ): boolean {
     if (oldFallbackMessageId.startsWith(WHITESPACE_ASSISTANT_INERT_MESSAGE_PREFIX)) return false;
+    invalidateTrimRetirement(db, sessionId, newRealMessageId);
     const result = db
         .prepare(
             `UPDATE tags SET message_id = ?
@@ -2107,6 +2124,8 @@ function applyDroppedStatusIfNeeded(
 ): void {
     if (survivor.status === "dropped") return;
     if (duplicate.status !== "dropped") return;
+    if (survivor.status === "compacted")
+        invalidateTrimRetirement(db, sessionId, survivor.messageId, survivor.toolOwnerMessageId);
     foldStatement(
         db,
         "UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?",
@@ -2359,6 +2378,7 @@ export function foldShrunkPartTags(
             // its tag number and moves down onto the part that remains.
             const lowest = orphans[0];
             if (!lowest) continue;
+            invalidateTrimRetirement(db, sessionId, `${messageId}:p0`);
             rekey.run(`${messageId}:p0`, sessionId, lowest.tagNumber);
             result.rekeyedTagNumbers.push(lowest.tagNumber);
             survivor = { ...lowest, messageId: `${messageId}:p0`, partIndex: 0 };
@@ -2511,6 +2531,7 @@ export function adoptPiFallbackToolOwnerTag(
     }
 
     const existing = getPiFallbackToolFoldTagRowByOwner(db, sessionId, callId, newOwnerMessageId);
+    invalidateTrimRetirement(db, sessionId, newOwnerMessageId);
     if (existing === null) {
         const result = db
             .prepare(
@@ -2582,6 +2603,7 @@ export function adoptPiFallbackMessageTag(
         sessionId,
         newRealMessageId,
     ).filter((row) => row.tagNumber !== tagNumber);
+    invalidateTrimRetirement(db, sessionId, newRealMessageId);
     if (duplicates.length === 0) {
         const result = db
             .prepare(
@@ -3437,7 +3459,7 @@ function getAdoptNullOwnerToolTagStatement(db: Database): PreparedStatement {
 function getToolOwnerByTagIdStatement(db: Database): PreparedStatement {
     let stmt = getToolOwnerByTagIdStatements.get(db);
     if (!stmt) {
-        stmt = db.prepare("SELECT tool_owner_message_id FROM tags WHERE id = ?");
+        stmt = db.prepare("SELECT session_id, tool_owner_message_id FROM tags WHERE id = ?");
         getToolOwnerByTagIdStatements.set(db, stmt);
     }
     return stmt;
@@ -3458,10 +3480,11 @@ export function adoptNullOwnerToolTag(db: Database, rowId: number, ownerMsgId: s
     return db
         .transaction(() => {
             const before = getToolOwnerByTagIdStatement(db).get(rowId) as
-                | { tool_owner_message_id: string | null }
+                | { session_id: string; tool_owner_message_id: string | null }
                 | undefined;
             if (!before || before.tool_owner_message_id !== null) return false;
 
+            invalidateTrimRetirement(db, before.session_id, ownerMsgId);
             getAdoptNullOwnerToolTagStatement(db).run(ownerMsgId, rowId);
             const after = getToolOwnerByTagIdStatement(db).get(rowId) as
                 | { tool_owner_message_id: string | null }

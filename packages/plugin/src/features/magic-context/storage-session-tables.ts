@@ -10,6 +10,7 @@ import {
     tagTombstoneOwnerKey,
     tagTombstoneOwnerRange,
 } from "./storage-tag-identity-revision";
+import { clearTrimRetirement } from "./trim-retirement-cache";
 
 export interface SessionScopedTableDefinition {
     readonly table: string;
@@ -115,6 +116,7 @@ export function deleteSessionScopedRows(
         deletableSessionIds = sessionIds.filter((sessionId) => !protectedSessionIds.has(sessionId));
     }
     if (deletableSessionIds.length === 0) return 0;
+    for (const sessionId of deletableSessionIds) clearTrimRetirement(db, sessionId);
     const placeholders = deletableSessionIds.map(() => "?").join(", ");
 
     const harnessTables = SESSION_SCOPED_TABLES.filter((definition) => definition.harnessScoped);
