@@ -176,3 +176,153 @@ fn processed_images_provider_switch_during_signed_hold_keeps_frozen_bytes() {
     assert_eq!(switched.action, "SOFT+");
     assert_eq!(review_bytes(&held), review_bytes(&switched));
 }
+
+fn render_processed_image_plan(
+    request: &TransformRequest,
+    units: Vec<FrozenUnit>,
+) -> Vec<CkWireMessage> {
+    let mut core = CoreState::default();
+    core.frozen_units = units;
+    let projection = project_messages(&request.messages).unwrap();
+    build_output(
+        &core,
+        &ModuleMeta::default(),
+        &projection,
+        request,
+        None,
+        false,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn processed_images_strip_nested_native_tool_media_without_emptying_results() {
+    for provider in ["anthropic", "openai"] {
+        for error in [false, true] {
+            let data = "x".repeat(300);
+            let pi_raw = vec![json!({
+                "role": "toolResult", "toolCallId": "call", "toolName": "read", "isError": error,
+                "content": [{"type": "image", "mimeType": "image/png", "data": data, "vendor": "image-extra"}]
+            })];
+            let decoded = crate::codec::pi::decode_pi(&pi_raw);
+            let mut request = req("tool-images", "cfg", decoded.messages);
+            request
+                .messages
+                .insert(0, assistant_tool_call("call", 0, "call"));
+            request.provider_id = Some(provider.into());
+            assert!(request.messages.iter().any(|m| m
+                .ck
+                .content
+                .iter()
+                .any(tool_image_block_is_large)));
+            assert!(
+                processed_image_plan(&CoreState::default(), &request, &BTreeMap::new(), 1, true)
+                    .is_empty(),
+                "a result needs a later assistant answer"
+            );
+            request
+                .messages
+                .push(wire_item("assistant", "answer", 100, &["processed"]));
+            let tags = BTreeMap::from([("answer".into(), 1)]);
+            let units = processed_image_plan(&CoreState::default(), &request, &tags, 1, true);
+            assert!(units
+                .iter()
+                .any(|u| u.kind == "image" && u.frozen_payload == "[image stripped]"));
+            let output = render_processed_image_plan(&request, units);
+            let encoded = crate::codec::pi::encode_pi(&output, &decoded.sidecar);
+            let result = encoded.iter().find(|m| m["role"] == "toolResult").unwrap();
+            assert_eq!(result["isError"], error);
+            assert_eq!(
+                result["content"],
+                json!([{"type": "text", "text": "[image stripped]"}])
+            );
+            assert!(!serde_json::to_string(&encoded).unwrap().contains(&data));
+
+            let oc_raw = vec![json!({
+                "info": {"id": "tool", "role": "assistant"},
+                "parts": [{"type": "tool", "callID": "call", "tool": "read", "state": {
+                    "status": if error {"error"} else {"completed"}, "input": {},
+                    "output": "", "error": "", "attachments": [
+                        {"mime": "image/png", "url": format!("data:image/png;base64,{data}")},
+                        {"mime": "image/png", "url": "https://example.test/keep.png"},
+                        {"mime": "image/png", "url": "data:image/png;base64,small"}
+                    ], "time": {"start": 1, "end": 2}
+                }}]
+            })];
+            let decoded = crate::codec::opencode::decode_opencode(&oc_raw);
+            let mut request = req("tool-images", "cfg", decoded.messages);
+            request.provider_id = Some(provider.into());
+            assert!(
+                processed_image_plan(&CoreState::default(), &request, &tags, 1, true).is_empty(),
+                "the assistant containing the result is not a later answer"
+            );
+            request
+                .messages
+                .push(wire_item("assistant", "answer", 100, &["processed"]));
+            let units = processed_image_plan(&CoreState::default(), &request, &tags, 1, true);
+            assert!(units
+                .iter()
+                .any(|u| u.key == "strip:processed_tool_image:tool"));
+            let output = render_processed_image_plan(&request, units);
+            let encoded = crate::codec::opencode::encode_opencode(&output, &decoded.sidecar, None);
+            let state = &encoded[0]["parts"][0]["state"];
+            assert_eq!(state["status"], if error { "error" } else { "completed" });
+            assert!(state[if error { "error" } else { "output" }]
+                .as_str()
+                .unwrap()
+                .contains("[image stripped]"));
+            assert_eq!(state["attachments"].as_array().unwrap().len(), 2);
+            assert!(!serde_json::to_string(&encoded).unwrap().contains(&data));
+        }
+    }
+}
+
+#[test]
+fn processed_images_nested_tool_decisions_persist_and_replay_on_defer() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let decoded = crate::codec::pi::decode_pi(&[json!({
+        "role": "toolResult", "toolCallId": "call", "toolName": "read",
+        "content": [{"type": "image", "mimeType": "image/png", "data": "x".repeat(300)}]
+    })]);
+    let mut messages = vec![assistant_tool_call("call", 0, "call")];
+    messages.extend(decoded.messages);
+    messages.push(wire_item("assistant", "answer", 100, &["processed"]));
+    messages.push(item("dropper", 101, "spent"));
+    let mut request = req("tool-image-replay", "cfg0", messages);
+    request.provider_id = Some("anthropic".into());
+    run(&s, &request, &spine());
+    s.seed_tags_for_test(
+        &request.session_id,
+        &[mc_store::TagMintInput {
+            block_id: "dropper#0".into(),
+            kind: "message".into(),
+            token_count: 1,
+            source_bytes: b"spent".to_vec(),
+        }],
+        0,
+    )
+    .unwrap();
+    request.render_config = "cfg1".into();
+    let bust = run(&s, &request, &[reduce("dropper#0", "drop", "")]);
+    assert_eq!(bust.action, "HARD");
+    assert!(s
+        .load(&request.session_id)
+        .unwrap()
+        .core
+        .frozen_units
+        .iter()
+        .any(|u| u.key.starts_with("strip:processed_tool_image:")));
+    assert!(!bust
+        .messages()
+        .iter()
+        .any(|m| m.content.iter().any(tool_image_block_is_large)));
+    run(&s, &request, &spine());
+    let replay = run(&s, &request, &spine());
+    assert_eq!(replay.action, "SOFT+");
+    assert_eq!(
+        serde_json::to_vec(bust.messages()).unwrap(),
+        serde_json::to_vec(replay.messages()).unwrap()
+    );
+}

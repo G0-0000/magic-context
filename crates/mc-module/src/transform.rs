@@ -14311,6 +14311,10 @@ fn image_block_is_large(block: &CkWireBlock) -> bool {
     let ck_wire::CkKind::Media(media) = &block.kind else {
         return false;
     };
+    image_media_is_large(media)
+}
+
+fn image_media_is_large(media: &ck_wire::MediaBlock) -> bool {
     if media.kind != ck_wire::MediaKind::Image || !media.media_type.starts_with("image/") {
         return false;
     }
@@ -14327,6 +14331,43 @@ fn image_block_is_large(block: &CkWireBlock) -> bool {
     // OpenCode's TS strip checks the original data URL length, so include the
     // MIME/prefix bytes rather than treating a remote URL as image payload.
     data.len() + format!("data:{};base64,", media.media_type).len() > 200
+}
+
+fn tool_image_block_is_large(block: &CkWireBlock) -> bool {
+    let ck_wire::CkKind::ToolResult { output, .. } = &block.kind else {
+        return false;
+    };
+    match &output.kind {
+        ck_wire::CkOutputKind::Content { blocks }
+        | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks.iter().any(|block| {
+            matches!(&block.kind, ck_wire::ResultBlockKind::Media { media } if image_media_is_large(media))
+        }),
+        _ => false,
+    }
+}
+
+fn strip_tool_images(block: &mut CkWireBlock, marker: &str) {
+    let ck_wire::CkKind::ToolResult { output, .. } = &mut block.kind else {
+        return;
+    };
+    let (ck_wire::CkOutputKind::Content { blocks }
+    | ck_wire::CkOutputKind::ErrorContent { blocks }) = &mut output.kind
+    else {
+        return;
+    };
+    for child in blocks {
+        if matches!(&child.kind, ck_wire::ResultBlockKind::Media { media } if image_media_is_large(media))
+        {
+            *child = ck_wire::ResultBlock {
+                kind: ck_wire::ResultBlockKind::Text {
+                    text: marker.to_string(),
+                },
+                // Native image fields must not survive as extras on the replacement text.
+                provider_extras: Default::default(),
+            };
+        }
+    }
+    block.mark_modified();
 }
 
 fn replace_with_sentinel(block: &mut CkWireBlock, text: &str) {
@@ -14476,6 +14517,7 @@ fn new_frozen_strip_units(
         let protected_reduce = blocks.iter().enumerate().any(|(index, block)| {
             is_reduce_block(block) && protected_tools.contains(&format!("{}#{index}", message.mid))
         });
+        let had_later_assistant = has_assistant_response;
         if message.ck.role == "assistant" {
             // The reverse image scan in TS treats any assistant message as evidence
             // that older user content has already reached the model.
@@ -14563,7 +14605,9 @@ fn new_frozen_strip_units(
                     units.insert(unit.key.clone(), unit);
                 }
             }
-            continue;
+            if !blocks.iter().any(tool_image_block_is_large) {
+                continue;
+            }
         }
         let is_stale_reduce = request_accepts_empty_content(req)
             && index < protected_start
@@ -14575,7 +14619,7 @@ fn new_frozen_strip_units(
                 units.insert(unit.key.clone(), unit);
             }
         }
-        if has_assistant_response
+        if had_later_assistant
             // Permission to rebuild the request does not permit changing content before
             // retained signed thinking. Previously frozen image removals still replay.
             && !blocks.iter().enumerate().any(|(i, _)| {
@@ -14587,27 +14631,36 @@ fn new_frozen_strip_units(
                 // minted only on a bust and then frozen by message/block id for stable replay.
                 message_tag_number(message, tag_numbers) <= selection_scope.image_watermark
             }
-            && blocks.iter().any(image_block_is_large)
+            && blocks.iter().any(|block| {
+                (message.ck.role == "user" && image_block_is_large(block))
+                    || tool_image_block_is_large(block)
+            })
         {
             let image_marker = if request_accepts_empty_content(req) {
                 ""
             } else {
                 "[image stripped]"
             };
-            let marker = strip_unit("processed_image", &message.mid, image_marker);
-            if !existing_keys.contains(marker.key.as_str()) {
-                units.insert(marker.key.clone(), marker);
-            }
             for (block_index, block) in blocks.iter().enumerate() {
-                if !image_block_is_large(block) {
-                    continue;
+                let (seed_kind, marker_text) =
+                    if message.ck.role == "user" && image_block_is_large(block) {
+                        ("processed_image", image_marker)
+                    } else if tool_image_block_is_large(block) {
+                    // An image-only tool result must not become empty when its media is removed.
+                        ("processed_tool_image", "[image stripped]")
+                    } else {
+                        continue;
+                    };
+                let marker = strip_unit(seed_kind, &message.mid, marker_text);
+                if !existing_keys.contains(marker.key.as_str()) {
+                    units.insert(marker.key.clone(), marker);
                 }
                 // Images are reductions of individual media blocks, not whole-message
                 // strips. Reusing red:* keeps image replay in the same durable machinery
                 // as tool reductions while the message marker keeps replay stable if
                 // unrelated parts change their block index.
                 let target = format!("{}#{block_index}", message.mid);
-                let unit = red_unit(&target, "image", image_marker);
+                let unit = red_unit(&target, "image", marker_text);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
                 }
@@ -14799,6 +14852,8 @@ fn apply_surface_strips(
     let stale_reduce =
         output_message_strip_unit(frozen_units, "stale_reduce", &message.mid).is_some();
     let image_seed = output_message_strip_unit(frozen_units, "processed_image", &message.mid);
+    let tool_image_seed =
+        output_message_strip_unit(frozen_units, "processed_tool_image", &message.mid);
     let message_tag = message_tag_number(message, tag_numbers);
     let aged = message_tag > 0 && message_tag <= reasoning_policy.watermark;
     let mut touched = false;
@@ -14825,13 +14880,18 @@ fn apply_surface_strips(
         // provider switch. Older Anthropic decisions saved empty text and keep those bytes.
         let image_unit = image_seed
             .filter(|_| image_block_is_large(block.wire_shape()))
+            .or_else(|| tool_image_seed.filter(|_| tool_image_block_is_large(block.wire_shape())))
             .or_else(|| {
                 frozen_units
                     .red_by_block_id(block.id())
                     .filter(|unit| unit.kind == "image")
             });
         if let Some(unit) = image_unit {
-            replace_with_sentinel(&mut rebuilt.content[index], &unit.frozen_payload);
+            if tool_image_block_is_large(block.wire_shape()) {
+                strip_tool_images(&mut rebuilt.content[index], &unit.frozen_payload);
+            } else {
+                replace_with_sentinel(&mut rebuilt.content[index], &unit.frozen_payload);
+            }
             touched = true;
             continue;
         }
