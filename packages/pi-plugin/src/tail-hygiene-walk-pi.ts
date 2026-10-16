@@ -2,6 +2,7 @@ import { protectedToolTagNumbers } from "@magic-context/core/features/magic-cont
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import { estimateImageTokensFromDataUrl } from "@magic-context/core/hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { rememberCurrentToolOutputCount } from "@magic-context/core/hooks/magic-context/tail-hygiene-output-count";
 import {
 	compareMeasuredTailPrefix,
 	freezeTailHygieneMeasurement,
@@ -903,21 +904,25 @@ export function refreshPiTailHygieneBaseline(
 	const now = input.now ?? Date.now();
 	const refrozen = (
 		mismatch?: TailHygienePrefixMismatch,
-	): TailHygieneBaseline & { realUserTurnCount: number } => ({
-		...freezeTailHygieneMeasurement(measured),
-		protectedToolsPolicy,
-		hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
-		toolsRatio: frozenCalibration.toolsRatio,
-		proseRatio: frozenCalibration.proseRatio,
-		baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
-		computedAt: now,
-		evaluable: true,
-		generationInvalidated: false,
-		contentSignature: measured.contentSignature,
-		channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
-		lastPrefixMismatch: mismatch,
-		realUserTurnCount: rawMeasured.realUserTurnCount,
-	});
+	): TailHygieneBaseline & { realUserTurnCount: number } =>
+		rememberCurrentToolOutputCount(
+			{
+				...freezeTailHygieneMeasurement(measured),
+				protectedToolsPolicy,
+				hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
+				toolsRatio: frozenCalibration.toolsRatio,
+				proseRatio: frozenCalibration.proseRatio,
+				baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
+				computedAt: now,
+				evaluable: true,
+				generationInvalidated: false,
+				contentSignature: measured.contentSignature,
+				channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
+				lastPrefixMismatch: mismatch,
+				realUserTurnCount: rawMeasured.realUserTurnCount,
+			},
+			measured,
+		);
 	if (input.cacheBusting || !input.previous) return refrozen();
 
 	const prefix = compareMeasuredTailPrefix(
@@ -945,17 +950,20 @@ export function refreshPiTailHygieneBaseline(
 		if (part.kind !== "toolOutput" || !part.protected)
 			turnDeltaU += part.uTokens;
 	}
-	return {
-		...input.previous,
-		protectedToolsPolicy,
-		turnDeltaU,
-		turnDeltaT,
-		evaluable: true,
-		generationInvalidated: false,
-		contentSignature: measured.contentSignature,
-		lastPrefixMismatch: undefined,
-		realUserTurnCount: rawMeasured.realUserTurnCount,
-	};
+	return rememberCurrentToolOutputCount(
+		{
+			...input.previous,
+			protectedToolsPolicy,
+			turnDeltaU,
+			turnDeltaT,
+			evaluable: true,
+			generationInvalidated: false,
+			contentSignature: measured.contentSignature,
+			lastPrefixMismatch: undefined,
+			realUserTurnCount: rawMeasured.realUserTurnCount,
+		},
+		measured,
+	);
 }
 
 export function effectivePiTailHygiene(

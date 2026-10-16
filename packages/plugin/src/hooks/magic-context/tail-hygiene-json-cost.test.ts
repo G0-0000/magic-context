@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import * as stableJson from "../../shared/stable-json";
 import { opencode1ToModelMessages } from "./opencode1-to-model-messages.fixture";
+import { providerVisiblePart, providerVisiblePartForTailHygiene } from "./provider-visible-parts";
 import { measureTailHygiene, refreshTailHygieneBaseline } from "./tail-hygiene-walk";
 
 function metadataProbe() {
@@ -145,4 +146,67 @@ test("excluded OpenCode identity preserves the interrupted error fields OpenCode
     probe.data.output = { UI: "not a string partial result" };
     expect(hash()).toBe(notInterrupted);
     expect(probe.stats().bytesVisited).toBe(0);
+});
+
+test("excluded OpenCode text and reasoning sentinels never visit UI state metadata", () => {
+    for (const opencode2 of [false, true]) {
+        const probe = metadataProbe();
+        const state = {
+            get metadata() {
+                return probe.read();
+            },
+        };
+        const messages = [
+            {
+                info: { id: `sentinel-owner-${opencode2}`, role: "assistant" },
+                parts: [
+                    { type: "text", text: "[dropped]", state },
+                    { type: "reasoning", text: "excluded", state },
+                    { type: "text", text: "sibling" },
+                ],
+            },
+            {
+                info: { id: `sentinel-newest-${opencode2}`, role: "user" },
+                parts: [{ type: "text", text: "next" }],
+            },
+        ];
+        const input = {
+            messages,
+            tags: [],
+            protectedTagNumbers: new Set<number>(),
+            cacheBusting: true,
+            now: 1,
+            opencode2,
+        };
+        const previous = refreshTailHygieneBaseline(input);
+        expect(probe.stats()).toEqual({ bytesVisited: 0, reads: 0 });
+        probe.data.diagnostics = "y".repeat(18 * 1024 * 1024);
+        messages[0].parts[2].text = "different sibling";
+        const next = refreshTailHygieneBaseline({ ...input, previous, cacheBusting: false });
+        expect(next.baselineParts.slice(0, 2)).toEqual(previous.baselineParts.slice(0, 2));
+        expect(probe.stats()).toEqual({ bytesVisited: 0, reads: 0 });
+    }
+});
+
+test("tail-only metadata filtering leaves the existing replay representation unchanged", () => {
+    const part = {
+        type: "tool",
+        state: {
+            status: "error",
+            input: {},
+            error: "failed",
+            metadata: { interrupted: false, output: { UI: "not forwarded" } },
+            time: { compacted: 0 },
+        },
+    };
+    expect(providerVisiblePart(part)).toBe(part);
+    expect(providerVisiblePartForTailHygiene(part)).toEqual({
+        type: "tool",
+        state: {
+            status: "error",
+            input: {},
+            error: "failed",
+            time: { compacted: 0 },
+        },
+    });
 });

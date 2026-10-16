@@ -23,7 +23,7 @@ interface TailRefreshFixture {
     state: () => Channel1State;
     serve: () => ReturnType<typeof runPostTransformPhase>;
     reduce: () => Promise<void>;
-    toolResult: () => Promise<string>;
+    toolResult: (text?: string) => Promise<string>;
     append: (words?: number) => void;
 }
 
@@ -147,8 +147,8 @@ export function tailRefreshFixture(input: {
                 { output: "synthetic reduction" },
             );
         },
-        toolResult: async () => {
-            const output = { output: "synthetic next result" };
+        toolResult: async (text = "synthetic next result") => {
+            const output = { output: text };
             await afterTool({ sessionID: sessionId, tool: "bash" }, output);
             return output.output;
         },

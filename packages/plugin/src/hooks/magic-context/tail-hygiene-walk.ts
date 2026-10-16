@@ -9,13 +9,14 @@ import {
     estimateToolAttachmentImageTokens,
 } from "./image-token-estimate";
 import {
-    providerVisibleMessage,
+    providerVisibleMessageForTailHygiene as providerVisibleMessage,
     providerVisibleMessageForOpenCode2,
-    providerVisiblePart,
+    providerVisiblePartForTailHygiene as providerVisiblePart,
     providerVisiblePartForOpenCode2,
 } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
+import { rememberCurrentToolOutputCount } from "./tail-hygiene-output-count";
 import { isSyntheticTodoPart } from "./todo-view";
 
 export interface TailHygieneDeltas {
@@ -1358,20 +1359,23 @@ export function refreshTailHygieneBaseline(input: {
     const refrozen = (mismatch?: TailHygienePrefixMismatch): TailHygieneBaseline => {
         const frozen = freezeTailHygieneMeasurement(measured);
         retainBaselineMeasurement(frozen.baselineParts, memo);
-        return {
-            ...frozen,
-            protectedToolsPolicy,
-            hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
-            toolsRatio: frozenCalibration.toolsRatio,
-            proseRatio: frozenCalibration.proseRatio,
-            baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
-            computedAt: now,
-            evaluable: true,
-            generationInvalidated: false,
-            contentSignature: measured.contentSignature,
-            channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
-            lastPrefixMismatch: mismatch,
-        };
+        return rememberCurrentToolOutputCount(
+            {
+                ...frozen,
+                protectedToolsPolicy,
+                hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
+                toolsRatio: frozenCalibration.toolsRatio,
+                proseRatio: frozenCalibration.proseRatio,
+                baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
+                computedAt: now,
+                evaluable: true,
+                generationInvalidated: false,
+                contentSignature: measured.contentSignature,
+                channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
+                lastPrefixMismatch: mismatch,
+            },
+            measured,
+        );
     };
     if (input.cacheBusting || !input.previous) return refrozen();
 
@@ -1397,16 +1401,19 @@ export function refreshTailHygieneBaseline(input: {
         // outputs extend the measured tail, include outputs that have aged out of protection.
         if (part.kind !== "toolOutput" || !part.protected) turnDeltaU += part.uTokens;
     }
-    return {
-        ...input.previous,
-        protectedToolsPolicy,
-        turnDeltaU,
-        turnDeltaT,
-        evaluable: true,
-        generationInvalidated: false,
-        contentSignature: measured.contentSignature,
-        lastPrefixMismatch: undefined,
-    };
+    return rememberCurrentToolOutputCount(
+        {
+            ...input.previous,
+            protectedToolsPolicy,
+            turnDeltaU,
+            turnDeltaT,
+            evaluable: true,
+            generationInvalidated: false,
+            contentSignature: measured.contentSignature,
+            lastPrefixMismatch: undefined,
+        },
+        measured,
+    );
 }
 
 export function effectiveTailHygiene(
