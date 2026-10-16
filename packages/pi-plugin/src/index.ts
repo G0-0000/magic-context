@@ -206,6 +206,7 @@ import {
 	type PiHarnessKind,
 	resolvePiHarnessDetection,
 } from "./pi-harness-kind";
+import { buildPiHistorianCommandOptions } from "./pi-historian-command-options";
 import { notePiLkgProviderUsage } from "./pi-lkg";
 import {
 	computePiPressure,
@@ -2161,14 +2162,10 @@ async function startPiMagicContextRuntime(
 	registerCtxRecompCommand(pi, {
 		db,
 		runner: recompRunner,
-		historianModel: bootProjectDeps.historianConfig?.model,
-		historianChunkTokens: deriveHistorianChunkTokens(
-			resolveHistorianContextLimit(bootProjectDeps.historianConfig?.model),
+		...buildPiHistorianCommandOptions(
+			bootProjectDeps.historianConfig,
+			bootProjectDeps.config,
 		),
-		historianFallbacks: bootProjectDeps.historianConfig?.fallbackModels,
-		historianTimeoutMs: bootProjectDeps.config.historian_timeout_ms,
-		historianMaxOutputTokens: bootProjectDeps.historianConfig?.maxOutputTokens,
-		historianThinkingLevel: bootProjectDeps.historianConfig?.thinkingLevel,
 		language: bootProjectDeps.config.language,
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
 		autoPromote: bootProjectDeps.config.memory.auto_promote,
@@ -2187,17 +2184,7 @@ async function startPiMagicContextRuntime(
 			return {
 				db,
 				runner: recompRunner,
-				historianModel: historian?.model,
-				historianChunkTokens:
-					historian?.historianChunkTokens ??
-					deriveHistorianChunkTokens(
-						resolveHistorianContextLimit(historian?.model),
-					),
-				historianFallbacks: historian?.fallbackModels,
-				historianTimeoutMs:
-					historian?.timeoutMs ?? current.config.historian_timeout_ms,
-				historianMaxOutputTokens: historian?.maxOutputTokens,
-				historianThinkingLevel: historian?.thinkingLevel,
+				...buildPiHistorianCommandOptions(historian, current.config),
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
 				autoPromote: fresh.memory.auto_promote,
@@ -2211,14 +2198,10 @@ async function startPiMagicContextRuntime(
 		shutdownSignal: commandLifecycleController.signal,
 		db,
 		runner: wrapupRunner,
-		historianModel: bootProjectDeps.historianConfig?.model,
-		historianChunkTokens: deriveHistorianChunkTokens(
-			resolveHistorianContextLimit(bootProjectDeps.historianConfig?.model),
+		...buildPiHistorianCommandOptions(
+			bootProjectDeps.historianConfig,
+			bootProjectDeps.config,
 		),
-		historianFallbacks: bootProjectDeps.historianConfig?.fallbackModels,
-		historianTimeoutMs: bootProjectDeps.config.historian_timeout_ms,
-		historianMaxOutputTokens: bootProjectDeps.historianConfig?.maxOutputTokens,
-		historianThinkingLevel: bootProjectDeps.historianConfig?.thinkingLevel,
 		language: bootProjectDeps.config.language,
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
 		autoPromote: bootProjectDeps.config.memory.auto_promote,
@@ -2243,17 +2226,7 @@ async function startPiMagicContextRuntime(
 			return {
 				db,
 				runner: wrapupRunner,
-				historianModel: historian?.model,
-				historianChunkTokens:
-					historian?.historianChunkTokens ??
-					deriveHistorianChunkTokens(
-						resolveHistorianContextLimit(historian?.model),
-					),
-				historianFallbacks: historian?.fallbackModels,
-				historianTimeoutMs:
-					historian?.timeoutMs ?? current.config.historian_timeout_ms,
-				historianMaxOutputTokens: historian?.maxOutputTokens,
-				historianThinkingLevel: historian?.thinkingLevel,
+				...buildPiHistorianCommandOptions(historian, current.config),
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
 				autoPromote: fresh.memory.auto_promote,
