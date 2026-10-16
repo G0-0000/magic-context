@@ -5737,6 +5737,11 @@ fn apply_once(
                 &loaded.core.frozen_units,
                 &selected_reductions,
             ),
+            image_protected_cutoff: protection_window
+                .cutoff
+                .cutoff
+                .and_then(|tag| u64::try_from(tag.0).ok()),
+            image_emergency: scheduler_outcome.pass == scheduler::PassDecision::Emergency95,
         },
         &selection_outcome.protected_tool_block_ids,
     );
@@ -5994,9 +5999,8 @@ fn apply_once(
         plan,
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     ) && !marker_hard_serves_frozen_prefix;
-    // The reductions-only child branch preserves inherited history and accepts
-    // reduction units only. Image/system/age-reasoning strip units stay primary-only;
-    // an execute ride must not silently widen that separate replay contract.
+    // Only primary sessions rebuild M0/M1 and remove old system or reasoning content.
+    // Child image removal uses a narrower permission below so it can share tool cleanup.
     let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
     if replay_legacy_treatment && is_provider_prefix_mutation_pass {
         return Err(TransformError::SyntheticTreatmentBust);
@@ -6115,6 +6119,16 @@ fn apply_once(
     let unit_mint_started_at = Instant::now();
     let new_strip_units = if is_bust_pass {
         planned_strip_units
+    } else if req.is_subagent && subagent_execute_permitted && is_provider_prefix_mutation_pass {
+        planned_strip_units
+            .into_iter()
+            .filter(|unit| {
+                matches!(
+                    unit.kind.as_str(),
+                    "image" | "strip_processed_image" | "strip_processed_tool_image"
+                )
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -6231,8 +6245,9 @@ fn apply_once(
                 None,
                 suppress_bootstrap_reduction_tag_overlay,
             );
-            // A subagent's only strip units: a signed-thinking reset's removals, which its
-            // output replays on every later pass like a primary's.
+            // The child's scheduler-authorized cleanup persists image and tool reductions
+            // together before returning the modified request.
+            rendered_units.extend(new_strip_units.iter().cloned());
             rendered_units.extend(signed_thinking_reset_units.iter().cloned());
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
@@ -14311,6 +14326,10 @@ fn image_block_is_large(block: &CkWireBlock) -> bool {
     let ck_wire::CkKind::Media(media) = &block.kind else {
         return false;
     };
+    image_media_is_large(media)
+}
+
+fn image_media_is_large(media: &ck_wire::MediaBlock) -> bool {
     if media.kind != ck_wire::MediaKind::Image || !media.media_type.starts_with("image/") {
         return false;
     }
@@ -14327,6 +14346,43 @@ fn image_block_is_large(block: &CkWireBlock) -> bool {
     // OpenCode's TS strip checks the original data URL length, so include the
     // MIME/prefix bytes rather than treating a remote URL as image payload.
     data.len() + format!("data:{};base64,", media.media_type).len() > 200
+}
+
+fn tool_image_block_is_large(block: &CkWireBlock) -> bool {
+    let ck_wire::CkKind::ToolResult { output, .. } = &block.kind else {
+        return false;
+    };
+    match &output.kind {
+        ck_wire::CkOutputKind::Content { blocks }
+        | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks.iter().any(|block| {
+            matches!(&block.kind, ck_wire::ResultBlockKind::Media { media } if image_media_is_large(media))
+        }),
+        _ => false,
+    }
+}
+
+fn strip_tool_images(block: &mut CkWireBlock, marker: &str) {
+    let ck_wire::CkKind::ToolResult { output, .. } = &mut block.kind else {
+        return;
+    };
+    let (ck_wire::CkOutputKind::Content { blocks }
+    | ck_wire::CkOutputKind::ErrorContent { blocks }) = &mut output.kind
+    else {
+        return;
+    };
+    for child in blocks {
+        if matches!(&child.kind, ck_wire::ResultBlockKind::Media { media } if image_media_is_large(media))
+        {
+            *child = ck_wire::ResultBlock {
+                kind: ck_wire::ResultBlockKind::Text {
+                    text: marker.to_string(),
+                },
+                // Native image fields must not survive as extras on the replacement text.
+                provider_extras: Default::default(),
+            };
+        }
+    }
+    block.mark_modified();
 }
 
 fn replace_with_sentinel(block: &mut CkWireBlock, text: &str) {
@@ -14382,6 +14438,49 @@ include!("transform/reasoning_clear.rs");
 struct StripSelectionScope<'a> {
     reasoning: ReasoningBudgetScope<'a>,
     image_watermark: u64,
+    image_protected_cutoff: Option<u64>,
+    image_emergency: bool,
+}
+
+/// 1. Position tag: the image's message's own maximum positive tag; if it has none,
+///    the first positive tag of any LATER message; if neither exists, the image is
+///    INELIGIBLE (retained, never age 0, never a preceding-tag fallback).
+/// 2. Age gate (unchanged): eligible only if position tag ≤ dropped-tag watermark
+///    (watermark > 0), plus the existing answered, admitted-bust, signed-prefix,
+///    stable-unit and persist-first rules.
+/// 3. Protected range: if position tag ≥ the protected cutoff (the same newest-tag
+///    window cutoff Rust's drops use), no new strip, below 95%.
+/// 4. At ≥95%: waive ONLY the protected-range check, exactly as the emergency drop
+///    does. Every other exclusion stays.
+fn processed_image_eligible(
+    message: &CkIngressMessage,
+    tag_numbers: &BTreeMap<String, u64>,
+    next_tag: Option<u64>,
+    answered: bool,
+    unsafe_content: &HashSet<String>,
+    scope: StripSelectionScope<'_>,
+) -> bool {
+    let position_tag = tag_numbers
+        .get(&message.mid)
+        .copied()
+        .filter(|tag| *tag > 0)
+        .or(next_tag);
+    let Some(position_tag) = position_tag else {
+        return false;
+    };
+    answered
+        && !message
+            .ck
+            .content
+            .iter()
+            .enumerate()
+            .any(|(index, _)| unsafe_content.contains(&ck_wire::block_id(&message.mid, index)))
+        && scope.image_watermark > 0
+        && position_tag <= scope.image_watermark
+        && (scope.image_emergency
+            || scope
+                .image_protected_cutoff
+                .is_none_or(|cutoff| position_tag < cutoff))
 }
 
 /// Processed images follow the shared dropped-tag watermark, not reasoning retention.
@@ -14463,9 +14562,18 @@ fn new_frozen_strip_units(
     let protected_thinking = protected_thinking_turn_mids(req);
     let unsafe_content = active_thinking_prefix_edit_ids(core, req);
     let mut has_assistant_response = false;
+    let mut next_image_tag = None;
 
     for index in (0..req.messages.len()).rev() {
         let message = &req.messages[index];
+        let later_image_tag = next_image_tag;
+        if let Some(tag) = tag_numbers
+            .get(&message.mid)
+            .copied()
+            .filter(|tag| *tag > 0)
+        {
+            next_image_tag = Some(tag);
+        }
         if message.ck.meta.synthetic
             || message.mid.is_empty()
             || lineage_anchor_mid == Some(message.mid.as_str())
@@ -14476,6 +14584,7 @@ fn new_frozen_strip_units(
         let protected_reduce = blocks.iter().enumerate().any(|(index, block)| {
             is_reduce_block(block) && protected_tools.contains(&format!("{}#{index}", message.mid))
         });
+        let had_later_assistant = has_assistant_response;
         if message.ck.role == "assistant" {
             // The reverse image scan in TS treats any assistant message as evidence
             // that older user content has already reached the model.
@@ -14563,7 +14672,9 @@ fn new_frozen_strip_units(
                     units.insert(unit.key.clone(), unit);
                 }
             }
-            continue;
+            if !blocks.iter().any(tool_image_block_is_large) {
+                continue;
+            }
         }
         let is_stale_reduce = request_accepts_empty_content(req)
             && index < protected_start
@@ -14575,30 +14686,42 @@ fn new_frozen_strip_units(
                 units.insert(unit.key.clone(), unit);
             }
         }
-        if has_assistant_response
-            && request_accepts_empty_content(req)
-            && selection_scope.image_watermark > 0
-            && {
-                // Missing tags are age zero in the TypeScript lane. This decision is still
-                // minted only on a bust and then frozen by message/block id for stable replay.
-                message_tag_number(message, tag_numbers) <= selection_scope.image_watermark
-            }
-            && blocks.iter().any(image_block_is_large)
-        {
-            let marker = strip_unit("processed_image", &message.mid, &sentinel);
-            if !existing_keys.contains(marker.key.as_str()) {
-                units.insert(marker.key.clone(), marker);
-            }
+        if processed_image_eligible(
+            message,
+            tag_numbers,
+            later_image_tag,
+            had_later_assistant,
+            &unsafe_content,
+            selection_scope,
+        ) && blocks.iter().any(|block| {
+            (message.ck.role == "user" && image_block_is_large(block))
+                || tool_image_block_is_large(block)
+        }) {
+            let image_marker = if request_accepts_empty_content(req) {
+                ""
+            } else {
+                "[image stripped]"
+            };
             for (block_index, block) in blocks.iter().enumerate() {
-                if !image_block_is_large(block) {
-                    continue;
+                let (seed_kind, marker_text) =
+                    if message.ck.role == "user" && image_block_is_large(block) {
+                        ("processed_image", image_marker)
+                    } else if tool_image_block_is_large(block) {
+                        // An image-only tool result must not become empty when its media is removed.
+                        ("processed_tool_image", "[image stripped]")
+                    } else {
+                        continue;
+                    };
+                let marker = strip_unit(seed_kind, &message.mid, marker_text);
+                if !existing_keys.contains(marker.key.as_str()) {
+                    units.insert(marker.key.clone(), marker);
                 }
                 // Images are reductions of individual media blocks, not whole-message
                 // strips. Reusing red:* keeps image replay in the same durable machinery
                 // as tool reductions while the message marker keeps replay stable if
                 // unrelated parts change their block index.
                 let target = format!("{}#{block_index}", message.mid);
-                let unit = red_unit(&target, "image", &sentinel);
+                let unit = red_unit(&target, "image", marker_text);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
                 }
@@ -14789,8 +14912,9 @@ fn apply_surface_strips(
 
     let stale_reduce =
         output_message_strip_unit(frozen_units, "stale_reduce", &message.mid).is_some();
-    let image_seed =
-        output_message_strip_unit(frozen_units, "processed_image", &message.mid).is_some();
+    let image_seed = output_message_strip_unit(frozen_units, "processed_image", &message.mid);
+    let tool_image_seed =
+        output_message_strip_unit(frozen_units, "processed_tool_image", &message.mid);
     let message_tag = message_tag_number(message, tag_numbers);
     let aged = message_tag > 0 && message_tag <= reasoning_policy.watermark;
     let mut touched = false;
@@ -14813,16 +14937,28 @@ fn apply_surface_strips(
             }
         }
 
+        // Reuse the replacement text saved when this image was removed, even after a
+        // provider switch. Older Anthropic decisions saved empty text and keep those bytes.
+        let image_unit = image_seed
+            .filter(|_| image_block_is_large(block.wire_shape()))
+            .or_else(|| tool_image_seed.filter(|_| tool_image_block_is_large(block.wire_shape())))
+            .or_else(|| {
+                frozen_units
+                    .red_by_block_id(block.id())
+                    .filter(|unit| unit.kind == "image")
+            });
+        if let Some(unit) = image_unit {
+            if tool_image_block_is_large(block.wire_shape()) {
+                strip_tool_images(&mut rebuilt.content[index], &unit.frozen_payload);
+            } else {
+                replace_with_sentinel(&mut rebuilt.content[index], &unit.frozen_payload);
+            }
+            touched = true;
+            continue;
+        }
         let should_strip = (request_accepts_empty_content(req)
             && stale_reduce
             && is_reduce_block(&message.ck.content[index]))
-            || ((image_seed
-                && request_accepts_empty_content(req)
-                && image_block_is_large(block.wire_shape()))
-                || (request_accepts_empty_content(req)
-                    && frozen_units
-                        .red_by_block_id(block.id())
-                        .is_some_and(|unit| unit.kind == "image")))
             || (request_accepts_empty_content(req)
                 && is_structural_noise(&message.ck.content[index]));
         if should_strip {
@@ -20297,7 +20433,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn untagged_answered_image_strips_on_bust_and_replays() {
+    fn untagged_answered_image_inherits_recent_reply_tag_and_stays_on_bust_and_defer() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let image = CkIngressMessage {
@@ -20350,12 +20486,20 @@ pub(crate) mod tests {
         store
             .seed_tags_for_test(
                 "untagged-image",
-                &[mc_store::TagMintInput {
-                    block_id: "dropper#0".into(),
-                    kind: "message".into(),
-                    token_count: 1,
-                    source_bytes: b"spent".to_vec(),
-                }],
+                &[
+                    mc_store::TagMintInput {
+                        block_id: "dropper#0".into(),
+                        kind: "message".into(),
+                        token_count: 1,
+                        source_bytes: b"spent".to_vec(),
+                    },
+                    mc_store::TagMintInput {
+                        block_id: "image-answer#0".into(),
+                        kind: "message".into(),
+                        token_count: 1,
+                        source_bytes: b"processed".to_vec(),
+                    },
+                ],
                 0,
             )
             .unwrap();
@@ -20367,19 +20511,28 @@ pub(crate) mod tests {
         request.render_config = "cfg1".into();
         let bust = run(&store, &request, &drops);
         assert_eq!(bust.action, "HARD");
-        assert_eq!(tail_bytes(&bust, "image-user"), "");
+        assert!(bust
+            .messages()
+            .iter()
+            .any(|message| message.content.iter().any(image_block_is_large)));
         let frozen = store.load("untagged-image").unwrap();
-        assert!(frozen
+        assert!(!frozen
             .core
             .frozen_units
             .iter()
             .any(|unit| unit.key == "strip:processed_image:image-user"));
 
         let stabilization = run(&store, &request, &spine());
-        assert_eq!(tail_bytes(&stabilization, "image-user"), "");
+        assert!(stabilization
+            .messages()
+            .iter()
+            .any(|message| message.content.iter().any(image_block_is_large)));
         let replay = run(&store, &request, &spine());
         assert_eq!(replay.action, "SOFT+");
-        assert_eq!(tail_bytes(&replay, "image-user"), "");
+        assert!(replay
+            .messages()
+            .iter()
+            .any(|message| message.content.iter().any(image_block_is_large)));
     }
 
     /// Models copy the tag notation they see in history onto their own replies.
@@ -30911,6 +31064,9 @@ pub(crate) mod tests {
     include!("transform/reasoning_clear_gate_tests.rs");
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
+    include!("tests/image_stripping_review_witness.rs");
+    include!("tests/processed_images.rs");
+    include!("tests/image_anthropic_differential.rs");
     include!("tests/signed_prefix_hold_review_r2.rs");
     include!("tests/signed_prefix_hold_review_r3.rs");
 
