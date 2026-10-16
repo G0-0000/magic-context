@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
 import {
     getTagsBySession,
+    insertTag,
     queuePendingOp,
     updateSessionMeta,
 } from "../features/magic-context/storage";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage-db";
 import { createTagger } from "../features/magic-context/tagger";
+import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { saveLkgSlotToDb } from "../hooks/magic-context/lkg-persist";
 import { captureLkgSlot } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot } from "../hooks/magic-context/lkg-slot";
@@ -150,6 +152,113 @@ for (const lane of ["oc1", "oc2"] as const) {
                 });
                 handler = buildHandler();
                 expect(await pass()).toBe(recovered);
+            } finally {
+                dropSlot(sessionId);
+                closeDatabase();
+            }
+        });
+    }
+}
+
+for (const lane of ["oc1", "oc2"] as const) {
+    for (const beforeThinking of [true, false]) {
+        test(`text-drop LKG ${lane}: ${beforeThinking ? "refuses before" : "allows after"} kept signed reasoning`, async () => {
+            const sessionId = `text-prefix-${lane}-${beforeThinking}`;
+            const db = openDatabase()!;
+            const draft = {
+                sessionID: sessionId,
+                model: { providerID: "anthropic", id: "claude-sonnet-4" },
+                messages: [
+                    {
+                        id: "old",
+                        role: "user",
+                        content: [
+                            { type: "text", text: beforeThinking ? "§907§ old text" : "old text" },
+                        ],
+                    },
+                    {
+                        id: "signed",
+                        role: "assistant",
+                        content: [
+                            {
+                                type: "reasoning",
+                                text: "keep",
+                                providerOptions: {
+                                    anthropic: { signature: "text-prefix-signature" },
+                                },
+                            },
+                            { type: "text", text: "answer" },
+                        ],
+                    },
+                    {
+                        id: "tail",
+                        role: "user",
+                        content: [{ type: "text", text: beforeThinking ? "next" : "§907§ next" }],
+                    },
+                ],
+                system: [],
+                tools: {},
+                options: {},
+            };
+            const bridge = adaptPayload(draft as never);
+            const messages =
+                lane === "oc1"
+                    ? bridge.messages.filter((m) => m.info.role !== "tool")
+                    : bridge.messages;
+            let replays = 0;
+            const handler = createMessagesTransformHandler({
+                magicContext: {
+                    "experimental.chat.messages.transform": async () => {
+                        throw new Error("text drop failed pass");
+                    },
+                },
+                rustReplayParticipant: () => null,
+                onLkgReplay: () => {
+                    replays++;
+                },
+            });
+            try {
+                expect(
+                    captureLkgSlot({
+                        sessionId,
+                        input: messages,
+                        output: messages,
+                        modelKey: "anthropic/claude-sonnet-4",
+                        providerKey: "anthropic",
+                        completeOutput: true,
+                    }),
+                ).toBe(true);
+                expect(
+                    saveLkgSlotToDb(db, sessionId, getSlot(sessionId)!, undefined, {
+                        rebuild: true,
+                    }),
+                ).toBe(true);
+                insertTag(
+                    db,
+                    sessionId,
+                    `${beforeThinking ? "old" : "tail"}:p0`,
+                    "message",
+                    100,
+                    907,
+                );
+                db.prepare("UPDATE tags SET status='dropped' WHERE session_id=?").run(sessionId);
+                const original = structuredClone(messages);
+                if (beforeThinking) {
+                    await expect(handler({}, { messages } as never)).rejects.toBeInstanceOf(
+                        DegradedPassRefusalError,
+                    );
+                    expect(messages).toEqual(original);
+                    expect(replays).toBe(0);
+                } else {
+                    await handler({}, { messages } as never);
+                    expect(replays).toBe(1);
+                    expect(JSON.stringify(messages)).toContain("[dropped §907§]");
+                    expect(JSON.stringify(messages)).toContain("text-prefix-signature");
+                    if (lane === "oc2") {
+                        bridge.commit();
+                        expect(JSON.stringify(draft.messages)).toContain("[dropped §907§]");
+                    }
+                }
             } finally {
                 dropSlot(sessionId);
                 closeDatabase();

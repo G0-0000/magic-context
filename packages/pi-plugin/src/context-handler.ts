@@ -176,6 +176,7 @@ import {
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import { calibrationForModelKey } from "@magic-context/core/hooks/magic-context/decision-calibration";
+import { DegradedPassRefusalError } from "@magic-context/core/hooks/magic-context/degraded-pass-refusal";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
 	type DroppedTokenReduction,
@@ -256,6 +257,7 @@ import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provid
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { ModelInput } from "@magic-context/core/shared/model-resolution";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
+import { recoveryReasoningPrefixes } from "@magic-context/core/shared/recovery-reasoning-prefix";
 import {
 	guardSqliteTransformPass,
 	type Statement as PreparedStatement,
@@ -6821,6 +6823,10 @@ export function registerPiContextHandler(
 								(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
 							);
 					if (replay.ok) {
+						const reasoningPrefixes = recoveryReasoningPrefixes(
+							replay.messages,
+							"content",
+						);
 						// A later write can fail after earlier drops committed. Render those
 						// decisions on the saved request now, not for the first time on defer.
 						const entryIds = lkgCoordinator.recoveryEntryIds(lkgPassSnapshot);
@@ -6853,7 +6859,9 @@ export function registerPiContextHandler(
 						const changed = applyFlushedStatuses(
 							sessionIdForError,
 							lkgOptions.db,
-							buildPersistedDropTargets(recoveryTranscript, drops),
+							buildPersistedDropTargets(recoveryTranscript, drops, {
+								allowReasoningPrefixRewrite: true,
+							}),
 							drops,
 						);
 						const working = recoveryTranscript.getWorkingMessages();
@@ -6862,6 +6870,19 @@ export function registerPiContextHandler(
 							working.map((message, index) => [message, entryIds[index]]),
 						);
 						recoveryTranscript.finalizeToolRemovals();
+						// Applying already stored drops does not authorize new history edits.
+						// Removing every thinking block needs a successful rebuild that also
+						// persists those omissions. Refuse here instead of removing thinking
+						// on a fallback that may run while scheduled edits are deferred.
+						if (
+							JSON.stringify(
+								recoveryReasoningPrefixes(replay.messages, "content"),
+							) !== JSON.stringify(reasoningPrefixes)
+						)
+							throw new DegradedPassRefusalError(
+								"lkg-reasoning-prefix-changed",
+								{ cause: err },
+							);
 						const recoveryIds = replay.messages.map(
 							(message) => idsByOutput.get(message) ?? null,
 						);
@@ -6911,6 +6932,8 @@ export function registerPiContextHandler(
 					);
 				} catch (replayError) {
 					budget.assertOutcome();
+					if (replayError instanceof DegradedPassRefusalError)
+						throw replayError;
 					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,

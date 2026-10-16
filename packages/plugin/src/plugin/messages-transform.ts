@@ -309,7 +309,10 @@ export function tryMessagesTransformLkgReplay(args: {
                 }
                 // A failed batch may already have committed earlier drops. The
                 // fallback must serve that subset before a later defer replays it.
-                if (replay.ok && !rust) replayCommittedDrops(db, sessionId, replay.messages);
+                if (replay.ok && !rust && !replayCommittedDrops(db, sessionId, replay.messages)) {
+                    sessionLog(sessionId, "lkg_reasoning_prefix_changed");
+                    return false;
+                }
                 // TypeScript mode has no Rust result to check, but replaying
                 // the saved request for a known model still has to pass the
                 // same fit check as Rust mode: measured size of the saved
