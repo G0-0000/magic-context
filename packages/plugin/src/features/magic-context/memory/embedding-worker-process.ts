@@ -14,7 +14,8 @@ process.on(
         texts?: string[];
     }) => {
         if (message.entry && !worker) {
-            worker = new Worker(new URL(message.entry), { workerData: message.data });
+            const entry = new URL(message.entry);
+            worker = inRootAsyncContext(() => new Worker(entry, { workerData: message.data }));
             worker.on("message", (reply: EmbeddingWorkerReply) => {
                 const wire: EmbeddingWorkerWireReply = {
                     ...reply,
@@ -43,3 +44,5 @@ process.on(
 
 // A disconnected host must not leave a model process or a native uploader behind.
 process.on("disconnect", () => process.exit(0));
+
+import { inRootAsyncContext } from "../../../shared/sqlite";

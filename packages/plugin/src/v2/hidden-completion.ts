@@ -622,54 +622,59 @@ export async function createV2HiddenCompletionExecutor(
                 budgetReject = reject;
             });
             if (budget) {
-                budgetPoll = setInterval(() => {
-                    try {
-                        const fresh = withReader(
-                            options.openReader,
-                            (reader) =>
-                                reader.assistantSince?.(run.child.id, usageSeq) ??
-                                (() => {
-                                    const latest = reader.latestAssistant(run.child.id);
-                                    return latest ? [latest] : [];
-                                })(),
-                        );
-                        for (const row of fresh) {
-                            if (row.seq <= usageSeq) continue;
-                            usageSeq = row.seq;
-                            const tokens = row.data.tokens;
-                            const decision = budget.charge(
-                                Math.max(0, tokens?.input ?? 0),
-                                Math.max(0, tokens?.cache?.read ?? 0),
-                                Math.max(0, tokens?.cache?.write ?? 0),
-                                row.data.finish === "stop" &&
-                                    !(row.data.content ?? []).some(
-                                        (part) => part.type === "tool-call",
-                                    ),
-                                false,
+                budgetPoll = inRootAsyncContext(() =>
+                    setInterval(() => {
+                        try {
+                            const fresh = withReader(
+                                options.openReader,
+                                (reader) =>
+                                    reader.assistantSince?.(run.child.id, usageSeq) ??
+                                    (() => {
+                                        const latest = reader.latestAssistant(run.child.id);
+                                        return latest ? [latest] : [];
+                                    })(),
                             );
-                            const onBudgetUpdate = run.identity.metadata?.onBudgetUpdate;
-                            if (typeof onBudgetUpdate === "function")
-                                onBudgetUpdate({ ...budget.snapshot(), sessionId: run.child.id });
-                            if (decision !== "continue") {
-                                if (budgetPoll) clearInterval(budgetPoll);
-                                // This host exposes context shaping but no pre-tool execution
-                                // hook for hidden children. Stop at the soft threshold instead
-                                // of allowing another investigation call to execute.
-                                attempt.budgetExceeded = new DreamTokenBudgetExceeded(
-                                    run.child.id,
-                                    budget.snapshot().spent,
+                            for (const row of fresh) {
+                                if (row.seq <= usageSeq) continue;
+                                usageSeq = row.seq;
+                                const tokens = row.data.tokens;
+                                const decision = budget.charge(
+                                    Math.max(0, tokens?.input ?? 0),
+                                    Math.max(0, tokens?.cache?.read ?? 0),
+                                    Math.max(0, tokens?.cache?.write ?? 0),
+                                    row.data.finish === "stop" &&
+                                        !(row.data.content ?? []).some(
+                                            (part) => part.type === "tool-call",
+                                        ),
+                                    false,
                                 );
-                                void interruptAndRetire(run, "token-budget").finally(() =>
-                                    budgetReject(attempt.budgetExceeded as Error),
-                                );
-                                return;
+                                const onBudgetUpdate = run.identity.metadata?.onBudgetUpdate;
+                                if (typeof onBudgetUpdate === "function")
+                                    onBudgetUpdate({
+                                        ...budget.snapshot(),
+                                        sessionId: run.child.id,
+                                    });
+                                if (decision !== "continue") {
+                                    if (budgetPoll) clearInterval(budgetPoll);
+                                    // This host exposes context shaping but no pre-tool execution
+                                    // hook for hidden children. Stop at the soft threshold instead
+                                    // of allowing another investigation call to execute.
+                                    attempt.budgetExceeded = new DreamTokenBudgetExceeded(
+                                        run.child.id,
+                                        budget.snapshot().spent,
+                                    );
+                                    void interruptAndRetire(run, "token-budget").finally(() =>
+                                        budgetReject(attempt.budgetExceeded as Error),
+                                    );
+                                    return;
+                                }
                             }
+                        } catch (error) {
+                            if (budgetPoll) clearInterval(budgetPoll);
+                            budgetReject(error instanceof Error ? error : new Error(String(error)));
                         }
-                    } catch (error) {
-                        if (budgetPoll) clearInterval(budgetPoll);
-                        budgetReject(error instanceof Error ? error : new Error(String(error)));
-                    }
-                }, POLL_INTERVAL_MS);
+                    }, POLL_INTERVAL_MS),
+                );
             }
             let abortReject!: (error: Error) => void;
             const aborted = new Promise<never>((_resolve, reject) => {
@@ -849,3 +854,5 @@ export async function createV2HiddenCompletionExecutor(
         },
     };
 }
+
+import { inRootAsyncContext } from "../shared/sqlite";

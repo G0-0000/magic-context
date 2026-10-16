@@ -888,10 +888,12 @@ export class SubcModuleTransport {
     }
 
     private connectClient(): Promise<SubcClient> {
-        return SubcClient.connect({
-            connectionFile: this.connectionFile,
-            handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
-        });
+        return inRootAsyncContext(() =>
+            SubcClient.connect({
+                connectionFile: this.connectionFile,
+                handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
+            }),
+        );
     }
 
     private backoffActiveError(): Error & { code?: string } {
@@ -992,3 +994,5 @@ export class SubcModuleTransport {
 }
 
 export const __moduleTransportTest = { isConnectionFailure, isStaleOrDeadRouteFailure };
+
+import { inRootAsyncContext } from "../../shared/sqlite";

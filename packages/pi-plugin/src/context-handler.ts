@@ -4236,7 +4236,7 @@ export function registerPiContextHandler(
 		const passGuard = { assert: assertCurrentPass, wait: guardAwait };
 		guardSqliteTransformPass({
 			assert: assertCurrentPass,
-			remainingMs: () => budget.remainingWork(),
+			remainingMs: budget.remainingWork,
 		});
 		budget.stage = "schema";
 		const toolWireSchema = await guardAwait(loadPiToolWireSchema());
@@ -5639,7 +5639,7 @@ export function registerPiContextHandler(
 			if (historian && !options.compactionOff && budget.remainingWork() > 0) {
 				guardSqliteTransformPass({
 					assert: budget.assert,
-					remainingMs: () => budget.remainingWork(),
+					remainingMs: budget.remainingWork,
 				});
 				try {
 					budget.assert();
@@ -5761,7 +5761,7 @@ export function registerPiContextHandler(
 			) {
 				guardSqliteTransformPass({
 					assert: budget.assert,
-					remainingMs: () => budget.remainingWork(),
+					remainingMs: budget.remainingWork,
 				});
 				try {
 					outputMessages = await guardAwait(
@@ -6569,8 +6569,7 @@ export function registerPiContextHandler(
 			budget.assertOutcome();
 			guardSqliteTransformPass({
 				assert: budget.assertOutcome,
-				remainingMs: () =>
-					Math.max(0, PI_CONTEXT_BUDGET.outcomeMs - budget.elapsed()),
+				remainingMs: budget.remainingOutcome,
 			});
 			// Empty host history has neither new identities nor an input prefix to publish.
 			if (
@@ -7177,22 +7176,24 @@ function startPiCompartmentLeaseRenewal(
 	sessionId: string,
 	holderId: string,
 ): ReturnType<typeof setInterval> {
-	return setInterval(() => {
-		try {
-			if (!renewCompartmentLease(db, sessionId, holderId)) {
+	return inRootAsyncContext(() =>
+		setInterval(() => {
+			try {
+				if (!renewCompartmentLease(db, sessionId, holderId)) {
+					sessionLog(
+						sessionId,
+						"compartment lease renewal failed; publish will be skipped if holder is stale",
+					);
+				}
+			} catch (err) {
+				// A missed renewal is safe because the compartment lease has a five-minute TTL.
 				sessionLog(
 					sessionId,
-					"compartment lease renewal failed; publish will be skipped if holder is stale",
+					`compartment lease renewal threw; publish will be skipped if holder is stale (${err instanceof Error ? err.message : String(err)})`,
 				);
 			}
-		} catch (err) {
-			// A missed renewal is safe because the compartment lease has a five-minute TTL.
-			sessionLog(
-				sessionId,
-				`compartment lease renewal threw; publish will be skipped if holder is stale (${err instanceof Error ? err.message : String(err)})`,
-			);
-		}
-	}, COMPARTMENT_LEASE_RENEWAL_MS);
+		}, COMPARTMENT_LEASE_RENEWAL_MS),
+	);
 }
 
 function ensureRunnablePiBoundaryForTests(
@@ -7299,7 +7300,7 @@ function spawnPiHistorianRun(args: {
 	const holderId = crypto.randomUUID();
 	const controller = new AbortController();
 	historianAbortControllers.set(sessionId, controller);
-	const runPromise = withoutSqliteTransformPass(() =>
+	const runPromise = inRootAsyncContext(() =>
 		(async () => {
 			// Defer the runner's synchronous prefix until the context handler has returned.
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -11698,6 +11699,7 @@ import {
 	deferDeliveredSystemRefresh,
 	recordSystemRefreshOwnership,
 } from "@magic-context/core/hooks/magic-context/system-prompt-delivery";
+import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";
 import { PI_FALLBACK_PREFIXES_JSON } from "../../plugin/src/shared/tag-owner-id";
 import {
 	beginPiSystemPromptRequest,

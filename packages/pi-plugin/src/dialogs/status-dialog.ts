@@ -304,15 +304,17 @@ class StatusDialogComponent implements Component {
 		);
 		this.detail = this.detailRefresh.refresh();
 		openStatusDialogs.add(this);
-		this.refreshTimer = setInterval(() => {
-			if (this.closed) return;
-			try {
-				this.detail = this.detailRefresh.refresh();
-				this.props.tui.requestRender();
-			} catch {
-				// best effort; keep previous detail
-			}
-		}, REFRESH_INTERVAL_MS);
+		this.refreshTimer = inRootAsyncContext(() =>
+			setInterval(() => {
+				if (this.closed) return;
+				try {
+					this.detail = this.detailRefresh.refresh();
+					this.props.tui.requestRender();
+				} catch {
+					// best effort; keep previous detail
+				}
+			}, REFRESH_INTERVAL_MS),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -1428,3 +1430,5 @@ function colorHex(hex: string, text: string): string {
 	const b = Number.parseInt(clean.slice(4, 6), 16);
 	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
 }
+
+import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";

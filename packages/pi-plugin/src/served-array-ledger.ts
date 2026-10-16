@@ -355,7 +355,9 @@ export function flushPiServedArrayLedger(): void {
 
 function scheduleFlush(): void {
 	if (flushTimer) return;
-	flushTimer = setTimeout(flushPiServedArrayLedger, FLUSH_DELAY_MS);
+	flushTimer = inRootAsyncContext(() =>
+		setTimeout(flushPiServedArrayLedger, FLUSH_DELAY_MS),
+	);
 	flushTimer.unref?.();
 }
 
@@ -507,3 +509,5 @@ export const __test = {
 };
 
 process.once("beforeExit", flushPiServedArrayLedger);
+
+import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";

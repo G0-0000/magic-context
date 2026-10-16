@@ -73,9 +73,9 @@ export class PiContextBudget {
 	elapsed(): number {
 		return this.now() - this.startedAt;
 	}
-	remainingWork(): number {
+	remainingWork = (): number => {
 		return Math.max(0, PI_CONTEXT_BUDGET.workMs - this.elapsed());
-	}
+	};
 	remainingOutcome = (): number =>
 		Math.max(0, PI_CONTEXT_BUDGET.outcomeMs - this.elapsed());
 	writerAllowance(): number {

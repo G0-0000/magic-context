@@ -29,7 +29,7 @@ export function startHostStallProfilerSwitch(): void {
             now: () => performance.now(),
             wallNow: () => Date.now(),
             setInterval: (callback, ms) => {
-                const handle = setInterval(callback, ms);
+                const handle = inRootAsyncContext(() => setInterval(callback, ms));
                 (handle as { unref?: () => void }).unref?.();
                 return handle;
             },
@@ -55,3 +55,5 @@ export function startHostStallProfilerSwitch(): void {
         log("[magic-context] host stall profiler: could not start the enable-file switch", error);
     }
 }
+
+import { inRootAsyncContext } from "./sqlite";

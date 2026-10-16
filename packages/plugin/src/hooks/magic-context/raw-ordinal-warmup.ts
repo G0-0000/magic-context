@@ -179,7 +179,9 @@ export function runSessionWarmupWorker(
             deadline.unref?.();
         };
         try {
-            worker = new Worker(options.entry ?? defaultEntry(), { workerData: input });
+            worker = inRootAsyncContext(
+                () => new Worker(options.entry ?? defaultEntry(), { workerData: input }),
+            );
         } catch (error) {
             finish({ failure: "start-failed", detail: String(error) });
             return;
@@ -320,3 +322,5 @@ function recordFailure(
         `[magic-context] WARN canonical ordinal warm-up failed for ${sessionId} (${failure}: ${detail}); counts remain bounded and callers must defer or retry`,
     );
 }
+
+import { inRootAsyncContext } from "../../shared/sqlite";
