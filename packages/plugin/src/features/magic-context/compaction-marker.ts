@@ -28,7 +28,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { noteRawSessionSummaryRowWritten } from "../../hooks/magic-context/read-session-raw";
 import { harnessOwnsOpenCodeStore } from "../../shared/harness";
 import { log } from "../../shared/logger";
@@ -115,6 +115,7 @@ function runMarkerRemovalTransaction<T>(db: Database, operation: () => T): T {
 /** Time the outer host-store lock, including COMMIT/rollback but not a nested savepoint. */
 function runMarkerWriteTransaction<T>(db: Database, site: string, operation: () => T): T {
     if (db.inTransaction) return db.transaction(operation).immediate();
+    const walBefore = markerWalPages(db);
     const startedAt = performance.now();
     let acquiredAt: number | undefined;
     let workFinishedAt: number | undefined;
@@ -144,9 +145,28 @@ function runMarkerWriteTransaction<T>(db: Database, site: string, operation: () 
             log(
                 `[magic-context] sqlite writer site=${site} db=opencode acquire_ms=${Math.round(acquireMs)} hold_ms=${Math.round(holdMs)} work_ms=${Math.round(workMs)} end_ms=${Math.round(endMs)} outcome=${acquiredAt === undefined ? "not_acquired" : committed ? "committed" : "failed"}`,
             );
+            if (finishedAt - startedAt > 100) {
+                const autoCheckpoint = db.prepare("PRAGMA wal_autocheckpoint").get() as {
+                    wal_autocheckpoint: number;
+                };
+                log(
+                    `[magic-context] compaction-marker slow writer site=${site} acquire_ms=${acquireMs.toFixed(1)} statements_ms=${workMs.toFixed(1)} ${committed ? "commit" : "rollback"}_ms=${endMs.toFixed(1)} wal_autocheckpoint=${autoCheckpoint.wal_autocheckpoint} wal_pages_before=${walBefore ?? "unknown"} wal_pages_after=${markerWalPages(db) ?? "unknown"}`,
+                );
+            }
         } catch {
             // A diagnostic must not turn a committed marker into a failed retry.
         }
+    }
+}
+
+/** Physical WAL frames, not a checkpoint PRAGMA (which would itself backfill). */
+function markerWalPages(db: Database): number | null {
+    try {
+        const row = db.prepare("PRAGMA page_size").get() as { page_size: number };
+        const bytes = statSync(`${getOpenCodeDbPath()}-wal`).size;
+        return Math.max(0, Math.floor((bytes - 32) / (row.page_size + 24)));
+    } catch {
+        return null;
     }
 }
 
@@ -267,6 +287,9 @@ function getWritableOpenCodeDb(purpose: "publication" | "removal" = "publication
         purpose === "removal" ? MARKER_REMOVAL_BUSY_TIMEOUT_MS : MARKER_BUSY_TIMEOUT_MS;
     db.exec(`PRAGMA busy_timeout=${timeoutMs}`);
     db.exec("PRAGMA journal_mode=WAL");
+    // OpenCode owns this WAL and checkpoints it on its own writer. A marker's
+    // three-row commit must not synchronously backfill OpenCode's accumulated WAL.
+    db.exec("PRAGMA wal_autocheckpoint=0");
     if (purpose === "removal") cachedRemovalDb = { path: dbPath, db };
     else cachedWriteDb = { path: dbPath, db };
     return db;
