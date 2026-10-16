@@ -31067,6 +31067,7 @@ pub(crate) mod tests {
     include!("tests/image_stripping_review_witness.rs");
     include!("tests/processed_images.rs");
     include!("tests/image_anthropic_differential.rs");
+    include!("tests/independent_image_review.rs");
     include!("tests/signed_prefix_hold_review_r2.rs");
     include!("tests/signed_prefix_hold_review_r3.rs");
 
