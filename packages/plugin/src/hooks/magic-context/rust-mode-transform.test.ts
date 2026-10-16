@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { listSessionCompactionMarkers } from "../../features/magic-context/compaction-marker";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
@@ -59,7 +60,10 @@ import {
     scheduleOpenCodeTransformDecisionWrite,
     __test as transformDecisionTest,
 } from "../../features/magic-context/transform-decision-log";
-import { createMessagesTransformHandler } from "../../plugin/messages-transform";
+import {
+    createMessagesTransformHandler,
+    tryMessagesTransformLkgReplay,
+} from "../../plugin/messages-transform";
 import { ABSOLUTE_EMERGENCY_PERCENTAGE } from "../../shared/escalation-bands";
 import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -112,6 +116,7 @@ import * as lkgSlot from "./lkg-slot";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
+import { opencode1ToModelMessages } from "./opencode1-to-model-messages.fixture";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -126,6 +131,7 @@ import {
     RUST_PARK_RETRY_INTERVAL,
     type RustModeModuleClient,
 } from "./rust-mode-transform";
+import { rustRawRebuild, servedRawBlockIds } from "./rust-served-raw";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import { registerSystemDateRefresh } from "./system-date-refresh";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
@@ -8820,7 +8826,7 @@ describe("LKG durability across restarts", () => {
     });
 
     for (const invalidation of ["model", "anchor"] as const) {
-        it(`releases a frozen replay on ${invalidation} validation failure on a healthy defer`, async () => {
+        it(`fails closed when ${invalidation} validation fails and an unpriced candidate deletes served raw history`, async () => {
             const sessionId = `rust-lkg-validation-${invalidation}-${Date.now()}`;
             sessions.push(sessionId);
             const db = makeDb();
@@ -8864,9 +8870,12 @@ describe("LKG durability across restarts", () => {
                 changed[0]!.info.model = { providerID: "test-provider", modelID: "other-model" };
             else changed[0]!.info.id = "replacement-anchor";
             const healthy = { messages: [...changed] as unknown[] };
-            await transform.run(sessionId, changed, healthy, makeMeta(db, sessionId));
-            expect(healthy.messages).toEqual(fresh);
-            expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(false);
+            await expect(
+                transform.run(sessionId, changed, healthy, makeMeta(db, sessionId)),
+            ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+            expect(healthy.messages).toEqual(changed);
+            expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(true);
+            expect(getSlot(sessionId)).toBeUndefined();
         });
     }
 
@@ -10124,7 +10133,7 @@ describe("proactive thinking strip on a released frozen replay", () => {
         }
     });
 
-    it("serves byte-identical bytes when a reasoning-run release changes nothing", async () => {
+    it("fails closed when neither the replay nor the byte-preserving candidate has a valid thinking run", async () => {
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
             const session = await frozenSession("reasoning-run");
@@ -10135,23 +10144,21 @@ describe("proactive thinking strip on a released frozen replay", () => {
                 thinkingAssistant(session.sessionId, "a2"),
                 thinkingAssistant(session.sessionId, "a3"),
             ];
-            const served = await session.run(releaseInput);
+            await expect(session.run(releaseInput)).rejects.toBeInstanceOf(
+                EmergencyFailClosedError,
+            );
             const lines = sessionLines(logSpy, session.sessionId);
-            expect(lines).toContain(
-                "lkg_frozen_replay_released reason=lkg_anthropic_reasoning_run_invalid",
+            expect(session.transform.getState(session.sessionId).lkgRepresentationFrozen).toBe(
+                true,
             );
-            expect(JSON.stringify(served.slice(0, session.frozenServed.length))).toBe(
-                JSON.stringify(session.frozenServed),
-            );
-            expect(hasReasoning(served, "a1")).toBe(true);
-            expect(hasReasoning(served, "a2")).toBe(true);
+            expect(getSlot(session.sessionId)).toBeUndefined();
             expect(lines.some((line) => line.includes("proactive thinking strip"))).toBe(false);
         } finally {
             logSpy.mockRestore();
         }
     });
 
-    it("strips only thinking after the first message a release changes", async () => {
+    it("refuses an unsafe release instead of pricing tags and thinking strips with a local failure reason", async () => {
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
             const session = await frozenSession("tagged-tail");
@@ -10169,23 +10176,18 @@ describe("proactive thinking strip on a released frozen replay", () => {
                 thinkingAssistant(session.sessionId, "a2"),
                 thinkingAssistant(session.sessionId, "a3"),
             ];
-            const served = await session.run(releaseInput);
+            await expect(session.run(releaseInput)).rejects.toBeInstanceOf(
+                EmergencyFailClosedError,
+            );
+            expect(session.transform.getState(session.sessionId).lkgRepresentationFrozen).toBe(
+                true,
+            );
+            expect(getSlot(session.sessionId)).toBeUndefined();
             expect(
                 sessionLines(logSpy, session.sessionId).some((line) =>
-                    line.includes("reason=lkg_anthropic_reasoning_run_invalid"),
+                    line.includes("proactive thinking strip"),
                 ),
-            ).toBe(true);
-            // a1 sits before the changed message: its bytes and prefix are unchanged.
-            expect(JSON.stringify(served.slice(0, 2))).toBe(
-                JSON.stringify(session.frozenServed.slice(0, 2)),
-            );
-            expect(hasReasoning(served, "a2")).toBe(false);
-            expect(hasReasoning(served, "a3")).toBe(false);
-            expect(transformDecisionTest.getPending(session.sessionId)).toMatchObject({
-                decision: "defer",
-                materialized: false,
-                lkgFrozenReleaseReason: "lkg_anthropic_reasoning_run_invalid",
-            });
+            ).toBe(false);
         } finally {
             logSpy.mockRestore();
         }
@@ -10583,3 +10585,448 @@ it("Rust-mode typed protected overflow cannot become passthrough or LKG replay",
 });
 
 import { bindSystemDateRequestIdentity } from "./system-date-refresh";
+
+// scripts/test-rust-raw-replay.sh builds the library driver and sets its staged executable path.
+const rawReplayProbe = process.env.MC_RAW_REPLAY_PROBE;
+if (!rawReplayProbe)
+    console.info("Rust raw-tail bridge tests skipped: MC_RAW_REPLAY_PROBE is not staged");
+
+describe.skipIf(!rawReplayProbe)("Rust external raw-tail provider bytes", () => {
+    const route = { providerID: "anthropic", modelID: "claude-opus-5-5" };
+    const user = (sessionId: string, id: string): MessageLike =>
+        ({
+            info: { id, sessionID: sessionId, role: "user", model: route },
+            parts: [{ id: `${id}-text`, type: "text", text: `question ${id}` }],
+        }) as MessageLike;
+    const tool = (sessionId: string, id: string, name = "read"): MessageLike =>
+        ({
+            info: {
+                id,
+                sessionID: sessionId,
+                role: "assistant",
+                finish: "tool-calls",
+                providerID: route.providerID,
+                modelID: route.modelID,
+            },
+            parts: [
+                {
+                    id: `${id}-part`,
+                    type: "tool",
+                    tool: name,
+                    callID: `${id}-call`,
+                    state: {
+                        status: "completed",
+                        input: {},
+                        time: { start: 1, end: 2 },
+                        output: name === "ctx_reduce" ? "8 tags stamped." : `output ${id}`,
+                    },
+                },
+            ],
+        }) as MessageLike;
+
+    async function requestBody(rows: unknown[]): Promise<{ messages: unknown[] }> {
+        const bodies: { messages: unknown[] }[] = [];
+        const model = createAnthropic({
+            apiKey: "fixture-only",
+            fetch: Object.assign(
+                async (_url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+                    bodies.push(JSON.parse(String(init?.body)));
+                    throw new Error("captured without network");
+                },
+                { preconnect: () => {} },
+            ),
+        }).messages(route.modelID);
+        const prompt = await opencode1ToModelMessages(rows, {
+            providerID: route.providerID,
+            id: route.modelID,
+            api: { npm: "@ai-sdk/anthropic", id: route.modelID },
+        });
+        await model
+            .doGenerate({
+                prompt: prompt as Parameters<typeof model.doGenerate>[0]["prompt"],
+                maxOutputTokens: 1,
+            })
+            .catch(() => {});
+        expect(bodies).toHaveLength(1);
+        return bodies[0]!;
+    }
+
+    function providerBlocks(body: { messages: unknown[] }): string[] {
+        return body.messages.flatMap((value) => {
+            const message = value as { role: string; content: unknown[] };
+            return message.content.map((block) => JSON.stringify({ role: message.role, block }));
+        });
+    }
+
+    function probe(binary: string, directory: string, body: unknown): Record<string, unknown> {
+        const result = spawnSync(binary, [directory], {
+            windowsHide: true,
+            input: JSON.stringify(body),
+            encoding: "utf8",
+            timeout: 30_000,
+        });
+        if (result.status !== 0)
+            throw new Error(`Rust bridge failed: ${result.stderr} ${result.error ?? ""}`);
+        return JSON.parse(result.stdout);
+    }
+
+    it("external ctx_reduce and growing ordinary tails survive unsafe-seam release and restart byte-identically", async () => {
+        const sessionId = `raw-replay-bytes-${Date.now()}`;
+        sessions.push(sessionId);
+        const directory = createTestTempDirFromPath("raw-replay-module-");
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let stripCandidateThinking = false;
+        let rejectCapture = false;
+        let lastResponse: Record<string, unknown> = {};
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                lastResponse = probe(rawReplayProbe!, directory, {
+                    ...body,
+                    tool_present: true,
+                    auto_search_enabled: false,
+                    cache_ttl: "never",
+                });
+                if (stripCandidateThinking) {
+                    for (const message of lastResponse.native_messages as MessageLike[]) {
+                        message.parts = message.parts.filter(
+                            (part) => (part as { type: string }).type !== "reasoning",
+                        );
+                    }
+                }
+                return lastResponse;
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.liveModelBySession?.set(sessionId, route);
+        deps.getModelKey = () => `${route.providerID}/${route.modelID}`;
+        let transform = createRustModeTransform(deps, {
+            moduleClient,
+            scheduleLkgCapture: (capture) => capture(),
+            onLkgCaptureForTests: () => {
+                if (rejectCapture) throw new Error("rejected replacement capture");
+            },
+        });
+        const run = async (input: MessageLike[]) => {
+            transform.invalidateWireState(sessionId);
+            const output = { messages: structuredClone(input) as unknown[] };
+            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            return output.messages;
+        };
+        const input = [user(sessionId, "prompt")];
+        await run(input);
+        recordDetectedContextLimit(db, sessionId, 200_000, `${route.providerID}/${route.modelID}`);
+        input.push({
+            info: {
+                id: "reduce",
+                sessionID: sessionId,
+                role: "assistant",
+                finish: "tool-calls",
+                providerID: route.providerID,
+                modelID: route.modelID,
+            },
+            parts: [
+                {
+                    id: "signed",
+                    type: "reasoning",
+                    text: "signed raw thinking",
+                    metadata: { anthropic: { signature: "fixture-signature" } },
+                },
+                ...tool(sessionId, "reduce", "ctx_reduce").parts,
+            ],
+        } as MessageLike);
+        const output = { messages: structuredClone(input) as unknown[] };
+        const replayOk = tryMessagesTransformLkgReplay({
+            output,
+            sessionId,
+            error: new Error("external outage"),
+            rust: transform.replayParticipant,
+        });
+        expect(replayOk).toBe(true);
+        const rawRequest = await requestBody(output.messages);
+        expect(JSON.stringify(rawRequest)).toContain("8 tags stamped.");
+        expect(JSON.stringify(rawRequest)).not.toMatch(/§\d+§ 8 tags stamped/);
+        await run(input);
+        expect(lastResponse.prefix_bust_permitted).toBe(false);
+        expect(
+            (lastResponse.test_tag_rows as { block_id: string }[]).some(
+                (r) => r.block_id === "reduce#2",
+            ),
+        ).toBe(true);
+        for (let pass = 0; pass < 3; pass++) {
+            input.push(user(sessionId, `u${pass}`), tool(sessionId, `ordinary${pass}`));
+            const served = await run(input);
+            expect(lastResponse.prefix_bust_permitted).toBe(false);
+            expect(
+                providerBlocks(await requestBody(served)).slice(
+                    0,
+                    providerBlocks(rawRequest).length,
+                ),
+            ).toEqual(providerBlocks(rawRequest));
+        }
+        expect(servedRawBlockIds(db, sessionId)).toContain("ordinary2#1");
+        // Recreate the adapter after saving the replayed request, losing its in-memory freeze state.
+        transform.dispose();
+        transform = createRustModeTransform(deps, {
+            moduleClient,
+            scheduleLkgCapture: (capture) => capture(),
+            onLkgCaptureForTests: () => {
+                if (rejectCapture) throw new Error("rejected replacement capture");
+            },
+        });
+        await run(input);
+        expect(servedRawBlockIds(db, sessionId)).toContain("reduce#2");
+        const resumedReplay = { messages: structuredClone(input) as unknown[] };
+        expect(
+            tryMessagesTransformLkgReplay({
+                output: resumedReplay,
+                sessionId,
+                error: new Error("second external outage"),
+                rust: transform.replayParticipant,
+            }),
+        ).toBe(true);
+        const before = await requestBody(await run(input));
+        expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(true);
+        const slot = getSlot(sessionId)!;
+        const broken = JSON.parse(slot.jsonPrefix) as MessageLike[];
+        // Save an incomplete tool at the prefix end. The real boundary validator must
+        // reject it when another message arrives, without rewriting older raw parts.
+        const seam = broken.at(-1)!.parts[0] as { state: { status: string } };
+        seam.state.status = "running";
+        const invalid = { ...slot, jsonPrefix: JSON.stringify(broken) };
+        lkgSlot.captureSlot(sessionId, invalid);
+        const { saveLkgSlotToDb } = await import("./lkg-persist");
+        expect(saveLkgSlotToDb(db, sessionId, invalid)).toBe(true);
+        input.push(user(sessionId, "release"));
+        stripCandidateThinking = true;
+        const released = await run(input);
+        expect(lastResponse.prefix_bust_permitted).toBe(false);
+        expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(false);
+        const after = await requestBody(released);
+        expect(providerBlocks(after).slice(0, providerBlocks(before).length)).toEqual(
+            providerBlocks(before),
+        );
+        expect(JSON.stringify(after)).not.toMatch(/§\d+§ 8 tags stamped/);
+        expect(JSON.stringify(after)).toContain("fixture-signature");
+        const blocks = after.messages.flatMap(
+            (value) => (value as { content: Record<string, unknown>[] }).content,
+        );
+        const uses = blocks.filter((block) => block.type === "tool_use").map((block) => block.id);
+        const results = blocks
+            .filter((block) => block.type === "tool_result")
+            .map((block) => block.tool_use_id);
+        expect(uses).toHaveLength(4);
+        expect(new Set(uses).size).toBe(uses.length);
+        expect(results).toEqual(uses);
+        const { validateLkgSeam, validateAnthropicReasoningRuns } = await import("./lkg-replay");
+        expect(validateLkgSeam([], released as MessageLike[], "anthropic")).toBe(true);
+        expect(validateAnthropicReasoningRuns(released as MessageLike[])).toBe(true);
+        expect(transformDecisionTest.getPending(sessionId)?.lkgFrozenReleaseReason).toStartWith(
+            "lkg_unsafe_seam;first_changed=",
+        );
+        stripCandidateThinking = false;
+        deps.variantBySession = new Map([[sessionId, "authorized-rebuild"]]);
+        // A changed system prompt independently authorizes rebuilding the cached prefix.
+        updateSessionMeta(db, sessionId, { systemPromptHash: "authorized-rebuild" });
+        rejectCapture = true;
+        await expect(run(input)).rejects.toThrow();
+        expect(servedRawBlockIds(db, sessionId)).toContain("reduce#2");
+        rejectCapture = false;
+        updateSessionMeta(db, sessionId, { systemPromptHash: "authorized-rebuild-retry" });
+        await run(input);
+        expect(lastResponse.prefix_bust_permitted).toBe(true);
+        const rebuilt = await requestBody(await run(input));
+        expect(JSON.stringify(rebuilt)).toMatch(/§\d+§ 8 tags stamped/);
+        transform.dispose();
+        rmSync(directory, { recursive: true, force: true });
+    });
+
+    for (const loss of ["source", "candidate", "external-source"] as const) {
+        it(`${loss} raw-history loss refuses once then automatically records and admits an identity rebuild`, async () => {
+            const sessionId = `raw-recovery-${loss}-${Date.now()}`;
+            sessions.push(sessionId);
+            const directory = createTestTempDirFromPath("raw-recovery-module-");
+            availabilityDataHomes.push(directory);
+            const db = makeDb();
+            installRawProvider(sessionId);
+            let dropCandidate = false;
+            let response: Record<string, unknown> = {};
+            let request: Record<string, unknown> = {};
+            const moduleClient: RustModeModuleClient = {
+                call: async ({ method, body }) => {
+                    if (method !== "transform") return { ok: true };
+                    request = body as Record<string, unknown>;
+                    response = probe(rawReplayProbe!, directory, {
+                        ...body,
+                        tool_present: true,
+                        auto_search_enabled: false,
+                        cache_ttl: "never",
+                    });
+                    if (dropCandidate)
+                        response.native_messages = (
+                            response.native_messages as MessageLike[]
+                        ).filter((message) => message.info.id !== "raw");
+                    return response;
+                },
+            };
+            const deps = makeDeps(db, moduleClient);
+            deps.liveModelBySession?.set(sessionId, route);
+            deps.getModelKey = () => `${route.providerID}/${route.modelID}`;
+            const host = createRustModeTransform(deps, { moduleClient });
+            const run = async (input: MessageLike[]) => {
+                host.invalidateWireState(sessionId);
+                const output = { messages: structuredClone(input) as unknown[] };
+                await host.run(sessionId, input, output, makeMeta(db, sessionId));
+                return output.messages;
+            };
+            try {
+                const input = [user(sessionId, "prompt")];
+                await run(input);
+                recordDetectedContextLimit(
+                    db,
+                    sessionId,
+                    200_000,
+                    `${route.providerID}/${route.modelID}`,
+                );
+                input.push(tool(sessionId, "raw"));
+                const replay = { messages: structuredClone(input) as unknown[] };
+                expect(
+                    tryMessagesTransformLkgReplay({
+                        output: replay,
+                        sessionId,
+                        error: new Error("outage"),
+                        rust: host.replayParticipant,
+                    }),
+                ).toBe(true);
+                if (loss !== "external-source") {
+                    await run(input);
+                    lkgSlot.dropSlot(sessionId, "message_removed");
+                }
+                if (loss !== "candidate") input.pop();
+                else dropCandidate = true;
+                input.push(user(sessionId, "continued"));
+                if (loss === "external-source") {
+                    const declined = { messages: structuredClone(input) as unknown[] };
+                    expect(
+                        tryMessagesTransformLkgReplay({
+                            output: declined,
+                            sessionId,
+                            error: new Error("outage after source removal"),
+                            rust: host.replayParticipant,
+                        }),
+                    ).toBe(false);
+                    expect(declined.messages).toEqual(input);
+                } else await expect(run(input)).rejects.toBeInstanceOf(EmergencyFailClosedError);
+                const reason = loss !== "candidate" ? "source_removed" : "candidate_loss";
+                expect(rustRawRebuild(db, sessionId)).toMatchObject({
+                    pending: true,
+                    reason,
+                    messageIds: ["raw"],
+                });
+                expect(servedRawBlockIds(db, sessionId)).toContain("raw#1");
+                const recovered = await requestBody(await run(input));
+                expect(request.raw_replay_rebuild).toMatchObject({ reason, message_ids: ["raw"] });
+                expect(response.prefix_bust_permitted).toBe(true);
+                expect(response.materialize_reason).toBe("raw_replay_identity_rebuild");
+                expect(
+                    transformDecisionTest.getPending(sessionId)?.lkgFrozenReleaseReason,
+                ).toStartWith(`raw_replay_${reason};first_changed=raw#`);
+                expect(rustRawRebuild(db, sessionId)?.pending).toBe(false);
+                if (loss !== "candidate") {
+                    expect(JSON.stringify(recovered)).not.toContain("raw-call");
+                    expect(JSON.stringify(recovered)).not.toContain("output raw");
+                    expect(servedRawBlockIds(db, sessionId)).not.toContain("raw#1");
+                } else {
+                    expect(JSON.stringify(recovered)).toContain("output raw");
+                    expect(servedRawBlockIds(db, sessionId)).toContain("raw#1");
+                }
+                expect(JSON.stringify(await requestBody(await run(input)))).toBe(
+                    JSON.stringify(recovered),
+                );
+                expect(request.raw_replay_rebuild).toBeUndefined();
+                expect(response.prefix_bust_permitted).toBe(false);
+            } finally {
+                host.dispose();
+            }
+        });
+    }
+
+    it.skipIf(!process.env.MC_RAW_REPLAY_BASELINE || !process.env.MC_RAW_REPLAY_BASELINE_ADAPTER)(
+        "no-LKG randomized passes have master-identical provider bytes",
+        async () => {
+            const current = createTestTempDirFromPath("raw-current-");
+            const baseline = createTestTempDirFromPath("raw-baseline-");
+            const baselineFactory = (await import(process.env.MC_RAW_REPLAY_BASELINE_ADAPTER!))
+                .createRustModeTransform as typeof createRustModeTransformImpl;
+            const hosts = [
+                {
+                    factory: createRustModeTransformImpl,
+                    binary: rawReplayProbe!,
+                    directory: current,
+                    sessionId: "diff-current",
+                },
+                {
+                    factory: baselineFactory,
+                    binary: process.env.MC_RAW_REPLAY_BASELINE!,
+                    directory: baseline,
+                    sessionId: "diff-baseline",
+                },
+            ].map(({ factory, binary, directory, sessionId }) => {
+                sessions.push(sessionId);
+                installRawProvider(sessionId);
+                const db = makeDb();
+                const moduleClient: RustModeModuleClient = {
+                    call: async ({ method, body }) =>
+                        method === "transform"
+                            ? probe(binary, directory, {
+                                  ...body,
+                                  tool_present: true,
+                                  auto_search_enabled: false,
+                                  cache_ttl: "never",
+                              })
+                            : { ok: true },
+                };
+                const deps = makeDeps(db, moduleClient);
+                deps.liveModelBySession?.set(sessionId, route);
+                const host = factory(deps, {
+                    moduleClient,
+                    scheduleLkgCapture: (capture) => capture(),
+                });
+                return { host, db, sessionId };
+            });
+            let seed = 0x5318;
+            const random = () => {
+                seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+                return seed;
+            };
+            const input: MessageLike[] = [];
+            for (let pass = 0; pass < 24; pass++) {
+                input.push(user("differential", `u${pass}`));
+                if (random() % 3)
+                    input.push(
+                        tool("differential", `t${pass}`, random() % 2 ? "read" : "ctx_reduce"),
+                    );
+                const wires: string[] = [];
+                for (const { host, db, sessionId } of hosts) {
+                    const raw = structuredClone(input).map((message) => ({
+                        ...message,
+                        info: { ...message.info, sessionID: sessionId },
+                    }));
+                    host.invalidateWireState(sessionId);
+                    updateSessionMeta(db, sessionId, {
+                        systemPromptHash: `cfg${Math.floor(pass / 7)}`,
+                    });
+                    const output = { messages: structuredClone(raw) as unknown[] };
+                    await host.run(sessionId, raw, output, makeMeta(db, sessionId));
+                    expect(host.getState(sessionId).lkgRepresentationFrozen).toBe(false);
+                    wires.push(JSON.stringify(await requestBody(output.messages)));
+                }
+                expect(wires[0]).toBe(wires[1]);
+            }
+            for (const { host } of hosts) host.dispose();
+            rmSync(current, { recursive: true, force: true });
+            rmSync(baseline, { recursive: true, force: true });
+        },
+    );
+});

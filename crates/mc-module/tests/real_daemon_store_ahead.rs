@@ -26,6 +26,8 @@ use serde_json::{json, Value};
 use subc_client_rs::{CallError, CallOptions, ConsumerOptions, RetryBackoff, SubcConsumer};
 use subc_protocol::{BindIdentity, RouteTarget};
 
+#[path = "support/daemon_checkout.rs"]
+mod daemon_checkout;
 #[path = "support/executable.rs"]
 mod executable_staging;
 
@@ -154,6 +156,9 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
     std::env::remove_var(subc_os::LAUNCH_NONCE_FD_ENV);
 
     let workspace = workspace_root();
+    if !daemon_checkout::available(&workspace) {
+        return;
+    }
     let subconscious = workspace.parent().unwrap().join("subconscious");
     let daemon_bin = ensure_binary(
         &subconscious,

@@ -286,7 +286,6 @@ export function tryMessagesTransformLkgReplay(args: {
                 sessionLog(sessionId, "lkg_emergency_armed");
             } else {
                 const inputMessages = output.messages as MessageLike[];
-                const inputCount = inputMessages.length;
                 const keys = resolveLkgModelKeys(inputMessages);
                 const replay = replayLkg({
                     sessionId,
@@ -373,14 +372,13 @@ export function tryMessagesTransformLkgReplay(args: {
                         return false;
                     retirePendingSystemPromptDelivery(sessionId);
                     args.onLkgReplay?.();
+                    // Record raw-part visibility before installing bytes that a later
+                    // healthy Rust pass must preserve, even if the module has already tagged them.
+                    noteExternalLkgReplay(rust, sessionId, inputMessages, replay.messages);
                     replaceMessagesInPlace(
                         output,
                         replay.messages as unknown as MessageWithParts[],
                     );
-                    // The provider has now cached the replayed bytes. Tell a Rust
-                    // adapter, so its next successful pass keeps serving them instead
-                    // of switching to module output, which would bust that cache.
-                    noteExternalLkgReplay(rust, sessionId, inputCount);
                     sessionLog(sessionId, "lkg_replay_served");
                     return true;
                 } else {

@@ -693,6 +693,88 @@ impl BoundaryState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawReplayRebuild {
+    pub identity: String,
+    pub reason: String,
+    pub message_ids: Vec<String>,
+}
+
+fn raw_replay_rebuild(req: &TransformRequest) -> Option<&RawReplayRebuild> {
+    req.raw_replay_rebuild.as_ref().filter(|request| {
+        req.serializer_profile == "opencode-aisdk"
+            && request.identity.len() == 64
+            && request
+                .identity
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && [
+                "source_removed",
+                "source_changed",
+                "candidate_loss",
+                "candidate_conflict",
+            ]
+            .contains(&request.reason.as_str())
+            && req
+                .render_config
+                .contains(&format!("raw_replay:{}", request.identity))
+    })
+}
+
+fn raw_replay_rebuild_core(
+    req: &TransformRequest,
+    meta: &ModuleMeta,
+    core: &CoreState,
+    projection: &FlatProjection,
+) -> Option<CoreState> {
+    let recovery = raw_replay_rebuild(req)?;
+    let mut rebuilt = core.clone();
+    for mid in &recovery.message_ids {
+        let covered = req
+            .messages
+            .iter()
+            .find(|message| message.mid == *mid)
+            .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal));
+        let anchor = core.boundary_id == *mid
+            || split_block_id(&core.boundary_id).is_some_and(|(id, _)| id == mid);
+        if covered
+            || anchor
+            || meta.block_identity_by_mid.get(mid) == projection.identity_by_mid.get(mid)
+        {
+            continue;
+        }
+        // Forget reduction/strip payloads tied to this changed, unsummarized message.
+        // Unrelated messages and the summarized-history boundary keep their checks.
+        let suffix = format!(":{mid}");
+        rebuilt.frozen_units.retain(|unit| {
+            if !frozen_unit_targets_message(unit, mid, &suffix) {
+                return true;
+            }
+            let block = unit
+                .key
+                .strip_prefix(RED_KEY_PREFIX)
+                .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX))
+                .or_else(|| {
+                    unit.key
+                        .starts_with(CHANNEL1_KEY_PREFIX)
+                        .then_some(unit.reset_rule.as_str())
+                });
+            if let Some((_, index)) = block.and_then(split_block_id) {
+                return meta
+                    .block_identity_by_mid
+                    .get(mid)
+                    .and_then(|blocks| blocks.get(index))
+                    == projection
+                        .identity_by_mid
+                        .get(mid)
+                        .and_then(|blocks| blocks.get(index));
+            }
+            false
+        });
+    }
+    Some(rebuilt)
+}
+
 /// A transform pass request. `boundary_present` is deliberately NOT a field: it is a
 /// cache-correctness decision (replay-frozen vs reconcile) that the module computes
 /// from its own durable state, never caller-supplied (a caller-supplied value would be
@@ -720,6 +802,14 @@ pub struct TransformRequest {
     /// It can acknowledge only a system-only identity delta, never other render inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_system_prompt_hash: Option<String>,
+    /// Block IDs (`message_id#block_index`) the host already sent without tag prefixes.
+    /// Recording provider visibility does not authorize rewriting the cached prefix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served_raw_block_ids: Vec<String>,
+    /// The host refused a missing/changed raw-served part and persisted this request.
+    /// Its declared render identity requests a rebuild; the module plan grants permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_replay_rebuild: Option<RawReplayRebuild>,
     /// Identity of the materializer's upgrade state, stored so a change is detected as a
     /// render-configuration change consistently with the TypeScript materializer.
     #[serde(default)]
@@ -1018,6 +1108,10 @@ fn present_deprecated_value<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 struct TransformRequestWire {
     #[serde(default)]
+    raw_replay_rebuild: Option<RawReplayRebuild>,
+    #[serde(default)]
+    served_raw_block_ids: Vec<String>,
+    #[serde(default)]
     kind: String,
     #[serde(default = "default_wire_version")]
     v: u32,
@@ -1179,6 +1273,8 @@ impl<'de> Deserialize<'de> for TransformRequest {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or_else(default_protected_tags);
         Ok(Self {
+            raw_replay_rebuild: wire.raw_replay_rebuild,
+            served_raw_block_ids: wire.served_raw_block_ids,
             kind: wire.kind,
             v: wire.v,
             serializer_profile: wire.serializer_profile.unwrap_or_default(),
@@ -4608,13 +4704,15 @@ fn apply_once(
                 req.session_id,
                 fingerprint
             );
+            let mut pending_tags = loaded.meta.pending_tag_block_ids.clone();
+            pending_tags.extend(req.served_raw_block_ids.iter().cloned());
             let passthrough_overlay = tagging_active.then(|| {
                 tag_overlay_state(
                     &tag_rows,
                     &temporal_marks,
                     &user_hints,
                     &channel1_appends,
-                    &loaded.meta.pending_tag_block_ids,
+                    &pending_tags,
                     &loaded.meta.pending_user_hint_block_ids,
                 )
             });
@@ -4634,6 +4732,7 @@ fn apply_once(
                 .as_ref()
                 .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
             let mut next_meta = loaded.meta.clone();
+            next_meta.pending_tag_block_ids = pending_tags;
             next_meta.served_output_fingerprint = served_fingerprints;
             next_meta.served_output_generation = Some(reasoning_generation(&next_meta));
             let fingerprint_changed = next_meta != loaded.meta;
@@ -4707,6 +4806,8 @@ fn apply_once(
 
         let core = loaded.core.clone();
         let mut meta = loaded.meta.clone();
+        meta.pending_tag_block_ids
+            .extend(req.served_raw_block_ids.iter().cloned());
         let mut trip_count = meta.pending_rewrite_trip_count;
         if trip_count > 0 {
             trip_count = trip_count.saturating_add(1);
@@ -4832,11 +4933,13 @@ fn apply_once(
     profile_end!(perf_coverage);
     profile_start!(perf_identity, "identity_enforce");
     let identity_enforce_started_at = Instant::now();
+    let recovery_core = raw_replay_rebuild_core(req, &loaded.meta, &loaded.core, &projection);
+    let identity_core = recovery_core.as_ref().unwrap_or(&loaded.core);
     let tail_identity_re_adoptions = enforce_block_identity(
         &loaded.meta,
         req,
         &projection,
-        &loaded.core,
+        identity_core,
         provisional_tail_mid,
         lineage_anchor_mid,
     )
@@ -4858,7 +4961,7 @@ fn apply_once(
             &legacy_meta,
             req,
             &projection,
-            &loaded.core,
+            identity_core,
             provisional_tail_mid,
             lineage_anchor_mid,
         )?;
@@ -5191,7 +5294,8 @@ fn apply_once(
         false,
         scheduler_outcome.idle_ttl_fired,
     );
-    let render_config_changed = render_config_changed && !system_identity_adopted;
+    let raw_rebuild = raw_replay_rebuild(req).is_some();
+    let render_config_changed = (render_config_changed && !system_identity_adopted) || raw_rebuild;
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
     // If Claude-code coverage advances over system messages, force a HARD render so the
     // messages move into the m0 prefix before the byte-splice profile suppresses their
@@ -5285,7 +5389,8 @@ fn apply_once(
     let head_rebuild_forced = !req.is_subagent
         && (!loaded.meta.initialized
             || cached_m1_missing(&loaded.core)
-            || lineage_state.force_hard);
+            || lineage_state.force_hard
+            || raw_rebuild);
     // `classify` also makes bootstrap-seed and legacy-baseline passes HARD whatever is queued:
     // neither has an m0/m1 pair matching the stored coverage to replay.
     let head_replay_impossible = head_rebuild_forced
@@ -5368,7 +5473,8 @@ fn apply_once(
     let identity_changed = |last: &str, current: Option<&str>| {
         !last.is_empty() && current.is_some_and(|current| current != last)
     };
-    let hard_fold_loses_provider_cache = scheduler_outcome.idle_ttl_fired
+    let hard_fold_loses_provider_cache = raw_rebuild
+        || scheduler_outcome.idle_ttl_fired
         || profile_transition
         || identity_changed(&loaded.meta.last_provider_id, req.provider_id.as_deref())
         || identity_changed(&loaded.meta.last_model_key, req.model_key.as_deref())
@@ -5431,7 +5537,7 @@ fn apply_once(
     // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
     // but do not pay for one. Both flags derive from this one expression so they cannot
     // drift apart.
-    let independent_rebuild = (prefix_materialization_enabled
+    let independent_rebuild = raw_rebuild || (prefix_materialization_enabled
         && (!loaded.meta.initialized
             || render_config_changed
             || cached_m1_missing(&loaded.core)
@@ -5805,7 +5911,10 @@ fn apply_once(
         // independent Soft pass selected by the scheduler.
         // A subagent under the signed-prefix hold defers this transition until the hold lifts:
         // tagging old blocks would edit content before its kept signed thinking.
-        plan = if (surface_transition && !signed_prefix_hold) || subagent_execute_permitted {
+        plan = if raw_rebuild
+            || (surface_transition && !signed_prefix_hold)
+            || subagent_execute_permitted
+        {
             PassPlan::Soft
         } else {
             PassPlan::Defer
@@ -5848,6 +5957,9 @@ fn apply_once(
     if cache_sections_discarded {
         materialize_reason = Some("cache_sections_discarded".to_string());
     }
+    if raw_rebuild {
+        materialize_reason = Some("raw_replay_identity_rebuild".to_string());
+    }
     if boundary_divergence_recut.is_some() {
         materialize_reason = Some("boundary_divergence_recut".to_string());
     }
@@ -5867,7 +5979,7 @@ fn apply_once(
     profile_end!(perf_planning);
     let state_clone_started_at = Instant::now();
     profile_start!(perf_clone, "state_clone");
-    let mut core = loaded.core.clone();
+    let mut core = recovery_core.unwrap_or_else(|| loaded.core.clone());
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
     if let Some(policy) = &ctx.cache_ttl_policy {
@@ -6036,6 +6148,10 @@ fn apply_once(
         serializer_profile,
         Some(SerializerProfile::OpencodeAiSdk | SerializerProfile::OwnedBroca)
     ) {
+        // The host may have sent raw bytes instead of an earlier successful
+        // transform's output. Hide tags for all reported blocks, even older rows.
+        meta.pending_tag_block_ids
+            .extend(req.served_raw_block_ids.iter().cloned());
         // Broca can serve a message the module never rendered (its last-known-good array
         // plus the raw tail after a failed transform), so it needs the same hold.
         let mint_end = pending_overlays
@@ -8360,7 +8476,16 @@ fn enforce_block_identity(
         if trailing_blank_identity_replays_stored(req, core, mid, stored) {
             continue;
         }
-        if identity_drift_requires_reject(meta, req, core, mid) {
+        let declared_tail_rebuild = raw_replay_rebuild(req)
+            .is_some_and(|recovery| recovery.message_ids.contains(mid))
+            && !req
+                .messages
+                .iter()
+                .find(|message| message.mid == *mid)
+                .is_some_and(|message| !is_tail(message.ordinal, meta.coverage_ordinal))
+            && core.boundary_id != *mid
+            && !split_block_id(&core.boundary_id).is_some_and(|(anchor, _)| anchor == mid);
+        if identity_drift_requires_reject(meta, req, core, mid) && !declared_tail_rebuild {
             return Err(TransformError::IdentityDrift(mid.clone()));
         }
         re_adoptions.push(TailIdentityReAdoption {
@@ -8414,22 +8539,26 @@ fn identity_drift_requires_reject(
 fn frozen_unit_targets_mid(core: &CoreState, mid: &str) -> bool {
     profile_start!(_perf_scan, "rt15_frozen_mid_scan");
     let strip_suffix = format!(":{mid}");
-    core.frozen_units.iter().any(|unit| {
-        let target = unit
-            .key
-            .strip_prefix(RED_KEY_PREFIX)
-            .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX));
-        if target.is_some_and(|target| {
-            split_block_id(target).is_some_and(|(unit_mid, _)| unit_mid == mid)
-        }) || (unit.key.starts_with(CHANNEL1_KEY_PREFIX)
+    core.frozen_units
+        .iter()
+        .any(|unit| frozen_unit_targets_message(unit, mid, &strip_suffix))
+}
+
+fn frozen_unit_targets_message(unit: &FrozenUnit, mid: &str, strip_suffix: &str) -> bool {
+    let target = unit
+        .key
+        .strip_prefix(RED_KEY_PREFIX)
+        .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX));
+    if target
+        .is_some_and(|target| split_block_id(target).is_some_and(|(unit_mid, _)| unit_mid == mid))
+        || (unit.key.starts_with(CHANNEL1_KEY_PREFIX)
             && split_block_id(&unit.reset_rule).is_some_and(|(unit_mid, _)| unit_mid == mid))
-        {
-            return true;
-        }
-        unit.key
-            .strip_prefix("strip:")
-            .is_some_and(|key| key.ends_with(&strip_suffix))
-    })
+    {
+        return true;
+    }
+    unit.key
+        .strip_prefix("strip:")
+        .is_some_and(|key| key.ends_with(strip_suffix))
 }
 
 fn block_identity_hash_prefix(vector: &[BlockIdentity]) -> String {
@@ -20782,6 +20911,8 @@ pub(crate) mod tests {
             render_config: cfg.to_string(),
             system_prompt_hash: String::new(),
             adopted_system_prompt_hash: None,
+            served_raw_block_ids: Vec::new(),
+            raw_replay_rebuild: None,
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
@@ -36548,6 +36679,210 @@ pub(crate) mod tests {
             .any(|row| row.block_id == "target#1"));
         assert!(s
             .load("opencode-late-tag-bust")
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn raw_replay_rebuild_requires_declared_identity_and_returns_to_defer() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = active_opencode_req(
+            "raw-rebuild-admission",
+            "cfg0",
+            vec![
+                item("u1", 1, "inspect"),
+                unstamped_opencode_tool_pair("raw", 2, "call"),
+                item("u2", 3, "continue"),
+            ],
+        );
+        run(&s, &request, &spine());
+        request.raw_replay_rebuild = Some(RawReplayRebuild {
+            identity: "a".repeat(64),
+            reason: "candidate_loss".into(),
+            message_ids: vec!["raw".into()],
+        });
+        assert!(!run(&s, &request, &spine()).prefix_bust_permitted);
+        request
+            .render_config
+            .push_str(&format!("|raw_replay:{}", "a".repeat(64)));
+        let rebuilt = run(&s, &request, &spine());
+        assert!(rebuilt.prefix_bust_permitted);
+        assert_eq!(
+            rebuilt.materialize_reason.as_deref(),
+            Some("raw_replay_identity_rebuild")
+        );
+        request.raw_replay_rebuild = None;
+        let stable = run(&s, &request, &spine());
+        assert!(!stable.prefix_bust_permitted);
+        assert_eq!(
+            opencode_native_bytes(&rebuilt, "raw-rebuild-admission"),
+            opencode_native_bytes(&stable, "raw-rebuild-admission")
+        );
+    }
+
+    #[test]
+    fn raw_replay_rebuild_retires_only_decisions_for_changed_tail_identities() {
+        let original = active_opencode_req(
+            "raw-rebuild-source",
+            "cfg0",
+            vec![
+                two_block_item("raw", 1, "stable sibling", "old"),
+                item("other", 2, "unchanged"),
+            ],
+        );
+        let before = project_messages(&original.messages).unwrap();
+        let meta = ModuleMeta {
+            block_identity_by_mid: before.identity_by_mid.clone(),
+            ..ModuleMeta::default()
+        };
+        let core = CoreState {
+            frozen_units: vec![
+                red_unit("raw#0", "message", "stable reduction"),
+                red_unit("raw#1", "message", "stale"),
+                strip_unit("reasoning_age", "other", ""),
+            ],
+            ..CoreState::default()
+        };
+        let mut request = active_opencode_req(
+            "raw-rebuild-source",
+            "cfg0",
+            vec![
+                two_block_item("raw", 1, "stable sibling", "new"),
+                item("other", 2, "unchanged"),
+            ],
+        );
+        let projected = project_messages(&request.messages).unwrap();
+        assert!(enforce_block_identity(&meta, &request, &projected, &core, None, None).is_err());
+        assert!(raw_replay_rebuild_core(&request, &meta, &core, &projected).is_none());
+        request
+            .render_config
+            .push_str(&format!("|raw_replay:{}", "b".repeat(64)));
+        request.raw_replay_rebuild = Some(RawReplayRebuild {
+            identity: "b".repeat(64),
+            reason: "source_changed".into(),
+            message_ids: vec!["raw".into()],
+        });
+        let rebuilt = raw_replay_rebuild_core(&request, &meta, &core, &projected).unwrap();
+        assert!(!rebuilt
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:raw#1"));
+        assert!(rebuilt
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:raw#0"));
+        assert!(rebuilt
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:reasoning_age:other"));
+        let adoptions =
+            enforce_block_identity(&meta, &request, &projected, &rebuilt, None, None).unwrap();
+        assert_eq!(adoptions.len(), 1);
+        assert_eq!(adoptions[0].mid, "raw");
+        assert_eq!(core.frozen_units.len(), 3);
+    }
+
+    #[test]
+    fn external_raw_replay_pending_rewrite_holds_existing_tags_before_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "external-raw-pending";
+        s.replace_compartments(session, &[comp(1, 1, 2, "t2#0", "summary")])
+            .unwrap();
+        let present = active_opencode_req(
+            session,
+            "cfg0",
+            vec![item("t2", 2, "covered"), item("t3", 3, "tail")],
+        );
+        run(&s, &present, &spine());
+        let mut absent = active_opencode_req(session, "cfg0", vec![item("t3", 3, "tail")]);
+        absent.served_raw_block_ids = vec!["t3#0".into()];
+        for _ in 0..2 {
+            let response = run(&s, &absent, &spine());
+            assert_eq!(response.action, "PASSTHROUGH");
+            assert_eq!(tail_bytes(&response, "t3"), "tail");
+            assert!(s
+                .load(session)
+                .unwrap()
+                .meta
+                .pending_tag_block_ids
+                .contains("t3#0"));
+        }
+    }
+
+    #[test]
+    fn external_raw_replay_holds_existing_and_new_rows_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let session = "external-raw-replay";
+        let mut request = active_opencode_req(session, "cfg0", vec![item("u1", 1, "inspect")]);
+        run(&s, &request, &spine());
+        request
+            .messages
+            .push(unstamped_opencode_tool_pair("reduce", 2, "reduce-call"));
+        request.messages.push(item("u2", 3, "continue"));
+        let minted = run(&s, &request, &spine());
+        assert!(!minted.prefix_bust_permitted);
+        assert!(s
+            .load_tags_for_session(session)
+            .unwrap()
+            .iter()
+            .any(|r| r.block_id == "reduce#1"));
+
+        // The host reports sending this block raw after its tag row was created;
+        // it never sent the transformed output. That older tag must stay hidden too.
+        request.served_raw_block_ids = vec!["reduce#1".into(), "ordinary#1".into()];
+        request
+            .messages
+            .push(unstamped_opencode_tool_pair("ordinary", 4, "ordinary-call"));
+        request.messages.push(item("u3", 5, "next"));
+        for _ in 0..3 {
+            let response = run(&s, &request, &spine());
+            assert!(!response.prefix_bust_permitted);
+            for mid in ["reduce", "ordinary"] {
+                let message = response
+                    .messages()
+                    .iter()
+                    .find(|m| m.meta.harness_id.as_deref() == Some(mid))
+                    .unwrap();
+                assert!(!first_block_text(&message.content[1])
+                    .unwrap()
+                    .starts_with('§'));
+                assert!(s
+                    .load(session)
+                    .unwrap()
+                    .meta
+                    .pending_tag_block_ids
+                    .contains(&format!("{mid}#1")));
+            }
+        }
+        drop(s);
+        let s = store(dir.path());
+        request.served_raw_block_ids.clear();
+        let response = run(&s, &request, &spine());
+        assert!(!response.prefix_bust_permitted);
+        assert!(s
+            .load(session)
+            .unwrap()
+            .meta
+            .pending_tag_block_ids
+            .contains("reduce#1"));
+        request.render_config = "cfg1".into();
+        let rebuilt = run(&s, &request, &spine());
+        assert!(rebuilt.prefix_bust_permitted);
+        let result = rebuilt
+            .messages()
+            .iter()
+            .find(|m| m.meta.harness_id.as_deref() == Some("reduce"))
+            .unwrap();
+        assert!(first_block_text(&result.content[1])
+            .unwrap()
+            .starts_with('§'));
+        assert!(s
+            .load(session)
             .unwrap()
             .meta
             .pending_tag_block_ids
