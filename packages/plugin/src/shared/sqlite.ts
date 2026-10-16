@@ -1014,9 +1014,10 @@ function foregroundWaitLease() {
         : undefined;
 }
 
-/** Prepared statements can probe implicit admission without spending the lease
- * on uncontended execution. Scripts cannot safely replay a committed prefix, so
- * their single attempt conservatively charges its whole execution time. */
+/** Probe a prepared statement's writer lock without charging uncontended work
+ * against the foreground lock-wait budget. An exec script may commit some of
+ * its statements before failing, so it cannot be retried without duplicating
+ * writes; conservatively charge its single attempt's full execution time. */
 function withAutocommitTimeout<T>(db: Database, operation: () => T, singleStatement = true): T {
     assertTransformWrite();
     const lease = foregroundWaitLease();
@@ -1052,8 +1053,9 @@ function withAutocommitTimeout<T>(db: Database, operation: () => T, singleStatem
         try {
             return execute();
         } finally {
-            // A prepared retry encountered contention; an exec script cannot be
-            // probed safely. Both charge execution as an upper bound on waiting.
+            // Deduct the prepared statement's contended retry or the exec
+            // script's execution from the remaining foreground wait budget;
+            // the native API cannot separate lock waiting from execution.
             if (lease)
                 lease.remainingWaitMs = Math.max(
                     0,

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 
+import { runMigrations } from "../../features/magic-context/migrations";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { setBoundedRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDir } from "../../shared/test-temp-dir";
@@ -48,16 +50,20 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
         const { dir: root, cleanup } = createTestTempDir("mc-v2-ctx-expand-ordinal-");
         const path = join(root, "opencode.db");
         let db: Database | undefined;
+        let contextDb: Database | undefined;
         let unregister: (() => void) | undefined;
 
         try {
             db = createSessionDatabase(path);
+            contextDb = new Database(":memory:");
+            initializeDatabase(contextDb);
+            runMigrations(contextDb);
             const reader = createV2RawMessageReader(() => new V2StoreReader(path));
             unregister = setBoundedRawMessageProvider(
                 SESSION_ID,
                 createV2RawMessageProvider(reader, SESSION_ID),
             );
-            const ctxExpand = createCtxExpandTools({ db: db as never }).ctx_expand;
+            const ctxExpand = createCtxExpandTools({ db: contextDb as never }).ctx_expand;
             const context = { sessionID: SESSION_ID } as never;
 
             const message = await ctxExpand.execute({ message: 9999 }, context);
@@ -81,6 +87,7 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
             expect(verboseRange).not.toContain(FIRST_MESSAGE_TEXT);
         } finally {
             unregister?.();
+            contextDb?.close();
             db?.close();
             cleanup();
         }
