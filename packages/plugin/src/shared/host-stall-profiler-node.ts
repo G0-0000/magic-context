@@ -224,7 +224,7 @@ export function createNodeHostStallProfiler(deps: NodeProfilerDeps): HostStallPr
             const api = await deps.createSession();
             if (stopped || !existsSync(enablePath)) return;
             session = api;
-            api.connect();
+            inRootAsyncContext(() => api.connect());
             await post(api, "Profiler.enable");
             await post(api, "Profiler.setSamplingInterval", {
                 interval: Math.round(options.sampleIntervalMs * 1000),
@@ -272,3 +272,5 @@ export function createNodeHostStallProfiler(deps: NodeProfilerDeps): HostStallPr
         isUnavailable: () => unavailable,
     };
 }
+
+import { inRootAsyncContext } from "./sqlite";

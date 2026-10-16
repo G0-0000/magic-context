@@ -187,7 +187,7 @@ const connections = new Map<string, Promise<SynapseClientLike>>();
 async function connect(connectionFile: string): Promise<SynapseClientLike> {
     let connection = connections.get(connectionFile);
     if (!connection) {
-        connection = SubcClient.connect({ connectionFile });
+        connection = inRootAsyncContext(() => SubcClient.connect({ connectionFile }));
         connections.set(connectionFile, connection);
         void connection.catch(() => connections.delete(connectionFile));
     }
@@ -373,3 +373,5 @@ export function candidateTexts(
         return candidateText(location, title, body);
     });
 }
+
+import { inRootAsyncContext } from "../../shared/sqlite";

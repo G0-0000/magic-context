@@ -266,32 +266,34 @@ export function queueAutoSearchBackfill(
             pending.delete(key);
             resolve();
         };
-        const queued = setTimeout(() => {
-            lifecycle.signal.removeEventListener("abort", cancel);
-            if (lifecycle.signal.aborted) return done();
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 10_000);
-            timeout.unref?.();
-            void executeAutoSearchWorker(
-                db,
-                sessionId,
-                projectPath,
-                query,
-                { signal: AbortSignal.any([controller.signal, lifecycle.signal]) },
-                new URL(
-                    new URL(import.meta.url).pathname.endsWith(".ts")
-                        ? "./auto-search-worker.ts"
-                        : "./auto-search-worker.js",
-                    import.meta.url,
-                ),
-                "backfill",
-            )
-                .catch((error) => log("[auto-search] background backfill failed:", error))
-                .finally(() => {
-                    clearTimeout(timeout);
-                    done();
-                });
-        }, 0);
+        const queued = inRootAsyncContext(() =>
+            setTimeout(() => {
+                lifecycle.signal.removeEventListener("abort", cancel);
+                if (lifecycle.signal.aborted) return done();
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 10_000);
+                timeout.unref?.();
+                void executeAutoSearchWorker(
+                    db,
+                    sessionId,
+                    projectPath,
+                    query,
+                    { signal: AbortSignal.any([controller.signal, lifecycle.signal]) },
+                    new URL(
+                        new URL(import.meta.url).pathname.endsWith(".ts")
+                            ? "./auto-search-worker.ts"
+                            : "./auto-search-worker.js",
+                        import.meta.url,
+                    ),
+                    "backfill",
+                )
+                    .catch((error) => log("[auto-search] background backfill failed:", error))
+                    .finally(() => {
+                        clearTimeout(timeout);
+                        done();
+                    });
+            }, 0),
+        );
         const cancel = () => {
             clearTimeout(queued);
             done();
@@ -347,7 +349,7 @@ async function executeAutoSearchWorker(
         deadlineUnixMs: autoSearchDeadlineUnixMs(deadlineSignal),
     };
     return new Promise((resolve, reject) => {
-        const worker = new Worker(entry, { workerData: input });
+        const worker = inRootAsyncContext(() => new Worker(entry, { workerData: input }));
         let settled = false;
         const finish = (results: UnifiedSearchResult[], error?: Error) => {
             if (settled) return;
@@ -532,7 +534,7 @@ export function searchMessageHistoryOffThread(
             deadline.unref?.();
         };
         try {
-            worker = new Worker(entry, { workerData: input });
+            worker = inRootAsyncContext(() => new Worker(entry, { workerData: input }));
         } catch (error) {
             finish(null, "start-failed", error);
             return;
@@ -548,3 +550,5 @@ export function searchMessageHistoryOffThread(
         worker.on("exit", (code) => finish(null, "exited", `exit code ${code}`));
     });
 }
+
+import { inRootAsyncContext } from "../../shared/sqlite";

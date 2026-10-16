@@ -300,20 +300,22 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
     lastBoundMessageIdBySession.set(args.sessionId, args.messageId);
     pendingDecisionBySession.delete(args.sessionId);
     const token = addScheduledWriteToken(args.sessionId);
-    setTimeout(() => {
-        try {
-            if (!hasScheduledWriteToken(args.sessionId, token)) return;
-            writeTransformDecisionBestEffort(dbPath, {
-                ...pending,
-                sessionId: args.sessionId,
-                harness: "opencode",
-                messageId: args.messageId,
-                inputTokens: args.inputTokens,
-            });
-        } finally {
-            deleteScheduledWriteToken(args.sessionId, token);
-        }
-    }, 0);
+    inRootAsyncContext(() =>
+        setTimeout(() => {
+            try {
+                if (!hasScheduledWriteToken(args.sessionId, token)) return;
+                writeTransformDecisionBestEffort(dbPath, {
+                    ...pending,
+                    sessionId: args.sessionId,
+                    harness: "opencode",
+                    messageId: args.messageId,
+                    inputTokens: args.inputTokens,
+                });
+            } finally {
+                deleteScheduledWriteToken(args.sessionId, token);
+            }
+        }, 0),
+    );
     return true;
 }
 
@@ -366,29 +368,31 @@ export function schedulePiTransformDecisionResolve(args: {
 
     pendingPiDecisionBySession.delete(args.sessionId);
     const token = addScheduledWriteToken(args.sessionId);
-    setTimeout(() => {
-        try {
-            if (!hasScheduledWriteToken(args.sessionId, token)) return;
+    inRootAsyncContext(() =>
+        setTimeout(() => {
             try {
-                pending.publicationGuard?.();
-                args.assertCurrentPass?.();
-            } catch {
-                sessionLog(
-                    args.sessionId,
-                    "DISCARDED CONTEXT RESULT: queued Pi transform decision",
-                );
-                return;
+                if (!hasScheduledWriteToken(args.sessionId, token)) return;
+                try {
+                    pending.publicationGuard?.();
+                    args.assertCurrentPass?.();
+                } catch {
+                    sessionLog(
+                        args.sessionId,
+                        "DISCARDED CONTEXT RESULT: queued Pi transform decision",
+                    );
+                    return;
+                }
+                writeTransformDecisionBestEffort(dbPath, {
+                    ...pending,
+                    sessionId: args.sessionId,
+                    harness: "pi",
+                    messageId: targetMessageId,
+                });
+            } finally {
+                deleteScheduledWriteToken(args.sessionId, token);
             }
-            writeTransformDecisionBestEffort(dbPath, {
-                ...pending,
-                sessionId: args.sessionId,
-                harness: "pi",
-                messageId: targetMessageId,
-            });
-        } finally {
-            deleteScheduledWriteToken(args.sessionId, token);
-        }
-    }, 0);
+        }, 0),
+    );
     return true;
 }
 
@@ -582,3 +586,5 @@ export const __test = {
     },
     findNewestPiAssistantEntryIdAfter,
 };
+
+import { inRootAsyncContext } from "../../shared/sqlite";

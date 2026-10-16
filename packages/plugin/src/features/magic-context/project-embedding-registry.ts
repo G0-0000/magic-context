@@ -2912,13 +2912,15 @@ export async function drainCommitBacklogForProject(
 
     let total = 0;
     let leaseLost = false;
-    const renewal = setInterval(() => {
-        try {
-            if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
-        } catch {
-            // A transient database error leaves the current TTL in force.
-        }
-    }, SESSION_EMBED_LEASE_RENEWAL_MS);
+    const renewal = inRootAsyncContext(() =>
+        setInterval(() => {
+            try {
+                if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
+            } catch {
+                // A transient database error leaves the current TTL in force.
+            }
+        }, SESSION_EMBED_LEASE_RENEWAL_MS),
+    );
     (renewal as { unref?: () => void }).unref?.();
     try {
         while (
@@ -3209,13 +3211,15 @@ async function drainCompartmentChunkBacklogForProject(
 
     let total = 0;
     let leaseLost = false;
-    const renewal = setInterval(() => {
-        try {
-            if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
-        } catch {
-            // A transient database error leaves the current TTL in force.
-        }
-    }, SESSION_EMBED_LEASE_RENEWAL_MS);
+    const renewal = inRootAsyncContext(() =>
+        setInterval(() => {
+            try {
+                if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
+            } catch {
+                // A transient database error leaves the current TTL in force.
+            }
+        }, SESSION_EMBED_LEASE_RENEWAL_MS),
+    );
     (renewal as { unref?: () => void }).unref?.();
     try {
         while (
@@ -3327,16 +3331,18 @@ export async function embedSessionCompartmentChunks(
     const forwardCallerAbort = (): void => drainAbort.abort();
     if (options?.signal?.aborted) drainAbort.abort();
     else options?.signal?.addEventListener("abort", forwardCallerAbort, { once: true });
-    const renewal = setInterval(() => {
-        try {
-            if (!renewGitSweepLease(db, projectIdentity, holderId)) {
-                leaseLost = true;
-                drainAbort.abort();
+    const renewal = inRootAsyncContext(() =>
+        setInterval(() => {
+            try {
+                if (!renewGitSweepLease(db, projectIdentity, holderId)) {
+                    leaseLost = true;
+                    drainAbort.abort();
+                }
+            } catch {
+                /* best-effort; the current lease remains valid until its TTL */
             }
-        } catch {
-            /* best-effort; the current lease remains valid until its TTL */
-        }
-    }, SESSION_EMBED_LEASE_RENEWAL_MS);
+        }, SESSION_EMBED_LEASE_RENEWAL_MS),
+    );
     (renewal as { unref?: () => void }).unref?.();
 
     const batchSize = Math.max(1, options?.batchSize ?? CHUNK_DRAIN_BATCH_SIZE);
@@ -3673,3 +3679,5 @@ export function _resetProjectEmbeddingRegistryForTests(): void {
     shadowBackfillNow = () => Date.now();
     setBootQuietPeriodForTests(null);
 }
+
+import { inRootAsyncContext } from "../../shared/sqlite";

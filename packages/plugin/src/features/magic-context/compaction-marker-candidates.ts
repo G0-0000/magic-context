@@ -231,7 +231,9 @@ function runCandidateWorker(
             timer.unref?.();
         };
         try {
-            worker = new Worker(entry, { workerData: { path, sessionId } });
+            worker = inRootAsyncContext(
+                () => new Worker(entry, { workerData: { path, sessionId } }),
+            );
             workers.add(worker);
             worker.unref();
             deadline(options.acceptMs ?? 2000);
@@ -298,3 +300,5 @@ export function scanMarkerCandidateSnapshot(
         if (ownsSnapshot) db.exec("ROLLBACK");
     }
 }
+
+import { inRootAsyncContext } from "../../shared/sqlite";

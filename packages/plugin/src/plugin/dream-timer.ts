@@ -318,7 +318,9 @@ export async function startDreamScheduleTimer(
             runTick("startup");
         });
 
-        const timer = setInterval(() => runTick("interval"), DREAM_TIMER_INTERVAL_MS);
+        const timer = inRootAsyncContext(() =>
+            setInterval(() => runTick("interval"), DREAM_TIMER_INTERVAL_MS),
+        );
         if (typeof timer === "object" && "unref" in timer) {
             timer.unref();
         }
@@ -800,17 +802,19 @@ function startGitSweepLeaseRenewal(
     projectIdentity: string,
     holderId: string,
 ): () => void {
-    const timer = setInterval(() => {
-        try {
-            if (!renewGitSweepLease(db, projectIdentity, holderId)) {
-                log(`[git-commits] sweep lease renewal failed for ${projectIdentity}`);
+    const timer = inRootAsyncContext(() =>
+        setInterval(() => {
+            try {
+                if (!renewGitSweepLease(db, projectIdentity, holderId)) {
+                    log(`[git-commits] sweep lease renewal failed for ${projectIdentity}`);
+                }
+            } catch (error) {
+                log(
+                    `[git-commits] sweep lease renewal errored for ${projectIdentity}: ${error instanceof Error ? error.message : String(error)}`,
+                );
             }
-        } catch (error) {
-            log(
-                `[git-commits] sweep lease renewal errored for ${projectIdentity}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        }
-    }, GIT_SWEEP_LEASE_RENEWAL_MS);
+        }, GIT_SWEEP_LEASE_RENEWAL_MS),
+    );
     (timer as { unref?: () => void }).unref?.();
     return () => clearInterval(timer);
 }
@@ -894,3 +898,5 @@ async function sweepGitCommits(args: {
         stopRenewal();
     }
 }
+
+import { inRootAsyncContext } from "../shared/sqlite";

@@ -1,6 +1,7 @@
 import { type ChildProcess, fork } from "node:child_process";
 import { Worker } from "node:worker_threads";
 import { log } from "../../../shared/logger";
+import { inRootAsyncContext } from "../../../shared/sqlite";
 import type { EmbeddingFailure } from "./embedding-failure";
 import type { LocalEmbeddingNativeMemoryStats } from "./embedding-local";
 import { prepareNativeOnnxTelemetry } from "./onnx-telemetry";
@@ -50,7 +51,7 @@ export class EmbeddingWorkerClient {
 
     private start(): Promise<ChildProcess | Worker> {
         if (this.startPromise) return this.startPromise;
-        this.startPromise = this.startOwner().finally(() => {
+        this.startPromise = inRootAsyncContext(() => this.startOwner()).finally(() => {
             this.startPromise = null;
         });
         return this.startPromise;

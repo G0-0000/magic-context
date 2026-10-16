@@ -39,7 +39,7 @@
  * `run()` → {changes,lastInsertRowid}) is identical and was verified directly.
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { statSync } from "node:fs";
 
 // Type import only — runtime is loaded dynamically below. @types/better-sqlite3
@@ -47,6 +47,16 @@ import { statSync } from "node:fs";
 // we use, so calls typed against BetterSqlite3 work under bun:sqlite and
 // node:sqlite at runtime (both expose prepare/run/get/all/exec/close).
 import type BetterSqlite3 from "better-sqlite3";
+
+// Capture the root before creating request-local AsyncLocalStorage scopes.
+// Shared workers and timers must not inherit callbacks that reject stale
+// database writes: those callbacks can retain an obsolete request's inputs.
+const resourceRoot = new AsyncResource("magic-context:root");
+
+/** Create host-owned resources without inheriting request-local state. */
+export function inRootAsyncContext<T>(operation: () => T): T {
+    return resourceRoot.runInAsyncScope(operation);
+}
 
 /**
  * Slow-write reporting is injected rather than imported: this module is also
@@ -571,7 +581,9 @@ function trackSqliteConnection(
 
 const TrackedDatabase = new Proxy(DatabaseImpl, {
     construct(target, args) {
-        const db = Reflect.construct(target, args, target) as BetterSqlite3.Database;
+        const db = inRootAsyncContext(
+            () => Reflect.construct(target, args, target) as BetterSqlite3.Database,
+        );
         return trackSqliteConnection(db, args[0], args[1]);
     },
 }) as typeof BetterSqlite3;
