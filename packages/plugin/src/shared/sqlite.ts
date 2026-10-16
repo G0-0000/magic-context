@@ -406,18 +406,27 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
                 try {
                     // exec accepts scripts: an earlier statement may have committed
                     // before a later statement reports BUSY. Never replay that prefix.
-                    const changes = db.prepare(
-                        "SELECT total_changes() AS n, schema_version AS schemaVersion FROM pragma_schema_version",
-                    );
-                    const before = changes.get() as { n: number; schemaVersion: number };
+                    const changes = db.prepare("SELECT total_changes() AS n");
+                    const schemaVersions = () =>
+                        JSON.stringify(
+                            (db.prepare("PRAGMA database_list").all() as { name: string }[]).map(
+                                ({ name }) => [
+                                    name,
+                                    pragmaNumber(
+                                        db,
+                                        `"${name.replaceAll('"', '""')}".schema_version`,
+                                    ),
+                                ],
+                            ),
+                        );
+                    const before = changes.get() as { n: number };
+                    const beforeSchemas = schemaVersions();
                     return withAutocommitTimeout(
                         db,
                         () => nativeExec(sql),
                         () => {
                             const after = changes.get() as typeof before;
-                            return (
-                                after.n === before.n && after.schemaVersion === before.schemaVersion
-                            );
+                            return after.n === before.n && schemaVersions() === beforeSchemas;
                         },
                     );
                 } finally {

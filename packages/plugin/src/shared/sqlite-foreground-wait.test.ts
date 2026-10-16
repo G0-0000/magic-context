@@ -282,8 +282,10 @@ for (const mode of ["BEGIN", "autocommit"]) {
 test("an autocommit exec script never replays a committed prefix after BUSY", () => {
     const main = fixture();
     const auxiliary = fixture();
+    const free = fixture();
     try {
         main.db.prepare("ATTACH DATABASE ? AS aux").run(auxiliary.path);
+        main.db.prepare("ATTACH DATABASE ? AS free").run(free.path);
         auxiliary.db.exec("BEGIN IMMEDIATE");
         withSqliteTransformPass(() => {
             guardSqliteTransformPass({ assert() {}, remainingMs: () => 100 });
@@ -297,6 +299,11 @@ test("an autocommit exec script never replays a committed prefix after BUSY", ()
                     "CREATE TABLE applied_once(id); INSERT INTO aux.result VALUES ('blocked')",
                 ),
             ).toThrow(SqliteAcquisitionBusyError);
+            expect(() =>
+                main.db.exec(
+                    "CREATE TABLE free.applied_once(id); INSERT INTO aux.result VALUES ('blocked')",
+                ),
+            ).toThrow(SqliteAcquisitionBusyError);
         });
         expect(main.db.prepare("SELECT * FROM main.result").all()).toEqual([{ value: "prefix" }]);
         expect(
@@ -306,5 +313,6 @@ test("an autocommit exec script never replays a committed prefix after BUSY", ()
         auxiliary.db.exec("ROLLBACK");
         auxiliary.close();
         main.close();
+        free.close();
     }
 });
