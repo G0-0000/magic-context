@@ -42,9 +42,20 @@ if (!["18.10.4", "18.11.0", "18.11.1"].includes(version))
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";
-if (!["managed", "raw", "managed-then-raw", "drop-commentary"].includes(mode))
+if (
+	![
+		"managed",
+		"raw",
+		"managed-then-raw",
+		"drop-commentary",
+		"text-edit-baseline",
+	].includes(mode)
+)
 	throw new Error("unknown mode");
 const historyCase = process.argv[4] ?? "fresh";
+const assistantEdit = ["assistant-drop", "assistant-caveman"].includes(
+	historyCase,
+);
 if (
 	![
 		"fresh",
@@ -65,6 +76,8 @@ if (
 		"mixed",
 		"materialized",
 		"responses-history",
+		"assistant-drop",
+		"assistant-caveman",
 		"cross-model-thinking",
 		"custom-summary",
 		"composite-cross",
@@ -202,12 +215,21 @@ writeFileSync(
 		memory: { enabled: false },
 		embedding: { provider: "off" },
 		dreamer: { disable: true },
+		...(assistantEdit
+			? {
+					caveman_text_compression: {
+						enabled: historyCase === "assistant-caveman",
+						min_chars: 100000,
+					},
+				}
+			: {}),
 	}),
 );
 const plugin =
 	process.env.MC683_PLUGIN ??
 	resolve(import.meta.dir, "../packages/pi-plugin/dist/index.js");
 const probe = join(root, "probe.mjs");
+writeFileSync(join(root, "hooks.jsonl"), "");
 writeFileSync(
 	probe,
 	`
@@ -216,9 +238,12 @@ import {appendFileSync} from 'node:fs';
 import {Database} from 'bun:sqlite';
 import {appendCompartments} from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin/src/features/magic-context/compartment-storage.ts"))};
 import {piPreparedStructure} from ${JSON.stringify(resolve(import.meta.dir, "../packages/pi-plugin/src/pi-dispatch-structure.ts"))};
+import {getTagsBySession} from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin/src/features/magic-context/storage.ts"))};
+import {applyCavemanCleanup} from ${JSON.stringify(resolve(import.meta.dir, "../packages/plugin/src/hooks/magic-context/caveman-cleanup.ts"))};
 const log = value => appendFileSync(${JSON.stringify(join(root, "hooks.jsonl"))},JSON.stringify({at:Date.now(),...value})+'\\n');
 export default async pi => {
   let seeded=false;
+  let reduce, flush, latestCtx, editTag;
   pi.on('context',(event,ctx)=>{
     if(${JSON.stringify(historyCase)}!=='materialized' || seeded) return;
     seeded=true;
@@ -229,6 +254,8 @@ export default async pi => {
     finally {db.close();}
   });
   const proxy = new Proxy(pi,{get(target,key){
+    if(key==='registerTool') return definition=>{if(definition.name==='ctx_reduce') reduce=definition;return target.registerTool(definition);};
+    if(key==='registerCommand') return (name,definition)=>{if(name==='ctx-flush') flush=definition;return target.registerCommand(name,definition);};
     if(key==='on') return (name,handler)=>target.on(name,async(event,ctx)=>{
       const raw=name==='context'?structuredClone(event.messages):undefined;
       if(name==='before_provider_request' && ${JSON.stringify(mode)}==='drop-commentary') {
@@ -244,6 +271,10 @@ export default async pi => {
       });
       const result=await handler(event,wrapped);
       if(name==='context') {
+        latestCtx=ctx;
+        for(const message of result?.messages??[]) for(const part of message.content??[]) {
+          if(part.type==='text' && part.textSignature?.includes('rs_cached686')) editTag=Number(/^§(\\d+)§ /.exec(part.text)?.[1]);
+        }
         log({phase:'prepared',messages:result?.messages,structure:piPreparedStructure(result?.messages??[],ctx.model)});
         if(${JSON.stringify(historyCase)}==='materialized' && result?.messages) {
           const db=new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR+'/context.db',{readonly:true});
@@ -258,6 +289,27 @@ export default async pi => {
     const value=target[key];return typeof value==='function'?value.bind(target):value;
   }});
   await magic(proxy);
+  globalThis.__mc683Edit=async()=>{
+    if(!editTag || !latestCtx) throw new Error('cached assistant tag not found');
+    if(${JSON.stringify(historyCase)}==='assistant-drop') {
+      if(!reduce) throw new Error('ctx_reduce not registered');
+      const result=await reduce.execute('probe_reduce',{drop:String(editTag)},undefined,undefined,latestCtx);
+      log({phase:'text-edit',editTag,result});
+      if(!flush) throw new Error('ctx-flush not registered');
+      await flush.handler('',latestCtx);
+    } else {
+      // Activate production compression once; later host passes replay its stored depth.
+      const db=new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR+'/context.db');
+      try {
+        const sessionId=latestCtx.sessionManager.getSessionId();
+        let text='';
+        const tags=getTagsBySession(db,sessionId).filter(tag=>tag.tagNumber===editTag);
+        const result=applyCavemanCleanup(sessionId,db,new Map([[editTag,{getContent:()=>text,setContent:value=>{text=value;}}]]),tags,{enabled:true,minChars:0,protectedCutoff:null});
+        if(result.mutatedTextTags!==1 || !text) throw new Error('caveman did not compress cached assistant');
+        log({phase:'text-edit',editTag,result,text});
+      } finally {db.close();}
+    }
+  };
 };
 `,
 );
@@ -492,6 +544,8 @@ try {
 				];
 				break;
 			}
+			case "assistant-drop":
+			case "assistant-caveman":
 			case "responses-history": {
 				const signed = (text: string, id: string, timestamp: number) => ({
 					...assistant(
@@ -508,10 +562,12 @@ try {
 						],
 						timestamp,
 					),
-					api: "openai-responses",
+					api: assistantEdit ? model.api : "openai-responses",
 				});
 				const cached = signed(
-					"HISTORY686 cached commentary",
+					assistantEdit
+						? "HISTORY686 cached commentary. I have been looking at the implementation and I think that the following changes are going to be very important for the project."
+						: "HISTORY686 cached commentary",
 					"rs_cached686",
 					stamp + 2,
 				);
@@ -529,13 +585,37 @@ try {
 							content: [
 								{
 									type: "output_text",
-									text: "HISTORY686 cached commentary",
+									text: (cached.content[0] as { text: string }).text,
 									annotations: [],
 								},
 							],
 						},
 					],
 				};
+				if (historyCase === "assistant-drop") {
+					// A wholly dropped message is removed before serialization. Keep a
+					// second text part so dropping the first must reconcile native replay.
+					const companion = signed(
+						"HISTORY686 retained companion",
+						"rs_companion686",
+						stamp + 2,
+					);
+					cached.content.push(companion.content[0]);
+					(cached as any).providerPayload.items.push({
+						type: "message",
+						role: "assistant",
+						id: "rs_companion686",
+						phase: "commentary",
+						status: "completed",
+						content: [
+							{
+								type: "output_text",
+								text: "HISTORY686 retained companion",
+								annotations: [],
+							},
+						],
+					});
+				}
 				history = [
 					user("HISTORY686 responses first user", stamp),
 					signed("HISTORY686 signed commentary", "rs_signed686", stamp + 1),
@@ -775,11 +855,80 @@ try {
 		audit({ phase: "isolation", label, pid: process.pid, stores });
 	};
 	isolation("start");
-	const managedTurns = historyCase === "mixed" && mode !== "raw" ? 3 : 1;
+	const managedTurns = assistantEdit
+		? 5
+		: historyCase === "mixed" && mode !== "raw"
+			? 3
+			: 1;
 	const managedOutcomes: object[] = [];
+	let originalTextPayload: any;
+	let replayedTextPayload: string | undefined;
 	for (let i = 0; i < managedTurns; i++) {
+		if (assistantEdit && i === 1) await (globalThis as any).__mc683Edit();
 		const before = wires;
+		const hookStart = readFileSync(join(root, "hooks.jsonl"), "utf8").length;
 		await session.prompt(`PROVIDER683 prepared turn ${i + 1}`);
+		if (assistantEdit) {
+			const events = readFileSync(join(root, "hooks.jsonl"), "utf8")
+				.slice(hookStart)
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+			const refusals = events.filter(
+				(event) =>
+					event.phase === "entry" &&
+					event.type === "magic-context-turn-refused",
+			);
+			const prepared = events.find((event) => event.phase === "prepared");
+			const text = prepared?.messages
+				?.flatMap((message: any) =>
+					message.role === "assistant" ? message.content : [],
+				)
+				.find(
+					(part: any) =>
+						part.textSignature?.includes("rs_cached686") ||
+						part.text?.startsWith("[dropped"),
+				)?.text;
+			const native = prepared?.messages?.find((message: any) =>
+				message.providerPayload?.items?.some(
+					(item: any) => item.id === "rs_cached686",
+				),
+			)?.providerPayload;
+			if (i === 0) originalTextPayload = structuredClone(native);
+			else {
+				if (
+					typeof text !== "string" ||
+					(historyCase === "assistant-drop"
+						? text !== "[dropped §3§]"
+						: !text.includes("I looking at implementation"))
+				)
+					throw new Error(
+						"stored assistant text edit did not reach prepared context",
+					);
+				const expected = structuredClone(originalTextPayload);
+				if (mode !== "text-edit-baseline")
+					expected.items.find(
+						(item: any) => item.id === "rs_cached686",
+					).content[0].text = text;
+				const bytes = JSON.stringify(native);
+				if (
+					bytes !== JSON.stringify(expected) ||
+					(replayedTextPayload !== undefined && bytes !== replayedTextPayload)
+				)
+					throw new Error(
+						"native text replay changed unrelated bytes or diverged between passes",
+					);
+				replayedTextPayload = bytes;
+			}
+			managedOutcomes.push({
+				turn: i + 1,
+				wires: wires - before,
+				refusals: refusals.map((event) => event.data.message),
+				text,
+			});
+			console.log(JSON.stringify(managedOutcomes.at(-1)));
+		}
 		if (historyCase === "mixed" && mode !== "raw") {
 			const turnHooks = readFileSync(join(root, "hooks.jsonl"), "utf8")
 				.trim()
@@ -964,8 +1113,15 @@ try {
 				: mode === "raw"
 					? `${selector}: raw request refused before transport`
 					: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
-	const ok =
-		mode === "managed-then-raw"
+	const ok = assistantEdit
+		? managedOutcomes.every((outcome: any, index) =>
+				index === 0 || mode !== "text-edit-baseline"
+					? outcome.wires === 1 && outcome.refusals.length === 0
+					: outcome.wires === 0 &&
+						outcome.refusals.length === 1 &&
+						outcome.refusals[0].includes("comparison=content"),
+			)
+		: mode === "managed-then-raw"
 			? managedOutcomes.length === managedTurns &&
 				attempts.length === managedTurns + 1 &&
 				wires === managedTurns &&

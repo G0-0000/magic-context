@@ -81,6 +81,7 @@ import { hasUserAnswerMetadata } from "@magic-context/core/shared/user-answer";
 import {
 	canRemoveNativeToolCall,
 	removeNativeToolCall,
+	rewriteNativeAssistantTexts,
 } from "./native-replay-pi";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
@@ -265,6 +266,9 @@ export function createPiTranscript(
 		commit(): void {
 			if (committed) return;
 			committed = true;
+			for (const index of dirtyMessages) {
+				rewriteNativeAssistantTexts(working[index], source[index], sessionId);
+			}
 			for (const [index, parts] of removals) {
 				const message = working[index];
 				if (
@@ -885,6 +889,8 @@ function createPiAssistantPart(
 					...existing,
 					arguments: { dropped: sentinelText },
 				};
+			} else if (existing?.type === "text") {
+				newContent[partIndex] = { ...existing, text: sentinelText };
 			} else {
 				newContent[partIndex] = { type: "text", text: sentinelText };
 			}
