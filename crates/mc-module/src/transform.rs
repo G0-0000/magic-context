@@ -14577,6 +14577,11 @@ fn new_frozen_strip_units(
         }
         if has_assistant_response
             && request_accepts_empty_content(req)
+            // Permission to rebuild the request does not permit changing content before
+            // retained signed thinking. Previously frozen image removals still replay.
+            && !blocks.iter().enumerate().any(|(i, _)| {
+                unsafe_content.contains(&ck_wire::block_id(&message.mid, i))
+            })
             && selection_scope.image_watermark > 0
             && {
                 // Missing tags are age zero in the TypeScript lane. This decision is still
@@ -30911,6 +30916,7 @@ pub(crate) mod tests {
     include!("transform/reasoning_clear_gate_tests.rs");
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
+    include!("tests/image_stripping_review_witness.rs");
     include!("tests/signed_prefix_hold_review_r2.rs");
     include!("tests/signed_prefix_hold_review_r3.rs");
 
