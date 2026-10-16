@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { processedImagePng } from "../../src/processed-image-fixture";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
@@ -47,7 +48,7 @@ const baseConfig = {
 };
 
 /** One host plus a turn driver whose first turn makes the model read pixel.png. */
-async function readImageSession(options: OpenCode2SpawnOptions) {
+async function readImageSession(options: OpenCode2SpawnOptions, imageData = PNG_BASE64) {
 	let host = await spawnOpencode2({ visionModel: true, magicContextConfig: baseConfig, ...options });
 	const mock = host.mock;
 	const connect = () =>
@@ -62,7 +63,7 @@ async function readImageSession(options: OpenCode2SpawnOptions) {
 	});
 	if (options.includeMagicContext !== false) await waitForPluginActive(client, host.cwd);
 	const png = join(host.cwd, "pixel.png");
-	writeFileSync(png, Buffer.from(PNG_BASE64, "base64"));
+	writeFileSync(png, Buffer.from(imageData, "base64"));
 	let issued = false;
 	mock.addMatcher((body) => {
 		if (body.model !== "mock-model")
@@ -249,3 +250,42 @@ for (const arm of ["same-process", "after-restart"] as const) {
 		}
 	}, 240_000);
 }
+
+
+test("issue 699 OpenCode 2 strips aged read images on a rewrite and replays the non-empty tool result", async () => {
+    const data = processedImagePng().toString("base64");
+    const run = await readImageSession({ magicContextConfig: { ...baseConfig, protected_tokens: 4000 } }, data);
+    try {
+        const first = (await run.turn("READ-IMAGE inspect pixel.png")).at(-1)!;
+        expect(imageBlock(first)).toContain(data);
+        const before = (await run.turn("IMAGE-DEFER-BEFORE")).at(-1)!;
+        expect(imageBlock(before)).toBe(imageBlock(first));
+        let aged = false;
+        const paths = Array.from({ length: 3 }, (_, i) => join(run.host().cwd, `ballast-${i}.txt`));
+        for (const path of paths) writeFileSync(path, "context ".repeat(12).concat("\n").repeat(500));
+        run.mock.addMatcher((body) => {
+            if (aged || !JSON.stringify(body).includes("IMAGE-AGE-TOOLS")) return null;
+            aged = true;
+            return { openaiOutput: paths.map((path, i) => ({ type: "function_call", id: `fc_ballast_${i}`, call_id: `ballast_${i}`, name: "read", arguments: JSON.stringify({ path }) })), usage: { input_tokens: 100, output_tokens: 20 } };
+        });
+        await run.turn("IMAGE-AGE-TOOLS read the three ballast files");
+        expect(aged).toBe(true);
+        await run.turn("IMAGE-DROP-TAG");
+        const mc = new Database(join(run.host().env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        try {
+            mc.exec("PRAGMA busy_timeout = 5000");
+            const tag = mc.prepare("SELECT MAX(tag_number) AS n FROM tags WHERE session_id = ? AND type = 'message'").get(run.session.id) as { n: number };
+            expect(tag.n).toBeGreaterThan(0);
+            mc.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?").run(run.session.id, tag.n);
+            mc.prepare("UPDATE session_meta SET cached_m0_system_hash = 'stale' WHERE session_id = ?").run(run.session.id);
+            const rewritten = (await run.turn("IMAGE-REWRITE")).at(-1)!;
+            expect(imageBlock(rewritten)).toBeUndefined();
+            expect(JSON.stringify(readResult(rewritten))).toContain("[image stripped]");
+            const replay = (await run.turn("IMAGE-DEFER-AFTER")).at(-1)!;
+            expect(readResult(replay)).toEqual(readResult(rewritten));
+            expect(imageBlock(replay)).toBeUndefined();
+            console.log(JSON.stringify({ host: "2.0.22", watermark: tag.n, toolImageBytes: [first, before, rewritten, replay].map((body) => imageBlock(body)?.length ?? 0) }));
+        } finally { mc.close(); }
+    } catch (error) { console.error(run.host().stderr().slice(-4000)); throw error; }
+    finally { await run.host().stop(); }
+}, 240_000);

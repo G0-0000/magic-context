@@ -8,7 +8,9 @@ import {
 } from "./merged-reasoning-decisions";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 import {
+    parseProcessedImageMarkers,
     parseStrippedPlaceholderState,
+    serializeProcessedImageMarkers,
     serializeStrippedPlaceholderState,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
 } from "./storage-meta-persisted";
@@ -333,6 +335,16 @@ function filterIdBlob(raw: string | null, filter: CloneSessionStateFilter): stri
     } catch {
         return "";
     }
+}
+
+function filterProcessedImageBlob(raw: string | null, filter: CloneSessionStateFilter): string {
+    return serializeProcessedImageMarkers(
+        new Map(
+            [...parseProcessedImageMarkers(raw)]
+                .filter(([id]) => filter.includeMessageId(id))
+                .map(([id, marker]) => [mapMessageId(filter, id) ?? id, marker]),
+        ),
+    );
 }
 
 /**
@@ -750,7 +762,7 @@ export function copySessionStateForClone(
                 : null,
             filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, filter),
             filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, filter),
-            filterIdBlob(meta?.processed_image_stripped_ids ?? null, filter),
+            filterProcessedImageBlob(meta?.processed_image_stripped_ids ?? null, filter),
             clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, filter),
             pendingMarker,
             migrateTodo ? (meta?.last_todo_state ?? "") : "",

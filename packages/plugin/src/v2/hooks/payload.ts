@@ -178,11 +178,21 @@ function contentValueAttachments(value: Part[]): Part[] {
  * result loses its files too: a drop exists to take the result out of the context, and an
  * image kept next to its drop placeholder would still be billed.
  */
-function rebuildFileContent(value: Part[], output: string): Part {
+function rebuildFileContent(value: Part[], output: string, attachments?: unknown): Part {
     if (isDroppedToolOutput(output)) return { type: "text", value: output };
     const rebuilt: Part[] = [];
     let placed = false;
     for (const item of value) {
+        // Processed-image stripping removes projected attachments. Honor that
+        // decision without reconstructing or changing any surviving host file.
+        if (
+            item?.type === "file" &&
+            Array.isArray(attachments) &&
+            !attachments.some(
+                (attachment) => attachment?.url === item.uri && attachment?.mime === item.mime,
+            )
+        )
+            continue;
         if (item?.type !== "text") {
             rebuilt.push(item);
             continue;
@@ -510,7 +520,11 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                                 state.output === bridge.output
                                     ? bridge.result.result
                                     : bridge.files && typeof state.output === "string"
-                                      ? rebuildFileContent(bridge.files, state.output)
+                                      ? rebuildFileContent(
+                                            bridge.files,
+                                            state.output,
+                                            state.attachments,
+                                        )
                                       : {
                                             type: state.status === "error" ? "error" : "text",
                                             value: state.output,

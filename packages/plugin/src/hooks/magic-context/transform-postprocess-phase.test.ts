@@ -10,7 +10,10 @@ import { appendCompartments } from "../../features/magic-context/compartment-sto
 import * as embeddingModule from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
-import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
+import {
+    computeProtectionWindow,
+    getProtectionWindowForSession,
+} from "../../features/magic-context/protection-window";
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
 import {
     addNote,
@@ -6751,7 +6754,7 @@ describe("postprocess empty-sentinel provider gate", () => {
         expect(oldMsg.parts).toEqual([{ type: "text", text: "" }]);
     });
 
-    it("leaves processed image file parts native for github-copilot", async () => {
+    it("leaves processed image file parts native for github-copilot on defer without frozen ids", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-copilot-processed-image";
@@ -12984,3 +12987,137 @@ it("a first render reproducing the served pair keeps all signed thinking", async
 
 import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import * as markerCandidates from "../../features/magic-context/compaction-marker-candidates";
+
+describe("issue 699 processed-image provider replay", () => {
+    const image = () => ({
+        type: "file",
+        mime: "image/png",
+        url: `data:image/png;base64,${"a".repeat(300)}`,
+    });
+    const source = (): MessageLike[] =>
+        [
+            { info: { id: "old-image", role: "user" }, parts: [image()] },
+            {
+                info: { id: "tool-image", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "image-read",
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: {},
+                            output: "read",
+                            attachments: [image()],
+                        },
+                    },
+                ],
+            },
+            { info: { id: "answer", role: "assistant" }, parts: [{ type: "text", text: "seen" }] },
+            { info: { id: "recent-image", role: "user" }, parts: [image()] },
+        ] as unknown as MessageLike[];
+    const serve = async (
+        sessionId: string,
+        provider: string,
+        bust: boolean,
+        overrides: Partial<PostTransformArgs> = {},
+    ) => {
+        const messages = source();
+        if (overrides.activeThinkingPrefixHold)
+            messages[2].parts.unshift({
+                type: "reasoning",
+                text: "retained signed thinking",
+                metadata: { anthropic: { signature: "retained-signature" } },
+            });
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                watermark: 2,
+                messageTagNumbers: new Map(messages.map((msg, i) => [msg, i + 1])),
+                resolvedProviderID: provider,
+                schedulerDecision: bust ? "execute" : "defer",
+                pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                contextUsage: { percentage: 60, inputTokens: 6000 },
+                currentTurnId: "image-turn",
+                ...overrides,
+            }),
+        );
+        return messages;
+    };
+    const open = () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+    };
+
+    it("issue 699 OpenAI rewrite strips answered aged images and defer only replays frozen bytes", async () => {
+        open();
+        const sessionId = "image-openai";
+        const deferFirst = await serve(sessionId, "openai", false);
+        expect(deferFirst[0].parts).toEqual(source()[0].parts);
+        expect(deferFirst[1].parts).toEqual(source()[1].parts);
+        expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual([]);
+        const rewritten = await serve(sessionId, "openai", true);
+        expect(rewritten[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+        expect(JSON.stringify(rewritten[1].parts)).not.toContain("data:image");
+        expect(JSON.stringify(rewritten[1].parts)).toContain("[image stripped]");
+        expect(rewritten[3].parts).toEqual(source()[3].parts);
+        const replayed = await serve(sessionId, "openai", false, { watermark: 100 });
+        expect(JSON.stringify(replayed.slice(0, 2))).toBe(JSON.stringify(rewritten.slice(0, 2)));
+        expect(replayed[3].parts).toEqual(source()[3].parts);
+    });
+
+    it("issue 699 provider switches retain each frozen marker form including legacy Anthropic ids", async () => {
+        open();
+        const sessionId = "image-switch";
+        const anthropic = await serve(sessionId, "anthropic", true);
+        expect(anthropic[0].parts).toEqual([{ type: "text", text: "" }]);
+        expect(JSON.stringify(anthropic[1].parts)).toContain("[image stripped]");
+        const openai = await serve(sessionId, "openai", false);
+        expect(JSON.stringify(openai.slice(0, 2))).toBe(JSON.stringify(anthropic.slice(0, 2)));
+        const other = await serve("image-switch-reverse", "openai", true);
+        const back = await serve("image-switch-reverse", "anthropic", false);
+        expect(JSON.stringify(back.slice(0, 2))).toBe(JSON.stringify(other.slice(0, 2)));
+        addProcessedImageStrippedIds(db, "legacy-switch", ["old-image"]);
+        const legacy = await serve("legacy-switch", "openai", false);
+        expect(legacy[0].parts).toEqual([{ type: "text", text: "" }]);
+    });
+
+    it("issue 699 a protected signed prefix prevents new user and tool image detection", async () => {
+        open();
+        const messages = await serve("image-signed", "anthropic", true, {
+            activeThinkingPrefixHold: true,
+        });
+        expect(messages[0].parts).toEqual(source()[0].parts);
+        expect(messages[1].parts).toEqual(source()[1].parts);
+        expect(messages[2].parts[0]).toEqual({
+            type: "reasoning",
+            text: "retained signed thinking",
+            metadata: { anthropic: { signature: "retained-signature" } },
+        });
+        expect([...getProcessedImageStrippedIds(db, "image-signed")]).toEqual([]);
+    });
+
+    it("issue 699 protected newest tags keep answered tool images despite a later dropped tag", async () => {
+        open();
+        const sessionId = "image-protected";
+        const window = computeProtectionWindow(
+            [{ tag_number: 2, type: "tool", token_count: 50 }],
+            4000,
+        );
+        expect(window.protectedTagNumbers.has(2)).toBe(true);
+        const messages = await serve(sessionId, "openai", true, {
+            watermark: 100,
+            protectedTagNumbers: window.protectedTagNumbers,
+        });
+        expect(messages[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+        expect(messages[1].parts).toEqual(source()[1].parts);
+        expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual(["old-image"]);
+    });
+
+    it("issue 699 compaction off disables detection and frozen replay", async () => {
+        open();
+        await serve("image-off", "openai", true);
+        const messages = await serve("image-off", "openai", true, { compactionOff: true });
+        expect(messages[0].parts).toEqual(source()[0].parts);
+        expect(messages[1].parts).toEqual(source()[1].parts);
+    });
+});

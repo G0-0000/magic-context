@@ -46,6 +46,7 @@ import {
     getEmergencyInputSample,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
+    getProcessedImageMarkers,
     getThinkingBindingRecoveryTarget,
     getTrailingBlankDecisions,
     type PersistedCompactionMarkerState,
@@ -3302,21 +3303,47 @@ export async function runPostTransformPhase(
         }
     }
 
-    // Processed-image strip — same REPLAY/DETECT freeze as stale ctx_reduce.
-    // The empty image sentinel is filtered off the Anthropic wire, so the first
-    // strip of a message removes its image blocks (a real byte change). Keying
-    // that first strip on the live watermark let a DEFER pass cross an older
-    // image message and remove its images mid-prefix, busting the cache.
-    // Freeze the id set on cache-busting passes; replay it every pass.
-    if (canUseEmptySentinels && !compactionOff && replaySnapshot) {
+    // Persist image ids and replacement text only when the cached prefix may
+    // change. Later cache-preserving passes restore only those saved decisions,
+    // including after a provider switch, instead of discovering new strips.
+    if (!compactionOff && replaySnapshot) {
         try {
             const tImg = performance.now();
             const frozenImageIds = replaySnapshot.processedImageStrippedIds;
+            const frozenMarkers = replaySnapshot.processedImageMarkers;
+            const replacementText = canUseEmptySentinels ? "" : "[image stripped]";
             stripProcessedImages(args.messages, frozenImageIds, {
                 detect: canEditWholePrefix && args.watermark > 0,
                 watermark: args.watermark,
                 messageTagNumbers: args.messageTagNumbers,
-                persistNewIds: (ids) => addProcessedImageStrippedIds(args.db, args.sessionId, ids),
+                replacementText,
+                frozenMarkers,
+                protectedMessageIds: new Set([
+                    ...args.tags
+                        .filter(
+                            (tag) =>
+                                args.protectedTagNumbers.has(tag.tagNumber) ||
+                                protectedToolTags.has(tag.tagNumber),
+                        )
+                        .map((tag) => tag.toolOwnerMessageId ?? tag.messageId),
+                    ...args.messages
+                        .filter((message) =>
+                            args.protectedTagNumbers.has(args.messageTagNumbers.get(message) ?? 0),
+                        )
+                        .flatMap((message) =>
+                            typeof message.info.id === "string" ? [message.info.id] : [],
+                        ),
+                ]),
+                persistNewIds: (ids, markers) => {
+                    if (!addProcessedImageStrippedIds(args.db, args.sessionId, ids, markers))
+                        return false;
+                    // Another plugin process sharing this session may have saved
+                    // a different marker before our compare-and-swap completed.
+                    const committed = getProcessedImageMarkers(args.db, args.sessionId);
+                    for (const id of ids)
+                        frozenMarkers.set(id, committed.get(id) ?? replacementText);
+                    return true;
+                },
                 onFirstApplication: recordFirstApplicationAt,
             });
             logTransformTiming(args.sessionId, "stripProcessedImages", tImg);
