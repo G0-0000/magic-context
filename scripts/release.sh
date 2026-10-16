@@ -413,18 +413,36 @@ fi
 echo "  ✓ All checks passed"
 echo ""
 
-# CI reuse must not regenerate source artifacts after certification. The local
-# gate path still regenerates and lints them before including them in the bump.
-if [[ -z "$CI_GATE_SHA" ]]; then
+generate_release_artifacts() {
 # Step 3: Generate JSON Schema
 echo "→ Generating JSON Schema..."
-bun packages/plugin/scripts/build-schema.ts || { echo "Error: Schema generation failed"; exit 1; }
+bun packages/plugin/scripts/build-schema.ts || { echo "Error: Schema generation failed"; return 1; }
 echo ""
 
 # Step 3b: Regenerate reference-seed corpus from source XML
 echo "→ Generating historian reference seeds..."
-bun packages/plugin/scripts/build-reference-seeds.ts || { echo "Error: Reference-seed generation failed"; exit 1; }
+bun packages/plugin/scripts/build-reference-seeds.ts || { echo "Error: Reference-seed generation failed"; return 1; }
 echo ""
+}
+
+if [[ -n "$CI_GATE_SHA" ]]; then
+  # New generated output is not CI-certified. Compare it with HEAD, then restore
+  # the certified files even when a generator failed after writing partial output.
+  GENERATED_ARTIFACTS=(
+    assets/magic-context.schema.json
+    packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts
+  )
+  generation_status=0
+  generate_release_artifacts || generation_status=$?
+  if ! git diff --quiet HEAD -- "${GENERATED_ARTIFACTS[@]}"; then
+    echo "Error: generated artifacts differ from HEAD; refusing CI reuse."
+    git --no-pager diff HEAD -- "${GENERATED_ARTIFACTS[@]}" || true
+    generation_status=1
+  fi
+  git checkout -- "${GENERATED_ARTIFACTS[@]}"
+  [[ "$generation_status" -eq 0 ]] || exit "$generation_status"
+else
+generate_release_artifacts
 
 # Step 3c: Re-lint generated artifacts. The pre-release lint (above) runs BEFORE
 # generation, so a generator that emits non-repo-style output would otherwise

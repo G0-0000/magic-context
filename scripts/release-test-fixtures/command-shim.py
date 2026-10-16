@@ -78,6 +78,14 @@ elif name == "bun":
             manifest = json.loads(path.read_text())
             manifest["dependencies"] = {"unverified": "1.0.0"}
             path.write_text(json.dumps(manifest) + "\n")
+    elif args[:1] == ["packages/plugin/scripts/build-schema.ts"]:
+        (cwd / "assets/magic-context.schema.json").write_text('{"fixture": "fresh schema"}\n')
+        if scenario.get("fail_generator") == "schema":
+            sys.exit(7)
+    elif args[:1] == ["packages/plugin/scripts/build-reference-seeds.ts"]:
+        (cwd / "packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts").write_text('export const seed = "fresh seed";\n')
+        if scenario.get("fail_generator") == "seeds":
+            sys.exit(7)
     else:
         if any(arg in ("lint", "typecheck", "test") for arg in args):
             print("Unexpected local gate: " + " ".join(args), file=sys.stderr)

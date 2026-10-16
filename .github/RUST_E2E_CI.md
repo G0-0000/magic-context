@@ -41,6 +41,12 @@ only version and public-note changes in the bump before tagging. A different
 HEAD uses the normal local gates; missing or unsuccessful workflows refuse the
 release. The tag workflow still runs its full publish gate.
 
+CI reuse also reruns the schema and reference-seed generators to verify the
+committed outputs are current. If regenerated files differ from HEAD, the script
+prints their diff, restores the committed files, and refuses the release rather
+than including uncertified generated output in the bump. Generator failures also
+refuse the release and restore the generated files.
+
 Each build creates the binaries consumed by the shards and uploads them as a
 short-lived workflow artifact. The hermetic Cargo target cache is keyed from
 the repository Cargo lockfile, sibling Cargo inputs, runner OS, and

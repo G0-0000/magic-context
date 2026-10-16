@@ -49,6 +49,12 @@ class ReleaseTests(unittest.TestCase):
         (self.repo / "packages/plugin/README.md").write_text("fixture readme\n")
         (self.repo / "CHANGELOG.md").write_text("# Changelog\n")
         (self.repo / "source.ts").write_text("certified source\n")
+        schema = self.repo / "assets/magic-context.schema.json"
+        schema.parent.mkdir(parents=True)
+        schema.write_text('{"fixture": "fresh schema"}\n')
+        seeds = self.repo / "packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts"
+        seeds.parent.mkdir(parents=True)
+        seeds.write_text('export const seed = "fresh seed";\n')
         notes = self.repo / ".cortexkit/release-notes/v9.8.7.md"
         notes.parent.mkdir(parents=True)
         notes.write_text("Public release notes\n")
@@ -138,12 +144,66 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(sum(args[-1] == "build" for args in runners), 3)
         self.assertTrue(any(args[-1] == "audit:packed-packages" for args in runners))
         self.assertTrue(any(args[:1] == ["scripts/version-sync.mjs"] for args in runners))
+        self.assertIn(["packages/plugin/scripts/build-schema.ts"], runners)
+        self.assertIn(["packages/plugin/scripts/build-reference-seeds.ts"], runners)
         self.assertFalse(any(arg in ("lint", "typecheck", "test") for args in runners for arg in args))
         changed = set(self.git("diff", "--name-only", self.base, "HEAD").splitlines())
         self.assertEqual(changed, {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")})
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertTrue(any(args[:2] == ["tag", "-a"] for args in self.commands("git")))
         self.assertTrue(any(args[:2] == ["run", "watch"] for args in self.commands("gh")))
+
+    def assert_stale_generated_refused(self, path, stale, fresh):
+        (self.repo / path).write_text(stale)
+        self.git("add", path)
+        self.git("commit", "-m", "Fixture stale generated artifact")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.scenario["base"] = self.base
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("generated artifacts differ from HEAD; refusing CI reuse", run.stdout)
+        self.assertIn("diff --git a/" + path + " b/" + path, run.stdout)
+        self.assertIn(fresh, run.stdout)
+        self.assertIn(["packages/plugin/scripts/build-schema.ts"], self.commands("bun"))
+        self.assertIn(["packages/plugin/scripts/build-reference-seeds.ts"], self.commands("bun"))
+        self.assertIn(["checkout", "--", "assets/magic-context.schema.json",
+                       "packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts"], self.commands("git"))
+        self.assertEqual((self.repo / path).read_text(), stale)
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertFalse(any(args[:1] == ["scripts/version-sync.mjs"] for args in self.commands("bun")))
+        self.assert_no_publish()
+
+    def test_ci_gate_refuses_stale_schema_and_restores_generated_files(self):
+        self.assert_stale_generated_refused("assets/magic-context.schema.json", '{"fixture": "stale schema"}\n', "fresh schema")
+
+    def test_ci_gate_refuses_stale_reference_seeds_and_restores_generated_files(self):
+        self.assert_stale_generated_refused("packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts",
+                                            'export const seed = "stale seed";\n', "fresh seed")
+
+    def test_ci_gate_generator_failure_refuses_and_restores_generated_files(self):
+        schema = self.repo / "assets/magic-context.schema.json"
+        schema.write_text('{"fixture": "stale schema"}\n')
+        self.git("add", ".")
+        self.git("commit", "-m", "Fixture stale schema before failed generation")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.scenario.update(base=self.base, fail_generator="schema")
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Schema generation failed", run.stdout)
+        self.assertEqual(schema.read_text(), '{"fixture": "stale schema"}\n')
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assert_no_publish()
+
+    def test_ci_gate_generator_failure_without_drift_still_refuses(self):
+        self.scenario["fail_generator"] = "seeds"
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Reference-seed generation failed", run.stdout)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assert_no_publish()
 
     def test_bump_refuses_non_version_notes_file_before_commit(self):
         self.scenario["stage_source"] = True
