@@ -11064,23 +11064,6 @@ function applyNoteNudges(args: {
 			anchor.text,
 		);
 	}
-	const autoSearchDecisions =
-		args.postTransformSnapshot?.autoSearchDecisions ??
-		getAutoSearchHintDecisions(db, sessionId);
-	for (const decision of autoSearchDecisions) {
-		if (
-			decision.decision === "hint" &&
-			getUnpublishedAutoSearchNoHint(sessionId, decision.messageId) ===
-				undefined
-		) {
-			appendReminderToUserMessageByIdPi(
-				messages,
-				replayMessageIdByIndex,
-				decision.messageId,
-				decision.text,
-			);
-		}
-	}
 	logTransformTiming(sessionId, "stickyReplayDecisions", tStickyReplay);
 
 	// Path 2: fresh delivery. Observe even when no trigger is pending, so a
@@ -11103,7 +11086,10 @@ function applyNoteNudges(args: {
 			.map(([, id]) => id),
 		anchorMessageId: latestUserId,
 		isLiveTail: latestUser?.index === messages.length - 1,
-		isCacheBustingPass: args.isCacheBusting,
+		// Pi's cache-bust permission does not prove bytes before this user message
+		// actually changed. Without that evidence, append only to an unserved user
+		// message at the tail so the reminder cannot originate a prefix rewrite.
+		prefixRewriteCoversAnchor: false,
 	});
 	const noteReadStillVisible = hasVisibleNoteReadCallPi(messages);
 	// The row snapshot is the change signal for expensive note/smart-note reads.
@@ -11152,6 +11138,26 @@ function applyNoteNudges(args: {
 			sessionLog(
 				sessionId,
 				`Pi note-nudge delivery skipped wire append: ${outcome.kind}`,
+			);
+		}
+	}
+
+	// Saved auto-search hints follow both saved and newly delivered note nudges;
+	// reversing that order on replay would rewrite the cached user message.
+	const autoSearchDecisions =
+		args.postTransformSnapshot?.autoSearchDecisions ??
+		getAutoSearchHintDecisions(db, sessionId);
+	for (const decision of autoSearchDecisions) {
+		if (
+			decision.decision === "hint" &&
+			getUnpublishedAutoSearchNoHint(sessionId, decision.messageId) ===
+				undefined
+		) {
+			appendReminderToUserMessageByIdPi(
+				messages,
+				replayMessageIdByIndex,
+				decision.messageId,
+				decision.text,
 			);
 		}
 	}

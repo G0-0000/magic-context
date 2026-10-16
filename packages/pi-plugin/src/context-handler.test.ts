@@ -2995,8 +2995,13 @@ describe("registerPiContextHandler", () => {
 		try {
 			const fake = createFakePi();
 			registerPiContextHandler(fake.pi as never, { db });
-			const pass = async () => {
-				const messages = [userMessage("latest real user", 1)];
+			const pass = async (earlier = false) => {
+				const messages = [
+					userMessage(
+						earlier ? "earlier user" : "latest real user",
+						earlier ? 0 : 1,
+					),
+				];
 				const handler = fake.handlers.get("context") as (
 					event: { messages: never[] },
 					ctx: never,
@@ -3007,18 +3012,25 @@ describe("registerPiContextHandler", () => {
 						fakeContext(
 							sessionId,
 							process.cwd(),
-							["entry-latest"],
+							[earlier ? "entry-earlier" : "entry-latest"],
 							messages,
 						) as never,
 					)
 				).messages;
 			};
+			await pass(true);
+			appendAutoSearchHintDecision(db, sessionId, {
+				messageId: "entry-latest",
+				decision: "hint",
+				text: "\n\n<ctx-search-hint>saved recall</ctx-search-hint>",
+			});
 			addNote(db, "session", { sessionId, content: "Rebuild reminder" });
 			onNoteTrigger(db, sessionId, "historian_complete");
 			setPersistedNoteNudgeTriggerMessageId(db, sessionId, "entry-latest");
 			signalPiPendingMaterialization(sessionId);
 			const rebuilt = await pass();
 			expect(textOf(rebuilt[0] as never)).toContain("deferred_notes");
+			expect(textOf(rebuilt[0] as never)).toContain("ctx-search-hint");
 			expect(await pass()).toEqual(rebuilt);
 		} finally {
 			clearContextHandlerSession(sessionId);
@@ -3054,6 +3066,8 @@ describe("registerPiContextHandler", () => {
 			addNote(db, "session", { sessionId, content: "Late reminder" });
 			onNoteTrigger(db, sessionId, "historian_complete");
 			setPersistedNoteNudgeTriggerMessageId(db, sessionId, "entry-old-trigger");
+			expect(await pass()).toEqual(served);
+			signalPiPendingMaterialization(sessionId);
 			expect(await pass()).toEqual(served);
 			clearContextHandlerSession(sessionId);
 			registerPiContextHandler(fake.pi as never, { db });
