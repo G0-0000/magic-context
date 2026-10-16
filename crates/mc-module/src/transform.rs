@@ -14576,7 +14576,6 @@ fn new_frozen_strip_units(
             }
         }
         if has_assistant_response
-            && request_accepts_empty_content(req)
             // Permission to rebuild the request does not permit changing content before
             // retained signed thinking. Previously frozen image removals still replay.
             && !blocks.iter().enumerate().any(|(i, _)| {
@@ -14590,7 +14589,12 @@ fn new_frozen_strip_units(
             }
             && blocks.iter().any(image_block_is_large)
         {
-            let marker = strip_unit("processed_image", &message.mid, &sentinel);
+            let image_marker = if request_accepts_empty_content(req) {
+                ""
+            } else {
+                "[image stripped]"
+            };
+            let marker = strip_unit("processed_image", &message.mid, image_marker);
             if !existing_keys.contains(marker.key.as_str()) {
                 units.insert(marker.key.clone(), marker);
             }
@@ -14603,7 +14607,7 @@ fn new_frozen_strip_units(
                 // as tool reductions while the message marker keeps replay stable if
                 // unrelated parts change their block index.
                 let target = format!("{}#{block_index}", message.mid);
-                let unit = red_unit(&target, "image", &sentinel);
+                let unit = red_unit(&target, "image", image_marker);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
                 }
@@ -14794,8 +14798,7 @@ fn apply_surface_strips(
 
     let stale_reduce =
         output_message_strip_unit(frozen_units, "stale_reduce", &message.mid).is_some();
-    let image_seed =
-        output_message_strip_unit(frozen_units, "processed_image", &message.mid).is_some();
+    let image_seed = output_message_strip_unit(frozen_units, "processed_image", &message.mid);
     let message_tag = message_tag_number(message, tag_numbers);
     let aged = message_tag > 0 && message_tag <= reasoning_policy.watermark;
     let mut touched = false;
@@ -14818,16 +14821,23 @@ fn apply_surface_strips(
             }
         }
 
+        // Reuse the replacement text saved when this image was removed, even after a
+        // provider switch. Older Anthropic decisions saved empty text and keep those bytes.
+        let image_unit = image_seed
+            .filter(|_| image_block_is_large(block.wire_shape()))
+            .or_else(|| {
+                frozen_units
+                    .red_by_block_id(block.id())
+                    .filter(|unit| unit.kind == "image")
+            });
+        if let Some(unit) = image_unit {
+            replace_with_sentinel(&mut rebuilt.content[index], &unit.frozen_payload);
+            touched = true;
+            continue;
+        }
         let should_strip = (request_accepts_empty_content(req)
             && stale_reduce
             && is_reduce_block(&message.ck.content[index]))
-            || ((image_seed
-                && request_accepts_empty_content(req)
-                && image_block_is_large(block.wire_shape()))
-                || (request_accepts_empty_content(req)
-                    && frozen_units
-                        .red_by_block_id(block.id())
-                        .is_some_and(|unit| unit.kind == "image")))
             || (request_accepts_empty_content(req)
                 && is_structural_noise(&message.ck.content[index]));
         if should_strip {
@@ -30917,6 +30927,7 @@ pub(crate) mod tests {
     include!("tests/signed_prefix_hold.rs");
     include!("tests/signed_prefix_hold_review.rs");
     include!("tests/image_stripping_review_witness.rs");
+    include!("tests/processed_images.rs");
     include!("tests/signed_prefix_hold_review_r2.rs");
     include!("tests/signed_prefix_hold_review_r3.rs");
 
