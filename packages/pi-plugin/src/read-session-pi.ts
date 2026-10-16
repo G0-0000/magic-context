@@ -485,6 +485,9 @@ export function isUnreachablePiOrdinalSlot(message: RawMessage): boolean {
 	return message.storeType === UNREACHABLE_PI_STORE_TYPE;
 }
 
+const READ_ENTRY = Symbol("read Pi entry");
+const END_ENTRIES = Symbol("end Pi entries");
+
 export function* iterateEntriesToRawMessageRange(
 	entries: Iterable<unknown>,
 	afterOrdinal: number,
@@ -492,6 +495,58 @@ export function* iterateEntriesToRawMessageRange(
 	finalWatermark: number,
 	ordinalOffset = 0,
 ): Generator<RawMessage> {
+	const input = entries[Symbol.iterator]();
+	const converter = convertEntryStream(
+		afterOrdinal,
+		limit,
+		finalWatermark,
+		ordinalOffset,
+	);
+	let next: unknown;
+	try {
+		while (true) {
+			const step = converter.next(next);
+			if (step.done) return;
+			if (step.value === READ_ENTRY) {
+				const entry = input.next();
+				next = entry.done ? END_ENTRIES : entry.value;
+			} else yield step.value;
+		}
+	} finally {
+		input.return?.();
+	}
+}
+
+/** Acquire entries asynchronously using iterateEntriesToRawMessageRange's ordinal/folding rules. */
+export async function* iterateAsyncEntriesToRawMessageRange(
+	entries: AsyncIterable<unknown>,
+	afterOrdinal: number,
+	limit: number,
+	finalWatermark: number,
+): AsyncGenerator<RawMessage> {
+	const input = entries[Symbol.asyncIterator]();
+	const converter = convertEntryStream(afterOrdinal, limit, finalWatermark, 0);
+	let next: unknown;
+	try {
+		while (true) {
+			const step = converter.next(next);
+			if (step.done) return;
+			if (step.value === READ_ENTRY) {
+				const entry = await input.next();
+				next = entry.done ? END_ENTRIES : entry.value;
+			} else yield step.value;
+		}
+	} finally {
+		await input.return?.();
+	}
+}
+
+function* convertEntryStream(
+	afterOrdinal: number,
+	limit: number,
+	finalWatermark: number,
+	ordinalOffset = 0,
+): Generator<RawMessage | typeof READ_ENTRY, void, unknown> {
 	let emitted = 0;
 	const normalizedAfter = Math.max(0, Math.floor(afterOrdinal));
 	const normalizedLimit = Math.max(1, Math.floor(limit));
@@ -548,7 +603,9 @@ export function* iterateEntriesToRawMessageRange(
 		return emitted >= normalizedLimit || nextOrdinal > normalizedWatermark;
 	};
 
-	for (const entry of entries) {
+	while (true) {
+		const entry = yield READ_ENTRY;
+		if (entry === END_ENTRIES) break;
 		if (!isMessageEntry(entry)) continue;
 
 		const msg = entry.message;
