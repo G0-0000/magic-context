@@ -23,12 +23,7 @@ import {
     type GhCommandResult,
     submitGithubIssue,
 } from "../lib/github-issue";
-import {
-    capBodyToGithubLimit,
-    extractRecentErrors,
-    filterLogLinesBySession,
-    getLogSessionIds,
-} from "../lib/issue-body";
+import { capBodyToGithubLimit, getLogSessionIds, prepareIssueReport } from "../lib/issue-body";
 import { formatLogFileInspection, inspectMagicContextLogs, readLogLines } from "../lib/log-lines";
 import {
     detectOmpBinary,
@@ -49,7 +44,6 @@ import {
     getOmpUserConfigPath,
 } from "../lib/paths";
 import { type PromptIO, promptIO } from "../lib/prompts";
-import { sanitizeDiagnosticText } from "../lib/redaction";
 
 const MIN_OMP_VERSION = "17.1.7";
 type Status = "pass" | "warn" | "fail" | "info";
@@ -441,22 +435,25 @@ function ompIssueBody(
     report: HealthReport,
     logLines: string[],
     sessionFilter: string | null,
+    cwd: string,
 ): string {
     const LOG_TAIL_LINES = 400;
-    const filteredLogLines = filterLogLinesBySession(logLines, sessionFilter);
-    const recentLog = sanitizeDiagnosticText(
-        filteredLogLines.slice(-LOG_TAIL_LINES).join("\n"),
-    ).trim();
-    const errorScanWindow = sanitizeDiagnosticText(filteredLogLines.slice(-4000).join("\n"));
-    const recentErrorLines = extractRecentErrors(errorScanWindow, 20);
+    const { privacy, recentLog, recentErrorLines } = prepareIssueReport(
+        report,
+        logLines,
+        sessionFilter,
+        [cwd],
+    );
 
     return [
         "## Description",
-        sanitizeDiagnosticText(description),
+        privacy.userText(description),
+        "",
+        privacy.notice,
         "",
         "## Environment",
-        `- Magic Context plugin: ${report.pluginVersion ? `v${sanitizeDiagnosticText(report.pluginVersion)}` : "not installed"}`,
-        `- Oh My Pi: ${report.ompVersion ? sanitizeDiagnosticText(report.ompVersion) : "not detected"}`,
+        `- Magic Context plugin: ${report.pluginVersion ? `v${privacy.report(report.pluginVersion, "pluginVersion")}` : "not installed"}`,
+        `- Oh My Pi: ${report.ompVersion ? privacy.report(report.ompVersion, "ompVersion") : "not detected"}`,
         `- OS: ${process.platform} ${process.arch}`,
         `- Runtime: Node.js ${process.version}`,
         "",
@@ -464,7 +461,7 @@ function ompIssueBody(
         `- Magic Context CLI: v${selfVersion()}`,
         ...report.results.map(
             (result) =>
-                `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
+                `- ${result.status.toUpperCase()}: ${privacy.healthMessage(result.message)}`,
         ),
         "",
         "## Recent errors (last 20, sanitized)",
@@ -546,6 +543,7 @@ async function runIssueFlow(options: {
                 report,
                 readLogLines(report.logFiles),
                 null,
+                options.cwd,
             ),
         );
         options.prompts.log.success(
@@ -585,7 +583,7 @@ async function runIssueFlow(options: {
     const path = join(options.cwd, `magic-context-omp-issue-${timestamp(options.deps.now())}.md`);
     const bundle = writeOmpIssueReport(
         path,
-        ompIssueBody(description, report, logLines, sessionFilter),
+        ompIssueBody(description, report, logLines, sessionFilter, options.cwd),
     );
     options.prompts.log.success(
         bundle.fullPath

@@ -265,9 +265,11 @@ describe("OMP doctor --issue --report", () => {
         expect(body).toContain(`Runtime: Node.js ${process.version}`);
         expect(body).toContain("## OMP diagnostics");
         expect(body).toContain("## Recent errors (last 20, sanitized)");
-        expect(body).toContain("could not safely prepare this turn: protected source");
+        expect(body).toContain("refused: <text omitted>");
+        expect(body).not.toContain("protected source");
         expect(body).toContain("## Log (last 400 lines, sanitized)");
-        expect(body).toContain("runtime continued");
+        expect(body).toContain("magic-context [session-1]");
+        expect(body).not.toContain("runtime continued");
     });
 
     it("keeps a refusal visible when a large OMP log is capped", async () => {
@@ -281,7 +283,7 @@ describe("OMP doctor --issue --report", () => {
         const lines = Array.from(
             { length: 4_600 },
             (_, index) =>
-                `[2026-09-05T10:41:03.130Z] [magic-context][ses_omp] tail-${index} ${"x".repeat(200)}`,
+                `[2026-09-05T10:41:03.130Z] [magic-context][ses_omp] tail count=${index} tokens=${"9".repeat(200)}`,
         );
         const refusal =
             "[2026-09-05T10:41:03.130Z] [magic-context][ses_omp] refused (unsafe turn preparation)";
@@ -302,9 +304,11 @@ describe("OMP doctor --issue --report", () => {
         expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(MAX_GITHUB_BODY_BYTES);
         expect(body).toContain("[truncated for GitHub 64KB limit");
         expect(body).toContain("## Recent errors (last 20, sanitized)");
-        expect(body).toContain(refusal);
+        expect(body).toContain("refused: <text omitted>");
+        expect(body).not.toContain(refusal);
         expect(existsSync(`${outputPath}.full.md`)).toBe(true);
-        expect(readFileSync(`${outputPath}.full.md`, "utf-8")).toContain(refusal);
+        expect(readFileSync(`${outputPath}.full.md`, "utf-8")).toContain("refused: <text omitted>");
+        expect(readFileSync(`${outputPath}.full.md`, "utf-8")).not.toContain("ses_omp");
     });
 
     it("filters the interactive OMP report to the selected session", async () => {
@@ -316,8 +320,8 @@ describe("OMP doctor --issue --report", () => {
             }
         });
         const logLines = [
-            "[2026-09-05T10:41:03.130Z] [magic-context][ses_keep] selected-session detail",
-            "[2026-09-05T10:41:04.130Z] [magic-context][ses_other] unrelated-session detail",
+            "[2026-09-05T10:41:03.130Z] [magic-context][ses_keep] selected-session detail count=17",
+            "[2026-09-05T10:41:04.130Z] [magic-context][ses_other] unrelated-session detail count=29",
         ];
         const { deps } = prepareOmpIssueFixture(root, logLines.join("\n"));
         const prompts = new NoPrompts();
@@ -344,7 +348,9 @@ describe("OMP doctor --issue --report", () => {
         const outputPath = reportMessage?.split(" ").at(-1);
         expect(outputPath).toBeDefined();
         const body = readFileSync(outputPath!, "utf-8");
-        expect(body).toContain("selected-session detail");
+        expect(body).toContain("count=17");
+        expect(body).not.toContain("count=29");
+        expect(body).not.toContain("selected-session detail");
         expect(body).not.toContain("unrelated-session detail");
     });
 
