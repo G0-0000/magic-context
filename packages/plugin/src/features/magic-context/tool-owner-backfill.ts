@@ -47,7 +47,6 @@ import { existsSync } from "node:fs";
 import { log } from "../../shared/logger";
 import { hasV1MessageTables, resolveOpenCodeDbPath } from "../../shared/opencode-db-path";
 import type { Database } from "../../shared/sqlite";
-import { invalidateTrimRetirement } from "./trim-retirement-cache";
 
 /**
  * Lease duration: 5 minutes per session. The slowest session in the
@@ -465,7 +464,6 @@ function applyOwnersForSession(
             // violate the partial UNIQUE index; leave the ghost NULL so runtime
             // lazy adoption can attach it to the real observed owner later.
             if (existingOwnerStmt.get(sessionId, callId, ownerId)) continue;
-            invalidateTrimRetirement(db, sessionId, ownerId);
             updateRowStmt.run(ownerId, orphan.id);
             // Verify the claimed row under the same write lock; tag triggers inflate changes.
             const updated = ownerForRowStmt.get(orphan.id) as
