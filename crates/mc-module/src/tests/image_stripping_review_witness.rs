@@ -29,12 +29,20 @@ fn image_stripping_review_witness_force_keeps_image_before_signed_thinking() {
     sim.s()
         .seed_tags_for_test(
             &sim.session,
-            &[mc_store::TagMintInput {
-                block_id: "u1#0".into(),
-                kind: "message".into(),
-                token_count: 3,
-                source_bytes: b"earlier task".to_vec(),
-            }],
+            &[
+                mc_store::TagMintInput {
+                    block_id: "a4#1".into(),
+                    kind: "message".into(),
+                    token_count: 3,
+                    source_bytes: b"note 4".to_vec(),
+                },
+                mc_store::TagMintInput {
+                    block_id: "u1#0".into(),
+                    kind: "message".into(),
+                    token_count: 3,
+                    source_bytes: b"earlier task".to_vec(),
+                },
+            ],
             0,
         )
         .unwrap();

@@ -30,6 +30,8 @@ fn processed_image_plan(
                 anchor: None,
             },
             image_watermark: watermark,
+            image_protected_cutoff: None,
+            image_emergency: false,
         },
         &HashSet::new(),
     )
@@ -181,8 +183,10 @@ fn render_processed_image_plan(
     request: &TransformRequest,
     units: Vec<FrozenUnit>,
 ) -> Vec<CkWireMessage> {
-    let mut core = CoreState::default();
-    core.frozen_units = units;
+    let core = CoreState {
+        frozen_units: units,
+        ..Default::default()
+    };
     let projection = project_messages(&request.messages).unwrap();
     build_output(
         &core,
@@ -440,4 +444,276 @@ fn processed_images_child_replays_inherited_frozen_images_without_execute_or_wat
         serde_json::to_vec(inherited.messages()).unwrap(),
         serde_json::to_vec(transform(&s, &request, &ctx).unwrap().messages()).unwrap()
     );
+}
+
+fn processed_image_policy(
+    own: Option<u64>,
+    next: Option<u64>,
+    watermark: u64,
+    cutoff: Option<u64>,
+    emergency: bool,
+) -> bool {
+    let message = processed_image_message("image", 1);
+    let tags = own
+        .map(|tag| BTreeMap::from([("image".into(), tag)]))
+        .unwrap_or_default();
+    processed_image_eligible(
+        &message,
+        &tags,
+        next,
+        true,
+        &HashSet::new(),
+        StripSelectionScope {
+            reasoning: ReasoningBudgetScope::default(),
+            image_watermark: watermark,
+            image_protected_cutoff: cutoff,
+            image_emergency: emergency,
+        },
+    )
+}
+
+#[test]
+fn processed_images_position_tag_uses_own_then_next_positive_never_zero() {
+    assert!(
+        processed_image_policy(Some(2), Some(20), 2, None, false),
+        "own tag wins over a later tag"
+    );
+    assert!(!processed_image_policy(Some(20), Some(2), 2, None, false));
+    assert!(processed_image_policy(None, Some(2), 2, None, false));
+    assert!(
+        !processed_image_policy(Some(0), Some(20), 2, None, false),
+        "zero is not a positive own tag"
+    );
+    assert!(
+        !processed_image_policy(None, None, 100, None, false),
+        "no own or later tag is ineligible"
+    );
+    let request = req(
+        "image-position",
+        "cfg",
+        vec![
+            item("preceding", 0, "older"),
+            processed_image_message("image", 1),
+            wire_item("assistant", "untagged-answer", 2, &["processed"]),
+            item("nearest", 3, "near"),
+            item("farther", 4, "far"),
+        ],
+    );
+    let tags = BTreeMap::from([
+        ("preceding".into(), 1),
+        ("untagged-answer".into(), 0),
+        ("nearest".into(), 20),
+        ("farther".into(), 2),
+    ]);
+    assert!(
+        processed_image_plan(&CoreState::default(), &request, &tags, 2, true).is_empty(),
+        "first later positive message, not preceding or farther tag"
+    );
+    let tags = BTreeMap::from([("preceding".into(), 1)]);
+    assert!(
+        processed_image_plan(&CoreState::default(), &request, &tags, 100, true).is_empty(),
+        "no preceding-tag fallback"
+    );
+}
+
+#[test]
+fn processed_images_age_gate_requires_positive_dropped_watermark() {
+    assert!(!processed_image_policy(Some(10), None, 0, None, false));
+    assert!(!processed_image_policy(Some(10), None, 9, None, false));
+    assert!(
+        processed_image_policy(Some(10), None, 10, None, false),
+        "watermark equality is old enough"
+    );
+    assert!(processed_image_policy(Some(10), None, 11, None, false));
+}
+
+#[test]
+fn processed_images_protected_newest_window_includes_cutoff_below_95() {
+    assert!(processed_image_policy(Some(9), None, 100, Some(10), false));
+    assert!(
+        !processed_image_policy(Some(10), None, 100, Some(10), false),
+        "cutoff tie is protected"
+    );
+    assert!(!processed_image_policy(
+        Some(11),
+        None,
+        100,
+        Some(10),
+        false
+    ));
+    assert!(
+        processed_image_policy(Some(11), None, 100, None, false),
+        "absent cutoff does not protect all images"
+    );
+}
+
+#[test]
+fn processed_images_emergency_waives_only_protected_window() {
+    assert!(processed_image_policy(Some(10), None, 10, Some(10), true));
+    assert!(
+        !processed_image_policy(Some(10), None, 9, Some(10), true),
+        "age still applies"
+    );
+    assert!(
+        !processed_image_policy(Some(10), None, 0, Some(10), true),
+        "positive watermark still required"
+    );
+    assert!(
+        !processed_image_policy(None, None, 100, Some(10), true),
+        "position still required"
+    );
+    let message = processed_image_message("image", 1);
+    let tags = BTreeMap::from([("image".into(), 10)]);
+    let scope = StripSelectionScope {
+        reasoning: ReasoningBudgetScope::default(),
+        image_watermark: 10,
+        image_protected_cutoff: Some(10),
+        image_emergency: true,
+    };
+    assert!(
+        !processed_image_eligible(&message, &tags, None, false, &HashSet::new(), scope),
+        "later assistant still required"
+    );
+    assert!(
+        !processed_image_eligible(
+            &message,
+            &tags,
+            None,
+            true,
+            &HashSet::from(["image#0".into()]),
+            scope
+        ),
+        "retained signed thinking still protects its prefix"
+    );
+    let request = req(
+        "emergency-image",
+        "cfg",
+        vec![
+            message.clone(),
+            wire_item("assistant", "answer", 2, &["processed"]),
+        ],
+    );
+    assert!(
+        new_frozen_strip_units(
+            &CoreState::default(),
+            &request,
+            &tags,
+            None,
+            false,
+            scope,
+            &HashSet::new()
+        )
+        .is_empty(),
+        "emergency does not authorize an unadmitted bust"
+    );
+    for synthetic in [false, true] {
+        let mut excluded = message.clone();
+        if synthetic {
+            excluded.ck.meta.synthetic = true;
+        } else {
+            excluded.mid.clear();
+        }
+        let request = req(
+            "emergency-image",
+            "cfg",
+            vec![
+                excluded,
+                wire_item("assistant", "answer", 2, &["processed"]),
+            ],
+        );
+        assert!(new_frozen_strip_units(
+            &CoreState::default(),
+            &request,
+            &tags,
+            None,
+            true,
+            scope,
+            &HashSet::new()
+        )
+        .is_empty());
+    }
+}
+
+#[test]
+fn processed_images_window_cutoff_and_emergency_are_wired_to_transform() {
+    for percent in [86, 95] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut image = processed_image_message("image", 2);
+        image
+            .ck
+            .content
+            .push(CkWireBlock::bare(ck_wire::CkKind::Text {
+                text: "look".into(),
+            }));
+        let mut request = req(
+            "image-window",
+            "cfg0",
+            vec![
+                assistant_tool_call("call", 0, "call"),
+                tool_result("tool", 1, "call", "output"),
+                image,
+                wire_item("assistant", "answer", 3, &["processed"]),
+                item("dropper", 4, "spent"),
+            ],
+        );
+        request.provider_id = Some("openai".into());
+        run(&s, &request, &spine());
+        s.seed_tags_for_test(
+            &request.session_id,
+            &[
+                mc_store::TagMintInput {
+                    block_id: "tool#0".into(),
+                    kind: "tool_result".into(),
+                    token_count: 100,
+                    source_bytes: b"output".to_vec(),
+                },
+                mc_store::TagMintInput {
+                    block_id: "image#1".into(),
+                    kind: "message".into(),
+                    token_count: 1,
+                    source_bytes: b"look".to_vec(),
+                },
+                mc_store::TagMintInput {
+                    block_id: "dropper#0".into(),
+                    kind: "message".into(),
+                    token_count: 1,
+                    source_bytes: b"spent".to_vec(),
+                },
+            ],
+            0,
+        )
+        .unwrap();
+        let mut loaded = s.load(&request.session_id).unwrap();
+        loaded
+            .core
+            .frozen_units
+            .push(red_unit("dropper#0", "drop", ""));
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+        request.render_config = "cfg1".into();
+        request = with_usage(request, percent, 100);
+        let response = run(&s, &request, &spine());
+        assert_eq!(
+            response
+                .messages()
+                .iter()
+                .any(|m| m.content.iter().any(image_block_is_large)),
+            percent < 95
+        );
+        assert_eq!(
+            s.load(&request.session_id)
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|u| u.key == "strip:processed_image:image"),
+            percent >= 95
+        );
+    }
 }
