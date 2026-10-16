@@ -25,6 +25,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
 import { log } from "@magic-context/core/shared/logger";
 import type { ModelHarness } from "@magic-context/core/shared/model-resolution";
+import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { CompletedSubagentToolCall } from "@magic-context/core/shared/subagent-runner";
 import { HiddenAgentStepLimit } from "@magic-context/core/v2/hooks/hidden-child";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
@@ -641,6 +642,30 @@ function createPiDreamerClient(
 					});
 				}
 				assertRegistrationOwnerActive();
+				const mappingMessages = result.meta?.mappingMessages;
+				if (budgetTask === "map-memories" && Array.isArray(mappingMessages)) {
+					// Retain decisions before raising a step/timeout error; the shared
+					// mapper reads this session to bank closed memory elements.
+					dreamSession.messages = mappingMessages
+						.filter(isRecord)
+						.filter((message) => message.role === "assistant")
+						.map((message) =>
+							makeMessage(
+								"assistant",
+								Array.isArray(message.content)
+									? message.content
+											.filter(isRecord)
+											.flatMap((part): SyntheticPart[] =>
+												part.type === "text" && typeof part.text === "string"
+													? [{ type: "text", text: part.text }]
+													: part.type === "toolCall"
+														? syntheticToolParts(1)
+														: [],
+											)
+									: [],
+							),
+						);
+				}
 				if (!result.ok) {
 					if (result.reason === "token_budget") {
 						throw new DreamTokenBudgetExceeded(
@@ -665,21 +690,22 @@ function createPiDreamerClient(
 					}
 					throw error;
 				}
-				dreamSession.messages = [
-					makeMessage("user", [{ type: "text", text: userMessage }]),
-					makeMessage("assistant", [
-						// Synthetic tool parts first so investigationToolCallCount
-						// (refresh-primers grounding gate) sees the agent's tool use,
-						// then the final answer text when the runner produced one.
-						...syntheticToolParts(
-							result.toolCallCount ?? 0,
-							result.completedToolCalls,
-						),
-						...(result.assistantText
-							? [{ type: "text" as const, text: result.assistantText }]
-							: []),
-					]),
-				];
+				if (!(budgetTask === "map-memories" && Array.isArray(mappingMessages)))
+					dreamSession.messages = [
+						makeMessage("user", [{ type: "text", text: userMessage }]),
+						makeMessage("assistant", [
+							// Synthetic tool parts first so investigationToolCallCount
+							// (refresh-primers grounding gate) sees the agent's tool use,
+							// then the final answer text when the runner produced one.
+							...syntheticToolParts(
+								result.toolCallCount ?? 0,
+								result.completedToolCalls,
+							),
+							...(result.assistantText
+								? [{ type: "text" as const, text: result.assistantText }]
+								: []),
+						]),
+					];
 				// G5: fire conservatively after every successful dreamer task. Many
 				// dreamer tasks (verify, curate, docs) don't touch the system-
 				// prompt adjuncts, but improve / maintain-docs / user-memory-review

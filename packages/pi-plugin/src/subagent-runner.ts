@@ -1398,6 +1398,10 @@ export class PiSubagentRunner implements SubagentRunner {
 
 		return new Promise<SubagentRunResult>((resolve) => {
 			let accountingMessages: unknown[] = [];
+			let mappingMessages: unknown[] = [];
+			const isMemoryMapper =
+				options.agent.replace(/^magic-context-/, "") ===
+				"dreamer-memory-mapper";
 			// Track whether we've already resolved so timeout/abort/exit don't
 			// double-resolve. JS promises tolerate double-resolve silently but
 			// we want explicit control so we can distinguish "timeout fired
@@ -1407,6 +1411,14 @@ export class PiSubagentRunner implements SubagentRunner {
 			const settle = (result: SubagentRunResult) => {
 				if (settled) return;
 				settled = true;
+				// Mapping emits decisions between tool turns. Preserve those turns on
+				// every settlement so a timeout cannot erase already located files.
+				if (isMemoryMapper) {
+					result = {
+						...result,
+						meta: { ...result.meta, mappingMessages: [...mappingMessages] },
+					};
+				}
 				if (
 					accountingMessages.length > 0 &&
 					/historian|dreamer|classify/i.test(options.agent)
@@ -1791,6 +1803,13 @@ export class PiSubagentRunner implements SubagentRunner {
 					messages?: unknown;
 					message?: unknown;
 				};
+				// Capture the current decision before a token/step guard can settle.
+				if (isMemoryMapper) {
+					if (e.type === "message_end" && e.message)
+						mappingMessages.push(e.message);
+					if (e.type === "agent_end" && Array.isArray(e.messages))
+						mappingMessages = e.messages;
+				}
 
 				if (
 					rpcBudget &&

@@ -168,9 +168,9 @@ describe("mapMemories disposition", () => {
 
             expect(result).toEqual({
                 mapped: 0,
-                independent: 20,
+                independent: 5,
                 batches: 1,
-                remaining: 1,
+                remaining: 16,
                 complete: false,
                 stopReason: "deadline",
             });
@@ -179,13 +179,13 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("floors a 12-batch default-deadline backfill and banks its first completed batch", async () => {
+    test("floors a large default-deadline backfill and banks its first completed batch", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-floor-primary";
             const dir = tempProject();
-            // 221 memories produce 12 batches. The old even split assigned only
-            // 100 seconds (1,200,000 / 12) to each batch, below the agentic floor.
+            // Even a large backlog must retain the four-minute floor.
+            // Smaller batches change throughput, not the latency allowance.
             const defaultDeadlineMs = 20 * 60 * 1000;
             expect(Math.floor(defaultDeadlineMs / 12)).toBe(100_000);
             expect(computeMapBatchSliceMs(defaultDeadlineMs, 12)).toBe(MAP_BATCH_FLOOR_MS);
@@ -212,13 +212,13 @@ describe("mapMemories disposition", () => {
             expect(promptCalls).toBe(1);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 20,
+                independent: 5,
                 batches: 1,
-                remaining: 201,
+                remaining: 216,
                 complete: false,
                 stopReason: "deadline",
             });
-            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(201);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(216);
         } finally {
             closeQuietly(db);
         }
@@ -249,13 +249,13 @@ describe("mapMemories disposition", () => {
             expect(promptCalls).toBe(1);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 20,
+                independent: 5,
                 batches: 1,
-                remaining: 1,
+                remaining: 16,
                 complete: false,
                 stopReason: "deadline",
             });
-            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(1);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(16);
         } finally {
             closeQuietly(db);
         }
@@ -407,8 +407,8 @@ describe("mapMemories disposition", () => {
             }) as never;
 
             const first = await mapMemories(args);
-            expect(first).toMatchObject({ independent: 20, batches: 1, remaining: 21 });
-            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(21);
+            expect(first).toMatchObject({ independent: 5, batches: 1, remaining: 36 });
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(36);
 
             args.deadline = Date.now() + 2 * MAP_BATCH_FLOOR_MS;
             args.client = successfulMapClient() as never;
@@ -416,8 +416,8 @@ describe("mapMemories disposition", () => {
 
             expect(second).toEqual({
                 mapped: 0,
-                independent: 21,
-                batches: 2,
+                independent: 36,
+                batches: 8,
                 remaining: 0,
                 complete: true,
             });
@@ -427,13 +427,13 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("commits a 19/20 closed subset and retries only its omitted id", async () => {
+    test("commits a 4/5 closed subset and retries only its omitted id", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-omission-retry";
             const dir = tempProject();
             const memoryIds: number[] = [];
-            for (let index = 0; index < 20; index += 1) {
+            for (let index = 0; index < 5; index += 1) {
                 memoryIds.push(
                     insertMemory(db, {
                         projectPath: projectIdentity,
@@ -451,7 +451,7 @@ describe("mapMemories disposition", () => {
                     // truncated, so its returned mappings can commit immediately. Only
                     // its one absent id is present in the retry prompt.
                     expect(ids).toHaveLength(1);
-                    expect(getMemoryVerifications(db, memoryIds).size).toBe(19);
+                    expect(getMemoryVerifications(db, memoryIds).size).toBe(4);
                     expect(getMemoryVerifications(db, ids).has(ids[0] as number)).toBe(false);
                 }
                 const returnedIds = call === 1 ? ids.slice(0, -1) : ids;
@@ -467,15 +467,15 @@ describe("mapMemories disposition", () => {
             const initialPrompt = promptIds[0];
             const retryPrompt = promptIds[1];
             if (!initialPrompt || !retryPrompt) throw new Error("missing prompt fixture");
-            expect(initialPrompt).toHaveLength(20);
+            expect(initialPrompt).toHaveLength(5);
             expect([...initialPrompt].sort((a, b) => a - b)).toEqual(
                 [...memoryIds].sort((a, b) => a - b),
             );
             expect(retryPrompt).toEqual([initialPrompt[initialPrompt.length - 1]]);
-            expect(progress).toEqual([19, 20]);
+            expect(progress).toEqual([4, 5]);
             expect(result).toEqual({
                 mapped: 0,
-                independent: 20,
+                independent: 5,
                 batches: 2,
                 remaining: 0,
                 complete: true,
@@ -485,7 +485,7 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("leaves an id omitted again by its targeted retry for the next run", async () => {
+    test("defers an id omitted twice and resumes after backoff", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-omission-resume";
@@ -516,9 +516,8 @@ describe("mapMemories disposition", () => {
             if (!initialPrompt || !retryPrompt) throw new Error("missing prompt fixture");
             expect(initialPrompt).toHaveLength(2);
             expect([...initialPrompt].sort((a, b) => a - b)).toEqual([first.id, second.id]);
-            // Mapping prioritizes by the memory query's recency ordering. The retry
-            // contract is that the unreturned id, rather than a fixed prompt position,
-            // is the one left for the next run.
+            // Only the unreturned id is retried. After two omissions it waits
+            // for backoff rather than immediately blocking the next scheduled run.
             expect(retryPrompt).toEqual([second.id]);
             expect(firstResult).toEqual({
                 mapped: 0,
@@ -529,6 +528,9 @@ describe("mapMemories disposition", () => {
             });
             expect(
                 selectMapMemoryInputs(db, projectIdentity, dir).map((memory) => memory.id),
+            ).toEqual([]);
+            expect(
+                selectMapMemoryInputs(db, projectIdentity, dir, true).map((memory) => memory.id),
             ).toEqual([second.id]);
 
             const resumed = mapArgs(db, dir, projectIdentity);
@@ -538,7 +540,15 @@ describe("mapMemories disposition", () => {
             );
             resumed.client = complete.client as never;
 
-            const resumedResult = await mapMemories(resumed);
+            const realNow = Date.now;
+            Date.now = () => realNow() + 3_600_001;
+            resumed.deadline = Date.now() + 300_000;
+            let resumedResult: Awaited<ReturnType<typeof mapMemories>>;
+            try {
+                resumedResult = await mapMemories(resumed);
+            } finally {
+                Date.now = realNow;
+            }
 
             expect(complete.promptIds()).toEqual([[second.id]]);
             expect(resumedResult).toEqual({

@@ -855,9 +855,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 );
                 if (!result.complete) {
                     if (result.stopReason === "timeout-circuit-breaker") {
-                        // A repeated timeout is a model-capacity starvation signal, not
-                        // a normal deadline remainder. Keep its failed status loud so
-                        // /ctx-dream and dreamer history expose why it stopped.
+                        // The mapper stopped after two timed-out batches committed
+                        // nothing, rather than simply running out of overall time.
+                        // Record a failure so /ctx-dream and history show that distinction.
                         const error = `map-memories starvation: timeout circuit breaker stopped the run with ${result.remaining} remain`;
                         recordRun("failed", error);
                         return { status: "failed", transient: true, error };
