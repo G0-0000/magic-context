@@ -56,6 +56,7 @@ export interface CtxRecompRuntimeDeps {
 	historianChunkTokens: number;
 	historianFallbacks?: readonly ModelInput[];
 	historianTimeoutMs?: number;
+	historianMaxOutputTokens?: number;
 	historianThinkingLevel?: string;
 	language?: string;
 	memoryEnabled: boolean;
@@ -234,6 +235,7 @@ export function registerCtxRecompCommand(
 								),
 								fallbackModels: currentDeps.historianFallbacks,
 								timeoutMs: currentDeps.historianTimeoutMs,
+								maxOutputTokens: currentDeps.historianMaxOutputTokens,
 								thinkingLevel: currentDeps.historianThinkingLevel,
 								directory: cwd,
 								accountingSessionId: sessionId,

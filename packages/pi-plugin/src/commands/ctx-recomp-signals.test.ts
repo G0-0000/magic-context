@@ -54,6 +54,12 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		expect(deferredSignal).toBeGreaterThan(publishedGate);
 	});
 
+	test("passes the configured historian output cap into the shared client", () => {
+		expect(codeOnly).toContain(
+			"maxOutputTokens: currentDeps.historianMaxOutputTokens",
+		);
+	});
+
 	test("stages the marker (deferred) instead of applying it eagerly", () => {
 		expect(codeOnly).toContain("stagePiRecompMarker(");
 		expect(codeOnly).not.toContain("queueAndApplyPiRecompMarker(");

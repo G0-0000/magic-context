@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MagicContextConfigSchema } from "../config/schema/magic-context";
@@ -52,6 +52,8 @@ import {
 } from "./rpc-handlers";
 import { resetSidebarSnapshotCache } from "./sidebar-snapshot-cache";
 
+const RPC_HANDLER_SOURCE = readFileSync(new URL("./rpc-handlers.ts", import.meta.url), "utf8");
+
 function createTestDb(): Database {
     const db = new Database(":memory:");
     initializeDatabase(db);
@@ -80,6 +82,16 @@ function registeredRpcMethods(
     });
     return handlers;
 }
+
+describe("managed RPC historian output cap", () => {
+    test("recomp and wrapup use the live historian maxTokens setting", () => {
+        expect(RPC_HANDLER_SOURCE).toContain(
+            "historianMaxOutputTokens: runConfig.historian?.maxTokens,",
+        );
+        expect(RPC_HANDLER_SOURCE).toContain("const ctx = await buildManagedCtx(db);");
+        expect(RPC_HANDLER_SOURCE).toContain("...(await buildManagedCtx(db)),");
+    });
+});
 
 afterEach(() => {
     resetSidebarSnapshotCache();

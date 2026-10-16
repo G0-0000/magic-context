@@ -236,6 +236,7 @@ async function runOneWrapupIteration(args: {
         sessionId,
         historianChunkTokens: ctx.historianChunkTokens,
         historianTimeoutMs: ctx.historianTimeoutMs,
+        historianMaxOutputTokens: ctx.historianMaxOutputTokens,
         boundarySnapshot: plan.snapshot,
         currentContextLimit: ctx.contextLimit,
         directory: ctx.directory,

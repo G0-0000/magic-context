@@ -62,6 +62,7 @@ export interface RegisterCtxWrapupDeps {
 	historianChunkTokens: number;
 	historianFallbacks?: readonly ModelInput[];
 	historianTimeoutMs?: number;
+	historianMaxOutputTokens?: number;
 	historianThinkingLevel?: string;
 	language?: string;
 	memoryEnabled: boolean;
@@ -485,6 +486,7 @@ export async function runPiWrapup(
 							}).snapshot,
 						currentContextLimit: contextLimit,
 						historianTimeoutMs: deps.historianTimeoutMs,
+						maxOutputTokens: deps.historianMaxOutputTokens,
 						thinkingLevel: deps.historianThinkingLevel,
 						memoryEnabled: deps.memoryEnabled,
 						autoPromote: deps.autoPromote,

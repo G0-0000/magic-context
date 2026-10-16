@@ -221,6 +221,47 @@ describe("Pi /ctx-wrapup", () => {
 		expect(parseWrapupArgs("two").ok).toBe(false);
 	});
 
+	it.each([
+		{ label: "configured", maxOutputTokens: 65_536, expected: 65_536 },
+		{ label: "unset", maxOutputTokens: undefined, expected: undefined },
+	])("passes the $label historian output cap to each wrapup run", async ({
+		maxOutputTokens,
+		expected,
+	}) => {
+		const db = createDb();
+		try {
+			const sessionId = `pi-wrapup-output-cap-${String(expected ?? "unset")}`;
+			const seenCaps: Array<number | undefined> = [];
+			const runPiHistorianForWrapup = mock(async (args) => {
+				seenCaps.push(args.maxOutputTokens);
+				const start = getLastCompartmentEndMessage(db, sessionId) + 1;
+				appendRange(
+					db,
+					sessionId,
+					start,
+					args.boundarySnapshot.eligibleEndOrdinal - 1,
+				);
+				args.onPublished?.();
+			});
+			const result = await runPiWrapup(
+				pi().api,
+				deps(db, {
+					historianMaxOutputTokens: maxOutputTokens,
+					runPiHistorianForWrapup,
+				}),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+
+			expect(result).not.toContain("Magic Wrapup — Partial");
+			expect(seenCaps.length).toBeGreaterThan(0);
+			expect(seenCaps.every((cap) => cap === expected)).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("promotes facts from every non-final wrapup window and skips only the final window", async () => {
 		const db = createDb();
 		try {

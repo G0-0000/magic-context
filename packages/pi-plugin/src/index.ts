@@ -2167,6 +2167,7 @@ async function startPiMagicContextRuntime(
 		),
 		historianFallbacks: bootProjectDeps.historianConfig?.fallbackModels,
 		historianTimeoutMs: bootProjectDeps.config.historian_timeout_ms,
+		historianMaxOutputTokens: bootProjectDeps.historianConfig?.maxOutputTokens,
 		historianThinkingLevel: bootProjectDeps.historianConfig?.thinkingLevel,
 		language: bootProjectDeps.config.language,
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
@@ -2195,6 +2196,7 @@ async function startPiMagicContextRuntime(
 				historianFallbacks: historian?.fallbackModels,
 				historianTimeoutMs:
 					historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianMaxOutputTokens: historian?.maxOutputTokens,
 				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,
@@ -2215,6 +2217,7 @@ async function startPiMagicContextRuntime(
 		),
 		historianFallbacks: bootProjectDeps.historianConfig?.fallbackModels,
 		historianTimeoutMs: bootProjectDeps.config.historian_timeout_ms,
+		historianMaxOutputTokens: bootProjectDeps.historianConfig?.maxOutputTokens,
 		historianThinkingLevel: bootProjectDeps.historianConfig?.thinkingLevel,
 		language: bootProjectDeps.config.language,
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
@@ -2249,6 +2252,7 @@ async function startPiMagicContextRuntime(
 				historianFallbacks: historian?.fallbackModels,
 				historianTimeoutMs:
 					historian?.timeoutMs ?? current.config.historian_timeout_ms,
+				historianMaxOutputTokens: historian?.maxOutputTokens,
 				historianThinkingLevel: historian?.thinkingLevel,
 				language: current.config.language,
 				memoryEnabled: current.config.memory.enabled,

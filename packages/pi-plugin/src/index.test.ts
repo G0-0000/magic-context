@@ -1,10 +1,50 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
-import { __test, registerConfiguredTodoLifecycle } from "./index";
+import {
+	__test,
+	registerConfiguredTodoLifecycle,
+	resolveHistorianFromConfig,
+} from "./index";
 import { createTestDb } from "./test-utils.test";
 import { registerMagicContextTools } from "./tools";
+
+const INDEX_SOURCE = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+
+describe("Pi recomp and wrapup historian output-cap config", () => {
+	it("resolves configured and unset caps using the historian config", () => {
+		const configured = MagicContextConfigSchema.parse({
+			historian: { maxTokens: 65_536, pi: { model: "provider/model" } },
+		});
+		const unset = MagicContextConfigSchema.parse({
+			historian: { pi: { model: "provider/model" } },
+		});
+
+		expect(resolveHistorianFromConfig(configured, "pi")?.maxOutputTokens).toBe(
+			65_536,
+		);
+		expect(
+			resolveHistorianFromConfig(unset, "pi")?.maxOutputTokens,
+		).toBeUndefined();
+	});
+
+	it("uses the live-resolved cap for both command runtime dependency sets", () => {
+		const bootWiring =
+			INDEX_SOURCE.match(
+				/historianMaxOutputTokens: bootProjectDeps\.historianConfig\?\.maxOutputTokens/g,
+			) ?? [];
+		const liveWiring =
+			INDEX_SOURCE.match(
+				/historianMaxOutputTokens: historian\?\.maxOutputTokens/g,
+			) ?? [];
+
+		expect(bootWiring).toHaveLength(2);
+		expect(liveWiring).toHaveLength(2);
+	});
+});
 
 describe("Pi todowrite registration from resolved config", () => {
 	it.each([
