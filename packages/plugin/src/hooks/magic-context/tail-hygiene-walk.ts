@@ -1,8 +1,9 @@
 import { protectedToolTagNumbers } from "../../features/magic-context/reclaim-protection";
 import type { TagEntry } from "../../features/magic-context/types";
 import { isRecord } from "../../shared/record-type-guard";
-import { stableStringify } from "../../shared/stable-json";
+import { stableStringify, stableStringifyHash } from "../../shared/stable-json";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
+import { TailHygieneJsonMemo } from "../../shared/tail-hygiene-json";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -362,34 +363,38 @@ function isDropSentinel(content: string): boolean {
     );
 }
 
-function toolOutputText(part: Record<string, unknown>): string | null {
+function toolOutputText(part: Record<string, unknown>, key: string): string | null {
+    const serialize = (value: unknown): string =>
+        partJsonMemo.get(key, value, () => safeStableStringify(value));
     if (part.type === "tool") {
         const state = isRecord(part.state) ? part.state : null;
         if (!state) return null;
-        if (state.output !== undefined) return safeStableStringify(state.output);
-        if (state.error !== undefined) return safeStableStringify(state.error);
-        if (state.result !== undefined) return safeStableStringify(state.result);
+        if (state.output !== undefined) return serialize(state.output);
+        if (state.error !== undefined) return serialize(state.error);
+        if (state.result !== undefined) return serialize(state.result);
         return null;
     }
     if (part.type === "tool_result") {
         const value = part.content ?? part.output ?? part.result;
-        return value === undefined ? null : safeStableStringify(value);
+        return value === undefined ? null : serialize(value);
     }
     return null;
 }
 
-function toolInputText(part: Record<string, unknown>): string | null {
+function toolInputText(part: Record<string, unknown>, key: string): string | null {
+    const serialize = (value: unknown): string =>
+        partJsonMemo.get(key, value, () => safeStableStringify(value));
     if (part.type === "tool") {
         const state = isRecord(part.state) ? part.state : null;
         if (!state || state.input === undefined) return null;
-        return safeStableStringify(state.input);
+        return serialize(state.input);
     }
     if (part.type === "tool-invocation") {
         const value = part.args ?? part.input;
-        return value === undefined ? null : safeStableStringify(value);
+        return value === undefined ? null : serialize(value);
     }
     if (part.type === "tool_use") {
-        return part.input === undefined ? null : safeStableStringify(part.input);
+        return part.input === undefined ? null : serialize(part.input);
     }
     return null;
 }
@@ -555,17 +560,35 @@ function snapshot(args: {
     };
 }
 
+const partJsonMemo = new TailHygieneJsonMemo();
+
 function excludedSnapshot(key: string, part: unknown): TailHygienePartMeasurement {
-    const content = safeStableStringify(part);
-    return snapshot({
+    const contentHash = partJsonMemo.get(
         key,
+        part,
+        () => {
+            if (part === null || part === undefined || typeof part === "string")
+                return memoizedContent("excluded", safeStableStringify(part)).hash;
+            try {
+                // Preserve the existing fingerprint, not a new hash of a narrower view.
+                return stableStringifyHash(part, "excluded\0");
+            } catch {
+                return memoizedContent("excluded", String(part)).hash;
+            }
+        },
+        true,
+    );
+    return {
+        key,
+        contentHash,
         kind: "excluded",
-        content,
         tokens: 0,
-        tag: undefined,
-        protectedNumbers: new Set(),
-        pendingDropTagNumbers: new Set(),
-    });
+        uTokens: 0,
+        tagNumber: null,
+        tagStatus: null,
+        protected: false,
+        queuedForDrop: false,
+    };
 }
 
 function fileContentAndTokens(part: Record<string, unknown>): { content: string; tokens: number } {
@@ -674,6 +697,7 @@ function measureWithReplay(
     input: MeasurementInput,
     replay?: BaselineMeasurementMemo,
 ): ReplayMeasurement {
+    partJsonMemo.beginPass();
     const pendingDropTagNumbers = input.pendingDropTagNumbers ?? new Set<number>();
     const unchanged = input.messages.map((message, index) => {
         const previous = replay?.messages[index];
@@ -692,7 +716,7 @@ function measureWithReplay(
             unchanged[index]
                 ? (replay?.measured.toolOutputs[index][partIndex] ?? null)
                 : isRecord(part)
-                  ? toolOutputText(part)
+                  ? toolOutputText(part, `${messageIdentity(message, index)}\0${partIndex}\0output`)
                   : null,
         ),
     );
@@ -855,7 +879,7 @@ function measureWithReplay(
                     continue;
                 }
                 const tag = attribution.toolTagsByPart.get(part);
-                const inputText = toolInputText(part);
+                const inputText = toolInputText(part, `${key}\0input`);
                 if (inputText !== null) {
                     const tokens = memoizedTokens("toolInput", inputText);
                     const measured = snapshot({

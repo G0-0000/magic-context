@@ -12,6 +12,10 @@ import {
 	type TailHygienePartMeasurement,
 	type TailHygienePrefixMismatch,
 } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
+import {
+	piJsonHash,
+	TailHygieneJsonMemo,
+} from "@magic-context/core/shared/tail-hygiene-json";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
@@ -77,6 +81,7 @@ interface DraftPart {
 	key: string;
 	kind: TailHygienePartKind;
 	content: string;
+	contentHash?: string;
 	tokens: number;
 	tag?: TagEntry;
 }
@@ -576,11 +581,22 @@ function attributeTags(
 	return { messageTags, tagsByNumber };
 }
 
+const partJsonMemo = new TailHygieneJsonMemo();
+
 function excludedDraft(key: string, value: unknown): DraftPart {
 	return {
 		key,
 		kind: "excluded",
-		content: typeof value === "string" ? value : safeStableStringify(value),
+		content: "",
+		contentHash: partJsonMemo.get(
+			key,
+			value,
+			() =>
+				typeof value === "string"
+					? partHash("excluded", value)
+					: piJsonHash(value, () => safeStableStringify(value)),
+			true,
+		),
 		tokens: 0,
 	};
 }
@@ -623,7 +639,7 @@ function finalizeParts(
 		u += uTokens;
 		return {
 			key: draft.key,
-			contentHash: partHash(draft.kind, draft.content),
+			contentHash: draft.contentHash ?? partHash(draft.kind, draft.content),
 			kind: draft.kind,
 			tokens,
 			uTokens,
@@ -651,6 +667,7 @@ function finalizeParts(
 export function measurePiTailHygiene(
 	input: PiTailHygieneWalkInput,
 ): TailHygieneMeasurement & { realUserTurnCount: number } {
+	partJsonMemo.beginPass();
 	const { arcs, arcByPart, messageIds } = collectToolArcs(input);
 	const { messageTags, tagsByNumber } = attributeTags(input, arcs, messageIds);
 	const drafts: DraftPart[] = [];
@@ -788,7 +805,9 @@ export function measurePiTailHygiene(
 					drafts.push(excludedDraft(`${key}\0toolInput`, part));
 					continue;
 				}
-				const content = safeStableStringify(part.arguments);
+				const content = partJsonMemo.get(`${key}\0input`, part.arguments, () =>
+					safeStableStringify(part.arguments),
+				);
 				if (!content) {
 					drafts.push(excludedDraft(`${key}\0toolInput`, part));
 				} else {
