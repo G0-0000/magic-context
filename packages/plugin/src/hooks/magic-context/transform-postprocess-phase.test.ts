@@ -13107,10 +13107,27 @@ describe("issue 699 processed-image provider replay", () => {
         const messages = await serve(sessionId, "openai", true, {
             watermark: 100,
             protectedTagNumbers: window.protectedTagNumbers,
+            protectedCutoff: window.cutoff,
         });
         expect(messages[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
         expect(messages[1].parts).toEqual(source()[1].parts);
         expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual(["old-image"]);
+    });
+
+    it("issue 699 emergency window bypass retains independent protected-tool images", async () => {
+        open();
+        const sessionId = "image-emergency-exemplar";
+        insertTag(db, sessionId, "image-read", "tool", 100, 2, 0, "read", 0, "tool-image");
+        const messages = await serve(sessionId, "openai", true, {
+            watermark: 100,
+            protectedCutoff: 1,
+            protectedTagNumbers: new Set([2]),
+            tags: getActiveTagsBySession(db, sessionId),
+            protectedTools: { read: 1 },
+            contextUsage: { percentage: 95, inputTokens: 1000 },
+        });
+        expect(messages[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+        expect(messages[1].parts).toEqual(source()[1].parts);
     });
 
     it("issue 699 compaction off disables detection and frozen replay", async () => {
@@ -13180,4 +13197,81 @@ describe("issue 699 post-drain image watermark", () => {
         const replay = await pass(false);
         expect(replay[0].parts).toEqual(rewritten[0].parts);
     });
+});
+
+describe("issue 699 position-based recent-image retention", () => {
+    const image = (native: boolean) =>
+        native
+            ? {
+                  type: "media",
+                  media: {
+                      mediaType: "image/png",
+                      source: { type: "base64", data: "a".repeat(300) },
+                  },
+              }
+            : { type: "file", mime: "image/png", url: `data:image/png;base64,${"a".repeat(300)}` };
+    const pass = async (
+        sessionId: string,
+        native: boolean,
+        options: { nextTag: number; watermark: number; percentage?: number; bust?: boolean },
+    ) => {
+        const messages = [
+            { info: { id: "position-image", role: "user" }, parts: [image(native)] },
+            {
+                info: { id: "position-answer", role: "assistant" },
+                parts: [{ type: "text", text: "seen" }],
+            },
+        ] as MessageLike[];
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                resolvedProviderID: "openai",
+                watermark: options.watermark,
+                messageTagNumbers: new Map([[messages[1], options.nextTag]]),
+                protectedCutoff: 5,
+                protectedTagNumbers: new Set([5, 6, 7, 8]),
+                pendingMaterializationSessions: new Set(options.bust === false ? [] : [sessionId]),
+                schedulerDecision: options.bust === false ? "defer" : "execute",
+                contextUsage: { percentage: options.percentage ?? 60, inputTokens: 1000 },
+            }),
+        );
+        return messages;
+    };
+    for (const native of [false, true]) {
+        it(`issue 699 answered image-only ${native ? "native media" : "file"} stays recent, ages outside the window, and yields only at emergency`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const recent = await pass(`image-position-recent-${native}`, native, {
+                nextTag: 6,
+                watermark: 1,
+            });
+            expect(recent[0].parts).toEqual([image(native)]);
+            const crossed = await pass(`image-position-protected-${native}`, native, {
+                nextTag: 6,
+                watermark: 8,
+                percentage: 94.99,
+            });
+            expect(crossed[0].parts).toEqual([image(native)]);
+            const emergency = await pass(`image-position-emergency-${native}`, native, {
+                nextTag: 6,
+                watermark: 8,
+                percentage: 95,
+            });
+            expect(emergency[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+            const sessionId = `image-position-old-${native}`;
+            const deferred = await pass(sessionId, native, {
+                nextTag: 3,
+                watermark: 4,
+                bust: false,
+            });
+            expect(deferred[0].parts).toEqual([image(native)]);
+            const aged = await pass(sessionId, native, { nextTag: 3, watermark: 4 });
+            expect(aged[0].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+            const replay = await pass(sessionId, native, {
+                nextTag: 100,
+                watermark: 0,
+                bust: false,
+            });
+            expect(replay[0].parts).toEqual(aged[0].parts);
+        });
+    }
 });

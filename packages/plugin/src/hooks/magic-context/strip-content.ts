@@ -3,6 +3,7 @@ import {
     MERGED_REASONING_PARTS_PREFIX,
     readFrozenMergedReasoningParts,
 } from "../../features/magic-context/merged-reasoning-decisions";
+import { createProcessedImageEligibility } from "../../shared/processed-image-eligibility";
 import { isRecord } from "../../shared/record-type-guard";
 import {
     isSentinel,
@@ -1008,11 +1009,13 @@ export function stripProcessedImages(
         detect: boolean;
         watermark: number;
         messageTagNumbers: Map<MessageLike, number>;
+        protectedCutoff?: number | null;
+        contextPercentage?: number;
         /** Marker for newly discovered ids only; legacy frozen ids keep empty sentinels. */
         replacementText?: "" | "[image stripped]";
         /** Stored text takes precedence if another process already persisted the same id. */
         frozenMarkers?: ReadonlyMap<string, "" | "[image stripped]">;
-        /** Messages containing recent or explicitly protected tool results cannot be newly stripped. */
+        /** Per-tool result exemptions still block stripping when emergency cleanup waives recency protection. */
         protectedMessageIds?: ReadonlySet<string>;
         /** Commit new replay IDs before changing bytes; false leaves new images intact. */
         persistNewIds?: (
@@ -1023,7 +1026,8 @@ export function stripProcessedImages(
         onFirstApplication?: (message: MessageLike, partIndex: number) => void;
     },
 ): StripProcessedImagesResult {
-    const { detect, watermark, messageTagNumbers } = options;
+    const { detect, messageTagNumbers } = options;
+    const eligibility = createProcessedImageEligibility(messages, messageTagNumbers, options);
     let stripped = 0;
     const newlyStrippedIds: string[] = [];
     const planned: {
@@ -1047,13 +1051,12 @@ export function stripProcessedImages(
 
         const id = typeof msg.info.id === "string" ? msg.info.id : undefined;
         const inFrozen = id !== undefined && frozenIds.has(id);
-        const maxTag = messageTagNumbers.get(msg) ?? 0;
         const isNewDetection =
             !inFrozen &&
             detect &&
             answered &&
             id !== undefined &&
-            maxTag <= watermark &&
+            eligibility.mayStrip(msg) &&
             !options.protectedMessageIds?.has(id);
 
         if (!inFrozen && !isNewDetection) {

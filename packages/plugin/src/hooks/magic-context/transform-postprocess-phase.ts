@@ -3324,23 +3324,14 @@ export async function runPostTransformPhase(
                 detect: canEditWholePrefix && imageWatermark > 0,
                 watermark: imageWatermark,
                 messageTagNumbers: args.messageTagNumbers,
+                protectedCutoff: args.protectedCutoff,
+                contextPercentage: args.contextUsage.percentage,
                 replacementText,
                 frozenMarkers,
                 protectedMessageIds: new Set([
                     ...args.tags
-                        .filter(
-                            (tag) =>
-                                args.protectedTagNumbers.has(tag.tagNumber) ||
-                                protectedToolTags.has(tag.tagNumber),
-                        )
+                        .filter((tag) => protectedToolTags.has(tag.tagNumber))
                         .map((tag) => tag.toolOwnerMessageId ?? tag.messageId),
-                    ...args.messages
-                        .filter((message) =>
-                            args.protectedTagNumbers.has(args.messageTagNumbers.get(message) ?? 0),
-                        )
-                        .flatMap((message) =>
-                            typeof message.info.id === "string" ? [message.info.id] : [],
-                        ),
                 ]),
                 persistNewIds: (ids, markers) => {
                     if (!addProcessedImageStrippedIds(args.db, args.sessionId, ids, markers))
