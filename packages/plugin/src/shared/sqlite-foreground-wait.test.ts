@@ -113,6 +113,146 @@ for (const holdMs of [1000, 2500]) {
     }, 30_000);
 }
 
+for (const holdMs of [1000, 2500]) {
+    test(`slow uncontended SQL preserves admission for a ${holdMs}ms autocommit lock`, async () => {
+        const { db, path, close } = fixture();
+        let locker: SqliteWriteLocker | undefined;
+        let served = false;
+        let refusals = 0;
+        const output = {
+            messages: [
+                {
+                    info: { id: "u", sessionID: "slow", role: "user" },
+                    parts: [{ type: "text", text: "raw" }],
+                },
+            ],
+        };
+        const handler = createMessagesTransformHandler({
+            onStorageBusyRefusal: async () => {
+                refusals++;
+            },
+            magicContext: {
+                "experimental.chat.messages.transform": async (_input, result) => {
+                    // Spend three seconds inside successful SQL, not between writes.
+                    // Recursive work keeps this independent of CPU speed and UDF APIs.
+                    const cte =
+                        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000)";
+                    const slowWrite = db.prepare(
+                        `${cte} INSERT INTO result SELECT sum(x) FROM n RETURNING value`,
+                    );
+                    const slowRead = db.prepare(`${cte} SELECT sum(x) FROM n`);
+                    const started = performance.now();
+                    do {
+                        slowWrite.all();
+                        slowRead.all();
+                    } while (performance.now() - started < 3000);
+                    locker = await startSqliteWriteLocker(path, holdMs);
+                    db.prepare("INSERT INTO result VALUES ('managed')").run();
+                    (result.messages[0].parts[0] as { text: string }).text = "managed";
+                },
+            },
+        });
+        try {
+            const pass = handler({}, output as Parameters<typeof handler>[1]).then(() => {
+                served = true;
+            });
+            if (holdMs === 1000) {
+                await pass;
+                expect(served).toBe(true);
+                expect(refusals).toBe(0);
+                expect(output.messages[0].parts[0].text).toBe("managed");
+            } else {
+                await expect(pass).rejects.toBeInstanceOf(StorageBusyRefusalError);
+                expect(served).toBe(false);
+                expect(refusals).toBe(1);
+                expect(output.messages[0].parts[0].text).toBe("raw");
+            }
+            expect(
+                db.prepare("SELECT count(*) AS n FROM result WHERE value = 'managed'").get(),
+            ).toEqual({ n: holdMs === 1000 ? 1 : 0 });
+        } finally {
+            if (locker) expect(await locker.exited).toBe(0);
+            close();
+        }
+    }, 30_000);
+}
+
+test("BUSY autocommit probes do not double-apply INSERT OR IGNORE, UPSERT or RETURNING", async () => {
+    const { db, path, close } = fixture();
+    db.exec(
+        "CREATE TABLE counter(id INTEGER PRIMARY KEY, n INTEGER); INSERT INTO counter VALUES (1, 0)",
+    );
+    const forms = [
+        ["INSERT OR IGNORE INTO counter VALUES (2, 1)", "run"],
+        ["INSERT INTO counter VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET n = n + 1", "run"],
+        ["UPDATE counter SET n = n + 1 WHERE id = 1 RETURNING n", "get"],
+        [
+            "INSERT INTO counter VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET n = n + 1 RETURNING n",
+            "all",
+        ],
+    ] as const;
+    try {
+        for (const [sql, method] of forms) {
+            const blocker = new Database(path);
+            blocker.exec("BEGIN IMMEDIATE");
+            db.exec("PRAGMA busy_timeout=0");
+            const before = db.prepare("SELECT * FROM counter ORDER BY id").all();
+            try {
+                expect(() => db.prepare(sql)[method]()).toThrow("locked");
+                expect(db.prepare("SELECT * FROM counter ORDER BY id").all()).toEqual(before);
+                expect(db.inTransaction).toBe(false);
+            } finally {
+                blocker.exec("ROLLBACK");
+                blocker.close();
+            }
+            const locker = await startSqliteWriteLocker(path, 100);
+            try {
+                await withSqliteTransformPass(() => db.prepare(sql)[method]());
+            } finally {
+                expect(await locker.exited).toBe(0);
+            }
+        }
+        expect(db.prepare("SELECT * FROM counter ORDER BY id").all()).toEqual([
+            { id: 1, n: 3 },
+            { id: 2, n: 1 },
+        ]);
+    } finally {
+        close();
+    }
+}, 30_000);
+
+test("many contended autocommit writes share at most two seconds of lock waiting", async () => {
+    const { db, path, close } = fixture();
+    let waited = 0;
+    let successes = 0;
+    let busy = 0;
+    try {
+        await withSqliteTransformPass(async () => {
+            for (let i = 0; i < 8; i++) {
+                const locker = await startSqliteWriteLocker(path, 400);
+                const started = performance.now();
+                try {
+                    db.prepare("INSERT INTO result VALUES ('one')").run();
+                    successes++;
+                } catch (error) {
+                    expect(error).toBeInstanceOf(SqliteAcquisitionBusyError);
+                    busy++;
+                } finally {
+                    waited += performance.now() - started;
+                    expect(await locker.exited).toBe(0);
+                }
+            }
+        });
+        expect(successes).toBeGreaterThan(0);
+        expect(busy).toBeGreaterThan(0);
+        expect(waited).toBeGreaterThanOrEqual(1900);
+        expect(waited).toBeLessThan(2200);
+        expect(db.prepare("SELECT count(*) AS n FROM result").get()).toEqual({ n: successes });
+    } finally {
+        close();
+    }
+}, 30_000);
+
 for (const mode of ["BEGIN", "autocommit"]) {
     test(`foreground ${mode} wait is capped by the pass deadline`, () => {
         const { db, path, close } = fixture();
@@ -138,3 +278,33 @@ for (const mode of ["BEGIN", "autocommit"]) {
         }
     });
 }
+
+test("an autocommit exec script never replays a committed prefix after BUSY", () => {
+    const main = fixture();
+    const auxiliary = fixture();
+    try {
+        main.db.prepare("ATTACH DATABASE ? AS aux").run(auxiliary.path);
+        auxiliary.db.exec("BEGIN IMMEDIATE");
+        withSqliteTransformPass(() => {
+            guardSqliteTransformPass({ assert() {}, remainingMs: () => 100 });
+            expect(() =>
+                main.db.exec(
+                    "INSERT INTO main.result VALUES ('prefix'); INSERT INTO aux.result VALUES ('blocked')",
+                ),
+            ).toThrow(SqliteAcquisitionBusyError);
+            expect(() =>
+                main.db.exec(
+                    "CREATE TABLE applied_once(id); INSERT INTO aux.result VALUES ('blocked')",
+                ),
+            ).toThrow(SqliteAcquisitionBusyError);
+        });
+        expect(main.db.prepare("SELECT * FROM main.result").all()).toEqual([{ value: "prefix" }]);
+        expect(
+            main.db.prepare("SELECT name FROM sqlite_schema WHERE name='applied_once'").all(),
+        ).toHaveLength(1);
+    } finally {
+        auxiliary.db.exec("ROLLBACK");
+        auxiliary.close();
+        main.close();
+    }
+});

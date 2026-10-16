@@ -404,7 +404,22 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
                 !/^\s*(?:SELECT|EXPLAIN|PRAGMA|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(sql)
             ) {
                 try {
-                    return withAutocommitTimeout(db, () => nativeExec(sql));
+                    // exec accepts scripts: an earlier statement may have committed
+                    // before a later statement reports BUSY. Never replay that prefix.
+                    const changes = db.prepare(
+                        "SELECT total_changes() AS n, schema_version AS schemaVersion FROM pragma_schema_version",
+                    );
+                    const before = changes.get() as { n: number; schemaVersion: number };
+                    return withAutocommitTimeout(
+                        db,
+                        () => nativeExec(sql),
+                        () => {
+                            const after = changes.get() as typeof before;
+                            return (
+                                after.n === before.n && after.schemaVersion === before.schemaVersion
+                            );
+                        },
+                    );
                 } finally {
                     if (mayChangeTagIdentity(sql)) tagIdentityWriteGeneration += 1;
                 }
@@ -984,31 +999,46 @@ function foregroundWaitLease() {
         : undefined;
 }
 
-/** Bound implicit writer admission too, including prepared INSERT OR IGNORE and
- * writes with RETURNING. Charge successful execution time conservatively: the
- * native API cannot separate lock waiting from statement execution. Exhaustion
- * switches to zero-wait acquisition, not a refusal when the writer is free. */
-function withAutocommitTimeout<T>(db: Database, operation: () => T): T {
+/** Probe implicit admission without waiting, so ordinary SQL execution (including
+ * conservative read classifications) cannot consume the lock-wait lease. SQLite
+ * permits retrying a BUSY single statement outside an explicit transaction. */
+function withAutocommitTimeout<T>(db: Database, operation: () => T, canRetry = () => true): T {
     assertTransformWrite();
     const lease = foregroundWaitLease();
     if (isInTransaction(db) || (!lease && !backgroundWriterScope.getStore())) return operation();
     const previous = pragmaNumber(db, "busy_timeout");
-    db.exec(
-        `PRAGMA busy_timeout=${lease ? Math.floor(Math.min(lease.remainingWaitMs, lease.guard?.remainingMs() ?? Infinity)) : SHORT_BUSY_TIMEOUT_MS}`,
-    );
-    const started = performance.now();
+    db.exec("PRAGMA busy_timeout=0");
     try {
-        return operation();
+        try {
+            return operation();
+        } catch (error) {
+            if (!isTransientSqliteError(error) || isInTransaction(db) || !canRetry()) throw error;
+        }
+        assertTransformWrite();
+        const timeout = Math.floor(
+            Math.min(
+                lease?.remainingWaitMs ?? SHORT_BUSY_TIMEOUT_MS,
+                lease?.guard?.remainingMs() ?? Infinity,
+            ),
+        );
+        db.exec(`PRAGMA busy_timeout=${timeout}`);
+        const started = performance.now();
+        try {
+            return operation();
+        } finally {
+            // Only an attempt known to have encountered contention spends the
+            // lease. Its execution time is a conservative upper bound on waiting.
+            if (lease)
+                lease.remainingWaitMs = Math.max(
+                    0,
+                    lease.remainingWaitMs - (performance.now() - started),
+                );
+        }
     } catch (error) {
         if (lease && isTransientSqliteError(error))
             throw new SqliteAcquisitionBusyError(error, "autocommit");
         throw error;
     } finally {
-        if (lease)
-            lease.remainingWaitMs = Math.max(
-                0,
-                lease.remainingWaitMs - (performance.now() - started),
-            );
         if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
     }
 }
