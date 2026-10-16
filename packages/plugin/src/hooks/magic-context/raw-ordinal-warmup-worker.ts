@@ -13,10 +13,19 @@ const input = workerData as RawOrdinalWarmupInput;
 // Report that the thread runs before importing the SQLite and scan modules, so
 // the caller's first deadline only has to cover thread start.
 port.postMessage({ kind: "accepted" } satisfies RawOrdinalWarmupReply);
-const [{ Database }, { scanRawSessionSummaryRows }] = await Promise.all([
+const [
+    { Database, registerSqliteDiagnosticSink },
+    { scanRawSessionSummaryRows },
+    { getHarness, setHarness },
+    { log },
+] = await Promise.all([
     import("../../shared/sqlite"),
     import("./read-session-raw"),
+    import("../../shared/harness"),
+    import("../../shared/logger"),
 ]);
+setHarness(input.harness ?? "opencode");
+registerSqliteDiagnosticSink(log, getHarness);
 let db: InstanceType<typeof Database> | undefined;
 let reply: RawOrdinalWarmupReply;
 try {
@@ -49,17 +58,11 @@ try {
     } else if (input.indexMessage) {
         const { setHarness } = await import("../../shared/harness");
         setHarness(input.harness ?? "opencode");
-        const [
-            { indexMessageInShortChunks },
-            { configureContextDatabasePragmas },
-            { registerSqliteDiagnosticSink },
-        ] = await Promise.all([
-            import("../../features/magic-context/message-index-bounded"),
-            import("../../shared/sqlite-context-pragmas"),
-            import("../../shared/sqlite"),
-        ]);
-        const { log } = await import("../../shared/logger");
-        registerSqliteDiagnosticSink(log);
+        const [{ indexMessageInShortChunks }, { configureContextDatabasePragmas }] =
+            await Promise.all([
+                import("../../features/magic-context/message-index-bounded"),
+                import("../../shared/sqlite-context-pragmas"),
+            ]);
         configureContextDatabasePragmas(db);
         const writer = db;
         const message = input.indexMessage;

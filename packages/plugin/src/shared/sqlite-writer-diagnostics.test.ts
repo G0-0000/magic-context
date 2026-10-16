@@ -39,6 +39,22 @@ const scenario = `
     hold();
     writer.exec("COMMIT");
 
+    writer.exec("BEGIN IMMEDIATE");
+    now += 101;
+    writer.exec("ROLLBACK");
+
+    writer.exec("CREATE TABLE result(value)");
+    const statementTimes = [now, now + 101];
+    performance.now = () => statementTimes.shift() ?? now;
+    writer.prepare("INSERT INTO result VALUES (1)").run();
+    now += 101;
+
+    let clockReads = 0;
+    performance.now = () => { clockReads++; return now; };
+    writer.exec("BEGIN IMMEDIATE");
+    writer.exec("COMMIT");
+    if (clockReads !== 2) throw new Error("fast unscoped transaction clock reads=" + clockReads);
+
     logger.flushLogger();
     writer.close();
     holder.close();
@@ -104,6 +120,21 @@ describe("sqlite writer diagnostics", () => {
     test("nothing reaches the host console", () => {
         expect(consoleOutput).not.toContain("[magic-context]");
         expect(consoleOutput).not.toContain("sqlite writer");
+    });
+
+    test("unscoped rollback names the host, pid and caller at the 100ms threshold", () => {
+        const rolledBack = logLines.find((line) => line.includes("outcome=rolled_back"));
+        expect(rolledBack).toContain("lane=background");
+        expect(rolledBack).toContain("hold_ms=101");
+        expect(rolledBack).toMatch(/pid=\d+ host=opencode/);
+        expect(rolledBack).toContain("caller=");
+    });
+
+    test("native autocommit time is labelled as including acquisition, not lock ownership", () => {
+        const statement = logLines.find((line) => line.includes("site=autocommit"));
+        expect(statement).toContain("elapsed_ms=101");
+        expect(statement).toContain("timing=statement_including_acquisition");
+        expect(statement).not.toContain("hold_ms=");
     });
 
     test("a writer that waited for the lock reports the wait, not its short hold", () => {

@@ -16,6 +16,7 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
+use crate::writer_diagnostics::WriterTransaction;
 use crate::McStoreError;
 
 /// The `context.db` connections `McStore` reads and writes domain rows through.
@@ -145,7 +146,7 @@ impl SqliteContextDomain {
 impl ContextDomain for SqliteContextDomain {
     fn try_write(
         &self,
-        _tables: &[&str],
+        tables: &[&str],
         write: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
     ) -> Result<(), McStoreError> {
         let mut conn = self
@@ -155,7 +156,14 @@ impl ContextDomain for SqliteContextDomain {
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(context_sql_error)?;
         let outcome = (|| {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let tx = WriterTransaction::immediate(
+                &mut conn,
+                "context_telemetry",
+                "mc-store",
+                "background",
+                emit_writer,
+            )?
+            .with_tables(tables);
             write(&tx)?;
             tx.commit()
         })();
@@ -181,19 +189,29 @@ impl ContextDomain for SqliteContextDomain {
 
     fn write(
         &self,
-        _tables: &[&str],
+        tables: &[&str],
         write: &mut dyn FnMut(&Transaction<'_>) -> rusqlite::Result<()>,
     ) -> Result<(), McStoreError> {
         let mut conn = self
             .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let transaction = conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(context_sql_error)?;
+        let transaction = WriterTransaction::immediate(
+            &mut conn,
+            "context_domain",
+            "mc-store",
+            "domain",
+            emit_writer,
+        )
+        .map_err(context_sql_error)?
+        .with_tables(tables);
         write(&transaction).map_err(context_sql_error)?;
         transaction.commit().map_err(context_sql_error)
     }
+}
+
+fn emit_writer(line: &str) {
+    tracing::info!("{line}");
 }
 
 /// The `context.db` schema the plugin creates, as the module's tests pin it.

@@ -72,14 +72,21 @@ export function registerSlowWriteReporter(reporter: SlowWriteReporter): void {
  */
 type SqliteDiagnosticSink = (message: string) => void;
 let sqliteDiagnosticSink: SqliteDiagnosticSink | undefined;
+let sqliteDiagnosticHost: () => string = () => "unknown";
 
-export function registerSqliteDiagnosticSink(sink: SqliteDiagnosticSink): void {
+export function registerSqliteDiagnosticSink(
+    sink: SqliteDiagnosticSink,
+    host?: () => string,
+): void {
     sqliteDiagnosticSink = sink;
+    if (host) sqliteDiagnosticHost = host;
 }
 
 function reportSqliteDiagnostic(message: string): void {
     try {
-        sqliteDiagnosticSink?.(`[magic-context] ${message}`);
+        sqliteDiagnosticSink?.(
+            `[magic-context] ${message} pid=${process.pid} host=${sqliteDiagnosticHost()}`,
+        );
     } catch {
         // Diagnostics must never change the outcome of the write they describe.
     }
@@ -393,9 +400,18 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
                 // A transaction that ended without passing through exec (for
                 // example an automatic rollback) must not be timed as this one.
                 openWriterTransactions.delete(db);
-                if (transformPassScope.getStore()?.active || backgroundWriterScope.getStore())
+                if (transformPassScope.getStore()?.active || backgroundWriterScope.getStore()) {
                     acquireShort(db, () => nativeExec(sql), sql.trim());
-                else nativeExec(sql);
+                } else {
+                    nativeExec(sql);
+                    openWriterTransactions.set(db, {
+                        site: sql.trim(),
+                        lane: "background",
+                        acquireMs: 0,
+                        attempts: 1,
+                        acquiredAt: performance.now(),
+                    });
+                }
                 return db;
             }
             if (WRITER_TRANSACTION_END.test(sql) && openWriterTransactions.has(db))
@@ -943,7 +959,7 @@ const SHORT_BUSY_TIMEOUT_MS = 25;
 const FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS = 250;
 const FOREGROUND_ACQUISITION_BUDGET_MS = 16_500;
 /** Waiting this long for the writer lock, or holding it this long, is logged. */
-const SLOW_WRITER_LOG_MS = 250;
+const SLOW_WRITER_LOG_MS = 100;
 const WRITER_TRANSACTION_END = /^\s*(?:COMMIT|END|ROLLBACK)(?:\s+TRANSACTION)?\s*;?\s*$/i;
 
 type WriterLane = "foreground" | "background";
@@ -991,25 +1007,33 @@ function foregroundWaitLease() {
 function withAutocommitTimeout<T>(db: Database, operation: () => T): T {
     assertTransformWrite();
     const lease = foregroundWaitLease();
-    if (isInTransaction(db) || (!lease && !backgroundWriterScope.getStore())) return operation();
-    const previous = pragmaNumber(db, "busy_timeout");
-    db.exec(
-        `PRAGMA busy_timeout=${lease ? Math.floor(lease.remainingWaitMs) : SHORT_BUSY_TIMEOUT_MS}`,
-    );
+    if (isInTransaction(db)) return operation();
+    const scoped = lease || backgroundWriterScope.getStore();
+    const previous = scoped ? pragmaNumber(db, "busy_timeout") : null;
+    if (scoped)
+        db.exec(
+            `PRAGMA busy_timeout=${lease ? Math.floor(lease.remainingWaitMs) : SHORT_BUSY_TIMEOUT_MS}`,
+        );
     const started = performance.now();
+    let completed = false;
     try {
-        return operation();
+        const result = operation();
+        completed = true;
+        return result;
     } catch (error) {
         if (lease && isTransientSqliteError(error))
             throw new SqliteAcquisitionBusyError(error, "autocommit");
         throw error;
     } finally {
-        if (lease)
-            lease.remainingWaitMs = Math.max(
-                0,
-                lease.remainingWaitMs - (performance.now() - started),
-            );
+        const elapsed = performance.now() - started;
+        if (lease) lease.remainingWaitMs = Math.max(0, lease.remainingWaitMs - elapsed);
         if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
+        // Native autocommit does not expose the instant its lock was acquired.
+        // Label the upper bound so a waiting statement is not blamed as a holder.
+        if (elapsed >= SLOW_WRITER_LOG_MS)
+            reportSqliteDiagnostic(
+                `sqlite writer site=autocommit lane=${lease ? "foreground" : "background"} elapsed_ms=${Math.round(elapsed)} timing=statement_including_acquisition outcome=${completed ? "completed" : "failed"} caller=${writerCaller()}`,
+            );
     }
 }
 
@@ -1071,20 +1095,18 @@ function acquireShort(db: Database, acquire: () => unknown, site: string): void 
  * `acquireShort`, then report how long the writer waited for the lock
  * (`acquire_ms`) and how long it then held it (`hold_ms`) when either crosses
  * the threshold. A long hold blocks every other process's writer, so it is
- * worth seeing even when the lock itself came quickly. The native end statement's
- * `end_ms` is reported separately, so a slow FTS merge or checkpoint at COMMIT
- * is not mistaken for acquisition time.
+ * worth seeing even when the lock itself came quickly. This interval includes
+ * COMMIT: an automatic PASSIVE checkpoint can run after writer-lock release,
+ * so hold_ms is a conservative upper bound, not proof of continuous ownership.
  */
 function endWriterTransaction(db: Database, end: () => unknown, sql: string): unknown {
     let ended = false;
-    const endStarted = performance.now();
     try {
         const result = end();
         ended = true;
         return result;
     } finally {
         const open = openWriterTransactions.get(db);
-        const endMs = performance.now() - endStarted;
         // A COMMIT that failed with the transaction still open has not ended it.
         if (open && !isInTransaction(db)) {
             openWriterTransactions.delete(db);
@@ -1096,11 +1118,30 @@ function endWriterTransaction(db: Database, end: () => unknown, sql: string): un
                       ? "committed"
                       : "failed";
                 reportSqliteDiagnostic(
-                    `sqlite writer site=${open.site} lane=${open.lane} acquire_ms=${Math.round(open.acquireMs)} hold_ms=${Math.round(holdMs)} end_ms=${Math.round(endMs)} attempts=${open.attempts} outcome=${outcome}`,
+                    `sqlite writer site=${open.site} lane=${open.lane} acquire_ms=${Math.round(open.acquireMs)} hold_ms=${Math.round(holdMs)} attempts=${open.attempts} outcome=${outcome} timing=through_commit_upper_bound caller=${writerCaller()}`,
                 );
             }
         }
     }
+}
+
+// Capture a stack only for slow writes. Synchronous COMMIT retains the writer's
+// caller, so fast transactions need neither stack allocation nor source mapping.
+function writerCaller(): string {
+    return (
+        new Error().stack
+            ?.split("\n")
+            .find(
+                (line) =>
+                    line.includes(" at ") &&
+                    !/[/\\]sqlite\.[tj]s[:)]/.test(line) &&
+                    !/\b(?:writerCaller|endWriterTransaction|withAutocommitTimeout|value)\b/.test(
+                        line,
+                    ),
+            )
+            ?.trim()
+            .replace(/\s+/g, "_") ?? "unknown"
+    );
 }
 
 /** Begin an immediate transaction with bounded asynchronous retries on writer contention.

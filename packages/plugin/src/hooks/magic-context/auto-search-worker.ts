@@ -22,8 +22,9 @@ const [
     { installProjectEmbeddingSearchBridge },
     { searchMessageHistory, unifiedSearch },
     { setEmbeddingSessionBusy },
-    { setHarness },
-    { Database },
+    { getHarness, setHarness },
+    { Database, registerSqliteDiagnosticSink },
+    { log },
 ] = await Promise.all([
     import("../../features/magic-context/memory/embedding-backfill"),
     import("../../features/magic-context/memory/embedding-cache"),
@@ -33,10 +34,12 @@ const [
     import("../../shared/embedding-activity"),
     import("../../shared/harness"),
     import("../../shared/sqlite"),
+    import("../../shared/logger"),
 ]);
 // Workers have their own module globals; session rows must retain their owner's
 // harness identity, and Pi/OMP must never inherit OpenCode-store ownership.
 setHarness(input.harness);
+registerSqliteDiagnosticSink(log, getHarness);
 setEmbeddingSessionBusy(input.sessionId, input.embeddingHostBusy === true);
 let nextId = 0;
 const pending = new Map<number, (reply: AutoSearchEmbeddingReply) => void>();

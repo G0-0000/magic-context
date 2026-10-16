@@ -27,6 +27,7 @@ pub mod move_inventory;
 pub mod private_permissions;
 pub mod single_store_domain;
 pub mod single_store_schema;
+pub mod writer_diagnostics;
 
 pub use single_store_domain::{ContextDomain, SqliteContextDomain};
 
