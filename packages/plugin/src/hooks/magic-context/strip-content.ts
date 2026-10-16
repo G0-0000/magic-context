@@ -989,6 +989,31 @@ export interface StripProcessedImagesResult {
     newlyStrippedIds: string[];
 }
 
+// Remember which empty text parts replaced images, without adding metadata to
+// serialized messages. Message ids and part indices survive message copies made
+// later in the transform. Replaying saved image markers rebuilds this per-pass map.
+const emptyImageParts = new WeakMap<readonly MessageLike[], Map<string, Set<number>>>();
+
+export function getEmptyImageParts(
+    messages: readonly MessageLike[],
+): ReadonlyMap<string, ReadonlySet<number>> {
+    return emptyImageParts.get(messages) ?? new Map();
+}
+
+function imageOmissionBreaksStructure(
+    messages: MessageLike[],
+    index: number,
+    omitted: ReadonlySet<number>,
+): boolean {
+    let before = index - 1;
+    let after = index + 1;
+    while (omitted.has(before)) before--;
+    while (omitted.has(after)) after++;
+    const previous = messages[before];
+    const next = messages[after];
+    return previous !== undefined && next !== undefined && previous.info.role === next.info.role;
+}
+
 /**
  * Remove answered inline images older than content already dropped from the
  * transcript. Tags number transcript content in order; the watermark is the
@@ -998,7 +1023,9 @@ export interface StripProcessedImagesResult {
  * Later passes replay those decisions without consulting the moving age boundary or
  * current provider, so growing history cannot silently change cached bytes.
  *
- * User files keep empty text on Anthropic and use `[image stripped]` elsewhere.
+ * User images prefer empty text on Anthropic and `[image stripped]` elsewhere.
+ * New empty forms retain a non-empty separator if omitting the row would join
+ * same-role neighbors or disturb a tool arc. Historical forms replay unchanged.
  * Tool attachments always put non-empty markers in the result's text output,
  * because the attachment array admits files only and a result must not be empty.
  */
@@ -1026,6 +1053,8 @@ export function stripProcessedImages(
         onFirstApplication?: (message: MessageLike, partIndex: number) => void;
     },
 ): StripProcessedImagesResult {
+    const omissions = new Map<string, Set<number>>();
+    emptyImageParts.set(messages, omissions);
     const { detect, messageTagNumbers } = options;
     const eligibility = createProcessedImageEligibility(messages, messageTagNumbers, options);
     let stripped = 0;
@@ -1102,6 +1131,47 @@ export function stripProcessedImages(
         }
     }
 
+    const imageIndices = new Map<MessageLike, Set<number>>();
+    for (const { message, partIndex, tool } of planned) {
+        if (tool) continue;
+        const indices = imageIndices.get(message) ?? new Set<number>();
+        indices.add(partIndex);
+        imageIndices.set(message, indices);
+    }
+    const emptiedRows = new Set<number>();
+    const newEmptyRows: { index: number; id: string }[] = [];
+    for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
+        if (
+            message.parts.every(
+                (part) => isRecord(part) && part.type === "text" && part.text === "",
+            )
+        )
+            emptiedRows.add(index);
+        const id = message.info.id;
+        const indices = imageIndices.get(message);
+        if (!id || !indices) continue;
+        const marker = options.frozenMarkers?.get(id) ?? newMarkers.get(id) ?? "";
+        // Only an image/text-only user row can disappear. Any tool call or
+        // result keeps the row alive, so image omission cannot delete a pair.
+        if (
+            marker !== "" ||
+            !message.parts.every(
+                (part, partIndex) =>
+                    indices.has(partIndex) ||
+                    (isRecord(part) && part.type === "text" && part.text === ""),
+            )
+        )
+            continue;
+        if (newMarkers.has(id)) newEmptyRows.push({ index, id });
+        else emptiedRows.add(index);
+    }
+    for (const { index, id } of newEmptyRows) {
+        if (imageOmissionBreaksStructure(messages, index, emptiedRows))
+            newMarkers.set(id, "[image stripped]");
+        else emptiedRows.add(index);
+    }
+
     const persisted =
         newlyStrippedIds.length === 0 ||
         options.persistNewIds?.(newlyStrippedIds, newMarkers) !== false;
@@ -1112,7 +1182,8 @@ export function stripProcessedImages(
         const marker = tool
             ? "[image stripped]"
             : (options.frozenMarkers?.get(message.info.id ?? "") ??
-              (firstApplication ? (options.replacementText ?? "") : ""));
+              (firstApplication ? newMarkers.get(message.info.id ?? "") : "") ??
+              "");
         const original = message.parts[partIndex];
         if (
             tool &&
@@ -1138,6 +1209,11 @@ export function stripProcessedImages(
             stripped += count;
         } else {
             message.parts[partIndex] = { ...makeSentinel(original), text: marker };
+            if (marker === "" && message.info.id) {
+                const indices = omissions.get(message.info.id) ?? new Set<number>();
+                indices.add(partIndex);
+                omissions.set(message.info.id, indices);
+            }
             stripped++;
         }
     }

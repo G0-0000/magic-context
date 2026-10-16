@@ -25,11 +25,17 @@ const baseStrip = new Function("isRecord", `${baseJavascript}\nreturn stripProce
     isRecord,
 ) as typeof stripProcessedImages;
 
-test("issue 699 unaffected Anthropic user images are byte-identical to base across randomized sessions", () => {
+test("issue 699 Anthropic differential preserves base bytes except newly frozen structural separators", () => {
     let seed = 699;
     const random = (max: number) => {
         seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
         return seed % max;
+    };
+    const counts = {
+        exactBaseMessages: 0,
+        newSeparators: 0,
+        replayedSeparators: 0,
+        deferPasses: 0,
     };
     for (let scenario = 0; scenario < 300; scenario++) {
         const raw: MessageLike[] = Array.from({ length: 2 + random(30) }, (_, i) =>
@@ -40,6 +46,8 @@ test("issue 699 unaffected Anthropic user images are byte-identical to base acro
             ]),
         );
         const frozen = new Set<string>();
+        const expectedMarkers = new Map<string, "" | "[image stripped]">();
+        const markers = new Map<string, "" | "[image stripped]">();
         for (let pass = 0; pass < 5; pass++) {
             const watermark = random(raw.length);
             const detect = random(2) === 1 && watermark > 0;
@@ -52,17 +60,78 @@ test("issue 699 unaffected Anthropic user images are byte-identical to base acro
                 watermark,
                 messageTagNumbers: tags(old),
             });
+            const expected = structuredClone(old);
+            for (const id of oldResult.newlyStrippedIds) {
+                const index = raw.findIndex((msg) => msg.info.id === id);
+                // Only the generated image-only tail users can disappear here:
+                // all initial rows contain non-empty text. Read their literal
+                // neighbors, without consulting the production omission planner.
+                const separator =
+                    index > 0 &&
+                    raw[index - 1].info.role === "assistant" &&
+                    raw[index + 1]?.info.role === "assistant" &&
+                    raw[index].parts.every((part) => (part as { type: string }).type === "file");
+                expectedMarkers.set(id, separator ? "[image stripped]" : "");
+                if (separator) counts.newSeparators++;
+            }
+            for (const msg of expected) {
+                if (expectedMarkers.get(msg.info.id!) !== "[image stripped]") continue;
+                for (const part of msg.parts) {
+                    const text = part as { type?: string; text?: string };
+                    if (text.type === "text" && text.text === "") text.text = "[image stripped]";
+                }
+                if (!oldResult.newlyStrippedIds.includes(msg.info.id!)) counts.replayedSeparators++;
+            }
+            const beforeMarkers = JSON.stringify([...markers]);
+            let writes = 0;
             const newResult = stripProcessedImages(current, frozen, {
                 detect,
                 watermark,
                 messageTagNumbers: tags(current),
+                frozenMarkers: markers,
+                persistNewIds: (ids, saved) => {
+                    writes++;
+                    for (const id of ids) {
+                        frozen.add(id);
+                        markers.set(id, saved.get(id)!);
+                    }
+                    return true;
+                },
             });
-            expect(JSON.stringify(current)).toBe(JSON.stringify(old));
+            expect(JSON.stringify(current)).toBe(JSON.stringify(expected));
             expect(newResult).toEqual(oldResult);
-            for (const id of oldResult.newlyStrippedIds) frozen.add(id);
+            expect(markers).toEqual(expectedMarkers);
+            for (let index = 0; index < current.length; index++) {
+                if (expectedMarkers.get(current[index].info.id!) === "[image stripped]") continue;
+                expect(JSON.stringify(current[index])).toBe(JSON.stringify(old[index]));
+                counts.exactBaseMessages++;
+            }
+            if (!detect) {
+                counts.deferPasses++;
+                expect(writes).toBe(0);
+                expect(JSON.stringify([...markers])).toBe(beforeMarkers);
+                expect(newResult.newlyStrippedIds).toEqual([]);
+            }
+            const replay = structuredClone(raw);
+            stripProcessedImages(replay, frozen, {
+                detect: false,
+                watermark: 0,
+                messageTagNumbers: new Map(),
+                frozenMarkers: markers,
+                persistNewIds: () => {
+                    throw new Error("defer must only replay saved image forms");
+                },
+            });
+            expect(JSON.stringify(replay)).toBe(JSON.stringify(current));
+            counts.replayedSeparators += [...expectedMarkers.values()].filter(Boolean).length;
             raw.push(message(`tail-${pass}`, pass % 2 ? "user" : "assistant", [image()]));
         }
     }
+    expect(counts.exactBaseMessages).toBeGreaterThan(0);
+    expect(counts.newSeparators).toBeGreaterThan(0);
+    expect(counts.replayedSeparators).toBeGreaterThan(0);
+    expect(counts.deferPasses).toBeGreaterThan(0);
+    console.log(`Anthropic structural differential classes: ${JSON.stringify(counts)}`);
 });
 
 test("issue 699 tool attachments use non-empty markers, retain other files, and replay without an answer", () => {
@@ -187,6 +256,7 @@ test("issue 699 differential classifies unaffected and deliberately changed rand
             recencyWindow: number;
             freshWatermark: number;
             providerMarker: number;
+            structuralFallback: number;
         }
     > = {};
     for (const provider of ["anthropic", "openai"]) {
@@ -197,6 +267,7 @@ test("issue 699 differential classifies unaffected and deliberately changed rand
             recencyWindow: 0,
             freshWatermark: 0,
             providerMarker: 0,
+            structuralFallback: 0,
         });
         for (let scenario = 0; scenario < 300; scenario++) {
             const raw = Array.from({ length: 10 }, (_, i) =>
@@ -265,6 +336,21 @@ test("issue 699 differential classifies unaffected and deliberately changed rand
                 watermark: 0,
                 messageTagNumbers: expectedTags,
             });
+            const legacyExpected = JSON.stringify(expected);
+            if (provider === "anthropic")
+                for (let index = 1; index + 1 < raw.length; index++) {
+                    // This corpus alternates roles and has one image per user.
+                    // A selected image between literal assistant neighbors must
+                    // leave a separator, even when its eligibility matches base.
+                    if (
+                        selected.has(raw[index].info.id!) &&
+                        raw[index - 1].info.role === "assistant" &&
+                        raw[index + 1].info.role === "assistant"
+                    ) {
+                        expected[index].parts = [{ type: "text", text: "[image stripped]" }];
+                        tally.structuralFallback++;
+                    }
+                }
             if (provider !== "anthropic")
                 for (const msg of expected)
                     for (const part of msg.parts) {
@@ -288,6 +374,26 @@ test("issue 699 differential classifies unaffected and deliberately changed rand
             const current = structuredClone(raw);
             const frozen = new Set<string>();
             const markers = new Map<string, "" | "[image stripped]">();
+            const deferred = structuredClone(raw);
+            stripProcessedImages(deferred, frozen, {
+                detect: false,
+                watermark,
+                messageTagNumbers: new Map(
+                    deferred.map((msg) => [msg, tags.get(msg.info.id!) ?? 0]),
+                ),
+                replacementText: provider === "anthropic" ? "" : "[image stripped]",
+                persistNewIds: () => {
+                    throw new Error("defer must not discover a structural fallback");
+                },
+            });
+            expect(JSON.stringify(deferred)).toBe(JSON.stringify(raw));
+            const legacy = structuredClone(raw);
+            stripProcessedImages(legacy, selected, {
+                detect: false,
+                watermark: 0,
+                messageTagNumbers: new Map(),
+            });
+            expect(JSON.stringify(legacy)).toBe(legacyExpected);
             stripProcessedImages(current, frozen, {
                 detect: true,
                 watermark,
@@ -319,6 +425,7 @@ test("issue 699 differential classifies unaffected and deliberately changed rand
         }
         expect(tally.unaffected).toBeGreaterThan(0);
         expect(tally.changed).toBeGreaterThan(0);
+        if (provider === "anthropic") expect(tally.structuralFallback).toBeGreaterThan(0);
     }
     console.log(`processed-image differential classes: ${JSON.stringify(counts)}`);
 });

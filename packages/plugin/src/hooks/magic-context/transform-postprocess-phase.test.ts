@@ -13280,7 +13280,7 @@ describe("issue 699 position-based recent-image retention", () => {
 
 describe("independent image cache safety through both host projections", () => {
     for (const host of ["oc1", "oc2-base64", "oc2-bytes"] as const) {
-        function project(provider: string, signed = false) {
+        function project(provider: string, signed = false, precedingAssistant = false) {
             const file = {
                 type: "file",
                 mime: "image/png",
@@ -13315,6 +13315,11 @@ describe("independent image cache safety through both host projections", () => {
                         parts: [...(signed ? [signature] : []), { type: "text", text: "seen" }],
                     },
                 ];
+                if (precedingAssistant)
+                    messages.unshift({
+                        info: { id: "before-image", role: "assistant" },
+                        parts: [{ type: "text", text: "before" }],
+                    });
                 return { messages, commit: () => {}, bytes: () => JSON.stringify(messages) };
             }
             class NativeAsset {
@@ -13368,6 +13373,12 @@ describe("independent image cache safety through both host projections", () => {
                     },
                 ],
             };
+            if (precedingAssistant)
+                draft.messages.unshift({
+                    id: "before-image",
+                    role: "assistant",
+                    content: [{ type: "text", text: "before" }],
+                });
             return { ...adaptPayload(draft), bytes: () => JSON.stringify(draft.messages) };
         }
 
@@ -13376,8 +13387,9 @@ describe("independent image cache safety through both host projections", () => {
             bust: boolean,
             provider = "openai",
             signed = false,
+            precedingAssistant = false,
         ) {
-            const projected = project(provider, signed);
+            const projected = project(provider, signed, precedingAssistant);
             const before = projected.bytes();
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, projected.messages, {
@@ -13515,14 +13527,31 @@ describe("independent image cache safety through both host projections", () => {
                 expect((await serve(sessionId, false, initialProvider)).bytes()).toBe(bytes);
                 const otherProvider = initialProvider === "openai" ? "anthropic" : "openai";
                 const switched = (await serve(sessionId, false, otherProvider)).bytes();
-                // OpenCode 2 removes empty image markers only on Anthropic, so a
-                // switch to OpenAI restores an empty row. The opt-in parity test in
-                // image-cache-independent-review.test.ts asserts the desired equality
-                // and fails on this difference; this test records the observed bytes.
-                if (host === "oc1" || initialProvider === "openai") expect(switched).toBe(bytes);
-                else expect(switched).not.toBe(bytes);
+                expect(switched).toBe(bytes);
                 expect((await serve(sessionId, false, initialProvider)).bytes()).toBe(bytes);
             }
+        });
+
+        it(`independent ${host}: structural image marker persists across reopen and provider switch`, async () => {
+            const dir = createTestTempDirFromPath(join(tmpdir(), `image-separator-${host}-`));
+            tempDirs.push(dir);
+            const path = join(dir, "separator.sqlite");
+            db = new Database(path);
+            initializeDatabase(db);
+            const sessionId = `image-separator-${host}`;
+            const frozen = await serve(sessionId, true, "anthropic", false, true);
+            expect(frozen.messages[1].parts).toEqual([{ type: "text", text: "[image stripped]" }]);
+            expect(
+                replayStorage.getProcessedImageMarkers(db, sessionId).get("independent-image"),
+            ).toBe("[image stripped]");
+            const bytes = frozen.bytes();
+            db.close();
+            db = new Database(path);
+            expect((await serve(sessionId, false, "anthropic", false, true)).bytes()).toBe(bytes);
+            expect((await serve(sessionId, false, "openai", false, true)).bytes()).toBe(bytes);
+            expect(
+                replayStorage.getProcessedImageMarkers(db, sessionId).get("independent-image"),
+            ).toBe("[image stripped]");
         });
     }
 });

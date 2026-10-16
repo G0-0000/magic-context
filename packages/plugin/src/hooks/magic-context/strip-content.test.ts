@@ -439,7 +439,9 @@ describe("strip-content", () => {
                     expect(user1.parts).toHaveLength(1);
                     expect(user2.parts).toHaveLength(1);
                     expect(user1.parts[0]).toEqual(SENTINEL);
-                    expect(user2.parts[0]).toEqual(SENTINEL);
+                    // This user row separates two assistants. An empty marker
+                    // would disappear on the wire and merge those assistant turns.
+                    expect(user2.parts[0]).toEqual({ type: "text", text: "[image stripped]" });
                 });
 
                 it("#then a DEFER pass (detect=false) does NOT first-strip an aged image, but a frozen id does", () => {

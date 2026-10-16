@@ -246,25 +246,22 @@ for (const kind of ["base64", "bytes"] as const) {
     });
 }
 
-test.skipIf(!process.env.MC_IMAGE_REVIEW_EXPECT_CACHE_PARITY)(
-    "independent witness: OC2 legacy empty image replay has identical bytes across provider switches",
-    () => {
-        const serve = (provider: string) => {
-            const context = draft(provider);
-            const mapped = adaptPayload(context);
-            stripProcessedImages(mapped.messages, new Set(["image"]), {
-                detect: false,
-                watermark: 0,
-                messageTagNumbers: new Map(),
-                replacementText: provider === "anthropic" ? "" : "[image stripped]",
-            });
-            mapped.commit();
-            return JSON.stringify(context.messages);
-        };
-        const anthropic = serve("anthropic");
-        const openai = serve("openai");
-        expect(anthropic).not.toContain('"media"');
-        expect(openai).not.toContain('"media"');
-        expect(openai).toBe(anthropic);
-    },
-);
+test("independent witness: OC2 legacy empty image replay has identical bytes across provider switches", () => {
+    const serve = (provider: string) => {
+        const context = draft(provider);
+        const mapped = adaptPayload(context);
+        stripProcessedImages(mapped.messages, new Set(["image"]), {
+            detect: false,
+            watermark: 0,
+            messageTagNumbers: new Map(),
+            replacementText: provider === "anthropic" ? "" : "[image stripped]",
+        });
+        mapped.commit();
+        return JSON.stringify(context.messages);
+    };
+    const anthropic = serve("anthropic");
+    const openai = serve("openai");
+    expect(anthropic).not.toContain('"media"');
+    expect(openai).not.toContain('"media"');
+    expect(openai).toBe(anthropic);
+});
