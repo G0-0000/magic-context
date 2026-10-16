@@ -31,6 +31,9 @@ test("excluded Pi parts never materialize whole JSON and unchanged parts reuse f
 		expect(
 			serialize.mock.calls.filter(([value]) => value === part),
 		).toHaveLength(0);
+		expect(
+			serialize.mock.calls.filter(([value]) => value === "metadata"),
+		).toHaveLength(1);
 		serialize.mockClear();
 		input.messages[0].content = [part, { type: "text", text: "second" }];
 		const replay = refreshPiTailHygieneBaseline({
