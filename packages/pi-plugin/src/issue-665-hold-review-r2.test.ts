@@ -1,5 +1,5 @@
-// Randomized multi-pass driver for the signed-prefix hold on Pi (issues 665 and
-// 664, second review). Each run drives one session through the real context
+// Randomized multi-pass driver for Pi turns whose signed thinking binds every
+// preceding provider-visible byte. Each run drives the real context
 // handler with a seeded sequence of tool steps, user turns, queued drops,
 // execute crossings, flushes, history refreshes, idle expiry, discarded
 // m[0]/m[1] pairs (first renders), carried tag-identity repairs and restarts.
@@ -8,6 +8,8 @@
 // - a held pass (unfinished signed thinking turn on a prefix-bound model, below
 //   the force band, with nothing that rewrites the prefix anyway) serves the
 //   previous array byte for byte, with only new raw messages after it;
+//   an actually rejected, calibrated over-window replay is exempt only after a
+//   declared, permitted rebuild removes every active-turn signed block;
 // - strict thinking binding: a signed thinking block served on two consecutive
 //   passes must have identical provider-visible bytes before it on both;
 // - no pass is refused for more than one user turn.
@@ -35,11 +37,13 @@ import * as logger from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import {
 	clearContextHandlerSession,
+	__test as contextHandlerInternals,
 	registerPiContextHandler,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 } from "./context-handler";
 import { clearM0M1PiCache } from "./inject-compartments-pi";
+import * as piFit from "./pi-raw-fallback";
 import {
 	queuePiIdentityRebuild,
 	readPiIdentityRebuilds,
@@ -85,6 +89,22 @@ interface PassRecord {
 	wireHash?: string;
 	decision?: string;
 	rawInputBytes?: number;
+	overWindowRebuild?: {
+		tokens: number;
+		limit: number;
+		activeSignedBlocks: number;
+		declaredRebuild: boolean;
+		bustPermitted: boolean;
+		bustedThisPass: boolean;
+		signedPrefixRewritten: boolean;
+	};
+}
+
+interface RejectedReplay {
+	tokens: number;
+	limit: number;
+	calibrated: boolean;
+	replaysPrevious: boolean;
 }
 
 interface Violation {
@@ -169,6 +189,15 @@ function signedPrefixes(messages: readonly unknown[]): Map<string, string> {
 	return out;
 }
 
+function activeTurnSignedBlocks(messages: readonly unknown[]): number {
+	let lastUser = -1;
+	for (let index = 0; index < messages.length; index++) {
+		if ((messages[index] as { role?: string })?.role === "user")
+			lastUser = index;
+	}
+	return signedPrefixes(messages.slice(lastUser + 1)).size;
+}
+
 const PREFIX_BOUND = "claude-opus-5-5";
 const UNBOUND = "claude-sonnet-5";
 const BULK = "BULK const value = compute(input, options); // line\n".repeat(80);
@@ -238,6 +267,15 @@ export async function runPiHoldDriver(options: {
 	let percent = 20;
 	let compartmentEnd = -1;
 	let compartmentSequence = 0;
+	let rejectedReplays: RejectedReplay[] = [];
+	let pipelineProof:
+		| {
+				prefixBustPermitted: boolean;
+				bustedThisPass: boolean;
+				identityRebuilt: boolean;
+				signedPrefixRewritten: boolean;
+		  }
+		| undefined;
 	const assistantExtra = (content: unknown[]) => ({
 		provider: "anthropic",
 		model: modelId,
@@ -327,10 +365,61 @@ export async function runPiHoldDriver(options: {
 			}),
 		};
 		const handler = fake.handlers.get("context")!;
-		const result = (await handler({ messages } as never, ctx as never)) as {
-			messages: unknown[];
-		};
-		return result.messages;
+		rejectedReplays = [];
+		pipelineProof = undefined;
+		const restoreResultObserver =
+			contextHandlerInternals.setPipelineResultObserverForTests(
+				(observedSession, result) => {
+					if (observedSession === sessionId)
+						pipelineProof = {
+							...result,
+							identityRebuilt: result.identityRebuilt === true,
+						};
+				},
+			);
+		const assertFits = piFit.assertPiRawFallbackFits;
+		const fitSpy = spyOn(piFit, "assertPiRawFallbackFits").mockImplementation(
+			(...args) => {
+				try {
+					return assertFits(...args);
+				} catch (error) {
+					const [replayMessages, limit] = args;
+					if (limit !== undefined && Number.isFinite(limit) && limit > 0) {
+						const estimate = piFit.estimatePiOutgoingInputTokens(
+							replayMessages,
+							args[4],
+							args[5],
+							limit,
+						);
+						rejectedReplays.push({
+							tokens: estimate.refusalTokens ?? estimate.tokens,
+							limit,
+							calibrated:
+								estimate.trusted &&
+								estimate.refusalGrade === true &&
+								estimate.refusalBasis === "calibrated",
+							replaysPrevious:
+								previous !== null &&
+								replayMessages.length >= previous.length &&
+								previous.every(
+									(message, index) =>
+										providerKey(message) === providerKey(replayMessages[index]),
+								),
+						});
+					}
+					throw error;
+				}
+			},
+		);
+		try {
+			const result = (await handler({ messages } as never, ctx as never)) as {
+				messages: unknown[];
+			};
+			return result.messages;
+		} finally {
+			fitSpy.mockRestore();
+			restoreResultObserver();
+		}
 	};
 
 	// The cached m[0]/m[1] bytes and the system hash they were folded with.
@@ -490,6 +579,7 @@ export async function runPiHoldDriver(options: {
 		const logStart = options.logCalls?.length ?? 0;
 		let served: unknown[] | null = null;
 		let refused: string | null = null;
+		let overWindowRebuild: PassRecord["overWindowRebuild"];
 		try {
 			served = await serve();
 		} catch (error) {
@@ -517,6 +607,51 @@ export async function runPiHoldDriver(options: {
 			if (held) {
 				for (let index = 0; index < previous.length; index++) {
 					if (providerKey(served[index]) !== providerKey(previous[index])) {
+						const overWindow = rejectedReplays.find(
+							(replay) =>
+								replay.replaysPrevious &&
+								replay.calibrated &&
+								replay.tokens > replay.limit,
+						);
+						const declaredRebuild =
+							pipelineProof?.identityRebuilt === true &&
+							(options.logCalls?.slice(logStart) ?? []).some((call) => {
+								const line = String(call[1]);
+								return (
+									line.startsWith(
+										"Pi held identity rebuild: prior prefix cannot fit",
+									) && line.endsWith("applying the declared rebuild")
+								);
+							});
+						const bustPermitted =
+							pipelineProof?.prefixBustPermitted === true &&
+							pipelineProof.bustedThisPass;
+						if (overWindow && declaredRebuild && bustPermitted) {
+							// The real replay guard must reject a calibrated token count
+							// above the same window; verify the outgoing strip and actual
+							// rebuild permission before allowing any changed prefix.
+							expect(overWindow.limit).toBe(contextWindow);
+							expect(overWindow.tokens).toBeGreaterThan(overWindow.limit);
+							expect(pipelineProof?.signedPrefixRewritten).toBe(true);
+							const activeSignedBlocks = activeTurnSignedBlocks(served);
+							expect(activeSignedBlocks).toBe(0);
+							overWindowRebuild = {
+								tokens: overWindow.tokens,
+								limit: overWindow.limit,
+								activeSignedBlocks,
+								declaredRebuild,
+								bustPermitted,
+								bustedThisPass: pipelineProof?.bustedThisPass === true,
+								signedPrefixRewritten:
+									pipelineProof?.signedPrefixRewritten === true,
+							};
+							if (process.env.R2_REBUILD_EVIDENCE === "1")
+								console.log(
+									"PI_OVER_WINDOW_REBUILD",
+									JSON.stringify({ pass, ...overWindowRebuild }),
+								);
+							break;
+						}
 						if (process.env.R2_DEBUG) {
 							const a = providerKey(previous[index]);
 							const b = providerKey(served[index]);
@@ -533,7 +668,7 @@ export async function runPiHoldDriver(options: {
 						violations.push({
 							pass,
 							kind: "held-prefix-changed",
-							detail: `first changed message ${index} of ${previous.length}`,
+							detail: `first changed message ${index} of ${previous.length}; over-window=${overWindow ? `${overWindow.tokens}/${overWindow.limit}` : "none"} declared=${declaredRebuild} permitted=${bustPermitted}`,
 							events,
 							unavoidable,
 						});
@@ -615,6 +750,7 @@ export async function runPiHoldDriver(options: {
 			held,
 			unavoidable,
 			refused,
+			...(overWindowRebuild ? { overWindowRebuild } : {}),
 			hash: served
 				? createHash("sha256")
 						.update(served.map(providerKey).join("\n"))

@@ -2,17 +2,18 @@ import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
-// The normal seed aged away enough reads to hide this defect. Existing user
-// protection can retain them even with the original age policy: a held pass
-// must still replay the empty history head previously sent to the provider,
-// rather than switching to newer summaries cached in the database.
-test("held-head witness: retained reads cannot replace a held empty history head", () => {
+// Keeping the newest 16 read results makes this session exceed the model window.
+// The changed prefix needs a shared calibrated estimate above that window, no
+// active-turn signed blocks in the output, and actual rebuild permission.
+test("held-head witness: over-window replay requires a stripped, permitted rebuild", () => {
 	const root = resolve(import.meta.dir, "../../..");
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		BUN_JSC_useOMGJIT: "0",
 		R2_SEEDS: "8",
 		R2_PASSES: "69",
+		R2_WINDOW: "100000",
+		R2_REBUILD_EVIDENCE: "1",
 	};
 	delete env.OPENCODE_DB;
 	const result = spawnSync(
@@ -34,4 +35,19 @@ test("held-head witness: retained reads cannot replace a held empty history head
 	);
 	expect(result.stderr).toContain("Pi held driver seed 8:");
 	expect(result.status, result.stdout + result.stderr).toBe(0);
+	const prefix = "PI_OVER_WINDOW_REBUILD ";
+	const evidence = result.stdout
+		.split("\n")
+		.filter((line) => line.startsWith(prefix))
+		.map((line) => JSON.parse(line.slice(prefix.length)));
+	expect(evidence).toHaveLength(1);
+	expect(evidence[0]).toMatchObject({
+		tokens: 100186,
+		limit: 100000,
+		activeSignedBlocks: 0,
+		declaredRebuild: true,
+		bustPermitted: true,
+		bustedThisPass: true,
+		signedPrefixRewritten: true,
+	});
 }, 180000);

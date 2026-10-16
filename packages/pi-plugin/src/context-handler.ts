@@ -565,6 +565,32 @@ let mutationGateObserverForTests:
 	  }) => void)
 	| undefined;
 let lkgRecoveryLogObserverForTests: ((message: string) => void) | undefined;
+let pipelineResultObserverForTests:
+	| ((
+			sessionId: string,
+			result: Readonly<
+				Pick<
+					RunPipelineResult,
+					| "prefixBustPermitted"
+					| "bustedThisPass"
+					| "identityRebuilt"
+					| "signedPrefixRewritten"
+				>
+			>,
+	  ) => void)
+	| undefined;
+
+function observePipelineResultForTests(
+	sessionId: string,
+	result: RunPipelineResult,
+): void {
+	pipelineResultObserverForTests?.(sessionId, {
+		prefixBustPermitted: result.prefixBustPermitted,
+		bustedThisPass: result.bustedThisPass,
+		identityRebuilt: result.identityRebuilt,
+		signedPrefixRewritten: result.signedPrefixRewritten,
+	});
+}
 
 let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 let beforePipelineForTests: (() => Promise<void>) | undefined;
@@ -685,6 +711,15 @@ export const __test = {
 		lkgRecoveryLogObserverForTests = fn;
 		return () => {
 			lkgRecoveryLogObserverForTests = undefined;
+		};
+	},
+	setPipelineResultObserverForTests(
+		fn: typeof pipelineResultObserverForTests,
+	): () => void {
+		const previous = pipelineResultObserverForTests;
+		pipelineResultObserverForTests = fn;
+		return () => {
+			pipelineResultObserverForTests = previous;
 		};
 	},
 };
@@ -5562,6 +5597,7 @@ export function registerPiContextHandler(
 				},
 			};
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
+			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			if (result.identityRebuilt || result.lkgFrozenReleaseReason)
 				schedulerDecision = "execute";
@@ -6278,6 +6314,7 @@ export function registerPiContextHandler(
 							},
 						}),
 					);
+					observePipelineResultForTests(sessionId, result);
 					fitReclaimedThisPass = true;
 					// This input was consumed by the retry; it is no longer pristine.
 					inputForFitReclaim = undefined;
@@ -6488,6 +6525,7 @@ export function registerPiContextHandler(
 									}),
 								);
 								outputMessages = result.messages as PiAgentMessage[];
+								observePipelineResultForTests(sessionId, result);
 								// Reclaim replaces the postprocessed output with a pristine-input
 								// rebuild. Restore the todo pair before stripping and measuring it.
 								injectTodo();
