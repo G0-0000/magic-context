@@ -130,6 +130,142 @@ test("native assistant ambiguous match preserves payload and still refuses", () 
 	expect(admitted(messages[0])).toBe(false);
 });
 
+test("native assistant text replay retains several rewrites in one commit", () => {
+	const raw = fixture();
+	const secondText = "A second cached assistant block.";
+	const secondSignature = JSON.stringify({
+		v: 1,
+		id: "msg_text_second",
+		phase: "final_answer",
+	});
+	const secondItem = structuredClone(raw.providerPayload.items[1]) as {
+		id: string;
+		phase: string;
+		content: { type: string; text: string }[];
+	};
+	secondItem.id = "msg_text_second";
+	secondItem.phase = "final_answer";
+	secondItem.content[0].text = secondText;
+	raw.content.push({
+		type: "text",
+		text: secondText,
+		textSignature: secondSignature,
+	});
+	raw.providerPayload.items.push(secondItem);
+	const messages = [raw];
+	const transcript = createPiTranscript(messages, undefined);
+	const firstEdit = "The first cached block was edited.";
+	const secondEdit = "The second cached block was edited.";
+	transcript.messages[0].parts[0].setText(firstEdit);
+	transcript.messages[0].parts[1].setText(secondEdit);
+	transcript.commit();
+
+	const expected = structuredClone(raw);
+	expected.content[0].text = firstEdit;
+	expected.content[1].text = secondEdit;
+	expected.providerPayload.items[1].content[0].text = firstEdit;
+	expected.providerPayload.items[2].content[0].text = secondEdit;
+	expect(JSON.stringify(messages[0])).toBe(JSON.stringify(expected));
+});
+
+const DIFFERENTIAL_SEEDS = [0x1a2b3c4d, 0x5e6f7081, 0x92a3b4c5] as const;
+const DIFFERENTIAL_HISTORIES_PER_SEED = 2_000;
+
+function differentialAssistant(id: string, text: string) {
+	const message = fixture();
+	message.content[0].text = text;
+	message.content[0].textSignature = JSON.stringify({
+		v: 1,
+		id,
+		phase: "commentary",
+	});
+	const nativeItem = message.providerPayload.items[1] as {
+		id: string;
+		content: { text: string }[];
+	};
+	nativeItem.id = id;
+	nativeItem.content[0].text = text;
+	return message;
+}
+
+test("seeded native assistant differential preserves base bytes for tag-only and untouched history", () => {
+	let setterCalls = 0;
+	for (const seed of DIFFERENTIAL_SEEDS) {
+		let state = seed;
+		const nextRandom = () => {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			return state >>> 0;
+		};
+		for (
+			let historyIndex = 0;
+			historyIndex < DIFFERENTIAL_HISTORIES_PER_SEED;
+			historyIndex++
+		) {
+			const salt = nextRandom().toString(16);
+			const original = `Cached assistant text ${salt}.`;
+			const tag = (nextRandom() % 100) + 1;
+			const entries = [
+				{
+					info: { role: "assistant" },
+					kind: "semantic" as const,
+					text: `Semantically edited ${salt}.`,
+					message: differentialAssistant(
+						`semantic_${seed}_${historyIndex}`,
+						original,
+					),
+				},
+				{
+					info: { role: "assistant" },
+					kind: "tag-only" as const,
+					text: `§${tag}§ ${original}`,
+					message: differentialAssistant(
+						`tag_${seed}_${historyIndex}`,
+						original,
+					),
+				},
+				{
+					info: { role: "assistant" },
+					kind: "untouched" as const,
+					text: original,
+					message: differentialAssistant(
+						`untouched_${seed}_${historyIndex}`,
+						original,
+					),
+				},
+			];
+			const messages = entries.map((entry) => entry.message);
+			// Before native text replay, commit copied transcript text into message.content but
+			// left providerPayload.items unchanged; this clone models those original native bytes.
+			const baseOutput = structuredClone(messages);
+			const transcript = createPiTranscript(messages, undefined);
+			for (let index = 0; index < entries.length; index++) {
+				const message = entries[index];
+				if (message.info.role !== "assistant" || message.kind === "untouched")
+					continue;
+				transcript.messages[index].parts[0].setText(message.text);
+				setterCalls++;
+				(baseOutput[index] as typeof message.message).content[0].text =
+					message.text;
+			}
+			transcript.commit();
+
+			for (let index = 0; index < entries.length; index++) {
+				if (entries[index].kind !== "semantic")
+					expect(JSON.stringify(messages[index])).toBe(
+						JSON.stringify(baseOutput[index]),
+					);
+			}
+			const semanticItem = messages[0].providerPayload.items[1] as {
+				content: { text: string }[];
+			};
+			expect(semanticItem.content[0].text).toBe(entries[0].text);
+		}
+	}
+	expect(setterCalls).toBeGreaterThan(0);
+});
+
 for (const kind of [
 	"missing-signature",
 	"wrong-phase",
