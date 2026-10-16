@@ -212,7 +212,8 @@ test("Pi watermark persistence under a second writer uses the bounded pass timeo
 			),
 		).toThrow("busy");
 		const elapsed = performance.now() - start;
-		expect(elapsed).toBeLessThan(1000);
+		expect(elapsed).toBeGreaterThanOrEqual(1900);
+		expect(elapsed).toBeLessThan(2600);
 		expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
 		expect(
 			getOrCreateSessionMeta(db, "locked-fixture").clearedReasoningThroughTag,

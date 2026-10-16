@@ -940,7 +940,7 @@ export class SqliteAcquisitionBusyError extends Error {
 }
 
 const SHORT_BUSY_TIMEOUT_MS = 25;
-const FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS = 250;
+const FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS = 2_000;
 const FOREGROUND_ACQUISITION_BUDGET_MS = 16_500;
 /** Waiting this long for the writer lock, or holding it this long, is logged. */
 const SLOW_WRITER_LOG_MS = 250;
@@ -994,7 +994,7 @@ function withAutocommitTimeout<T>(db: Database, operation: () => T): T {
     if (isInTransaction(db) || (!lease && !backgroundWriterScope.getStore())) return operation();
     const previous = pragmaNumber(db, "busy_timeout");
     db.exec(
-        `PRAGMA busy_timeout=${lease ? Math.floor(lease.remainingWaitMs) : SHORT_BUSY_TIMEOUT_MS}`,
+        `PRAGMA busy_timeout=${lease ? Math.floor(Math.min(lease.remainingWaitMs, lease.guard?.remainingMs() ?? Infinity)) : SHORT_BUSY_TIMEOUT_MS}`,
     );
     const started = performance.now();
     try {
