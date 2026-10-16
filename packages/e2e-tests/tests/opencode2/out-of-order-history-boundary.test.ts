@@ -97,6 +97,9 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
                 const moved = rows(store, session.id);
                 expect(moved.filter((row) => row.type === "location-switched")).toHaveLength(1);
                 expect(moved.filter((row) => before.some((old) => old.id === row.id))).toEqual(before);
+                // A real instruction change after the covered boundary is rendered
+                // by the host as an ID-less system row in the next live window.
+                writeFileSync(join(destination, "AGENTS.md"), "UNSUMMARIZED-MOVED-INSTRUCTION: never publish the private signing key.\n");
             }
             await host.stopHost();
             if (operation === "offline row deletion") {
@@ -121,6 +124,7 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
             client = clientFor();
             const sizes: number[] = [];
             const heads: string[] = [];
+            const instructions: string[] = [];
             for (let pass = 0; pass < 3; pass++) {
                 const marker = `retained-tail-${operation}-${pass}`;
                 const start = mock.requests().length;
@@ -131,8 +135,24 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
                 expect(sizes.at(-1)).toBeLessThan(SMALL_WINDOW);
                 expect(JSON.stringify(sent[0]!.body)).not.toContain("COVERED-0");
                 heads.push(JSON.stringify((sent[0]!.body.input as unknown[]).slice(0, 2)));
+                if (operation === "session_move") {
+                    const updates = (sent[0]!.body.input as unknown[]).map((item) => JSON.stringify(item))
+                        .filter((item) => item.includes("UNSUMMARIZED-MOVED-INSTRUCTION"));
+                    expect(updates).toHaveLength(1);
+                    instructions.push(updates[0]!);
+                }
             }
             expect(new Set(heads).size).toBe(1);
+            if (operation === "session_move") {
+                expect(new Set(instructions).size).toBe(1);
+                const db = new Database(store, { readonly: true });
+                try {
+                    const updates = db.prepare("SELECT seq FROM session_message WHERE session_id=? AND type='system' AND data LIKE ?")
+                        .all(session.id, "%UNSUMMARIZED-MOVED-INSTRUCTION%") as { seq: number }[];
+                    expect(updates).toHaveLength(1);
+                    expect(updates[0]!.seq).toBeGreaterThan(boundary.seq);
+                } finally { db.close(); }
+            }
             expect(oversized).toEqual([]);
             const windows = readFileSync(join(fixture.root, "windows.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
             expect(windows.some((window) => window.index > 0)).toBe(true);

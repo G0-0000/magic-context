@@ -1040,12 +1040,13 @@ describe("prepared prefix source-order trimming", () => {
         expect(result.prefixTrimStatus).toBe("applied");
         expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
             "new prefix",
+            "covered instruction",
             "instruction row",
             "after",
         ]);
     });
 
-    it("orders id-less host system messages by their persisted neighbours", () => {
+    it("retains id-less host instructions even before a visible boundary", () => {
         db = makeDb();
         const source = [
             message("covered", "user"),
@@ -1072,6 +1073,7 @@ describe("prepared prefix source-order trimming", () => {
         expect(result.prefixTrimStatus).toBe("applied");
         expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
             "new prefix",
+            "covered instruction",
             "instruction row",
             "after",
         ]);
