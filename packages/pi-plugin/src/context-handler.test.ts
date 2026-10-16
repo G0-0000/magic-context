@@ -3875,7 +3875,7 @@ describe("registerPiContextHandler", () => {
 		});
 	});
 
-	it("gates new stale ctx_reduce strips by provider but replays already-stripped tags", async () => {
+	it("cleans stale ctx_reduce arcs across providers and replays already-stripped tags", async () => {
 		const buildMessages = () =>
 			[
 				userMessage("older request", 1),
@@ -4007,9 +4007,11 @@ describe("registerPiContextHandler", () => {
 			}
 		}
 
+		// Stale ctx_reduce cleanup removes call/result pairs or writes non-empty
+		// markers; whether a provider accepts empty text must not restrict it.
 		await expect(runProviderScenario("openai")).resolves.toEqual({
-			reduceStatus: "active",
-			replayedToolResult: "§3§ reduced old tags",
+			reduceStatus: "dropped",
+			replayedToolResult: "",
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",

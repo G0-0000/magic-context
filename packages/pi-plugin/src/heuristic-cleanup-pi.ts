@@ -10,10 +10,9 @@
  *     as parts of type `"toolCall"` with `{ id, name, arguments }`.
  *     OpenCode's `extractToolInfo` checks `"tool" | "tool_use" |
  *     "tool-invocation"` shapes that don't exist in Pi.
- *   - Stale `ctx_reduce` removal also walks Pi shape directly. New discovery is
- *     gated to providers that can safely drop empty sentinels; Pi persists
- *     `tags.status='dropped'` and lets `applyFlushedStatuses` replay existing
- *     drops on every provider, which is the cache-stable mechanism Pi already uses.
+ *   - Stale `ctx_reduce` removal also walks Pi shape directly. Only after the
+ *     caller permits a prefix rewrite, it records removal or a non-empty result
+ *     skeleton. The saved representation replays on every provider.
  *
  *   - Everything else (tiered emergency reclaim, strip system injections from
  *     message tags, age-tier caveman compression) is tag-driven and

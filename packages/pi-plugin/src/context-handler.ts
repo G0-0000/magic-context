@@ -9746,7 +9746,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						? protectionWindowForPass.cutoff
 						: undefined,
 					routine: routineCleanupApplied,
-					staleReduceStripEnabled: args.canUseEmptySentinels,
+					staleReduceStripEnabled: true,
 					onStaleReduceEdit: recordStaleReduceEdit,
 					// Tiered emergency drop fires only at the derived force band AND when the
 					// ceiling is known. forceMaterialization already incorporates
@@ -9783,7 +9783,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							? protectionWindowForPass.cutoff
 							: undefined,
 						routine: true,
-						staleReduceStripEnabled: args.canUseEmptySentinels,
+						staleReduceStripEnabled: true,
 						onStaleReduceEdit: recordStaleReduceEdit,
 						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
 					},
@@ -10119,13 +10119,47 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	{
 		const tProcessedImages = performance.now();
 		try {
+			const imagePositionTags = new Map(messageIdToMaxTag);
+			for (const [tagNumber, target] of targets) {
+				for (const { message } of target.mutationParts ?? []) {
+					const id = message.info.id;
+					if (id && tagNumber > (imagePositionTags.get(id) ?? 0))
+						imagePositionTags.set(id, tagNumber);
+					// The adapter represents tool results as synthetic user rows.
+					// Copy each row's tag to its original Pi message for image age checks.
+					if (id?.startsWith("synth-user-")) {
+						const nativeId = id.slice("synth-user-".length);
+						if (tagNumber > (imagePositionTags.get(nativeId) ?? 0))
+							imagePositionTags.set(nativeId, tagNumber);
+					}
+				}
+			}
+			const protectedImageToolKeys = new Set(
+				activeTags
+					.filter(
+						(tag) =>
+							tag.type === "tool" && protectedToolTags.has(tag.tagNumber),
+					)
+					.map((tag) =>
+						tag.toolOwnerMessageId
+							? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
+							: tag.messageId,
+					),
+			);
 			const imageResult = stripPiProcessedImages({
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
 				detect: isCacheBustingPass && !protectedSignedPrefix,
 				watermark: getMaxDroppedTagNumber(args.db, args.sessionId),
-				messageIdToMaxTag,
+				messageIdToMaxTag: imagePositionTags,
+				protectedCutoff: usesTokenProtection
+					? protectionWindowForPass.cutoff
+					: protectedTagNumbersForPass.size > 0
+						? Math.min(...protectedTagNumbersForPass)
+						: null,
+				usagePercentage: args.contextUsage.percentage,
+				protectedToolKeys: protectedImageToolKeys,
 				stableId: stableIdResolver,
 				onFirstApplication: recordFirstApplicationAt,
 			});

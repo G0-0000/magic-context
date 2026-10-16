@@ -31,6 +31,10 @@ const image = () => ({
 	data: "a".repeat(240),
 });
 const marker = { type: "text", text: "[image stripped]" };
+const protectionPayload = Array.from(
+	{ length: 3000 },
+	(_, i) => `token_${i} `,
+).join("");
 
 function fixture(api = "openai-completions") {
 	const db = createTestDb();
@@ -39,7 +43,7 @@ function fixture(api = "openai-completions") {
 	registerPiContextHandler(fake.pi as never, {
 		db,
 		protectedTags: 0,
-		protectedTokens: 0,
+		protectedTokens: 4000,
 		heuristics: { clearReasoningAge: 999 },
 	});
 	const handler = fake.handlers.get("context") as (
@@ -57,6 +61,16 @@ function fixture(api = "openai-completions") {
 		assistantMessage("answered images", 4),
 		userMessage([{ type: "text", text: "newer screenshot" }, image()], 5),
 		assistantMessage("answered newer image", 6),
+		// Later tool inputs and results move old images outside the protected token window.
+		...Array.from({ length: 3 }, (_, i) => [
+			assistantToolCall(
+				`later-${i}`,
+				"screenshot",
+				{ page: i, payload: protectionPayload },
+				10 + i * 2,
+			),
+			toolResultMessage(`later-${i}`, protectionPayload, 11 + i * 2),
+		]).flat(),
 		userMessage([image()], 7),
 	];
 	return {
@@ -137,7 +151,14 @@ describe("Pi processed-image provider wiring", () => {
 					marker,
 					marker,
 				]);
+				expect(f.strip.mock.calls[0]?.[0].protectedCutoff).toBeGreaterThan(2);
+				expect(
+					f.strip.mock.calls[0]?.[0].messageIdToMaxTag.get("entry-2"),
+				).toBe(2);
 				expect(contentOf(rewritten, 3)).toEqual([marker]);
+				expect(
+					f.strip.mock.calls[0]?.[0].messageIdToMaxTag.get("entry-2"),
+				).toBe(2);
 				expect(latestDetection(f)).toBe(true);
 				expect(contentOf(rewritten, 5)).toContainEqual(image());
 				expect(contentOf(rewritten, 7)).toEqual([image()]);
@@ -174,6 +195,9 @@ describe("Pi processed-image provider wiring", () => {
 				[3, "§3§ answered images"],
 				[4, "§4§ newer screenshot"],
 				[5, "§5§ answered newer image"],
+				[7, `§6§ ${protectionPayload}`],
+				[9, `§7§ ${protectionPayload}`],
+				[11, `§8§ ${protectionPayload}`],
 			] as const) {
 				const parts = baseRequest[index]?.content;
 				if (!Array.isArray(parts)) throw new Error("expected content parts");
