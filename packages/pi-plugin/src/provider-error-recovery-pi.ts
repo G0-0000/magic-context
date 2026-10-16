@@ -14,6 +14,7 @@ import {
 	THINKING_BINDING_STRIP_ORDER_END_MARKER,
 	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import { latestAssistantTurnMessages } from "@magic-context/core/hooks/magic-context/latest-assistant-turn";
 import {
 	armBindingRecoverySafely,
@@ -198,14 +199,25 @@ export interface PiThinkingBindingApplication {
 	entryIds: string[];
 }
 
+export class PiThinkingBindingRecoveryRefusal extends EmergencyFailClosedError {
+	constructor() {
+		super(
+			"Pi thinking-binding recovery has no valid new strip shape; this turn was not sent. Send a new message or start a new session.",
+			{ code: "pi_thinking_binding_no_valid_shape" },
+		);
+		this.name = "PiThinkingBindingRecoveryRefusal";
+	}
+}
+
 /**
  * Apply an armed thinking-binding recovery and replay earlier ones.
  *
- * An armed flag freezes completed assistant entries that still carry thinking.
- * The entire active assistant turn is excluded across tool results: its signed
- * blocks must stay exactly as returned. The frozen set is persisted before
- * bytes change and replays on every later pass, so a removed block never comes
- * back; thinking in the current tool loop stays until a real user turn ends it.
+ * An armed flag strips every signed block, including the active assistant turn:
+ * keeping a later signature after removing older thinking invalidates its prefix.
+ * The frozen set is persisted before bytes change and replays on later passes.
+ * Once that shape has been rejected there is nothing left to strip; refuse rather
+ * than send the same rejected request again. A separate latest-thinking recovery
+ * handles providers that require the original thinking in a live tool loop.
  */
 export function applyPiThinkingBindingRecovery(args: {
 	db: ContextDatabase;
@@ -239,14 +251,14 @@ export function applyPiThinkingBindingRecovery(args: {
 	if (flagTarget) {
 		const entryIds = new Set<string>();
 		for (let index = 0; index < args.messages.length; index += 1) {
-			if (protectedMessages.has(args.messages[index])) continue;
+			if (!hasThinkingPart(args.messages[index])) continue;
 			const entryId = args.entryIds[index];
-			if (entryId && hasThinkingPart(args.messages[index]))
-				entryIds.add(entryId);
+			if (!entryId) throw new PiThinkingBindingRecoveryRefusal();
+			entryIds.add(entryId);
 		}
 		const newEntryIds = [...entryIds].filter((id) => !frozenEntryIds.has(id));
+		if (newEntryIds.length === 0) throw new PiThinkingBindingRecoveryRefusal();
 		if (
-			newEntryIds.length === 0 ||
 			addMergedReasoningStrippedIds(args.db, args.sessionId, [
 				...newEntryIds.map(thinkingBindingRecoveryFrozenId),
 				...(args.endOfPassOrder
@@ -261,7 +273,7 @@ export function applyPiThinkingBindingRecovery(args: {
 				args.report,
 				`thinking-binding recovery consumed on context pass target=${flagTarget} entries=${applied.entryIds.length} [${applied.entryIds.join(",")}]`,
 			);
-		}
+		} else throw new PiThinkingBindingRecoveryRefusal();
 	}
 
 	// A provider rejection of this turn asks for its original thinking back.

@@ -138,7 +138,10 @@ for (const active of [false, true]) {
 				expect(
 					handlePiProviderFailure({ db, sessionId, message: bindingError }),
 				).toEqual({ kind: "thinking_binding", armed: true });
-				expect(await pass()).toEqual(retry);
+				await expect(pass()).rejects.toMatchObject({
+					name: "PiThinkingBindingRecoveryRefusal",
+					code: "pi_thinking_binding_no_valid_shape",
+				});
 			}
 			// Removing an older block changes the bytes bound by every later signature.
 			if (active && JSON.stringify(retry).includes("active bound thought")) {

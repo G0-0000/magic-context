@@ -8413,13 +8413,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		((!!args.recoveryRebuildReason || args.forceSignedRebuildForFit === true) &&
 			hasUnfrozenPiThinking({
 				messages: args.messages,
-				entryIds: args.messages.map((message, index) =>
-					resolvePiStableId(
-						message,
-						index,
-						args.entryIds,
-						args.entryIdByRef ?? undefined,
-					),
+				entryIds: args.messages.map(
+					(message, index) =>
+						args.lkgEntryIds?.[index] ??
+						resolvePiRealStableId(
+							message,
+							index,
+							args.entryIds,
+							args.entryIdByRef ?? undefined,
+						),
 				),
 				frozen: frozenBindingEntryIds(args.db, args.sessionId),
 				provider: args.resolvedProviderID,
@@ -8436,13 +8438,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			db: args.db,
 			sessionId: args.sessionId,
 			messages: messages as unknown[],
-			entryIds: messages.map((message, index) =>
-				resolvePiStableId(
-					message,
-					index,
-					args.entryIds,
-					args.entryIdByRef ?? undefined,
-				),
+			entryIds: messages.map(
+				(message, index) =>
+					args.lkgEntryIds?.[index] ??
+					resolvePiRealStableId(
+						message,
+						index,
+						args.entryIds,
+						args.entryIdByRef ?? undefined,
+					),
 			),
 			provider: args.resolvedProviderID,
 			model: args.resolvedModelID,
