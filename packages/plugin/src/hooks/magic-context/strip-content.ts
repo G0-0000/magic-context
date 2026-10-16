@@ -1151,13 +1151,18 @@ function isProcessedImagePart(part: unknown): boolean {
     // class identity, while stripped parts become ordinary text content.
     if (isRecord(part) && part.type === "media" && isRecord(part.media)) {
         const { source, mediaType } = part.media;
+        const inlineLength = isRecord(source)
+            ? source.type === "base64" && typeof source.data === "string"
+                ? source.data.length
+                : source.type === "bytes" && source.data instanceof Uint8Array
+                  ? Math.ceil(source.data.byteLength / 3) * 4
+                  : 0
+            : 0;
         return (
             typeof mediaType === "string" &&
             mediaType.startsWith("image/") &&
-            isRecord(source) &&
-            source.type === "base64" &&
-            typeof source.data === "string" &&
-            source.data.length + `data:${mediaType};base64,`.length > 200
+            inlineLength > 0 &&
+            inlineLength + `data:${mediaType};base64,`.length > 200
         );
     }
     return (

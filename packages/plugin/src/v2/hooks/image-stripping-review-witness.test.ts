@@ -123,3 +123,34 @@ test("native v2 image replay keeps marker bytes and unstripped host assets intac
     expect(JSON.stringify(replay)).toBe(JSON.stringify(first));
     expect(large.source.data).toBe(DATA);
 });
+
+test("native v2 inline byte assets strip without cloning surviving host assets", () => {
+    class HostAsset {
+        readonly mediaType = "image/png";
+        constructor(readonly source: { type: "bytes"; data: Uint8Array }) {}
+    }
+    const large = new HostAsset({ type: "bytes", data: new Uint8Array(300) });
+    const tiny = new HostAsset({ type: "bytes", data: new Uint8Array(1) });
+    const image: MessageLike = {
+        info: { id: "byte-image", role: "user" },
+        parts: [large, tiny].map((media) => ({ type: "media", media })),
+    };
+    const result = stripProcessedImages(
+        [
+            image,
+            { info: { id: "answer", role: "assistant" }, parts: [{ type: "text", text: "seen" }] },
+        ],
+        new Set(),
+        {
+            detect: true,
+            watermark: 1,
+            messageTagNumbers: new Map([[image, 1]]),
+            replacementText: "[image stripped]",
+            persistNewIds: () => true,
+        },
+    );
+    expect(result.stripped).toBe(1);
+    expect(image.parts[0]).toEqual({ type: "text", text: "[image stripped]" });
+    expect((image.parts[1] as { media: unknown }).media).toBe(tiny);
+    expect(large.source.data).toHaveLength(300);
+});
