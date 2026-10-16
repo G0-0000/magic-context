@@ -49,11 +49,14 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import {
+    appendAutoSearchHintDecision,
     getEmergencyInputSample,
+    getNoteNudgeAnchors,
     type getPersistedCompactionMarkerState,
     setEmergencyDropSample,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { addNote } from "../../features/magic-context/storage-notes";
 import { createTagger } from "../../features/magic-context/tagger";
 import { recordToolDefinition } from "../../features/magic-context/tool-definition-tokens";
 import {
@@ -72,6 +75,7 @@ import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compart
 import { createToolExecuteAfterHook } from "./hook-handlers";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
+import { onNoteTrigger } from "./note-nudger";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { clearMessageTokensCache, createTransform } from "./transform";
 
@@ -5575,3 +5579,268 @@ for (const trigger of ["wall", "final fit"] as const)
             }
         }, 30_000);
     }
+
+describe("sticky nudge request-byte stability", () => {
+    async function fixture(sessionId: string) {
+        useTempDataHome(`sticky-bytes-${sessionId}-`);
+        const db = openDatabase()!;
+        getOrCreateSessionMeta(db, sessionId);
+        const usage = new Map<
+            string,
+            { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }
+        >();
+        const directory = makeTempDir("sticky-bytes-project-");
+        const pendingMaterializationSessions = new Set<string>();
+        const transform = createTransform({
+            db,
+            directory,
+            memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
+            tagger: createTagger(),
+            scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "claude-opus-5-5" }],
+            ]),
+            contextUsageMap: usage,
+            clearReasoningAge: 1000,
+            protectedTokens: 0,
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId: new Map(),
+        });
+        const raw: TestMessage[] = [
+            {
+                info: { id: "warm-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "Warm the cached prefix" }],
+            },
+        ];
+        const serve = async () => {
+            const messages = structuredClone(raw);
+            await transform({}, { messages });
+            return messages;
+        };
+        await serve();
+        const anchor = "turn-user";
+        raw.push({
+            info: { id: anchor, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "Continue the long task" }],
+        });
+        const hint = "\n\n<ctx-search-hint>saved related fragments</ctx-search-hint>";
+        const saveHint = () =>
+            appendAutoSearchHintDecision(db, sessionId, {
+                messageId: anchor,
+                decision: "hint",
+                text: hint,
+            });
+        const trigger = () => {
+            addNote(db, "session", { sessionId, content: "Resume deferred phone work" });
+            onNoteTrigger(db, sessionId, "historian_complete");
+        };
+        const force = (percentage = 85.2, inputTokens = 742989) =>
+            usage.set(sessionId, {
+                usage: { percentage, inputTokens },
+                updatedAt: Date.now(),
+                hasUsageTokens: true,
+            });
+        return {
+            db,
+            raw,
+            anchor,
+            serve,
+            saveHint,
+            trigger,
+            force,
+            directory,
+            pendingMaterializationSessions,
+        };
+    }
+
+    it("force pass with 224 thinking-held drops cannot first-append a nudge 150 steps back", async () => {
+        const f = await fixture("held-nudge-prefix");
+        const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        try {
+            f.saveHint();
+            await f.serve();
+            for (let n = 0; n < 150; n++) {
+                f.raw.push({
+                    info: {
+                        id: `loop-${n}`,
+                        role: "assistant",
+                        sessionID: "held-nudge-prefix",
+                        providerID: "anthropic",
+                        modelID: "claude-opus-5-5",
+                    },
+                    parts: [
+                        {
+                            type: "reasoning",
+                            text: `signed thinking ${n}`,
+                            ...{ metadata: { anthropic: { signature: `signature-${n}` } } },
+                        },
+                        ...Array.from({ length: n < 74 ? 2 : 1 }, (_, k) => ({
+                            type: "text" as const,
+                            text: `distinct output ${n}-${k}`,
+                        })),
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: `call-${n}`,
+                            state: { status: "completed", output: `result ${n}` },
+                        },
+                    ],
+                });
+            }
+            const baseline = await f.serve();
+            const tools = getTagsBySession(f.db, "held-nudge-prefix").filter(
+                (t) => t.type === "message" && t.messageId.startsWith("loop-"),
+            );
+            expect(tools).toHaveLength(224);
+            for (const tag of tools)
+                queuePendingOp(f.db, "held-nudge-prefix", tag.tagNumber, "drop");
+            for (let note = 0; note < 12; note++)
+                addNote(f.db, "session", {
+                    sessionId: "held-nudge-prefix",
+                    content: `Other deferred item ${note}`,
+                });
+            f.trigger();
+            f.force();
+            const first = await f.serve();
+            f.force(78.6, 685633);
+            const second = await f.serve();
+            expect(getPendingOps(f.db, "held-nudge-prefix")).toHaveLength(224);
+            expect(
+                logs.mock.calls.some((call) => String(call[1]).includes("active_thinking:224")),
+            ).toBe(true);
+            expect(first.find((m) => m.info.id === f.anchor)).toEqual(
+                baseline.find((m) => m.info.id === f.anchor),
+            );
+            expect(JSON.stringify(first)).toBe(JSON.stringify(baseline));
+            expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+            expect(getNoteNudgeAnchors(f.db, "held-nudge-prefix")).toHaveLength(0);
+        } finally {
+            logs.mockRestore();
+            closeQuietly(f.db);
+        }
+    });
+
+    it("first delivery and replay share one order when a hint already occupies the anchor", async () => {
+        const f = await fixture("same-anchor-order");
+        try {
+            f.saveHint();
+            f.trigger();
+            const first = await f.serve();
+            expect(JSON.stringify(first)).toContain("deferred_notes");
+            expect(JSON.stringify(first)).toContain("ctx-search-hint");
+            expect(JSON.stringify(await f.serve())).toBe(JSON.stringify(first));
+        } finally {
+            closeQuietly(f.db);
+        }
+    });
+
+    it("an empty force opportunity cannot rewrite an older user even without signed thinking", async () => {
+        const f = await fixture("empty-force-note");
+        try {
+            f.saveHint();
+            f.raw.push({
+                info: { id: "unsigned-step", role: "assistant", sessionID: "empty-force-note" },
+                parts: [{ type: "text", text: "Still working" }],
+            });
+            const baseline = await f.serve();
+            f.trigger();
+            f.force();
+            expect(JSON.stringify(await f.serve())).toBe(JSON.stringify(baseline));
+            expect(JSON.stringify(await f.serve())).toBe(JSON.stringify(baseline));
+            expect(getNoteNudgeAnchors(f.db, "empty-force-note")).toHaveLength(0);
+        } finally {
+            closeQuietly(f.db);
+        }
+    });
+
+    it("an actual head rewrite can carry a late nudge on an already-served anchor", async () => {
+        const f = await fixture("rewritten-head-note");
+        try {
+            f.saveHint();
+            const baseline = await f.serve();
+            f.trigger();
+            replaceAllCompartments(f.db, "rewritten-head-note", [
+                {
+                    sequence: 0,
+                    startMessage: 0,
+                    endMessage: 0,
+                    startMessageId: "",
+                    endMessageId: "",
+                    title: "Published history",
+                    content: "Newly published context",
+                },
+            ]);
+            insertMemory(f.db, {
+                projectPath: resolveProjectIdentity(f.directory),
+                category: "USER_DIRECTIVES",
+                content: "Distinct newly published project directive",
+            });
+            updateSessionMeta(f.db, "rewritten-head-note", {
+                lastResponseTime: Date.now() - 2 * 60 * 60 * 1000,
+                cacheTtl: "5m",
+            });
+            f.pendingMaterializationSessions.add("rewritten-head-note");
+            f.force();
+            const rewritten = await f.serve();
+            expect(JSON.stringify(rewritten[0])).toContain(
+                "Distinct newly published project directive",
+            );
+            expect(rewritten[0]).not.toEqual(baseline[0]);
+            expect(JSON.stringify(rewritten.find((m) => m.info.id === f.anchor))).toContain(
+                "deferred_notes",
+            );
+            expect(JSON.stringify(await f.serve())).toBe(JSON.stringify(rewritten));
+        } finally {
+            closeQuietly(f.db);
+        }
+    });
+
+    it("seeded differential keeps repeated nudge and hint requests byte-identical", async () => {
+        let seed = 0x5eed;
+        const next = () => {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            return seed >>> 8;
+        };
+        for (let sample = 0; sample < 12; sample++) {
+            const f = await fixture(`random-sticky-${sample}`);
+            try {
+                if (next() % 3 !== 0) f.saveHint();
+                else
+                    appendAutoSearchHintDecision(f.db, `random-sticky-${sample}`, {
+                        messageId: f.anchor,
+                        decision: "no-hint",
+                        reason: "below-threshold",
+                    });
+                f.trigger();
+                const first = await f.serve();
+                expect(JSON.stringify(first)).toContain("deferred_notes");
+                const steps = 1 + (next() % 8);
+                for (let n = 0; n < steps; n++)
+                    f.raw.push({
+                        info: {
+                            id: `random-${n}`,
+                            role: "assistant",
+                            sessionID: `random-sticky-${sample}`,
+                            providerID: "anthropic",
+                            modelID: "claude-opus-5-5",
+                        },
+                        parts: [
+                            { type: "reasoning", text: `signed ${next()}` },
+                            { type: "text", text: `step ${next()}` },
+                        ],
+                    });
+                if (next() % 2) f.force();
+                const grown = await f.serve();
+                expect(grown.find((m) => m.info.id === f.anchor)).toEqual(
+                    first.find((m) => m.info.id === f.anchor),
+                );
+                for (let replay = 0; replay < 3; replay++) {
+                    expect(JSON.stringify(await f.serve())).toBe(JSON.stringify(grown));
+                }
+            } finally {
+                closeQuietly(f.db);
+            }
+        }
+    }, 30000);
+});

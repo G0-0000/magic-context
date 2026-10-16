@@ -790,6 +790,9 @@ describe("note nudge first-serve fence", () => {
         makeNoteDb();
         const sessionId = "synapse-rebuild-note";
         getOrCreateSessionMeta(db, sessionId);
+        // Serve the old user and assistant first, so the observer can prove the
+        // later channel notice is an unserved user message at the tail.
+        await runPostTransformPhase(basePostTransformArgs(db, sessionId, source().slice(0, 2)));
         addNote(db, "session", { sessionId, content: "Check deferred work" });
         noteNudger.onNoteTrigger(db, sessionId, "historian_complete");
         // The raw meaningful-user resolver skipped the newest channel notice.
@@ -849,8 +852,13 @@ describe("note nudge first-serve fence", () => {
         const path = join(root, "context.db");
         makeNoteDb(path);
         const sessionId = "note-restart";
-        const pass = async (bust = false) => {
+        const pass = async (bust = false, fresh = false) => {
             const messages = source();
+            if (fresh)
+                messages.push({
+                    info: { id: "after-restart", role: "user" },
+                    parts: [{ type: "text", text: "Next task" }],
+                } as MessageLike);
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     currentTurnId: newestId,
@@ -869,20 +877,28 @@ describe("note nudge first-serve fence", () => {
             expect(await pass()).toEqual(served);
             expect(await pass()).toEqual(served);
             expect(getNoteNudgeAnchors(db, sessionId)).toEqual([]);
-            const hard = await pass(true);
-            expect(JSON.stringify(hard[2])).toContain("deferred_notes");
-            expect(await pass()).toEqual(hard);
+            // A requested materialization with no proven earlier wire edit is
+            // not permission to rewrite an already-served user message.
+            expect(await pass(true)).toEqual(served);
+            const fresh = await pass(false, true);
+            expect(JSON.stringify(fresh.at(-1))).toContain("deferred_notes");
+            expect(await pass(false, true)).toEqual(fresh);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
     });
 
-    it("the Rust host postprocessor uses the same first-serve and bust fence", () => {
+    it("the Rust host requires a fresh tail when only bust permission is available", () => {
         makeNoteDb();
         const sessionId = "rust-note-first-serve";
         getOrCreateSessionMeta(db, sessionId);
-        const pass = (cacheBustingPass = false) => {
+        const pass = (cacheBustingPass = false, fresh = false) => {
             const messages = source();
+            if (fresh)
+                messages.push({
+                    info: { id: "rust-fresh", role: "user" },
+                    parts: [{ type: "text", text: "Next task" }],
+                } as MessageLike);
             runRustModePostprocess({
                 db,
                 sessionId,
@@ -898,9 +914,16 @@ describe("note nudge first-serve fence", () => {
         replayStorage.setPersistedNoteNudgeTriggerMessageId(db, sessionId, oldId);
         expect(pass()).toEqual(served);
         expect(getNoteNudgeAnchors(db, sessionId)).toEqual([]);
-        const hard = pass(true);
-        expect(JSON.stringify(hard[2])).toContain("deferred_notes");
-        expect(pass()).toEqual(hard);
+        expect(pass(true)).toEqual(served);
+        replayStorage.appendAutoSearchHintDecision(db, sessionId, {
+            messageId: "rust-fresh",
+            decision: "hint",
+            text: "\n\n<ctx-search-hint>saved hint</ctx-search-hint>",
+        });
+        const fresh = pass(false, true);
+        expect(JSON.stringify(fresh.at(-1))).toContain("deferred_notes");
+        expect(JSON.stringify(fresh.at(-1))).toContain("ctx-search-hint");
+        expect(pass(false, true)).toEqual(fresh);
     });
 });
 
