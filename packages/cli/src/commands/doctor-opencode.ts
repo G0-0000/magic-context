@@ -184,7 +184,8 @@ export function findUndeclaredConfiguredVariants(
     catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
 ): Array<{ agent: string; model: string; variant: string }> {
     return configured.filter((entry) => {
-        const [providerID, id] = entry.model.split("/", 2);
+        const [providerID, ...modelParts] = entry.model.split("/");
+        const id = modelParts.join("/");
         const model = catalog.find((item) => item.providerID === providerID && item.id === id);
         return model !== undefined && !Object.hasOwn(model.variants, entry.variant);
     });
@@ -201,7 +202,8 @@ export function findUnknownConfiguredModels(
     catalog: ReturnType<typeof parseOpenCodeModelCatalog>,
 ): Array<{ agent: string; model: string; fallback: boolean; unknown: "provider" | "model" }> {
     return configured.flatMap((entry): Array<typeof entry & { unknown: "provider" | "model" }> => {
-        const [providerID, id] = entry.model.split("/", 2);
+        const [providerID, ...modelParts] = entry.model.split("/");
+        const id = modelParts.join("/");
         if (!catalog.some((item) => item.providerID === providerID)) {
             return [{ ...entry, unknown: "provider" as const }];
         }
