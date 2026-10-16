@@ -780,6 +780,27 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("records the classified Zen refusal instead of generic empty output", async () => {
+		const { db } = await runHistorianWith({
+			historianModel: "opencode/free",
+			runner: runnerWithSteps([
+				{
+					ok: false,
+					reason: "no_assistant",
+					error:
+						"opencode_zen_free_tier: choose another historian model for Pi (FreeTierError).",
+					durationMs: 1,
+					meta: { failureClass: "opencode_zen_free_tier" },
+				},
+			]),
+		});
+		try {
+			expect(latestHistorianFailureReason(db)).toBe("opencode_zen_free_tier");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("records a classified custom OpenAI-compatible provider error", async () => {
 		const customModel = "local-cpa/gpt-5.6-sol";
 		const { db } = await runHistorianWith({

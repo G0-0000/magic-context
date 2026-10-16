@@ -4322,3 +4322,102 @@ it.each([
 		__temperatureTest.reset();
 	}
 });
+
+for (const targetHarness of ["pi", "omp"] as const) {
+	for (const agent of [
+		"magic-context-historian",
+		"dreamer-classifier",
+		"dreamer-memory-mapper",
+	]) {
+		it(`${targetHarness} classifies Zen free-tier ${agent} failure without retaining the body`, async () => {
+			__setPiHarnessKindForTesting(targetHarness);
+			const root = createTestTempDirFromPath(join(tmpdir(), "mc-zen-refusal-"));
+			const previous = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			process.env.MAGIC_CONTEXT_TEST_DATA_DIR = root;
+			closeDatabase();
+			const child = createMockChild();
+			const { runner, spawnImpl } = runnerWith(child, {
+				invocation: { command: targetHarness, prefixArgs: [], targetHarness },
+			});
+			const progress: unknown[] = [];
+			const logs = spyOn(loggerModule, "sessionLog").mockImplementation(
+				() => {},
+			);
+			const raw = `403 {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode.","private":"PRIVATE_BODY_SENTINEL"}`;
+			try {
+				const pending = runner.run({
+					...baseOptions,
+					agent,
+					model: "opencode/free",
+					accountingSessionId: "zen-refusal",
+					onProgress: (event) => progress.push(event),
+				});
+				const args = (spawnImpl.mock.calls as unknown[][])[0]?.[1] as string[];
+				expect(args.includes("--no-tools")).toBe(
+					agent !== "dreamer-memory-mapper",
+				);
+				expect(
+					readFileSync(
+						requirePromptPath(args[args.indexOf("--system-prompt") + 1]),
+						"utf8",
+					),
+				).toBe(baseOptions.systemPrompt);
+				child.writeStderr(raw.slice(0, 18));
+				child.writeStderr(raw.slice(18));
+				child.writeStdoutLine({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: raw,
+					},
+				});
+				child.writeStdoutLine(
+					agentEnd([
+						{
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							errorMessage: raw,
+						},
+					]),
+				);
+				child.emitClose(0);
+				const result = await pending;
+				expect(result).toMatchObject({
+					ok: false,
+					meta: {
+						failureClass: "opencode_zen_free_tier",
+						errorClass: "FreeTierError",
+					},
+				});
+				if (result.ok) throw new Error("expected refused invocation");
+				expect(result.error).toContain(
+					`choose another ${agent.includes("historian") ? "historian" : "dreamer"} model for ${targetHarness === "omp" ? "Oh My Pi" : "Pi"}`,
+				);
+				const db = openDatabase();
+				if (!db)
+					throw new Error("Zen refusal accounting database did not open");
+				const [row] = getSubagentInvocations(db, "zen-refusal");
+				expect(row?.error).toBe(result.error);
+				expect(row?.status).toBe("failed");
+				expect(
+					JSON.stringify({ result, progress, logs: logs.mock.calls, row }),
+				).not.toContain("PRIVATE_BODY_SENTINEL");
+				expect(
+					logs.mock.calls.some((call) =>
+						String(call[1]).includes("opencode_zen_free_tier"),
+					),
+				).toBe(true);
+			} finally {
+				logs.mockRestore();
+				closeDatabase();
+				if (previous === undefined)
+					delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+				else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = previous;
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+}

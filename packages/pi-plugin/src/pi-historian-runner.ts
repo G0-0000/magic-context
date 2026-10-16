@@ -161,6 +161,7 @@ import {
 	isPiOrdinalAlignmentUnanchored,
 	resolvePiOrdinalAlignment,
 } from "./pi-ordinal-alignment";
+import { ZEN_FREE_TIER_FAILURE } from "./pi-zen-free-tier";
 import {
 	iterateEntriesToRawMessageRange,
 	SYNTH_USER_ID_PREFIX,
@@ -1867,6 +1868,8 @@ type ValidationOutcome =
 function piSubagentFailureReason(
 	failure: Extract<ValidationOutcome, { kind: "spawn-failed" }>,
 ): string {
+	if (failure.meta?.failureClass === ZEN_FREE_TIER_FAILURE)
+		return ZEN_FREE_TIER_FAILURE;
 	if (PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(failure.error))
 		return failure.error;
 	if (

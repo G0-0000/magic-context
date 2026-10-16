@@ -3,6 +3,7 @@ import packageMetadata from "../package.json";
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
+    buildZenReadAgentRegistrations,
 } from "./agents/hidden-agent-registrations";
 import { withContentLanguageDirective } from "./agents/language-directive";
 import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
@@ -84,6 +85,7 @@ import {
 import { getMagicContextStorageDir } from "./shared/data-path";
 import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setHarness } from "./shared/harness";
+import { shapeV1HiddenMessage } from "./shared/hidden-zen-read";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { flushLogger, log } from "./shared/logger";
 import {
@@ -978,6 +980,7 @@ const server: Plugin = async (ctx) => {
                 provId && modId
                     ? { providerID: provId, modelID: modId, agentName: agent || "default" }
                     : null;
+            shapeV1HiddenMessage(input.sessionID, output.message);
             await magicContextRuntime.magicContext?.["chat.message"]?.(input, output);
         },
         "tool.definition": async (input, output) => {
@@ -1112,6 +1115,7 @@ const server: Plugin = async (ctx) => {
                     historianOverrides: historianAgentOverrides,
                     historianDisallowed: pluginConfig.historian?.disallowed_tools ?? [],
                 });
+                registrations.push(...buildZenReadAgentRegistrations(registrations));
 
                 const agentConfig = { ...(config.agent ?? {}) } as NonNullable<typeof config.agent>;
                 const agentConfigRecord = agentConfig as Record<string, Record<string, unknown>>;
