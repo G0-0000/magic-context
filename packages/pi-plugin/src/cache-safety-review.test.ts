@@ -347,121 +347,13 @@ for (const [provider, api] of [
 }
 
 // Pi groups tool results into transcript user rows. A group's id can differ from
-// the id of the native message that holds an image. These checks are disabled by
-// default while that mapping bug is unresolved. Each captures the handler's real
+// the id of the native message that holds an image. Each captures the handler's real
 // tag map and calls the image helper directly, with the tool's tag as the highest
 // dropped tag. A second call fixes only the map, isolating its effect on image
 // selection. Setting usage to 95% bypasses recency protection; the tests do not
 // exercise the handler's pressure-based permission to rewrite earlier messages.
 for (const parallel of [false, true]) {
-	const run =
-		process.env.MC_PI_CACHE_REVIEW_FINDINGS === "1" ? test : test.skip;
-	run(
-		`cache review F4 projection: ${parallel ? "parallel results" : "result folded into user"} use each native result's own tag`,
-		async () => {
-			const db = createTestDb();
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				heuristics: {},
-				protectedTokens: 0,
-				protectedTags: 0,
-			});
-			const messages: PiMessage[] = [
-				userMessage("start", 1),
-				assistantToolCall("first", "read", {}, 2),
-			];
-			if (parallel)
-				(messages[1] as { content: unknown[] }).content.push({
-					type: "toolCall",
-					id: "second",
-					name: "read",
-					arguments: {},
-				});
-			messages.push(toolResultMessage("first", "first result", 3));
-			if (parallel)
-				messages.push(toolResultMessage("second", "second result", 4));
-			if (!parallel) messages.push(userMessage("follow-up", 5));
-			messages.push(assistantMessage("answer", 6));
-			const imageResult = messages.find(
-				(m) =>
-					m.role === "toolResult" &&
-					m.toolCallId === (parallel ? "second" : "first"),
-			) as { content: unknown[] };
-			imageResult.content.push({
-				type: "image",
-				mimeType: "image/png",
-				data: "x".repeat(201),
-			});
-			const strip = imageCleanup.stripPiProcessedImages;
-			const spy = spyOn(imageCleanup, "stripPiProcessedImages");
-			try {
-				const handler = fake.handlers.get("context") as (
-					event: { messages: PiMessage[] },
-					ctx: never,
-				) => Promise<unknown>;
-				await handler({ messages }, {
-					...fakeContext(
-						session,
-						process.cwd(),
-						messages.map((m) => `entry-${m.timestamp}`),
-						messages,
-					),
-					model: {
-						provider: "anthropic",
-						id: "claude-sonnet-4",
-						api: "anthropic-messages",
-						contextWindow: 100000,
-					},
-				} as never);
-				const args = spy.mock.calls.at(-1)?.[0];
-				expect(args).toBeDefined();
-				const tag = getTagsBySession(db, session).find(
-					(t) =>
-						t.type === "tool" &&
-						t.messageId === (parallel ? "second" : "first"),
-				)!;
-				const nativeId = parallel ? "entry-4" : "entry-3";
-				const plan = {
-					...args!,
-					detect: true,
-					watermark: tag.tagNumber,
-					protectedCutoff: null,
-					usagePercentage: 95,
-					stableId: (m: unknown) =>
-						`entry-${(m as { timestamp: number }).timestamp}`,
-				};
-				const correctedTags = new Map(plan.messageIdToMaxTag).set(
-					nativeId,
-					tag.tagNumber,
-				);
-				expect(
-					strip({
-						...plan,
-						sessionId: "projection-control",
-						messages: structuredClone(plan.messages),
-						messageIdToMaxTag: correctedTags,
-					}).stripped,
-				).toBe(1);
-				expect(
-					strip({
-						...plan,
-						sessionId: "projection-actual",
-						messages: structuredClone(plan.messages),
-					}).stripped,
-				).toBe(1);
-			} finally {
-				spy.mockRestore();
-				clearContextHandlerSession(session);
-				db.close();
-			}
-		},
-	);
-}
-
-(process.env.MC_PI_CACHE_REVIEW_FINDINGS === "1" ? test : test.skip)(
-	"cache review F4 projection: image-only user must not inherit a preceding folded tool tag",
-	async () => {
+	test(`cache review F4 projection: ${parallel ? "parallel results" : "result folded into user"} use each native result's own tag`, async () => {
 		const db = createTestDb();
 		const fake = createFakePi();
 		registerPiContextHandler(fake.pi as never, {
@@ -470,16 +362,32 @@ for (const parallel of [false, true]) {
 			protectedTokens: 0,
 			protectedTags: 0,
 		});
-		const messages = [
+		const messages: PiMessage[] = [
 			userMessage("start", 1),
-			assistantToolCall("read", "read", {}, 2),
-			toolResultMessage("read", "result", 3),
-			userMessage(
-				[{ type: "image", mimeType: "image/png", data: "x".repeat(201) }],
-				4,
-			),
-			assistantMessage("answer", 5),
+			assistantToolCall("first", "read", {}, 2),
 		];
+		if (parallel)
+			(messages[1] as { content: unknown[] }).content.push({
+				type: "toolCall",
+				id: "second",
+				name: "read",
+				arguments: {},
+			});
+		messages.push(toolResultMessage("first", "first result", 3));
+		if (parallel)
+			messages.push(toolResultMessage("second", "second result", 4));
+		if (!parallel) messages.push(userMessage("follow-up", 5));
+		messages.push(assistantMessage("answer", 6));
+		const imageResult = messages.find(
+			(m) =>
+				m.role === "toolResult" &&
+				m.toolCallId === (parallel ? "second" : "first"),
+		) as { content: unknown[] };
+		imageResult.content.push({
+			type: "image",
+			mimeType: "image/png",
+			data: "x".repeat(201),
+		});
 		const strip = imageCleanup.stripPiProcessedImages;
 		const spy = spyOn(imageCleanup, "stripPiProcessedImages");
 		try {
@@ -501,40 +409,120 @@ for (const parallel of [false, true]) {
 					contextWindow: 100000,
 				},
 			} as never);
-			const args = spy.mock.calls.at(-1)![0];
-			const tool = getTagsBySession(db, session).find(
-				(t) => t.type === "tool",
+			const args = spy.mock.calls.at(-1)?.[0];
+			expect(args).toBeDefined();
+			const tag = getTagsBySession(db, session).find(
+				(t) =>
+					t.type === "tool" && t.messageId === (parallel ? "second" : "first"),
 			)!;
+			const nativeId = parallel ? "entry-4" : "entry-3";
 			const plan = {
-				...args,
+				...args!,
 				detect: true,
-				watermark: tool.tagNumber,
+				watermark: tag.tagNumber,
 				protectedCutoff: null,
 				usagePercentage: 95,
 				stableId: (m: unknown) =>
 					`entry-${(m as { timestamp: number }).timestamp}`,
 			};
-			const corrected = new Map(plan.messageIdToMaxTag);
-			corrected.delete("entry-4");
+			const correctedTags = new Map(plan.messageIdToMaxTag).set(
+				nativeId,
+				tag.tagNumber,
+			);
 			expect(
 				strip({
 					...plan,
-					sessionId: "user-control",
+					sessionId: "projection-control",
 					messages: structuredClone(plan.messages),
-					messageIdToMaxTag: corrected,
+					messageIdToMaxTag: correctedTags,
 				}).stripped,
-			).toBe(0);
+			).toBe(1);
 			expect(
 				strip({
 					...plan,
-					sessionId: "user-actual",
+					sessionId: "projection-actual",
 					messages: structuredClone(plan.messages),
 				}).stripped,
-			).toBe(0);
+			).toBe(1);
 		} finally {
 			spy.mockRestore();
 			clearContextHandlerSession(session);
 			db.close();
 		}
-	},
-);
+	});
+}
+
+test("cache review F4 projection: image-only user must not inherit a preceding folded tool tag", async () => {
+	const db = createTestDb();
+	const fake = createFakePi();
+	registerPiContextHandler(fake.pi as never, {
+		db,
+		heuristics: {},
+		protectedTokens: 0,
+		protectedTags: 0,
+	});
+	const messages = [
+		userMessage("start", 1),
+		assistantToolCall("read", "read", {}, 2),
+		toolResultMessage("read", "result", 3),
+		userMessage(
+			[{ type: "image", mimeType: "image/png", data: "x".repeat(201) }],
+			4,
+		),
+		assistantMessage("answer", 5),
+	];
+	const strip = imageCleanup.stripPiProcessedImages;
+	const spy = spyOn(imageCleanup, "stripPiProcessedImages");
+	try {
+		const handler = fake.handlers.get("context") as (
+			event: { messages: PiMessage[] },
+			ctx: never,
+		) => Promise<unknown>;
+		await handler({ messages }, {
+			...fakeContext(
+				session,
+				process.cwd(),
+				messages.map((m) => `entry-${m.timestamp}`),
+				messages,
+			),
+			model: {
+				provider: "anthropic",
+				id: "claude-sonnet-4",
+				api: "anthropic-messages",
+				contextWindow: 100000,
+			},
+		} as never);
+		const args = spy.mock.calls.at(-1)![0];
+		const tool = getTagsBySession(db, session).find((t) => t.type === "tool")!;
+		const plan = {
+			...args,
+			detect: true,
+			watermark: tool.tagNumber,
+			protectedCutoff: null,
+			usagePercentage: 95,
+			stableId: (m: unknown) =>
+				`entry-${(m as { timestamp: number }).timestamp}`,
+		};
+		const corrected = new Map(plan.messageIdToMaxTag);
+		corrected.delete("entry-4");
+		expect(
+			strip({
+				...plan,
+				sessionId: "user-control",
+				messages: structuredClone(plan.messages),
+				messageIdToMaxTag: corrected,
+			}).stripped,
+		).toBe(0);
+		expect(
+			strip({
+				...plan,
+				sessionId: "user-actual",
+				messages: structuredClone(plan.messages),
+			}).stripped,
+		).toBe(0);
+	} finally {
+		spy.mockRestore();
+		clearContextHandlerSession(session);
+		db.close();
+	}
+});

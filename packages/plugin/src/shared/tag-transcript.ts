@@ -55,6 +55,7 @@ import {
     updateTagTokenCount,
 } from "../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
+import type { TagEntry } from "../features/magic-context/types";
 import { droppedInputMarker } from "../hooks/magic-context/dropped-input-guard";
 import { applyEditMarkerToInput } from "../hooks/magic-context/edit-marker";
 import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-token-estimate";
@@ -119,6 +120,87 @@ export interface TagTranscriptOptions {
 
 export interface TagTranscriptResult {
     targets: Map<number, TagTarget>;
+}
+
+/**
+ * Bind durable drops to a saved request without tagging it again. Recovery must
+ * not allocate identities, inject prefixes, or write accounting while the store
+ * is failing. Reuse the normal targets so persisted modes render identically.
+ */
+export function buildPersistedDropTargets(
+    transcript: Transcript,
+    tags: readonly TagEntry[],
+): Map<number, TagTarget> {
+    const targets = new Map<number, TagTarget>();
+    const tools = new Map(
+        tags
+            .filter((tag) => tag.type === "tool")
+            .map((tag) => [makeToolCompositeKey(tag.toolOwnerMessageId ?? "", tag.messageId), tag]),
+    );
+    const textTags = new Map(
+        tags.filter((tag) => tag.type !== "tool").map((tag) => [tag.messageId, tag]),
+    );
+    const byNumber = new Map(tags.map((tag) => [tag.tagNumber, tag]));
+    const aggregates = new Map<
+        string,
+        { tag?: TagEntry; occurrences: ToolOccurrence[]; reasoning: boolean }
+    >();
+    const pending = new Map<string, string[]>();
+    const end = new ConversationEndGuard(transcript.messages);
+    for (const message of transcript.messages) {
+        let ordinal = 0;
+        let resultRun: { callId: string; key: string } | undefined;
+        const parts = message.parts;
+        const reasoning =
+            message.requiresToolArcSkeleton ??
+            (message.info.role === "assistant" && parts.some((part) => part.kind === "thinking"));
+        for (const part of parts) {
+            if (part.kind !== "tool_result") resultRun = undefined;
+            if (part.kind === "text") {
+                const prefix = /^§(\d+)§\s/.exec(part.getText() ?? "");
+                const tag =
+                    (prefix ? byNumber.get(Number(prefix[1])) : undefined) ??
+                    textTags.get(`${message.info.id}:p${ordinal}`);
+                ordinal++;
+                if (tag && tag.type !== "tool")
+                    targets.set(tag.tagNumber, buildTextTarget(part, message, ""));
+            } else if ((part.kind === "tool_use" || part.kind === "tool_result") && part.id) {
+                const open = pending.get(part.id) ?? [];
+                const key =
+                    (part.kind === "tool_result"
+                        ? resultRun?.callId === part.id
+                            ? resultRun.key
+                            : open.at(-1)
+                        : undefined) ?? makeToolCompositeKey(message.info.id ?? "", part.id);
+                if (part.kind === "tool_use") open.push(key);
+                else {
+                    const position = open.lastIndexOf(key);
+                    if (position >= 0) open.splice(position, 1);
+                    resultRun = { callId: part.id, key };
+                }
+                pending.set(part.id, open);
+                let aggregate = aggregates.get(key);
+                if (!aggregate) {
+                    aggregate = {
+                        tag: tools.get(key) ?? tools.get(makeToolCompositeKey("", part.id)),
+                        occurrences: [],
+                        reasoning: false,
+                    };
+                    aggregates.set(key, aggregate);
+                }
+                aggregate.occurrences.push({ message, part, kind: part.kind });
+                aggregate.reasoning ||= reasoning;
+            }
+        }
+    }
+    for (const { tag, occurrences, reasoning } of aggregates.values()) {
+        if (tag)
+            targets.set(
+                tag.tagNumber,
+                buildAggregateTarget(tag.tagNumber, occurrences, reasoning, end),
+            );
+    }
+    return targets;
 }
 
 /**
