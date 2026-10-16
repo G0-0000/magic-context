@@ -130,6 +130,7 @@ export interface TagTranscriptResult {
 export function buildPersistedDropTargets(
     transcript: Transcript,
     tags: readonly TagEntry[],
+    options: { allowReasoningPrefixRewrite?: boolean } = {},
 ): Map<number, TagTarget> {
     const targets = new Map<number, TagTarget>();
     const tools = new Map(
@@ -146,6 +147,8 @@ export function buildPersistedDropTargets(
         { tag?: TagEntry; occurrences: ToolOccurrence[]; reasoning: boolean }
     >();
     const pending = new Map<string, string[]>();
+    const resolved = new Map<string, string>();
+    const ambiguousCalls = new Set<string>();
     const end = new ConversationEndGuard(transcript.messages);
     for (const message of transcript.messages) {
         let ordinal = 0;
@@ -166,23 +169,25 @@ export function buildPersistedDropTargets(
                     targets.set(tag.tagNumber, buildTextTarget(part, message, ""));
             } else if ((part.kind === "tool_use" || part.kind === "tool_result") && part.id) {
                 const open = pending.get(part.id) ?? [];
+                if (open.length > 1) ambiguousCalls.add(part.id);
                 const key =
                     (part.kind === "tool_result"
                         ? resultRun?.callId === part.id
                             ? resultRun.key
-                            : open.at(-1)
+                            : (open.at(-1) ?? resolved.get(part.id))
                         : undefined) ?? makeToolCompositeKey(message.info.id ?? "", part.id);
                 if (part.kind === "tool_use") open.push(key);
                 else {
                     const position = open.lastIndexOf(key);
                     if (position >= 0) open.splice(position, 1);
                     resultRun = { callId: part.id, key };
+                    resolved.set(part.id, key);
                 }
                 pending.set(part.id, open);
                 let aggregate = aggregates.get(key);
                 if (!aggregate) {
                     aggregate = {
-                        tag: tools.get(key) ?? tools.get(makeToolCompositeKey("", part.id)),
+                        tag: tools.get(key),
                         occurrences: [],
                         reasoning: false,
                     };
@@ -193,12 +198,42 @@ export function buildPersistedDropTargets(
             }
         }
     }
-    for (const { tag, occurrences, reasoning } of aggregates.values()) {
+    const arcsByCall = new Map<string, number>();
+    for (const { occurrences } of aggregates.values()) {
+        const callId = occurrences[0]?.part.id ?? "";
+        arcsByCall.set(callId, (arcsByCall.get(callId) ?? 0) + 1);
+    }
+    for (const aggregate of aggregates.values()) {
+        const { occurrences, reasoning } = aggregate;
+        const callId = occurrences[0]?.part.id ?? "";
+        if (ambiguousCalls.has(callId)) continue;
+        const tag =
+            aggregate.tag ??
+            (arcsByCall.get(callId) === 1
+                ? tools.get(makeToolCompositeKey("", callId))
+                : undefined);
         if (tag)
             targets.set(
                 tag.tagNumber,
                 buildAggregateTarget(tag.tagNumber, occurrences, reasoning, end),
             );
+    }
+    if (!options.allowReasoningPrefixRewrite) {
+        // This target builder cannot persist removal of thinking. By default,
+        // withhold edits before reasoning rather than invalidate its signature.
+        // The Pi recovery handler opts in only to test edits on a saved copy;
+        // it must compare final request prefixes and refuse unsafe changes.
+        let lastThinking = -1;
+        transcript.messages.forEach((message, index) => {
+            if (message.parts.some((part) => part.kind === "thinking")) lastThinking = index;
+        });
+        const protectedIds = new Set(
+            transcript.messages.slice(0, lastThinking + 1).map((message) => message.info.id),
+        );
+        for (const [number, target] of targets) {
+            if (target.mutationParts?.some(({ message }) => protectedIds.has(message.info.id)))
+                targets.delete(number);
+        }
     }
     return targets;
 }

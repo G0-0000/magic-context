@@ -74,47 +74,42 @@ for (const lane of ["oc1", "oc2", "pi"]) {
         );
     }
 }
-// Signed reasoning authenticates preceding input bytes. Pi currently changes
-// those bytes during recovery but keeps the signature. The assertion remains an
-// expected failure until recovery removes the signed reasoning or refuses the request.
+// A reasoning signature covers the earlier messages as originally sent. Even
+// when a drop was stored before a later write failed, recovery cannot change
+// those messages and keep that signature.
 for (const lane of ["oc1", "oc2", "pi"]) {
-    const signedTest = lane === "pi" && !process.env.REVIEW_ASSERT_INVARIANTS ? test.failing : test;
-    signedTest(
-        `review signed-prefix ${lane}: committed subset must strip signed thinking or refuse`,
-        () => {
-            const root = temporary();
-            try {
-                const recovered = child(root, lane, "seed", 2, true);
-                expect(recovered.status, recovered.stderr).toBe(0);
-                expect(
-                    recovered.proof.state.tags.filter((row: unknown[]) => row[3] === "dropped"),
-                ).toHaveLength(1);
-                expect(recovered.proof.before).toContain("independent-signature");
-                if (!recovered.proof.wire) {
-                    expect(recovered.proof.error).toContain("This request was not sent");
-                    return;
-                }
-                const before = JSON.parse(recovered.proof.before) as unknown[];
-                const after = JSON.parse(recovered.proof.wire) as unknown[];
-                const prefix = (messages: unknown[]) =>
-                    JSON.stringify(
-                        messages.slice(
-                            0,
-                            messages.findIndex((m) =>
-                                JSON.stringify(m).includes("independent-signature"),
-                            ),
-                        ),
-                    );
-                const changedPrefix = prefix(before) !== prefix(after);
-                const keptSignature = recovered.proof.wire.includes("independent-signature");
-                console.log(
-                    `SIGNED_RECOVERY ${lane} changed=${changedPrefix} keptSignature=${keptSignature}`,
-                );
-                expect(changedPrefix && keptSignature).toBe(false);
-            } finally {
-                rmSync(root, { recursive: true, force: true });
+    test(`review signed-prefix ${lane}: committed subset must strip signed thinking or refuse`, () => {
+        const root = temporary();
+        try {
+            const recovered = child(root, lane, "seed", 2, true);
+            expect(recovered.status, recovered.stderr).toBe(0);
+            expect(
+                recovered.proof.state.tags.filter((row: unknown[]) => row[3] === "dropped"),
+            ).toHaveLength(1);
+            expect(recovered.proof.before).toContain("independent-signature");
+            if (!recovered.proof.wire) {
+                expect(recovered.proof.error).toContain("This request was not sent");
+                return;
             }
-        },
-        60000,
-    );
+            const before = JSON.parse(recovered.proof.before) as unknown[];
+            const after = JSON.parse(recovered.proof.wire) as unknown[];
+            const prefix = (messages: unknown[]) =>
+                JSON.stringify(
+                    messages.slice(
+                        0,
+                        messages.findIndex((m) =>
+                            JSON.stringify(m).includes("independent-signature"),
+                        ),
+                    ),
+                );
+            const changedPrefix = prefix(before) !== prefix(after);
+            const keptSignature = recovered.proof.wire.includes("independent-signature");
+            console.log(
+                `SIGNED_RECOVERY ${lane} changed=${changedPrefix} keptSignature=${keptSignature}`,
+            );
+            expect(changedPrefix && keptSignature).toBe(false);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 60000);
 }

@@ -4,9 +4,6 @@ import { closeDatabase, openDatabase } from "../../features/magic-context/storag
 import { replayCommittedDrops } from "./replay-committed-drops";
 import type { MessageLike } from "./tag-messages";
 
-// The signed-prefix, ownerless-collision, and split-result assertions below expose
-// safety properties the binder currently violates. REVIEW_ASSERT_INVARIANTS=1
-// reports them directly; ordinary suites register them with test.failing.
 afterEach(() => closeDatabase());
 const session = "independent-binder-review";
 function dropped(
@@ -84,57 +81,82 @@ test("independent binder owner collision: only the stored owner is dropped", () 
     replayCommittedDrops(db, session, messages);
     expect(messages).toEqual([...arc("newer"), tail()]);
 });
-(process.env.REVIEW_ASSERT_INVARIANTS ? test : test.failing)(
-    "review P2 legacy ownerless collision: ambiguous arcs must be left untouched",
-    () => {
-        const db = dropped("full", null);
-        const messages = [...arc("older"), ...arc("newer"), tail()];
-        const before = structuredClone(messages);
-        replayCommittedDrops(db, session, messages);
-        expect(messages).toEqual(before);
-    },
-);
-(process.env.REVIEW_ASSERT_INVARIANTS ? test : test.failing)(
-    "review P2 split result: every segment of the committed tool must be dropped",
-    () => {
-        const db = dropped("skeleton_real");
+for (const mode of ["full", "truncated", "skeleton_real"]) {
+    test(`binder split result ${mode}: all segments share the invocation owner`, () => {
+        const db = dropped(mode);
         const messages = [
             ...arc(),
             {
-                info: { id: "later-result", role: "tool" },
-                parts: [{ type: "tool_result", tool_use_id: "call", content: "second-payload" }],
+                info: { id: "second-result", role: "tool" },
+                parts: [{ type: "tool_result", tool_use_id: "call", content: "later-segment" }],
             },
             tail(),
         ];
+        expect(replayCommittedDrops(db, session, messages)).toBe(true);
+        expect(JSON.stringify(messages)).not.toContain("later-segment");
+        if (mode === "full") expect(messages).toEqual([tail()]);
+        const wire = JSON.stringify(messages);
         replayCommittedDrops(db, session, messages);
-        expect(JSON.stringify(messages)).not.toContain("second-payload");
-    },
-);
-(process.env.REVIEW_ASSERT_INVARIANTS ? test : test.failing)(
-    "review P1 signed-prefix invariant: a committed text drop must not precede kept signed reasoning",
-    () => {
-        const db = dropped("full", null, "old:p0", "message");
-        const messages: MessageLike[] = [
-            {
-                info: { id: "old", role: "user" },
-                parts: [{ type: "text", text: "§907§ old text" }],
-            },
-            {
-                info: { id: "signed", role: "assistant" },
-                parts: [
-                    {
-                        type: "reasoning",
-                        text: "keep",
-                        metadata: { anthropic: { signature: "signed-prefix" } },
-                    },
-                    { type: "text", text: "answer" },
-                ],
-            },
-            tail(),
-        ];
-        const prefix = JSON.stringify(messages[0]);
-        replayCommittedDrops(db, session, messages);
-        const kept = JSON.stringify(messages).includes("signed-prefix");
-        expect(kept && JSON.stringify(messages[0]) !== prefix).toBe(false);
-    },
-);
+        expect(JSON.stringify(messages)).toBe(wire);
+    });
+}
+test("binder overlapping invocation owners: bind neither ambiguous arc", () => {
+    const db = dropped("full", "older");
+    const older = arc("older");
+    const newer = arc("newer");
+    const messages = [older[0]!, newer[0]!, older[1]!, newer[1]!, tail()];
+    const before = structuredClone(messages);
+    replayCommittedDrops(db, session, messages);
+    expect(messages).toEqual(before);
+});
+test("binder unique ownerless legacy arc: retained compatibility", () => {
+    const db = dropped("full", null);
+    const messages = [...arc(), tail()];
+    replayCommittedDrops(db, session, messages);
+    expect(messages).toEqual([tail()]);
+});
+test("review P2 legacy ownerless collision: ambiguous arcs must be left untouched", () => {
+    const db = dropped("full", null);
+    const messages = [...arc("older"), ...arc("newer"), tail()];
+    const before = structuredClone(messages);
+    replayCommittedDrops(db, session, messages);
+    expect(messages).toEqual(before);
+});
+test("review P2 split result: every segment of the committed tool must be dropped", () => {
+    const db = dropped("skeleton_real");
+    const messages = [
+        ...arc(),
+        {
+            info: { id: "later-result", role: "tool" },
+            parts: [{ type: "tool_result", tool_use_id: "call", content: "second-payload" }],
+        },
+        tail(),
+    ];
+    replayCommittedDrops(db, session, messages);
+    expect(JSON.stringify(messages)).not.toContain("second-payload");
+});
+test("review P1 signed-prefix invariant: a committed text drop must not precede kept signed reasoning", () => {
+    const db = dropped("full", null, "old:p0", "message");
+    const messages: MessageLike[] = [
+        {
+            info: { id: "old", role: "user" },
+            parts: [{ type: "text", text: "§907§ old text" }],
+        },
+        {
+            info: { id: "signed", role: "assistant" },
+            parts: [
+                {
+                    type: "reasoning",
+                    text: "keep",
+                    metadata: { anthropic: { signature: "signed-prefix" } },
+                },
+                { type: "text", text: "answer" },
+            ],
+        },
+        tail(),
+    ];
+    const prefix = JSON.stringify(messages[0]);
+    replayCommittedDrops(db, session, messages);
+    const kept = JSON.stringify(messages).includes("signed-prefix");
+    expect(kept && JSON.stringify(messages[0]) !== prefix).toBe(false);
+});

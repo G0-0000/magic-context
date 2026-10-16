@@ -14,9 +14,6 @@ import {
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
-// The signed-prefix assertion below exposes a missing reasoning safety check.
-// REVIEW_ASSERT_INVARIANTS=1 reports that failure directly; ordinary suites
-// register it with test.failing until recovery strips reasoning or refuses.
 const session = "independent-pi-binder";
 for (const mode of ["full", "truncated", "skeleton_real"]) {
 	test(`independent Pi binder legacy ${mode}: split native results, synth-user and idempotence`, () => {
@@ -93,34 +90,72 @@ for (const id of ["synth-user-old:p0", "absent-from-request"]) {
 		}
 	});
 }
-(process.env.REVIEW_ASSERT_INVARIANTS ? test : test.failing)(
-	"review P1 Pi signed-prefix invariant: committed text before kept thinking must strip or refuse",
-	() => {
+test("review P1 Pi signed-prefix invariant: committed text before kept thinking must strip or refuse", () => {
+	const db = createTestDb();
+	try {
+		insertTag(db, session, "old:p0", "message", 100, 817);
+		db.exec("UPDATE tags SET status='dropped'");
+		const messages = [
+			userMessage("§817§ old text"),
+			assistantMessage("answer", 2, {
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4",
+				content: [
+					{
+						type: "thinking",
+						thinking: "keep",
+						thinkingSignature: "signed-prefix",
+					},
+					{ type: "text", text: "answer" },
+				],
+			}),
+			userMessage("next", 3),
+		];
+		const before = JSON.stringify(messages[0]);
+		const transcript = createPiTranscript(messages, session, [
+			"old",
+			"signed",
+			"tail",
+		]);
+		const tags = getTagsBySession(db, session);
+		applyFlushedStatuses(
+			session,
+			db,
+			buildPersistedDropTargets(transcript, tags),
+			tags,
+		);
+		transcript.commit();
+		expect(
+			JSON.stringify(messages).includes("signed-prefix") &&
+				JSON.stringify(messages[0]) !== before,
+		).toBe(false);
+	} finally {
+		db.close();
+	}
+});
+
+for (const owner of [null, "older"]) {
+	test(`Pi binder reused call ID: ${owner ? "qualified owner" : "ambiguous legacy row"}`, () => {
 		const db = createTestDb();
 		try {
-			insertTag(db, session, "old:p0", "message", 100, 817);
+			insertTag(db, session, "call", "tool", 100, 817, 0, "read", 0, owner);
 			db.exec("UPDATE tags SET status='dropped'");
-			const messages = [
-				userMessage("§817§ old text"),
-				assistantMessage("answer", 2, {
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-sonnet-4",
-					content: [
-						{
-							type: "thinking",
-							thinking: "keep",
-							thinkingSignature: "signed-prefix",
-						},
-						{ type: "text", text: "answer" },
-					],
-				}),
-				userMessage("next", 3),
+			const older = [
+				assistantToolCall("call", "read", { filePath: "older.ts" }, 2),
+				toolResultMessage("call", "older result", 3),
 			];
-			const before = JSON.stringify(messages[0]);
+			const newer = [
+				assistantToolCall("call", "read", { filePath: "newer.ts" }, 4),
+				toolResultMessage("call", "newer result", 5),
+			];
+			const messages = [...older, ...newer, userMessage("next", 6)];
+			const before = structuredClone(messages);
 			const transcript = createPiTranscript(messages, session, [
-				"old",
-				"signed",
+				"older",
+				"older-result",
+				"newer",
+				"newer-result",
 				"tail",
 			]);
 			const tags = getTagsBySession(db, session);
@@ -131,12 +166,12 @@ for (const id of ["synth-user-old:p0", "absent-from-request"]) {
 				tags,
 			);
 			transcript.commit();
-			expect(
-				JSON.stringify(messages).includes("signed-prefix") &&
-					JSON.stringify(messages[0]) !== before,
-			).toBe(false);
+			transcript.finalizeToolRemovals();
+			expect(messages).toEqual(
+				owner ? [...newer, userMessage("next", 6)] : before,
+			);
 		} finally {
 			db.close();
 		}
-	},
-);
+	});
+}
