@@ -404,31 +404,9 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
                 !/^\s*(?:SELECT|EXPLAIN|PRAGMA|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(sql)
             ) {
                 try {
-                    // exec accepts scripts: an earlier statement may have committed
-                    // before a later statement reports BUSY. Never replay that prefix.
-                    const changes = db.prepare("SELECT total_changes() AS n");
-                    const schemaVersions = () =>
-                        JSON.stringify(
-                            (db.prepare("PRAGMA database_list").all() as { name: string }[]).map(
-                                ({ name }) => [
-                                    name,
-                                    pragmaNumber(
-                                        db,
-                                        `"${name.replaceAll('"', '""')}".schema_version`,
-                                    ),
-                                ],
-                            ),
-                        );
-                    const before = changes.get() as { n: number };
-                    const beforeSchemas = schemaVersions();
-                    return withAutocommitTimeout(
-                        db,
-                        () => nativeExec(sql),
-                        () => {
-                            const after = changes.get() as typeof before;
-                            return after.n === before.n && schemaVersions() === beforeSchemas;
-                        },
-                    );
+                    // exec can commit a script prefix before BUSY. Run it once;
+                    // only prepared statements are safe to probe and retry.
+                    return withAutocommitTimeout(db, () => nativeExec(sql), false);
                 } finally {
                     if (mayChangeTagIdentity(sql)) tagIdentityWriteGeneration += 1;
                 }
@@ -1008,22 +986,24 @@ function foregroundWaitLease() {
         : undefined;
 }
 
-/** Probe implicit admission without waiting, so ordinary SQL execution (including
- * conservative read classifications) cannot consume the lock-wait lease. SQLite
- * permits retrying a BUSY single statement outside an explicit transaction. */
-function withAutocommitTimeout<T>(db: Database, operation: () => T, canRetry = () => true): T {
+/** Prepared statements can probe implicit admission without spending the lease
+ * on uncontended execution. Scripts cannot safely replay a committed prefix, so
+ * their single attempt conservatively charges its whole execution time. */
+function withAutocommitTimeout<T>(db: Database, operation: () => T, singleStatement = true): T {
     assertTransformWrite();
     const lease = foregroundWaitLease();
     if (isInTransaction(db) || (!lease && !backgroundWriterScope.getStore())) return operation();
     const previous = pragmaNumber(db, "busy_timeout");
-    db.exec("PRAGMA busy_timeout=0");
     try {
-        try {
-            return operation();
-        } catch (error) {
-            if (!isTransientSqliteError(error) || isInTransaction(db) || !canRetry()) throw error;
+        if (singleStatement) {
+            db.exec("PRAGMA busy_timeout=0");
+            try {
+                return operation();
+            } catch (error) {
+                if (!isTransientSqliteError(error) || isInTransaction(db)) throw error;
+            }
+            assertTransformWrite();
         }
-        assertTransformWrite();
         const timeout = Math.floor(
             Math.min(
                 lease?.remainingWaitMs ?? SHORT_BUSY_TIMEOUT_MS,
@@ -1035,8 +1015,8 @@ function withAutocommitTimeout<T>(db: Database, operation: () => T, canRetry = (
         try {
             return operation();
         } finally {
-            // Only an attempt known to have encountered contention spends the
-            // lease. Its execution time is a conservative upper bound on waiting.
+            // A prepared retry encountered contention; an exec script cannot be
+            // probed safely. Both charge execution as an upper bound on waiting.
             if (lease)
                 lease.remainingWaitMs = Math.max(
                     0,

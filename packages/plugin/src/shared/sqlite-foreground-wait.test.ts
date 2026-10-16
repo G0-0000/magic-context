@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -223,35 +223,109 @@ test("BUSY autocommit probes do not double-apply INSERT OR IGNORE, UPSERT or RET
 
 test("many contended autocommit writes share at most two seconds of lock waiting", async () => {
     const { db, path, close } = fixture();
-    let waited = 0;
-    let successes = 0;
-    let busy = 0;
+    const blocker = new Database(path);
+    blocker.exec("BEGIN IMMEDIATE");
+    const timeouts: number[] = [];
+    const nativeExec = db.exec.bind(db);
+    const exec = spyOn(db, "exec").mockImplementation((sql) => {
+        const timeout = /^PRAGMA busy_timeout=(\d+)$/.exec(sql);
+        if (timeout) timeouts.push(Number(timeout[1]));
+        return nativeExec(sql);
+    });
     try {
-        await withSqliteTransformPass(async () => {
-            for (let i = 0; i < 8; i++) {
-                const locker = await startSqliteWriteLocker(path, 400);
-                const started = performance.now();
-                try {
-                    db.prepare("INSERT INTO result VALUES ('one')").run();
-                    successes++;
-                } catch (error) {
-                    expect(error).toBeInstanceOf(SqliteAcquisitionBusyError);
-                    busy++;
-                } finally {
-                    waited += performance.now() - started;
-                    expect(await locker.exited).toBe(0);
+        await withSqliteTransformPass(() => {
+            // Use real BUSY failures but a controlled accounting clock: each
+            // retry costs 400ms regardless of runner scheduling. The deadline
+            // keeps the real waits short without hiding lease exhaustion.
+            guardSqliteTransformPass({ assert() {}, remainingMs: () => 10 });
+            let now = 0;
+            const clock = spyOn(performance, "now").mockImplementation(() => (now += 400));
+            try {
+                for (let i = 0; i < 8; i++) {
+                    expect(() => db.prepare("INSERT INTO result VALUES ('one')").run()).toThrow(
+                        SqliteAcquisitionBusyError,
+                    );
                 }
+            } finally {
+                clock.mockRestore();
             }
+            // Five charged retries exhaust 2000ms. All later retries must have
+            // zero timeout even though the deadline still offers another 10ms.
+            expect(timeouts).toEqual([
+                ...Array.from({ length: 5 }, () => [0, 10, 5000]).flat(),
+                ...Array.from({ length: 3 }, () => [0, 0, 5000]).flat(),
+            ]);
+            blocker.exec("ROLLBACK");
+            db.prepare("INSERT INTO result VALUES ('uncontended')").run();
         });
-        expect(successes).toBeGreaterThan(0);
-        expect(busy).toBeGreaterThan(0);
-        expect(waited).toBeGreaterThanOrEqual(1900);
-        expect(waited).toBeLessThan(2200);
-        expect(db.prepare("SELECT count(*) AS n FROM result").get()).toEqual({ n: successes });
+        expect(db.prepare("SELECT * FROM result").all()).toEqual([{ value: "uncontended" }]);
     } finally {
+        exec.mockRestore();
+        if (blocker.inTransaction) blocker.exec("ROLLBACK");
+        blocker.close();
         close();
     }
 }, 30_000);
+
+test("an exec script charges its single attempt without a zero-wait probe", () => {
+    const { db, path, close } = fixture();
+    const blocker = new Database(path);
+    const timeouts: number[] = [];
+    const nativeExec = db.exec.bind(db);
+    const exec = spyOn(db, "exec").mockImplementation((sql) => {
+        const timeout = /^PRAGMA busy_timeout=(\d+)$/.exec(sql);
+        if (timeout) timeouts.push(Number(timeout[1]));
+        return nativeExec(sql);
+    });
+    try {
+        withSqliteTransformPass(() => {
+            let now = 0;
+            const clock = spyOn(performance, "now").mockImplementation(() => (now += 2500));
+            try {
+                db.exec(
+                    "INSERT INTO result VALUES ('prefix'); INSERT INTO result VALUES ('suffix')",
+                );
+            } finally {
+                clock.mockRestore();
+            }
+            blocker.exec("BEGIN IMMEDIATE");
+            expect(() => db.prepare("INSERT INTO result VALUES ('blocked')").run()).toThrow(
+                SqliteAcquisitionBusyError,
+            );
+        });
+        expect(timeouts).toEqual([2000, 5000, 0, 0, 5000]);
+        expect(db.prepare("SELECT * FROM result").all()).toEqual([
+            { value: "prefix" },
+            { value: "suffix" },
+        ]);
+    } finally {
+        exec.mockRestore();
+        if (blocker.inTransaction) blocker.exec("ROLLBACK");
+        blocker.close();
+        close();
+    }
+});
+
+test("an explicit transaction keeps its timeout and never probes or retries", () => {
+    const { db, path, close } = fixture();
+    const other = new Database(path);
+    db.exec("PRAGMA busy_timeout=0; BEGIN; SELECT * FROM result");
+    other.exec("INSERT INTO result VALUES ('other')");
+    const exec = spyOn(db, "exec");
+    try {
+        withSqliteTransformPass(() => {
+            expect(() => db.prepare("INSERT INTO result VALUES ('stale')").run()).toThrow("locked");
+        });
+        expect(exec).not.toHaveBeenCalled();
+        expect(db.inTransaction).toBe(true);
+        expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 0 });
+    } finally {
+        exec.mockRestore();
+        if (db.inTransaction) db.exec("ROLLBACK");
+        other.close();
+        close();
+    }
+});
 
 for (const mode of ["BEGIN", "autocommit"]) {
     test(`foreground ${mode} wait is capped by the pass deadline`, () => {
