@@ -311,6 +311,42 @@ describe("home project sidebar", () => {
 });
 
 describe("session-owner", () => {
+    test("moved-session recomp and recovery use fresh host ownership before opening local state", async () => {
+        const root = createTestTempDirFromPath(join(tmpdir(), "moved-history-owner-"));
+        const handlers = new Map<string, TestRpcHandler>();
+        const liveSessionState = createLiveSessionState();
+        liveSessionState.sessionDirectoryBySession.set("moved", "/old");
+        try {
+            registerRpcHandlers(
+                {
+                    handle: (method: string, handler: TestRpcHandler) =>
+                        handlers.set(method, handler),
+                } as unknown as MagicContextRpcServer,
+                {
+                    directory: "/old",
+                    config: MagicContextConfigSchema.parse({}),
+                    client: undefined,
+                    liveSessionState,
+                    storageDir: root,
+                    readSessionDirectory: async () => "/new",
+                    getDatabase: () => {
+                        throw new Error("old instance must not open history state");
+                    },
+                },
+            );
+            expect(await handlers.get("session-owner")!({ sessionId: "moved" })).toEqual({
+                owner: false,
+            });
+            for (const method of ["recomp", "wrapup"]) {
+                const reply = await handlers.get(method)!({ sessionId: "moved" });
+                expect(reply.ok).toBe(false);
+                expect(reply.error).toContain("current project directory (/new)");
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     function ownerHandler(directory: string, sessionDirectories: Record<string, string>) {
         const handlers = new Map<string, TestRpcHandler>();
         const rpcServer = {

@@ -151,6 +151,8 @@ export interface RawMessageProvider {
     readMessagePartsById?: (messageId: string) => RawMessageParts | null;
     hasMessageById?: (messageId: string) => boolean;
     readMessageOrdinalById?: (messageId: string) => number | null;
+    /** Persisted ordering key, including directory-change notices not numbered for history compression. */
+    readMessageOrderById?: (messageId: string) => number | null;
     readMessageIdOrdinals?: () => Map<string, number>;
     readMessageIdOrdinalsForRange?: (fromOrdinal: number, toOrdinal: number) => Map<string, number>;
     readMessageOrdinalPage?: (
@@ -184,6 +186,7 @@ export interface BoundedRawMessageProvider {
     readMessagePartsById(messageId: string): RawMessageParts | null;
     hasMessageById(messageId: string): boolean;
     readMessageOrdinalById(messageId: string): number | null;
+    readMessageOrderById?: (messageId: string) => number | null;
     readMessageIdOrdinalsForRange(fromOrdinal: number, toOrdinal: number): Map<string, number>;
     readMessageOrdinalPage(
         after: RawMessageOrdinalAnchor | null,
@@ -932,16 +935,28 @@ export function readRawSessionMessageOrdinalById(
     );
 }
 
+/** Store positions order persisted rows; raw ordinals number only messages selected for compression. */
+function readRawSessionMessageOrderPosition(sessionId: string, messageId: string): number | null {
+    const provider = sessionProviders.get(sessionId)?.provider;
+    if (provider) {
+        return provider.readMessageOrderById
+            ? provider.readMessageOrderById(messageId)
+            : (provider.readMessageOrdinalById?.(messageId) ?? null);
+    }
+    return readRawSessionMessageOrdinalById(sessionId, messageId);
+}
+
 /**
  * Compare two messages' positions in the session's persisted order without
  * reading the rest of the session: negative when `leftId` comes first, positive
  * when it comes after, 0 when they are the same row, null when either row is
  * unknown here.
  *
- * OpenCode's store is compared on (time_created, id), the order raw-message
- * ordinals are numbered in, with two primary-key lookups. A registered provider
- * is compared by ordinal only when it can look one up by id directly; any other
- * provider answers null rather than falling back to a whole-history read.
+ * OpenCode 1 uses (time_created, id), with two primary-key lookups. Other host
+ * readers supply their persisted ordering key: OpenCode 2 uses session_message.seq,
+ * which also places directory-change notices omitted from raw-message numbering.
+ * Readers without a separate ordering key use direct message-number lookups;
+ * unavailable positions answer null rather than loading the whole history.
  */
 export function compareRawSessionMessageOrder(
     sessionId: string,
@@ -950,9 +965,9 @@ export function compareRawSessionMessageOrder(
 ): number | null {
     const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
-        if (!provider.readMessageOrdinalById) return null;
-        const left = provider.readMessageOrdinalById(leftId);
-        const right = provider.readMessageOrdinalById(rightId);
+        if (!provider.readMessageOrderById && !provider.readMessageOrdinalById) return null;
+        const left = readRawSessionMessageOrderPosition(sessionId, leftId);
+        const right = readRawSessionMessageOrderPosition(sessionId, rightId);
         return left === null || right === null ? null : left - right;
     }
     if (!openCodeDbExists()) return null;

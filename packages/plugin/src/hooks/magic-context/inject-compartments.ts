@@ -3788,8 +3788,8 @@ export function capturePrefixTrimSourceOrder(
     for (const [index, message] of messages.entries()) {
         const id = message.info.id;
         // OpenCode 2 renders instruction-update rows as id-less system messages
-        // anywhere in history. They carry no row identity to order, and the trim
-        // places them by their persisted neighbours.
+        // anywhere in history. They carry no row identity to order, so both
+        // visible-boundary and persisted-order trimming preserve them.
         if (isHostRenderedSystemMessage(message)) continue;
         if (typeof id !== "string" || id.length === 0) {
             if (!sawPersistedRow && isSyntheticPrefixHead(message)) {
@@ -3813,6 +3813,46 @@ export function capturePrefixTrimSourceOrder(
         syntheticHeadCount,
         invalidReason,
     });
+}
+
+/**
+ * Use persisted order to place a missing boundary in the captured host ID list.
+ * This is evidence only: no missing message body is restored. A missing lookup,
+ * duplicate or reordered window cannot prove a cut and keeps the refusal path.
+ * On a cache-preserving pass, this removes the same identified covered rows as
+ * visible-boundary trimming and keeps every ID-less system row. Hiding only a
+ * fully covered boundary leaves request bytes unchanged, even on the first replay.
+ * No new cache-bust permission or change to the prepared prefix is needed.
+ */
+function reanchorStoredBoundary(
+    options: M0M1RenderOptions,
+    boundary: string,
+): PrefixTrimSourceOrder | undefined {
+    if (!options.messages) return undefined;
+    const source = options.prefixTrimSourceOrder ?? capturePrefixTrimSourceOrder(options.messages);
+    if (source.invalidReason) return undefined;
+    try {
+        if (compareRawSessionMessageOrder(options.sessionId, boundary, boundary) !== 0)
+            return undefined;
+        const messageIds = [...source.messageIds];
+        let previous: string | undefined;
+        let insertion = messageIds.length;
+        for (const [index, id] of messageIds.entries()) {
+            if (previous) {
+                const increasing = compareRawSessionMessageOrder(options.sessionId, previous, id);
+                if (increasing === null || !Number.isFinite(increasing) || increasing >= 0)
+                    return undefined;
+            }
+            const order = compareRawSessionMessageOrder(options.sessionId, boundary, id);
+            if (order === null || !Number.isFinite(order) || order === 0) return undefined;
+            if (order < 0 && insertion === messageIds.length) insertion = index;
+            previous = id;
+        }
+        messageIds.splice(insertion, 0, boundary);
+        return { ...source, messageIds };
+    } catch {
+        return undefined;
+    }
 }
 
 function trimToPreparedPrefix(
@@ -3864,7 +3904,13 @@ function trimToPreparedPrefix(
                     sourcePosition.get(boundary) ??
                     sourcePosition.get(resolveHostServedBoundaryId(options.sessionId, boundary));
                 if (boundaryPosition === undefined) {
-                    status = refuse("boundary absent from immutable source order");
+                    const reanchored = reanchorStoredBoundary(options, boundary);
+                    status = reanchored
+                        ? trimToPreparedPrefix(
+                              { ...options, prefixTrimSourceOrder: reanchored },
+                              prepared,
+                          )
+                        : refuse("boundary absent from immutable source order");
                 } else {
                     let lastSourcePosition = -1;
                     let sawPersistedRow = false;
@@ -3875,10 +3921,16 @@ function trimToPreparedPrefix(
                     for (const [index, message] of options.messages.entries()) {
                         const id = message.info.id;
                         if (isHostRenderedSystemMessage(message)) {
-                            // Belongs to the rows around its persisted neighbours:
-                            // kept exactly when the row before it is kept or is the
-                            // boundary, the same cut the id-lookup trim makes.
-                            if (lastSourcePosition >= boundaryPosition) retained.push(message);
+                            // Unplaced means a host system/instruction row without
+                            // its own stable ID, not the injected synthetic user head. A
+                            // neighbour cannot prove its coverage; even a covered
+                            // instruction need not survive in a compartment summary.
+                            // Retain it whether the boundary is visible or missing,
+                            // so hiding the boundary on a cache-preserving pass
+                            // cannot change the already-served request bytes.
+                            // An identified location notice uses its own persisted
+                            // order (OpenCode 2 seq), even with no raw-message ordinal.
+                            retained.push(message);
                             continue;
                         }
                         if (typeof id !== "string" || id.length === 0) {
@@ -3939,11 +3991,15 @@ function trimToPreparedPrefix(
         } else {
             const index = findBoundaryIndex(options.sessionId, options.messages, boundary);
             if (index >= 0) {
-                const removed = options.messages.splice(
-                    0,
+                const cut =
                     index +
-                        (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1),
-                );
+                    (isPartialCompartmentEnd(options.db, options.sessionId, boundary) ? 0 : 1);
+                // Match source-order trimming: a summary is not proof that an
+                // ID-less host instruction is dispensable. Retaining it here too
+                // keeps request bytes unchanged if the host later hides only the
+                // boundary on a cache-preserving pass.
+                const unplaced = options.messages.slice(0, cut).filter(isHostRenderedSystemMessage);
+                const removed = options.messages.splice(0, cut, ...unplaced);
                 retireDecisions(
                     removed
                         .map((message) => message.info.id)
@@ -3952,7 +4008,15 @@ function trimToPreparedPrefix(
                 resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
             } else {
-                status = classifyAbsentBoundary(options, options.messages, boundary);
+                const reanchored = reanchorStoredBoundary(options, boundary);
+                if (reanchored && reanchored.messageIds[0] !== boundary) {
+                    status = trimToPreparedPrefix(
+                        { ...options, prefixTrimSourceOrder: reanchored },
+                        prepared,
+                    );
+                } else {
+                    status = classifyAbsentBoundary(options, options.messages, boundary);
+                }
             }
         }
     }

@@ -138,7 +138,7 @@ export function createNativeHiddenChildren(
             // would run unshaped, with that directory as its working tree.
             throw new HiddenCompletionRefusal(
                 "hidden_prompt_unrecognized",
-                `hidden child ${sessionID} is bound to ${directory}, not to this instance's ${options.directory}`,
+                `hidden child ${sessionID} is bound to ${directory}, not to this instance's ${options.directory}. Reopen the parent session in ${directory}, then run /ctx-recomp so its owning instance can rebuild history.`,
                 true,
             );
         }

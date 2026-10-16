@@ -30,6 +30,7 @@ import {
 	MEMORY_RENDER_FORMAT_EPOCH,
 } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
 import { renderMemoryBlockV2 } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
@@ -77,6 +78,50 @@ function result(toolCallId: string) {
 		timestamp: 1,
 	};
 }
+
+it("Pi reanchors an invisible cached boundary by active-branch order on repeated passes", () => {
+	const db = createTestDb();
+	const sessionId = "pi-out-of-order-boundary";
+	try {
+		appendCompartments(db, sessionId, [
+			{
+				sequence: 0,
+				startMessage: 1,
+				endMessage: 2,
+				startMessageId: "old",
+				endMessageId: "boundary",
+				title: "Summary",
+				content: "Old history.",
+			},
+		]);
+		materializeM0Pi({ sessionId, injectDocs: false }, db);
+		withRawMessageProvider(
+			sessionId,
+			{
+				readMessages: () =>
+					["old", "boundary", "tail"].map((id, index) => ({
+						id,
+						role: "user" as const,
+						ordinal: index + 1,
+						parts: [{ type: "text", text: id }],
+					})),
+			},
+			() => {
+				for (let pass = 0; pass < 3; pass++) {
+					const live = [userMessage("old"), userMessage("tail")];
+					const ids = ["old", "tail"];
+					expect(trimPiMessagesToCachedBoundary(db, sessionId, live, ids)).toBe(
+						1,
+					);
+					expect(live).toEqual([userMessage("tail")]);
+					expect(ids).toEqual(["tail"]);
+				}
+			},
+		);
+	} finally {
+		closeQuietly(db);
+	}
+});
 
 it("pi applied compaction bounds auto-search blob across 20000 user messages", () => {
 	const db = createTestDb();

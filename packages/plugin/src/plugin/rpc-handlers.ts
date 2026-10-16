@@ -1467,6 +1467,8 @@ export function registerRpcHandlers(
         compactionMarkerStrategy?: ManagedRecompContext["compactionMarkerStrategy"];
         /** Install the host's history source even before a reopened session's first pass. */
         prepareHistorySession?: (sessionId: string) => void;
+        /** Read the session's current host directory, not the plugin's pre-move cached directory. */
+        readSessionDirectory?: (sessionId: string) => Promise<string | null>;
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
         getDatabase?: () => Database | null;
@@ -1536,9 +1538,10 @@ export function registerRpcHandlers(
     rpcServer.handle("session-owner", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { owner: false };
-        const sessionDirectory =
-            liveSessionState.sessionDirectoryBySession.get(sessionId) ??
-            (await readHostSessionDirectory(args.client, sessionId));
+        const sessionDirectory = args.readSessionDirectory
+            ? await args.readSessionDirectory(sessionId)
+            : ((await readHostSessionDirectory(args.client, sessionId)) ??
+              liveSessionState.sessionDirectoryBySession.get(sessionId));
         if (!sessionDirectory) return { owner: false };
         return {
             owner:
@@ -1683,6 +1686,19 @@ export function registerRpcHandlers(
     rpcServer.handle("recomp", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
+        const readDirectory = args.readSessionDirectory;
+        if (readDirectory) {
+            const { handoffHistoryWork } = await import("../shared/history-owner");
+            const handed = await handoffHistoryWork({
+                storageDir: args.storageDir ?? getMagicContextStorageDir(),
+                directory,
+                sessionId,
+                method: "recomp",
+                params,
+                readDirectory: () => readDirectory(sessionId),
+            });
+            if (handed) return handed;
+        }
         const dir = String(params.directory ?? directory);
         if (config.transform_mode === "rust") {
             return executeRustRecompRpc(rustModeModuleClient, sessionId, dir);
@@ -1784,6 +1800,20 @@ export function registerRpcHandlers(
     });
 
     rpcServer.handle("wrapup", async (params) => {
+        const readDirectory = args.readSessionDirectory;
+        if (readDirectory && params.sessionId) {
+            const { handoffHistoryWork } = await import("../shared/history-owner");
+            const sessionId = String(params.sessionId);
+            const handed = await handoffHistoryWork({
+                storageDir: args.storageDir ?? getMagicContextStorageDir(),
+                directory,
+                sessionId,
+                method: "wrapup",
+                params,
+                readDirectory: () => readDirectory(sessionId),
+            });
+            if (handed) return handed;
+        }
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
         if (!compactionEnabled) return { ok: true, message: compactionOffRefusal("ctx-wrapup") };

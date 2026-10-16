@@ -17,8 +17,8 @@ export const USER_FACING_FAILURES = {
     history_boundary_unresolved: {
         code: "MC-H04",
         sentence:
-            "This request was not sent: the message that marks where this session's history summary ends is missing from the OpenCode store, and without it the request is larger than the model's context window.",
-        action: "Run /ctx-recomp to rebuild the history summary.",
+            "This request was not sent: Magic Context could not safely place the history summary boundary in the loaded conversation, and the untrimmed request is larger than the model's context window.",
+        action: "Reopen this session in its current project directory, then run /ctx-recomp to rebuild the history summary. A model with a larger context window can also help.",
     },
     history_over_window_unmanaged: {
         code: "MC-H06",
