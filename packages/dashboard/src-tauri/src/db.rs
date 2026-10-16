@@ -1,6 +1,4 @@
-use rusqlite::{
-    params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
-};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -741,10 +739,12 @@ fn ensure_context_store_uuid(conn: &Connection) -> Result<(), rusqlite::Error> {
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
     );
-    conn.execute(
+    crate::writer_diagnostics::statement("context_store_uuid", || {
+        conn.execute(
         "INSERT INTO context_store_meta(key, value) VALUES ('store_uuid', ?1) ON CONFLICT(key) DO NOTHING",
         [&uuid],
-    )?;
+    )
+    })?;
     Ok(())
 }
 
@@ -6059,8 +6059,9 @@ fn bump_session_facts_version_for_session(
 /// Exception-only cache invalidation for schema/cache-format upgrades and explicit clear-all UI.
 /// Routine memory, user-memory, and fact mutations must use scoped version counters instead.
 pub fn invalidate_all_memory_block_caches(conn: &Connection) -> Result<usize, rusqlite::Error> {
-    conn.execute(
-        "UPDATE session_meta
+    crate::writer_diagnostics::statement("invalidate_memory_caches", || {
+        conn.execute(
+            "UPDATE session_meta
          SET memory_block_cache = '',
              memory_block_ids = '',
              cached_m0_bytes = NULL,
@@ -6071,8 +6072,9 @@ pub fn invalidate_all_memory_block_caches(conn: &Connection) -> Result<usize, ru
             OR cached_m0_bytes IS NOT NULL
             OR cached_m1_bytes IS NOT NULL
             OR cached_m0_max_memory_mutation_id IS NOT NULL",
-        [],
-    )
+            [],
+        )
+    })
 }
 
 pub fn update_memory_status(
@@ -6112,7 +6114,7 @@ pub fn update_memory_status(
     let is_archive = new_status == "archived" && prior_status != Some("archived");
 
     // Phase B: re-check the target row, mutate, and queue/bump in one tx.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
     tx.execute(
         "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
@@ -6155,7 +6157,7 @@ pub fn update_memory_content(
     let new_hash = normalize_hash(new_content);
 
     // Phase B: re-check the target row, mutate, clear stale embeddings, and queue once.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
 
     // Pre-check the UNIQUE(project_path, category, normalized_hash) constraint
@@ -6252,7 +6254,7 @@ pub fn update_memory_category(
     }
 
     // Phase B: re-check the target row, mutate, and bump epochs once.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
 
     let normalized_hash: String = tx.query_row(
@@ -6312,7 +6314,7 @@ pub fn delete_memory(conn: &mut Connection, memory_id: i64) -> Result<(), rusqli
     let target = lookup_memory_mutation_target(conn, memory_id)?;
 
     // Phase B: re-check, queue before delete, then delete.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
     queue_memory_mutation(
         &tx,
@@ -6375,7 +6377,7 @@ pub fn bulk_update_memory_status(
     let now = now_millis();
 
     // Phase B: bulk re-verify, bulk update, then queue per archive or bump per restore.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
     let affected = {
         let status_value = new_status.to_string();
@@ -6437,7 +6439,7 @@ pub fn bulk_delete_memory(
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     // Phase B: bulk re-verify, queue one delete per memory, then delete.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
     for id in memory_ids {
         if let Some(target) = phase_a_targets.get(id) {
@@ -7547,7 +7549,7 @@ pub fn update_session_fact(
     let session_id = lookup_session_fact_session_id(conn, fact_id)?;
 
     // Phase B: re-check the owner, mutate, and bump session_facts_version together.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_session_fact_session_unchanged(&tx, fact_id, &session_id)?;
     let affected = tx.execute(
         "UPDATE session_facts SET content = ?1, updated_at = ?2 WHERE id = ?3",
@@ -7565,7 +7567,7 @@ pub fn delete_session_fact(conn: &mut Connection, fact_id: i64) -> Result<usize,
     let session_id = lookup_session_fact_session_id(conn, fact_id)?;
 
     // Phase B: re-check, bump before delete, then delete.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     verify_session_fact_session_unchanged(&tx, fact_id, &session_id)?;
     bump_session_facts_version_for_session(&tx, &session_id)?;
     let affected = tx.execute("DELETE FROM session_facts WHERE id = ?1", params![fact_id])?;
@@ -7578,24 +7580,30 @@ pub fn update_note(
     note_id: i64,
     content: &str,
 ) -> Result<usize, rusqlite::Error> {
-    conn.execute(
-        "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![content, chrono::Utc::now().timestamp_millis(), note_id],
-    )
+    crate::writer_diagnostics::statement("update_note", || {
+        conn.execute(
+            "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![content, chrono::Utc::now().timestamp_millis(), note_id],
+        )
+    })
 }
 
 pub fn delete_note(conn: &Connection, note_id: i64) -> Result<usize, rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM notes WHERE id = ?1",
-        rusqlite::params![note_id],
-    )
+    crate::writer_diagnostics::statement("delete_note", || {
+        conn.execute(
+            "DELETE FROM notes WHERE id = ?1",
+            rusqlite::params![note_id],
+        )
+    })
 }
 
 pub fn dismiss_note(conn: &Connection, note_id: i64) -> Result<usize, rusqlite::Error> {
-    conn.execute(
-        "UPDATE notes SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
-        rusqlite::params![chrono::Utc::now().timestamp_millis(), note_id],
-    )
+    crate::writer_diagnostics::statement("dismiss_note", || {
+        conn.execute(
+            "UPDATE notes SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().timestamp_millis(), note_id],
+        )
+    })
 }
 
 pub fn get_smart_notes(
@@ -8392,7 +8400,7 @@ pub fn get_user_memory_candidates(
 }
 
 pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     let affected = tx.execute(
         "UPDATE user_memories SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
         params![now_millis(), id],
@@ -8405,7 +8413,7 @@ pub fn dismiss_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
 }
 
 pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     let affected = tx.execute(
         "UPDATE user_memories SET status = 'active', updated_at = ?1 WHERE id = ?2 AND status = 'dismissed'",
         params![now_millis(), id],
@@ -8424,7 +8432,7 @@ pub fn restore_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlit
 }
 
 pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite::Error> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     let affected = tx.execute("DELETE FROM user_memories WHERE id = ?1", params![id])?;
     if affected > 0 {
         bump_project_user_profile_version(&tx)?;
@@ -8438,7 +8446,7 @@ pub fn update_user_memory_content(
     id: i64,
     content: &str,
 ) -> Result<(), rusqlite::Error> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
     let affected = tx.execute(
         "UPDATE user_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
         params![content, now_millis(), id],
@@ -8454,10 +8462,12 @@ pub fn update_user_memory_content(
 }
 
 pub fn delete_user_memory_candidate(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "DELETE FROM user_memory_candidates WHERE id = ?1",
-        params![id],
-    )?;
+    crate::writer_diagnostics::statement("delete_user_memory_candidate", || {
+        conn.execute(
+            "DELETE FROM user_memory_candidates WHERE id = ?1",
+            params![id],
+        )
+    })?;
     Ok(())
 }
 
@@ -8466,7 +8476,7 @@ pub fn promote_user_memory_candidate(
     id: i64,
 ) -> Result<(), rusqlite::Error> {
     let now = now_millis();
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = crate::writer_diagnostics::begin(conn, concat!(file!(), ":", line!()))?;
 
     let content: String = tx.query_row(
         "SELECT content FROM user_memory_candidates WHERE id = ?1",

@@ -229,6 +229,17 @@ function persistLkgSlot(
     }
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
+        // Ownership arrays grow with the session. Serialize them before BEGIN so
+        // preparing a large saved request does not exclude another host's writer.
+        const inputIdSeq = JSON.stringify(
+            slot.piOutputEntryIds
+                ? { version: 1, inputIds: slot.inputIdSeq, piOutputEntryIds: slot.piOutputEntryIds }
+                : slot.inputIdSeq,
+        );
+        const inputContentDigests = JSON.stringify(slot.inputContentDigests);
+        const inputContentSignatures = slot.inputContentSignatures
+            ? JSON.stringify(slot.inputContentSignatures)
+            : null;
         db.transaction(() => {
             const storedHashes = new Map<unknown, unknown>();
             for (const row of db
@@ -273,17 +284,9 @@ function persistLkgSlot(
                 layout.chars,
                 layout.chunks.length,
                 layout.hash,
-                JSON.stringify(
-                    slot.piOutputEntryIds
-                        ? {
-                              version: 1,
-                              inputIds: slot.inputIdSeq,
-                              piOutputEntryIds: slot.piOutputEntryIds,
-                          }
-                        : slot.inputIdSeq,
-                ),
-                JSON.stringify(slot.inputContentDigests),
-                slot.inputContentSignatures ? JSON.stringify(slot.inputContentSignatures) : null,
+                inputIdSeq,
+                inputContentDigests,
+                inputContentSignatures,
                 slot.lastInputMessageId,
                 slot.modelKey,
                 slot.providerKey,

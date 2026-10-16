@@ -14,7 +14,7 @@ import {
     getMagicContextStorageDir,
 } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
-import { harnessOwnsOpenCodeStore } from "../../shared/harness";
+import { getHarness, harnessOwnsOpenCodeStore } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import {
     type AsyncProcessInspection,
@@ -85,7 +85,7 @@ import { runToolOwnerBackfill } from "./tool-owner-backfill";
 // this module, so registering here covers privileged writes and writer
 // acquisition/hold diagnostics on both runtimes.
 registerSlowWriteReporter(logSlowWriteTransaction);
-registerSqliteDiagnosticSink((message) => log(message));
+registerSqliteDiagnosticSink((message) => log(message), getHarness);
 
 // Re-exported so existing `from "./storage-db"` importers (and tests) keep
 // resolving these; the definitions live in the leaf module to break the
