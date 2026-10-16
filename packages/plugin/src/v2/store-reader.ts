@@ -60,7 +60,7 @@ export const V2_MESSAGE_PAGE_SQL = `WITH bounds AS (
             SELECT seq FROM session_message
             WHERE session_id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
             ORDER BY seq ASC LIMIT 1 OFFSET ?
-        ), -1) END AS after_seq,
+        ), (SELECT MAX(seq) FROM session_message WHERE session_id = ?), -1) END AS after_seq,
         COALESCE((
             SELECT seq FROM session_message
             WHERE session_id = ? AND type IN (${RAW_MESSAGE_TYPE_PARAMETERS})
@@ -507,11 +507,14 @@ export class V2StoreReader {
                 }
             }
             const maximumSeq = Number.MAX_SAFE_INTEGER;
+            // A cursor past the last ordinal must stay after the session's rows;
+            // falling back to -1 would replay the first message under that ordinal.
             const rows = this.prepare(V2_MESSAGE_PAGE_SQL).all(
                 afterOrdinal,
                 sessionID,
                 ...RAW_MESSAGE_TYPES,
                 Math.max(0, afterOrdinal - 1),
+                sessionID,
                 sessionID,
                 ...RAW_MESSAGE_TYPES,
                 finalWatermark - 1,
