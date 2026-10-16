@@ -1559,6 +1559,7 @@ export const defaultCompactionMarkerStrategy: CompactionMarkerStrategy = {
 };
 
 interface RunPostTransformPhaseArgs {
+    opencode2?: boolean;
     /** Add §N§ reduction handles to messages sent untagged during recovery, once a fold replaces the provider's cached prefix. */
     normalizeRecoveryTail?: () => void;
     compactionMarkerStrategy?: CompactionMarkerStrategy;
@@ -4536,6 +4537,7 @@ export async function runPostTransformPhase(
                     hygieneCalibration,
                 );
                 const baseline = refreshTailHygieneBaseline({
+                    opencode2: args.opencode2,
                     messages: args.messages,
                     tags,
                     protectedTagNumbers: args.protectedTagNumbers,
@@ -4563,7 +4565,10 @@ export async function runPostTransformPhase(
                     );
                 }
                 const tTailState = performance.now();
-                const structuralSignature = tailHygieneStructuralSignature(args.messages);
+                const structuralSignature = tailHygieneStructuralSignature(
+                    args.messages,
+                    args.opencode2,
+                );
                 const effective = effectiveTailHygiene(baseline);
                 const durableGrace =
                     baseline.evaluable && !baseline.generationInvalidated
@@ -4587,8 +4592,15 @@ export async function runPostTransformPhase(
                     ...baseline,
                     usableWindow: args.usableWindow,
                     realUserTurnCount: countRealUserMessages(args.messages),
+                    // A successful refresh replaces the stale counts invalidated by ctx_reduce.
+                    // Release that temporary hold even without a generation change; persisted
+                    // post-reduce grace still waits for sufficient regrowth before reminding.
                     reducedSinceRefresh:
-                        baseline.baselineGeneration !== previous?.baselineGeneration
+                        baseline.baselineGeneration !== previous?.baselineGeneration ||
+                        ((previous?.generationInvalidated === true ||
+                            previous?.evaluable === false) &&
+                            baseline.evaluable &&
+                            !baseline.generationInvalidated)
                             ? false
                             : (previous?.reducedSinceRefresh ?? false),
                     agentDropsAppliedThisPass: pendingOpsDidMutate,
@@ -4636,7 +4648,7 @@ export async function runPostTransformPhase(
     const tTailGuard = performance.now();
     if (assertedBaseline) {
         try {
-            const servedSignature = tailHygieneStructuralSignature(args.messages);
+            const servedSignature = tailHygieneStructuralSignature(args.messages, args.opencode2);
             if (
                 !sameTailHygieneStructuralSignature(
                     assertedBaseline.structuralSignature,
@@ -4658,6 +4670,7 @@ export async function runPostTransformPhase(
             );
         }
         assertTailHygieneContentUnchangedIfEnabled({
+            opencode2: args.opencode2,
             messages: args.messages,
             tags: assertedBaseline.tags,
             protectedTagNumbers: assertedBaseline.protectedTagNumbers,

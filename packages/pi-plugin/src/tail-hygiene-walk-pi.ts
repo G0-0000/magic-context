@@ -16,6 +16,7 @@ import {
 	piJsonHash,
 	TailHygieneJsonMemo,
 } from "@magic-context/core/shared/tail-hygiene-json";
+import { providerVisiblePiPart } from "./provider-visible-parts-pi";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
@@ -582,19 +583,29 @@ function attributeTags(
 }
 
 const partJsonMemo = new TailHygieneJsonMemo();
+let excludedViews = new WeakMap<object, unknown>();
 
 function excludedDraft(key: string, value: unknown): DraftPart {
+	let view =
+		value !== null && typeof value === "object"
+			? excludedViews.get(value)
+			: undefined;
+	if (view === undefined) {
+		view = providerVisiblePiPart(value);
+		if (value !== null && typeof value === "object")
+			excludedViews.set(value, view);
+	}
 	return {
 		key,
 		kind: "excluded",
 		content: "",
 		contentHash: partJsonMemo.get(
 			key,
-			value,
+			view,
 			() =>
-				typeof value === "string"
-					? partHash("excluded", value)
-					: piJsonHash(value, () => safeStableStringify(value)),
+				typeof view === "string"
+					? partHash("excluded", view)
+					: piJsonHash(view, () => safeStableStringify(view)),
 			true,
 		),
 		tokens: 0,
@@ -668,6 +679,7 @@ export function measurePiTailHygiene(
 	input: PiTailHygieneWalkInput,
 ): TailHygieneMeasurement & { realUserTurnCount: number } {
 	partJsonMemo.beginPass();
+	excludedViews = new WeakMap();
 	const { arcs, arcByPart, messageIds } = collectToolArcs(input);
 	const { messageTags, tagsByNumber } = attributeTags(input, arcs, messageIds);
 	const drafts: DraftPart[] = [];

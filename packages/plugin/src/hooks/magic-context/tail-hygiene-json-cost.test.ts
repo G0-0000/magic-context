@@ -1,61 +1,148 @@
 import { expect, spyOn, test } from "bun:test";
 import * as stableJson from "../../shared/stable-json";
-import { refreshTailHygieneBaseline } from "./tail-hygiene-walk";
+import { opencode1ToModelMessages } from "./opencode1-to-model-messages.fixture";
+import { measureTailHygiene, refreshTailHygieneBaseline } from "./tail-hygiene-walk";
 
-test("excluded OpenCode parts never materialize whole JSON and unchanged parts reuse fingerprints", () => {
+function metadataProbe() {
+    const data = {
+        diagnostics: "x".repeat(18 * 1024 * 1024),
+        interrupted: true,
+        output: "partial" as unknown,
+    };
+    let bytesVisited = 0;
+    let reads = 0;
+    const metadata = new Proxy(data, {
+        ownKeys(target) {
+            bytesVisited += data.diagnostics.length;
+            return Reflect.ownKeys(target);
+        },
+        get(target, key, receiver) {
+            if (key === "diagnostics") bytesVisited += data.diagnostics.length;
+            return Reflect.get(target, key, receiver);
+        },
+    });
+    return {
+        data,
+        read: () => {
+            reads++;
+            return metadata;
+        },
+        stats: () => ({ bytesVisited, reads }),
+    };
+}
+
+for (const opencode2 of [false, true]) {
+    test(`excluded OpenCode ${opencode2 ? 2 : 1} identity visits zero UI metadata bytes`, () => {
+        const probe = metadataProbe();
+        const part = {
+            type: "tool",
+            callID: `cost-call-${opencode2}`,
+            tool: "edit",
+            state: {
+                status: opencode2 ? "error" : "completed",
+                input: { path: "file.ts" },
+                error: "[dropped §1§]",
+                ...(opencode2 ? {} : { output: "[dropped §1§]" }),
+                get metadata() {
+                    return probe.read();
+                },
+            },
+        };
+        const messages = [
+            {
+                info: { id: `cost-owner-${opencode2}`, role: "assistant" },
+                parts: [part, { type: "text", text: "first" }, part],
+            },
+            {
+                info: { id: `cost-newest-${opencode2}`, role: "user" },
+                parts: [{ type: "text", text: "next" }],
+            },
+        ];
+        const input = {
+            messages,
+            tags: [],
+            protectedTagNumbers: new Set<number>(),
+            cacheBusting: true,
+            now: 1,
+            opencode2,
+        };
+        const serialize = spyOn(stableJson, "stableStringify");
+        const fingerprint = spyOn(stableJson, "stableStringifyHash");
+        try {
+            let previous = refreshTailHygieneBaseline(input);
+            expect(probe.stats()).toEqual({ bytesVisited: 0, reads: 0 });
+            expect(serialize.mock.calls.filter(([value]) => value === part)).toHaveLength(0);
+            expect(fingerprint).toHaveBeenCalledTimes(1);
+            serialize.mockClear();
+            fingerprint.mockClear();
+            messages[0].parts[1] = { type: "text", text: "second" };
+            previous = refreshTailHygieneBaseline({ ...input, previous, cacheBusting: false });
+            expect(serialize).not.toHaveBeenCalled();
+            expect(fingerprint).not.toHaveBeenCalled();
+            probe.data.diagnostics = "y".repeat(18 * 1024 * 1024);
+            messages[0].parts[1] = { type: "text", text: "third" };
+            const changed = refreshTailHygieneBaseline({ ...input, previous, cacheBusting: false });
+            // UI-only edits stay irrelevant even when a sibling invalidates message replay.
+            expect(changed.baselineParts[0]).toEqual(previous.baselineParts[0]);
+            expect(fingerprint).not.toHaveBeenCalled();
+            expect(probe.stats()).toEqual({ bytesVisited: 0, reads: 0 });
+        } finally {
+            serialize.mockRestore();
+            fingerprint.mockRestore();
+        }
+    });
+}
+
+test("excluded OpenCode identity preserves the interrupted error fields OpenCode 1 forwards", async () => {
+    const probe = metadataProbe();
     const part = {
         type: "tool",
-        callID: "cost-call",
+        callID: "interrupted-cost",
         tool: "edit",
         state: {
-            status: "completed",
+            status: "error",
             input: { path: "file.ts" },
-            output: "[dropped §1§]",
-            metadata: {
-                diagnostics: Array.from({ length: 20_000 }, (_, i) => ({
-                    i,
-                    text: "x".repeat(100),
-                })),
+            error: "[dropped]",
+            get metadata() {
+                return probe.read();
             },
         },
     };
     const messages = [
         {
-            info: { id: "cost-owner", role: "assistant" },
-            parts: [part, { type: "text", text: "first" }, part],
+            info: {
+                id: "interrupted-owner",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-sonnet-4-5",
+            },
+            parts: [part],
         },
-        { info: { id: "cost-newest", role: "user" }, parts: [{ type: "text", text: "next" }] },
+        {
+            info: { id: "interrupted-newest", role: "user" },
+            parts: [{ type: "text", text: "next" }],
+        },
     ];
-    const input = {
-        messages,
-        tags: [],
-        protectedTagNumbers: new Set<number>(),
-        cacheBusting: true,
-        now: 1,
+    const input = { messages, tags: [], protectedTagNumbers: new Set<number>() };
+    const hash = () => measureTailHygiene(input).parts[0].contentHash;
+    const model = {
+        providerID: "anthropic",
+        id: "claude-sonnet-4-5",
+        api: { npm: "@ai-sdk/anthropic", id: "claude-sonnet-4-5" },
     };
-    const serialize = spyOn(stableJson, "stableStringify");
-    const fingerprint = spyOn(stableJson, "stableStringifyHash");
-    try {
-        let previous = refreshTailHygieneBaseline(input);
-        expect(serialize.mock.calls.filter(([value]) => value === part)).toHaveLength(0);
-        expect(fingerprint.mock.calls.filter(([value]) => value === part)).toHaveLength(1);
-        serialize.mockClear();
-        fingerprint.mockClear();
-        messages[0].parts[1] = { type: "text", text: "second" };
-        previous = refreshTailHygieneBaseline({ ...input, previous, cacheBusting: false });
-        expect(serialize).not.toHaveBeenCalled();
-        expect(fingerprint).not.toHaveBeenCalled();
-        // A metadata edit alone is intentionally invisible to the existing message replay.
-        // A sibling edit invalidates that replay, so the full excluded identity must update.
-        part.state.metadata.diagnostics[0].text = "different";
-        messages[0].parts[1] = { type: "text", text: "third" };
-        const changed = refreshTailHygieneBaseline({ ...input, previous, cacheBusting: false });
-        expect(fingerprint.mock.calls.filter(([value]) => value === part)).toHaveLength(1);
-        expect(changed.baselineParts[0].contentHash).not.toBe(
-            previous.baselineParts[0].contentHash,
-        );
-    } finally {
-        serialize.mockRestore();
-        fingerprint.mockRestore();
-    }
+    const before = hash();
+    const beforeWire = JSON.stringify(await opencode1ToModelMessages(messages, model));
+    probe.data.output = "different partial";
+    expect(hash()).not.toBe(before);
+    const afterWire = JSON.stringify(await opencode1ToModelMessages(messages, model));
+    expect(afterWire).not.toBe(beforeWire);
+    expect(afterWire).toContain("different partial");
+    probe.data.interrupted = false;
+    const notInterrupted = hash();
+    probe.data.output = "irrelevant while not interrupted";
+    expect(hash()).toBe(notInterrupted);
+    probe.data.interrupted = true;
+    probe.data.output = { UI: "not a string partial result" };
+    expect(hash()).toBe(notInterrupted);
+    expect(probe.stats().bytesVisited).toBe(0);
 });
