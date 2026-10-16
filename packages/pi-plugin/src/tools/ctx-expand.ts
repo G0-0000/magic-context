@@ -35,6 +35,7 @@ import {
 	renderMessageByOrdinal,
 	renderVerboseRange,
 } from "@magic-context/core/tools/ctx-expand/render";
+import { renderSearchArchive } from "@magic-context/core/tools/ctx-expand/search-archive";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import {
@@ -153,15 +154,24 @@ export function createCtxExpandTool(
 				if (mode.kind === "tag") {
 					return ok(renderItemByTag(deps.db, sessionId, mode.tag, "text"));
 				}
-				// Message and range ordinals are stored coordinates. When they cannot
-				// be placed on this branch, any branch message shown under them
-				// would be a different message, so expansion is refused.
+				// Stored ordinals must be aligned before reading branch messages, or
+				// the same number could show a different message. Archived text keeps
+				// its stored coordinates and can be recovered without branch alignment.
 				const alignment = resolvePiOrdinalAlignmentForContext(
 					deps.db,
 					sessionId,
 					ctx,
 				);
 				if (isPiOrdinalAlignmentUnanchored(alignment)) {
+					const archived = renderSearchArchive(
+						deps.db,
+						sessionId,
+						mode.kind === "message" ? mode.message : mode.start,
+						mode.kind === "message" ? mode.message : mode.end,
+						CTX_EXPAND_TOKEN_BUDGET,
+						true,
+					);
+					if (archived) return ok(archived);
 					return err(
 						"This session's history numbering can't be verified right now, so message ordinals can't be expanded. Tags (ctx_expand tag=N) still work.",
 					);
@@ -171,6 +181,14 @@ export function createCtxExpandTool(
 				const lostThrough = alignment.offset;
 				const firstAvailable = lostThrough + 1;
 				if (mode.kind === "message") {
+					const archived = renderSearchArchive(
+						deps.db,
+						sessionId,
+						mode.message,
+						mode.message,
+						CTX_EXPAND_TOKEN_BUDGET,
+					);
+					if (archived) return ok(archived);
 					if (mode.message <= lostThrough) {
 						return ok(
 							`No message at ordinal ${mode.message}: it is no longer in this session's history, which now starts at message ${firstAvailable}.`,
@@ -196,6 +214,14 @@ export function createCtxExpandTool(
 				}
 				const effectiveEnd =
 					lastCompartmentEnd >= 0 ? Math.min(end, lastCompartmentEnd) : end;
+				const archived = renderSearchArchive(
+					deps.db,
+					sessionId,
+					requestedStart,
+					effectiveEnd,
+					CTX_EXPAND_TOKEN_BUDGET,
+				);
+				if (archived) return ok(archived);
 				if (effectiveEnd <= lostThrough) {
 					return ok(
 						`No messages found in range ${requestedStart}-${effectiveEnd}: those messages are no longer in this session's history, which now starts at message ${firstAvailable}.`,

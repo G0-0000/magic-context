@@ -10,6 +10,7 @@ import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
 import { renderItemByTag, renderMessageByOrdinal, renderVerboseRange } from "./render";
+import { renderSearchArchive } from "./search-archive";
 import type { CtxExpandArgs } from "./types";
 
 export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -78,7 +79,15 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return renderItemByTag(deps.db, sessionId, mode.tag);
             }
             if (mode.kind === "message") {
-                return renderMessageByOrdinal(sessionId, mode.message);
+                return (
+                    renderSearchArchive(
+                        deps.db,
+                        sessionId,
+                        mode.message,
+                        mode.message,
+                        CTX_EXPAND_TOKEN_BUDGET,
+                    ) ?? renderMessageByOrdinal(sessionId, mode.message)
+                );
             }
             const { start, end, verbose } = mode;
 
@@ -92,6 +101,14 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 return `Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`;
             }
             const effectiveEnd = lastCompartmentEnd >= 0 ? Math.min(end, lastCompartmentEnd) : end;
+            const archived = renderSearchArchive(
+                deps.db,
+                sessionId,
+                start,
+                effectiveEnd,
+                CTX_EXPAND_TOKEN_BUDGET,
+            );
+            if (archived) return archived;
 
             // Verbose mode: each message separate, with ids + per-part previews.
             if (verbose) {
