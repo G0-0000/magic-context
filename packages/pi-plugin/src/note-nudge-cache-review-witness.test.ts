@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetMessageIndexAsyncForTests } from "@magic-context/core/features/magic-context/message-index-async";
 import {
@@ -11,6 +10,10 @@ import {
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { clearModelsDevCache } from "@magic-context/core/shared/models-dev-cache";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import {
+	cleanupTestTempDir,
+	createTestTempDir,
+} from "@magic-context/core/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -40,8 +43,7 @@ afterEach(() => {
 	clearModelsDevCache();
 	for (const session of sessions.splice(0)) clearContextHandlerSession(session);
 	for (const db of databases.splice(0)) db.close();
-	for (const root of roots.splice(0))
-		rmSync(root, { recursive: true, force: true });
+	for (const root of roots.splice(0)) cleanupTestTempDir(root);
 	if (oldData === undefined) delete process.env.XDG_DATA_HOME;
 	else process.env.XDG_DATA_HOME = oldData;
 	if (oldCache === undefined) delete process.env.XDG_CACHE_HOME;
@@ -49,7 +51,7 @@ afterEach(() => {
 });
 
 function fixture(sessionId: string, path = ":memory:") {
-	const root = mkdtempSync(join(tmpdir(), "pi-note-nudge-review-"));
+	const { dir: root } = createTestTempDir("pi-note-nudge-review-");
 	roots.push(root);
 	process.env.XDG_DATA_HOME = root;
 	process.env.XDG_CACHE_HOME = root;
@@ -194,7 +196,7 @@ describe("independent Pi note-nudge cache review", () => {
 	}
 
 	it("pending note waits through 48 signed-loop passes and delivers on the first fresh tail", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-note-nudge-review-reopen-"));
+		const { dir: root } = createTestTempDir("pi-note-nudge-review-reopen-");
 		roots.push(root);
 		const sessionId = "pi-review-liveness";
 		const f = fixture(sessionId, join(root, "db.sqlite"));

@@ -91,7 +91,10 @@ export function applyNewToolDrop(
         persist?: (mode: NewToolDropOutcome["mode"]) => void;
     },
 ): NewToolDropOutcome {
-    if (options.persist && (target?.canDrop?.() === false || target?.prepareDrop?.() === false)) {
+    // Automatic cleanup protects user answers, but an explicit ctx_reduce can
+    // still drop them. Check for a completed result before persisting the drop,
+    // not whether automatic cleanup is allowed to select it.
+    if (options.persist && (target?.prepareDrop?.() ?? target?.canDrop?.()) === false) {
         return { result: "incomplete", mode: "full" };
     }
     if (!target) {

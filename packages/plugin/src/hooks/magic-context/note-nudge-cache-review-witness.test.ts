@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -16,6 +15,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { clearModelsDevCache } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { createHostSeams } from "../../v2/hooks/context";
 import type { V2Context } from "../../v2/hooks/types";
 import { onNoteTrigger } from "./note-nudger";
@@ -35,7 +35,7 @@ afterEach(() => {
     __resetMessageIndexAsyncForTests();
     clearModelsDevCache();
     for (const db of databases.splice(0)) db.close();
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    for (const root of roots.splice(0)) cleanupTestTempDir(root);
     if (oldData === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = oldData;
     if (oldCache === undefined) delete process.env.XDG_CACHE_HOME;
@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 function database(path = ":memory:") {
-    const root = mkdtempSync(join(tmpdir(), "note-nudge-review-"));
+    const { dir: root } = createTestTempDir("note-nudge-review-");
     roots.push(root);
     process.env.XDG_DATA_HOME = root;
     process.env.XDG_CACHE_HOME = root;
@@ -161,7 +161,7 @@ describe("independent note-nudge cache review", () => {
 
         it(`${generation} note/hint bytes survive 48 replays and transform restart`, async () => {
             const sessionId = `review-replay-${generation}`;
-            const root = mkdtempSync(join(tmpdir(), "note-nudge-review-oc-reopen-"));
+            const { dir: root } = createTestTempDir("note-nudge-review-oc-reopen-");
             roots.push(root);
             const path = join(root, "db.sqlite");
             let f = fixture(sessionId, generation, database(path));
@@ -241,7 +241,7 @@ describe("independent note-nudge cache review", () => {
     });
 
     it("Rust host waits 48 signed-loop passes, delivers on the first fresh user, and reopens cleanly", () => {
-        const root = mkdtempSync(join(tmpdir(), "note-nudge-review-restart-"));
+        const { dir: root } = createTestTempDir("note-nudge-review-restart-");
         roots.push(root);
         const path = join(root, "db.sqlite");
         let db = database(path);

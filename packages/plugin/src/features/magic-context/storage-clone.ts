@@ -8,10 +8,10 @@ import {
 } from "./merged-reasoning-decisions";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 import {
-    parseProcessedImageMarkers,
     getPendingPiCompactionMarkerState,
     logPiCompactionMarkerClear,
     type PendingPiCompactionMarker,
+    parseProcessedImageMarkers,
     parseStrippedPlaceholderState,
     serializeProcessedImageMarkers,
     serializeStrippedPlaceholderState,

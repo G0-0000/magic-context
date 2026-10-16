@@ -345,7 +345,9 @@ describe("injectCompactionMarker", () => {
         closeQuietly(db);
         expect(await prepareCompactionMarkerCandidates("ses-1")).toBe(true);
         const logged = spyOn(logger, "log").mockImplementation(() => {});
-        const times = [0, 70, 370, 390];
+        // The SQLite wrapper records its own timestamp just after BEGIN. Reserve
+        // that clock sample before the marker's acquisition, work and commit samples.
+        const times = [0, 0, 70, 370, 390];
         const clock = spyOn(performance, "now").mockImplementation(() => times.shift() ?? 390);
         try {
             expect(

@@ -561,7 +561,11 @@ describe("a degraded transform pass is never served", () => {
         );
         try {
             const served = await session.serve(nextTurn(sessionId));
-            expect(replay).toHaveBeenCalledTimes(1);
+            // After the transform fails, recovery reads saved drop decisions and
+            // applies them to the last successfully sent request before resending it.
+            expect(replay).toHaveBeenCalledTimes(2);
+            expect(replay.mock.results[0]?.type).toBe("throw");
+            expect(replay.mock.results[1]?.type).toBe("return");
             expectReplayOfManaged(served, session.managed, sessionId);
         } finally {
             replay.mockRestore();

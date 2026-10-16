@@ -483,6 +483,8 @@ export function createToolDropTarget(
      * makes the plan stop early and under-evict below the ceiling.
      */
     canDrop: () => boolean;
+    /** A completed result exists; explicit drops may replace it even if it contains a user answer. */
+    prepareDrop: () => boolean;
     requiresToolArcSkeleton: boolean;
     readInput: () => Record<string, unknown> | null;
     measureReclaim: (skeleton: boolean) => {
@@ -649,6 +651,10 @@ export function createToolDropTarget(
             const entry = index.get(compositeKey);
             if (!entry || entry.occurrences.length === 0) return false;
             return batch.wouldStrandConversationEnd(entry.occurrences);
+        },
+        prepareDrop: (): boolean => {
+            const entry = index.get(compositeKey);
+            return !!entry && entry.occurrences.length > 0 && entry.hasResult;
         },
         canDrop: (): boolean => {
             const entry = index.get(compositeKey);
