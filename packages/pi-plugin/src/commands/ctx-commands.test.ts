@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { replaceAllCompartmentState } from "@magic-context/core/features/magic-context/compartment-storage";
 import { writeTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
@@ -18,6 +19,8 @@ import {
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
 } from "../context-handler";
+import { resolveHistorianFromConfig } from "../index";
+import { buildPiHistorianCommandOptions } from "../pi-historian-command-options";
 import {
 	abortInFlightRecomps,
 	awaitInFlightRecomps,
@@ -783,6 +786,113 @@ describe("Pi Magic Context commands", () => {
 
 		expect(promptText).toContain("[1] U: message 1");
 		expect(promptText).not.toContain("[2] A: message 2");
+	});
+
+	it("passes boot, live-resolved, and unset output caps through /ctx-recomp", async () => {
+		const scenarios: Array<{
+			name: string;
+			bootCap?: number;
+			liveCap?: number;
+			live: boolean;
+			expected?: number;
+		}> = [
+			{ name: "boot cap", bootCap: 65_536, live: false, expected: 65_536 },
+			{
+				name: "live update",
+				bootCap: 4096,
+				liveCap: 65_536,
+				expected: 65_536,
+				live: true,
+			},
+			{
+				name: "unset boot cap",
+				bootCap: undefined,
+				expected: undefined,
+				live: false,
+			},
+			{
+				name: "live removal",
+				bootCap: 4096,
+				liveCap: undefined,
+				expected: undefined,
+				live: true,
+			},
+		];
+		for (const harness of ["pi", "omp"] as const) {
+			for (const [index, scenario] of scenarios.entries()) {
+				const db = createDb();
+				const sessionId = `ses-recomp-output-cap-${harness}-${index}`;
+				const configFor = (maxTokens?: number) =>
+					MagicContextConfigSchema.parse({
+						historian: {
+							...(maxTokens === undefined ? {} : { maxTokens }),
+							[harness]: { model: `test/${harness}-historian` },
+						},
+					});
+				const bootConfig = configFor(scenario.bootCap);
+				const bootOptions = buildPiHistorianCommandOptions(
+					resolveHistorianFromConfig(bootConfig, harness),
+					bootConfig,
+				);
+				const liveOptions = scenario.live
+					? buildPiHistorianCommandOptions(
+							resolveHistorianFromConfig(configFor(scenario.liveCap), harness),
+							configFor(scenario.liveCap),
+						)
+					: undefined;
+				const seenCaps: Array<number | undefined> = [];
+				const runner = {
+					run: async (options: {
+						userMessage: string;
+						maxOutputTokens?: number;
+					}) => {
+						seenCaps.push(options.maxOutputTokens);
+						return {
+							ok: true as const,
+							assistantText: validCompartmentForPrompt(options.userMessage),
+							cost: 0,
+							durationMs: 1,
+						};
+					},
+				};
+				const baseDeps = {
+					db,
+					runner: runner as never,
+					...bootOptions,
+					memoryEnabled: false,
+					autoPromote: false,
+				};
+				try {
+					const { pi, handlers } = createMockPi();
+					registerCtxRecompCommand(pi as never, {
+						...baseDeps,
+						...(liveOptions
+							? {
+									resolveRuntimeDeps: () => ({
+										...baseDeps,
+										...liveOptions,
+									}),
+								}
+							: {}),
+					});
+					const ctx = createCtx(sessionId);
+					await handlers.get("ctx-recomp")?.("", ctx);
+					await handlers.get("ctx-recomp")?.("", ctx);
+					await awaitInFlightRecomps();
+
+					expect(
+						seenCaps.length,
+						`${harness} ${scenario.name}`,
+					).toBeGreaterThan(0);
+					expect(
+						seenCaps.every((cap) => cap === scenario.expected),
+						`${harness} ${scenario.name}`,
+					).toBe(true);
+				} finally {
+					db.close();
+				}
+			}
+		}
 	});
 
 	it("control: a valid /ctx-recomp publishes and stages deferred effects", async () => {

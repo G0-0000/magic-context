@@ -1661,6 +1661,7 @@ export function registerRpcHandlers(
                 resolveHistorianContextLimit(historianModel.primary?.model),
             ),
             historianTimeoutMs: runConfig.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+            historianMaxOutputTokens: runConfig.historian?.maxTokens,
             memoryEnabled: config.memory?.enabled ?? true,
             autoPromote: runConfig.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,

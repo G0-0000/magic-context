@@ -10,6 +10,7 @@ import {
 	spyOn,
 } from "bun:test";
 import { join } from "node:path";
+import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_TTL_MS,
@@ -52,9 +53,12 @@ import {
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
 } from "../context-handler";
+import { resolveHistorianFromConfig } from "../index";
+import { buildPiHistorianCommandOptions } from "../pi-historian-command-options";
 import {
 	parseWrapupArgs,
 	type RegisterCtxWrapupDeps,
+	registerCtxWrapupCommand,
 	runPiWrapup,
 } from "./ctx-wrapup";
 
@@ -168,6 +172,26 @@ function pi() {
 	};
 }
 
+function registerablePi() {
+	const handlers = new Map<
+		string,
+		(args: string, ctx: never) => Promise<void>
+	>();
+	const sent: Array<{ message: { content: string } }> = [];
+	const api = {
+		sendMessage(message: { content: string }) {
+			sent.push({ message });
+		},
+		registerCommand(
+			name: string,
+			options: { handler: (args: string, ctx: never) => Promise<void> },
+		) {
+			handlers.set(name, options.handler);
+		},
+	};
+	return { api, handlers, sent };
+}
+
 function appendRange(
 	db: Database,
 	sessionId: string,
@@ -219,6 +243,147 @@ describe("Pi /ctx-wrapup", () => {
 		expect(parseWrapupArgs(" 7 ")).toEqual({ ok: true, messagesToKeep: 7 });
 		expect(parseWrapupArgs("0").ok).toBe(false);
 		expect(parseWrapupArgs("two").ok).toBe(false);
+	});
+
+	it.each([
+		{ label: "configured", maxOutputTokens: 65_536, expected: 65_536 },
+		{ label: "unset", maxOutputTokens: undefined, expected: undefined },
+	])("passes the $label historian output cap to each wrapup run", async ({
+		maxOutputTokens,
+		expected,
+	}) => {
+		const db = createDb();
+		try {
+			const sessionId = `pi-wrapup-output-cap-${String(expected ?? "unset")}`;
+			const seenCaps: Array<number | undefined> = [];
+			const runPiHistorianForWrapup = mock(async (args) => {
+				seenCaps.push(args.maxOutputTokens);
+				const start = getLastCompartmentEndMessage(db, sessionId) + 1;
+				appendRange(
+					db,
+					sessionId,
+					start,
+					args.boundarySnapshot.eligibleEndOrdinal - 1,
+				);
+				args.onPublished?.();
+			});
+			const result = await runPiWrapup(
+				pi().api,
+				deps(db, {
+					historianMaxOutputTokens: maxOutputTokens,
+					runPiHistorianForWrapup,
+				}),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+
+			expect(result).not.toContain("Magic Wrapup — Partial");
+			expect(seenCaps.length).toBeGreaterThan(0);
+			expect(seenCaps.every((cap) => cap === expected)).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("passes Pi and OMP boot and live /ctx-wrapup caps to the historian runner", async () => {
+		const scenarios: Array<{
+			name: string;
+			bootCap?: number;
+			liveCap?: number;
+			live: boolean;
+			expected: number;
+		}> = [
+			{
+				name: "configured boot",
+				bootCap: 65_536,
+				live: false,
+				expected: 65_536,
+			},
+			{
+				name: "live update",
+				bootCap: 4096,
+				liveCap: 65_536,
+				live: true,
+				expected: 65_536,
+			},
+			{ name: "unset boot", live: false, expected: 32_000 },
+		];
+		for (const harness of ["pi", "omp"] as const) {
+			for (const [index, scenario] of scenarios.entries()) {
+				const db = createDb();
+				const sessionId = `pi-command-wrapup-output-cap-${harness}-${index}`;
+				const configFor = (maxTokens?: number) =>
+					MagicContextConfigSchema.parse({
+						historian: {
+							...(maxTokens === undefined ? {} : { maxTokens }),
+							[harness]: { model: `test/no-window-${sessionId}` },
+						},
+					});
+				const bootConfig = configFor(scenario.bootCap);
+				const optionsFor = (config: ReturnType<typeof configFor>) =>
+					buildPiHistorianCommandOptions(
+						resolveHistorianFromConfig(config, harness),
+						config,
+					);
+				const bootOptions = optionsFor(bootConfig);
+				const liveOptions = scenario.live
+					? optionsFor(configFor(scenario.liveCap))
+					: undefined;
+				const seenCaps: Array<number | undefined> = [];
+				const runner = {
+					run: async (options: { maxOutputTokens?: number }) => {
+						seenCaps.push(options.maxOutputTokens);
+						return {
+							ok: false as const,
+							reason: "model_failed" as const,
+							error: "synthetic output-cap test failure",
+							durationMs: 1,
+						};
+					},
+				};
+				const baseDeps = deps(db, {
+					...bootOptions,
+					runner: runner as never,
+					runPiHistorianForWrapup: undefined,
+				});
+				const commandDeps = {
+					...baseDeps,
+					...(liveOptions
+						? {
+								resolveRuntimeDeps: () => ({
+									...baseDeps,
+									...liveOptions,
+								}),
+							}
+						: {}),
+				};
+				const { api, handlers } = registerablePi();
+				try {
+					registerCtxWrapupCommand(api as never, commandDeps);
+					const commandContext = {
+						...ctx(sessionId, 8),
+						getContextUsage: () => ({
+							contextWindow: 200_000,
+							tokens: 1,
+							percent: 0,
+						}),
+					};
+					await handlers.get("ctx-wrapup")?.("2", commandContext as never);
+
+					expect(
+						seenCaps.length,
+						`${harness} ${scenario.name}`,
+					).toBeGreaterThan(0);
+					expect(
+						seenCaps.every((cap) => cap === scenario.expected),
+						`${harness} ${scenario.name}`,
+					).toBe(true);
+				} finally {
+					closeQuietly(db);
+				}
+			}
+		}
 	});
 
 	it("promotes facts from every non-final wrapup window and skips only the final window", async () => {
