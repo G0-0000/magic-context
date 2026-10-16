@@ -142,6 +142,11 @@ export interface RawMessageProvider {
     ) => RawMessage[];
     /** A single source traversal; iterator cleanup must release resources on early exit. */
     iterateMessageRange?: (fromOrdinal: number, toOrdinal: number) => Iterable<RawMessage>;
+    /** Background consumers use async iteration so scans can yield between reads to process host input. */
+    iterateMessageRangeAsync?: (
+        fromOrdinal: number,
+        toOrdinal: number,
+    ) => AsyncIterable<RawMessage>;
     readMessageById?: (messageId: string) => RawMessage | null;
     readMessagePartsById?: (messageId: string) => RawMessageParts | null;
     hasMessageById?: (messageId: string) => boolean;
@@ -555,6 +560,27 @@ export function visitRawSessionMessages(
         afterOrdinal = nextOrdinal;
         const last = page.at(-1);
         after = last ? { timeCreated: last.createdAt ?? 0, id: last.id } : undefined;
+    }
+}
+
+/** Use async iteration for background seeds, or the existing visitor for synchronous providers. */
+export async function visitRawSessionMessagesAsync(
+    sessionId: string,
+    fromOrdinal: number,
+    toOrdinal: number,
+    visit: (message: RawMessage) => boolean,
+    options: { summary?: boolean; pageSize?: number } = {},
+): Promise<void> {
+    const from = Math.max(1, Math.floor(fromOrdinal));
+    const to = Math.floor(toOrdinal);
+    if (to < from) return;
+    const provider = sessionProviders.get(sessionId)?.provider;
+    if (!provider?.iterateMessageRangeAsync) {
+        visitRawSessionMessages(sessionId, from, to, visit, options);
+        return;
+    }
+    for await (const message of provider.iterateMessageRangeAsync(from, to)) {
+        if (!visit(message)) return;
     }
 }
 
@@ -1212,7 +1238,10 @@ export function readSessionChunk(
                     const call = calls.get(p.callID);
                     if (call) {
                         const expansion = expandToolPart(
-                            { ...call, state: { ...(call.state as object), output: state.output } },
+                            {
+                                ...call,
+                                state: { ...(call.state as object), output: state.output },
+                            },
                             options.expandTools,
                         );
                         if (expansion !== null) {
