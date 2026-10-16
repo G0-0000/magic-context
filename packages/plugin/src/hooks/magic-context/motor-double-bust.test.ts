@@ -534,13 +534,17 @@ it("MOTOR: rebuild and five-second defer have byte-identical Anthropic history",
     ).toBe(true);
 }, 30_000);
 
-it("MOTOR: rebuild refuses a boundary absent from immutable host order", async () => {
+it("MOTOR: rebuild reanchors an invisible boundary by persisted order and replays identical wire bytes", async () => {
     const run = await runRebuildThenDefer(true);
     expect(run.rebuildTrim.boundary).toBe(run.boundaryId);
     expect(run.rebuildTrim.sourceIds).not.toContain(run.boundaryId);
-    expect(run.rebuildTrim.status).toBe("refused");
-    expect(run.rebuildLogs).toContain("boundary absent from immutable source order");
-    expect(run.rebuild.filter((row) => run.coveredIds.includes(row.info.id ?? ""))).toHaveLength(
-        50,
+    // The host omitted this boundary from the array, but its store still holds
+    // the row. That stored position proves the same cut on rebuild and replay.
+    expect(run.rebuildTrim.status).toBe("applied");
+    expect(run.rebuild.filter((row) => run.coveredIds.includes(row.info.id ?? ""))).toHaveLength(0);
+    const rebuild = await providerWire(run.rebuild);
+    const replay = await providerWire(run.replay);
+    expect(Buffer.from(JSON.stringify(replay.pinned))).toEqual(
+        Buffer.from(JSON.stringify(rebuild.pinned)),
     );
 }, 30_000);

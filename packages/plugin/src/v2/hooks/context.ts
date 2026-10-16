@@ -2268,6 +2268,13 @@ export async function registerContext(context: V2Context) {
             : lateHiddenExecutor,
         compactionMarkerStrategy: v2CompactionMarkerStrategy,
         prepareHistorySession,
+        readSessionDirectory: async (sessionID) => {
+            try {
+                return (await context.session.get({ sessionID })).location?.directory ?? null;
+            } catch {
+                return null;
+            }
+        },
         storageDir,
     });
     // The v2 TUI reaches manual dreaming through RPC because this host has no

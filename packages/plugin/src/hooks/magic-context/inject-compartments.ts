@@ -3815,6 +3815,43 @@ export function capturePrefixTrimSourceOrder(
     });
 }
 
+/**
+ * Insert an invisible seam into the frozen host window using persisted order.
+ * This is evidence only: no missing message body is restored. A missing lookup,
+ * duplicate or reordered window cannot prove a cut and keeps the refusal path.
+ * The same stored rows prove the same seam on cache-preserving passes.
+ */
+function reanchorStoredBoundary(
+    options: M0M1RenderOptions,
+    boundary: string,
+): PrefixTrimSourceOrder | undefined {
+    if (!options.messages) return undefined;
+    const source = options.prefixTrimSourceOrder ?? capturePrefixTrimSourceOrder(options.messages);
+    if (source.invalidReason) return undefined;
+    try {
+        if (compareRawSessionMessageOrder(options.sessionId, boundary, boundary) !== 0)
+            return undefined;
+        const messageIds = [...source.messageIds];
+        let previous: string | undefined;
+        let insertion = messageIds.length;
+        for (const [index, id] of messageIds.entries()) {
+            if (previous) {
+                const increasing = compareRawSessionMessageOrder(options.sessionId, previous, id);
+                if (increasing === null || !Number.isFinite(increasing) || increasing >= 0)
+                    return undefined;
+            }
+            const order = compareRawSessionMessageOrder(options.sessionId, boundary, id);
+            if (order === null || !Number.isFinite(order) || order === 0) return undefined;
+            if (order < 0 && insertion === messageIds.length) insertion = index;
+            previous = id;
+        }
+        messageIds.splice(insertion, 0, boundary);
+        return { ...source, messageIds };
+    } catch {
+        return undefined;
+    }
+}
+
 function trimToPreparedPrefix(
     options: M0M1RenderOptions,
     prepared: Pick<
@@ -3864,7 +3901,13 @@ function trimToPreparedPrefix(
                     sourcePosition.get(boundary) ??
                     sourcePosition.get(resolveHostServedBoundaryId(options.sessionId, boundary));
                 if (boundaryPosition === undefined) {
-                    status = refuse("boundary absent from immutable source order");
+                    const reanchored = reanchorStoredBoundary(options, boundary);
+                    status = reanchored
+                        ? trimToPreparedPrefix(
+                              { ...options, prefixTrimSourceOrder: reanchored },
+                              prepared,
+                          )
+                        : refuse("boundary absent from immutable source order");
                 } else {
                     let lastSourcePosition = -1;
                     let sawPersistedRow = false;
@@ -3952,7 +3995,15 @@ function trimToPreparedPrefix(
                 resetPrefixTrimFallbackState(options.sessionId);
                 status = "applied";
             } else {
-                status = classifyAbsentBoundary(options, options.messages, boundary);
+                const reanchored = reanchorStoredBoundary(options, boundary);
+                if (reanchored && reanchored.messageIds[0] !== boundary) {
+                    status = trimToPreparedPrefix(
+                        { ...options, prefixTrimSourceOrder: reanchored },
+                        prepared,
+                    );
+                } else {
+                    status = classifyAbsentBoundary(options, options.messages, boundary);
+                }
             }
         }
     }

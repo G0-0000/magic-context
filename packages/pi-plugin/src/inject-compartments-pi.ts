@@ -95,7 +95,10 @@ import {
 	trimWorkspaceMemoriesToBudgetV2,
 	type WorkspaceRenderContext,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
-
+import {
+	hasRawMessageProvider,
+	readRawSessionMessages,
+} from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
@@ -198,6 +201,30 @@ function trimPiMessagesToBoundary(
 		if (msg && resolveStableId(msg, i, entryIds) === effectiveCutoffId) {
 			cutoffIndex = i;
 			break;
+		}
+	}
+	if (cutoffIndex < 0 && sessionId && hasRawMessageProvider(sessionId)) {
+		// The active branch can still place a boundary omitted from event.messages.
+		// Never infer that position from the shortened live-array indices.
+		try {
+			const branch = readRawSessionMessages(sessionId);
+			const positions = new Map(
+				branch.map((message, index) => [message.id, index]),
+			);
+			const boundaryPosition = positions.get(cutoffMessageId);
+			if (boundaryPosition === undefined) return 0;
+			let previous = -1;
+			for (const [index, message] of piMessages.entries()) {
+				if (isPiSystemEntry(message)) continue;
+				const id = resolveStableId(message, index, entryIds);
+				const position =
+					positions.get(id) ?? positions.get(`${SYNTH_USER_ID_PREFIX}${id}`);
+				if (position === undefined || position <= previous) return 0;
+				previous = position;
+				if (position <= boundaryPosition) cutoffIndex = index;
+			}
+		} catch {
+			return 0;
 		}
 	}
 	if (cutoffIndex < 0) return 0;
