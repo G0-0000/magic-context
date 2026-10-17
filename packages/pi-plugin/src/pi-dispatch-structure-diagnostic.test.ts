@@ -146,6 +146,34 @@ test("dispatch divergence: unreadable values and malicious roles cannot leak int
 	expect(sanitized).not.toContain(secrets[0]);
 });
 
+test("dispatch divergence: an exception reports its comparison stage and error class, never its message", () => {
+	const hostile = {
+		get messages() {
+			throw new TypeError(secrets[0]);
+		},
+	};
+	const wire = mismatch(hostile);
+	expect(wire).toBe(
+		"row=0 expectedRows=unreadable actualRows=unreadable expectedRole=unreadable actualRole=unreadable expectedCalls=unreadable actualCalls=unreadable expectedResults=unreadable actualResults=unreadable comparison=exception stage=wire rows error=TypeError",
+	);
+
+	// A throw while walking rows keeps the row it reached and both row counts.
+	if (!prepared) throw new Error("prepared structure missing");
+	const rows = prepared.messages.map((row) => ({ ...row }));
+	Object.defineProperty(rows[1], "wireCalls", {
+		get() {
+			class PRIVATE_TOOL_NAME extends Error {}
+			throw new PRIVATE_TOOL_NAME(secrets[4]);
+		},
+	});
+	const row = mismatch(payload(), { ...prepared, messages: rows });
+	expect(row).toBe(
+		"row=1 expectedRows=4 actualRows=4 expectedRole=assistant actualRole=assistant expectedCalls=1 actualCalls=1 expectedResults=0 actualResults=0 comparison=exception stage=row comparison error=unknown",
+	);
+	for (const detail of [wire, row])
+		for (const secret of secrets) expect(detail).not.toContain(secret);
+});
+
 test("dispatch divergence: provider refusal appends safe detail without message text, tool names, arguments or IDs", async () => {
 	__setPiHarnessKindForTesting("omp");
 	const logs: string[] = [];

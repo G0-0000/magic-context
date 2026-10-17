@@ -813,7 +813,8 @@ type StructureComparison =
 	| "name"
 	| "count"
 	| "timestamp"
-	| "content";
+	| "content"
+	| "exception";
 
 function safeRole(
 	row: MessageStructure | undefined,
@@ -897,6 +898,13 @@ export function piPreparedStructureMismatch(
 		trimmed: number;
 	}) => void,
 ): string | undefined {
+	// Where the comparison was when something threw, plus the built-in error
+	// class. Both are fixed vocabularies, so an exception's message or a
+	// getter's value can never reach the refusal text.
+	let stage = "image count";
+	let row = 0;
+	let expectedRows: readonly MessageStructure[] | undefined;
+	let rows: readonly MessageStructure[] | undefined;
 	try {
 		if (prepared?.structuralSkipReason) return undefined;
 		const imageBudget = prepared?.imageBudget;
@@ -906,6 +914,7 @@ export function piPreparedStructureMismatch(
 		// An equal count must take the original structural comparison, including
 		// its existing provider text equivalences. Image projection is trim-only.
 		const imageProjection = trimmed > 0;
+		stage = "wire rows";
 		const body = object(payload);
 		const ollama =
 			prepared?.api === "ollama-chat" &&
@@ -916,7 +925,7 @@ export function piPreparedStructureMismatch(
 			body.inferenceConfig === undefined;
 		const responses =
 			body?.messages === undefined && Array.isArray(body?.input);
-		const rows = payloadStructure(
+		rows = payloadStructure(
 			payload,
 			ollama,
 			responses && !!prepared?.responsesMessages,
@@ -928,7 +937,8 @@ export function piPreparedStructureMismatch(
 			(prepared?.api === "openai-completions" || body.system === undefined) &&
 			body.input === undefined &&
 			body.inferenceConfig === undefined;
-		let expectedRows =
+		stage = "prepared rows";
+		expectedRows =
 			responses && prepared?.responsesMessages
 				? prepared.responsesMessages
 				: chat && prepared?.chatMessages
@@ -939,6 +949,7 @@ export function piPreparedStructureMismatch(
 		if (!rows || !expectedRows)
 			return structureDetail(0, expectedRows, rows, "count");
 		if (!body) return structureDetail(0, expectedRows, rows, "count");
+		stage = "row comparison";
 		const google = !!piGoogleConversation(payload);
 		const anthropic =
 			google ||
@@ -948,6 +959,7 @@ export function piPreparedStructureMismatch(
 				body.max_tokens !== undefined &&
 				Array.isArray(body.system));
 		for (let i = 0; i < Math.min(rows.length, expectedRows.length); i++) {
+			row = i;
 			const expected = expectedRows[i];
 			const actual = rows[i];
 			if (actual.role !== expected.role)
@@ -1056,9 +1068,20 @@ export function piPreparedStructureMismatch(
 				trimmed,
 			});
 		return undefined;
-	} catch {
-		// Unreadable payloads still fail closed without exposing a getter's error.
-		return structureDetail(0, undefined, undefined, "count");
+	} catch (error) {
+		// Unreadable payloads still fail closed; report where, not what was read.
+		const name =
+			error instanceof Error &&
+			[
+				"Error",
+				"TypeError",
+				"RangeError",
+				"SyntaxError",
+				"ReferenceError",
+			].includes(error.constructor.name)
+				? error.constructor.name
+				: "unknown";
+		return `${structureDetail(row, expectedRows, rows, "exception")} stage=${stage} error=${name}`;
 	}
 }
 
