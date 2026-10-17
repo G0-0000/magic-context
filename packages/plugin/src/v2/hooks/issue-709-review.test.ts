@@ -723,6 +723,7 @@ test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
         };
         const results = [];
         let comparisons = 0;
+        const memoryEnabled = process.env.OC2_FOLD_MEMORY_ON === "1";
         for (const seed of [4709, ...Array.from({ length: 20 }, (_, n) => 709 + n)]) {
             const runs = [];
             for (const register of [baseline.registerContext, registerContext]) {
@@ -730,7 +731,7 @@ test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
                     seed,
                     {
                         ...foldFeaturesOff,
-                        memory: { ...foldFeaturesOff.memory, enabled: false },
+                        memory: { ...foldFeaturesOff.memory, enabled: memoryEnabled },
                     },
                     register,
                 );
@@ -738,12 +739,13 @@ test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
                     let random = seed;
                     const bytes: string[] = [];
                     const hard: string[] = [];
+                    let summary = "";
                     for (let step = 0; step < 12; step++) {
                         if (step === 2) f.changeExternalFeatures();
                         if (step === 3) await f.start(register);
                         if (step === 5) f.switchModel();
                         if (step === 7) await f.idle();
-                        if (step === 9) await f.fold();
+                        if (step === 9) summary = await f.fold();
                         random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
                         if (step > 0 && step < 9 && step !== 7 && random % 3 === 0) f.freshTurn();
                         const first = await f.pass();
@@ -756,7 +758,7 @@ test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
                         bytes.push(first.bytes, replay.bytes);
                         f.completeResponse();
                     }
-                    runs.push({ bytes, hard });
+                    runs.push({ bytes, hard, summary });
                 } finally {
                     await f.cleanup();
                 }
@@ -769,10 +771,20 @@ test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
                 ),
                 baselineHard: runs[0]!.hard,
                 currentHard: runs[1]!.hard,
+                sameFold: runs[0]!.summary === runs[1]!.summary,
             });
+            if (memoryEnabled)
+                expect(runs[1]!.summary, `memory-on fold seed ${seed}`).toBe(runs[0]!.summary);
+            else {
+                expect(runs[0]!.summary).toContain("<project-memory>");
+                expect(runs[1]!.summary).not.toContain("<project-memory>");
+            }
         }
-        console.log(`FOLD_SYSTEM_COMPARISON ${JSON.stringify({ comparisons, results })}`);
+        console.log(
+            `FOLD_SYSTEM_COMPARISON ${JSON.stringify({ memoryEnabled, comparisons, results })}`,
+        );
         expect(results.every((row) => row.differences.length === 0)).toBe(true);
+        expect(results.every((row) => row.currentHard.length === 0)).toBe(true);
     },
     120000,
 );
@@ -808,6 +820,65 @@ test("OC2 fold system identity: real system change after compaction causes exact
         expect(replay.bytes).toBe(changed.bytes);
     } finally {
         await f.cleanup();
+    }
+});
+
+test("OC2 fold memory policy: memory-off summaries omit project memory without a corrective HARD", async () => {
+    const counts = [];
+    for (const memoryEnabled of [true, false]) {
+        for (const seed of [4709, ...Array.from({ length: 20 }, (_, n) => 709 + n)]) {
+            const f = await fixture(seed, {
+                ...foldFeaturesOff,
+                memory: { ...foldFeaturesOff.memory, enabled: memoryEnabled },
+            });
+            try {
+                await f.pass();
+                const summary = await f.fold();
+                const after = await f.pass();
+                const replay = await f.pass();
+                const hard = after.logs.filter((line) => /HARD.*executed=true/.test(line));
+                counts.push({ seed, memoryEnabled, hard });
+                expect(
+                    summary.includes("<project-memory>"),
+                    `seed ${seed} memory=${memoryEnabled}`,
+                ).toBe(memoryEnabled);
+                if (!memoryEnabled) {
+                    expect(summary).not.toContain("Project constraint");
+                    expect(summary).not.toContain("<user-profile>");
+                }
+                expect(hard, `seed ${seed} memory=${memoryEnabled}`).toEqual([]);
+                expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+                expect(replay.bytes).toBe(after.bytes);
+            } finally {
+                await f.cleanup();
+            }
+        }
+    }
+    console.log(`FOLD_MEMORY_COUNTS ${JSON.stringify(counts)}`);
+}, 120000);
+
+test("OC2 fold memory policy: a real memory setting change after compaction causes exactly one HARD", async () => {
+    for (const memoryEnabled of [true, false]) {
+        const f = await fixture(4709, {
+            ...foldFeaturesOff,
+            memory: { ...foldFeaturesOff.memory, enabled: memoryEnabled },
+        });
+        try {
+            await f.pass();
+            await f.fold();
+            f.config.memory.enabled = !memoryEnabled;
+            await f.start();
+            const changed = await f.pass();
+            const replay = await f.pass();
+            expect(changed.logs.filter((line) => /HARD.*executed=true/.test(line))).toHaveLength(1);
+            expect(f.meta().cachedM0Bytes?.toString().includes("<project-memory>")).toBe(
+                !memoryEnabled,
+            );
+            expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+            expect(replay.bytes).toBe(changed.bytes);
+        } finally {
+            await f.cleanup();
+        }
     }
 });
 

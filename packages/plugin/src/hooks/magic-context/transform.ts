@@ -1779,13 +1779,17 @@ export function createTransform(deps: TransformDeps) {
             persistedUsageBeforeResets.lastUsageContextLimit > 0
                 ? persistedUsageBeforeResets.lastUsageContextLimit
                 : undefined);
+        const memoryProjectDirectory = compartmentDirectory || process.cwd();
         const renderOptions = createM0RenderOptions(
             deps,
             contextUsageEarly,
             currentModelKeyForBoundary,
             historyContextLimit,
+            deps.memoryConfig?.enabled
+                ? resolveProjectIdentityForSession(memoryProjectDirectory, deps.allowHomeProject)
+                : undefined,
         );
-        const { historyBudgetTokens } = renderOptions;
+        const { historyBudgetTokens, projectPath: projectIdentity } = renderOptions;
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
@@ -2047,16 +2051,6 @@ export function createTransform(deps: TransformDeps) {
 
         logTransformTiming(sessionId, "emergencyRecoveryBlock", tFirstPass);
 
-        // Resolve project identity ONCE per transform pass. Used by both
-        // prepareCompartmentInjection (memory filtering by project) and
-        // runCompartmentPhase (historian memory resolution). Computing it
-        // twice per turn is wasteful — resolveProjectIdentity caches by
-        // directory but still does a cache lookup on each call, and the
-        // first call per directory in a new process spawns `git rev-list`.
-        const memoryProjectDirectory = compartmentDirectory || process.cwd();
-        const projectIdentity = deps.memoryConfig?.enabled
-            ? resolveProjectIdentityForSession(memoryProjectDirectory, deps.allowHomeProject)
-            : undefined;
         if (deps.memoryConfig?.enabled) {
             maybeSendProjectIdentityWarning(
                 deps,
@@ -2729,11 +2723,8 @@ export function createTransform(deps: TransformDeps) {
                 db,
                 sessionId,
                 state: sessionMeta,
-                projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
                 ...renderOptions,
-                memoryEnabled: deps.memoryConfig?.enabled,
-                memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 hardSignals: m0HardSignals,
             }).value;
         const protectionCacheBustingPass =
@@ -2954,18 +2945,8 @@ export function createTransform(deps: TransformDeps) {
             passOutcome,
             historyRefreshSessions: deps.historyRefreshSessions,
             m0M1: {
-                // Memory identity ONLY (drives <project-memory> selection in
-                // materializeM0). Must stay undefined when memory.enabled=false —
-                // falling back to deps.projectPath here re-enabled memory injection
-                // despite the config being off (materializeM0 renders memory purely
-                // on projectPath presence). projectDirectory below independently
-                // drives docs/key-files/history, so dropping the fallback does not
-                // disable those.
-                projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
                 ...renderOptions,
-                memoryEnabled: deps.memoryConfig?.enabled,
-                memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 hardSignals: m0HardSignals,
             },
         });

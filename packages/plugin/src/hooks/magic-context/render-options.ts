@@ -5,6 +5,7 @@ import type { TransformDeps } from "./transform";
 type RenderControls = Pick<
     TransformDeps,
     | "injectDocs"
+    | "memoryConfig"
     | "muralEnabled"
     | "experimentalTemporalAwareness"
     | "historyBudgetPercentage"
@@ -13,17 +14,21 @@ type RenderControls = Pick<
 >;
 
 /**
- * Share docs, mural, temporal and history-budget settings between context requests
- * and host folds. A fold that records defaults would force another prefix rebuild
- * when the next request restores the configured settings.
+ * Share memory, docs, mural, temporal and history-budget settings between context
+ * requests and host folds. The memory project identity must be absent when memory
+ * is disabled: the materializer selects project memories by identity presence.
  */
 export function createM0RenderOptions(
     controls: RenderControls,
     contextUsage: ContextUsage,
     modelKey: string | undefined,
     resolvedContextLimit?: number,
+    projectPath?: string,
 ) {
     return {
+        projectPath: controls.memoryConfig?.enabled ? projectPath : undefined,
+        memoryEnabled: controls.memoryConfig?.enabled,
+        memoryInjectionBudgetTokens: controls.memoryConfig?.injectionBudgetTokens,
         injectDocs: controls.injectDocs,
         muralEnabled: controls.muralEnabled,
         temporalAwareness: controls.experimentalTemporalAwareness,

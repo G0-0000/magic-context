@@ -32,6 +32,11 @@ export function createV2TransformFeatureDeps(
         commitClusterTrigger: config.commit_cluster_trigger,
         allowHomeProject: config.allow_home_project,
         injectDocs: config.dreamer?.inject_docs !== false,
+        memoryConfig: {
+            enabled: config.memory.enabled,
+            injectionBudgetTokens: config.memory.injection_budget_tokens,
+            autoPromote: config.memory.auto_promote,
+        },
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         historyBudgetPercentage: config.history_budget_percentage,
         experimentalUserMemories: userMemoryCollectionEnabled(config.dreamer),

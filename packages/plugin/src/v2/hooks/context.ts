@@ -1374,17 +1374,12 @@ export async function registerContext(context: V2Context) {
                 usage.get(draft.sessionID)?.usage ?? { percentage: 0, inputTokens: 0 },
                 modelKey,
                 contextLimit,
+                resolveProjectIdentityForSession(directory, config.allow_home_project),
             ),
             db,
             sessionId: draft.sessionID,
             state,
-            projectPath:
-                resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             projectDirectory: directory,
-            memoryEnabled:
-                config.memory.enabled &&
-                !!resolveProjectIdentityForSession(directory, config.allow_home_project),
-            memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
             hardSignals: {
                 // Reuse systemPromptHash persisted by the system hook after guidance,
                 // preset and date resolution. Hashing the raw compaction draft instead
@@ -1878,11 +1873,6 @@ export async function registerContext(context: V2Context) {
                 promptSurface: config.prompt_surface,
                 promptSurfaceRuntime,
                 onRustEngineReconnectRefusal: (refusal) => rustRefusalRecovery?.arm(refusal),
-                memoryConfig: {
-                    enabled: config.memory.enabled,
-                    injectionBudgetTokens: config.memory.injection_budget_tokens,
-                    autoPromote: config.memory.auto_promote,
-                },
                 ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
             });
             const admitted = new Set<string>();
