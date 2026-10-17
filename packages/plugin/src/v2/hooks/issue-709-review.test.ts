@@ -1,0 +1,686 @@
+import { expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as configLoader from "../../config";
+import { MagicContextConfigSchema } from "../../config/schema/magic-context";
+import * as embedding from "../../features/magic-context/memory/embedding";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import {
+    closeDatabase,
+    getTagsBySession,
+    openDatabase,
+} from "../../features/magic-context/storage";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
+import { getAutoSearchHintDecisions } from "../../features/magic-context/storage-meta-persisted";
+import { replayHint } from "../../hooks/magic-context/auto-search-replay.fixture";
+import { autoSearchTestSnapshot } from "../../hooks/magic-context/auto-search-snapshot.fixture";
+import * as search from "../../hooks/magic-context/auto-search-worker-client";
+import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
+import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
+import { collectTemporalCandidates } from "../../hooks/magic-context/temporal-awareness";
+import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
+import * as logger from "../../shared/logger";
+import * as models from "../../shared/models-dev-cache";
+import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
+import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
+import { registerContext } from "./context";
+import * as storageGate from "./storage-gate";
+import type { SessionContext, V2Context, V2Message } from "./types";
+
+class ReviewAsset {
+    constructor(readonly sourceRecord: { source: Record<string, unknown> }) {
+        Object.assign(this, sourceRecord);
+    }
+}
+class ReviewMessage {
+    constructor(readonly content: Array<Record<string, unknown>>) {}
+}
+
+const prose =
+    "Please review the implementation and verify the results carefully before we continue with the next deployment cache invalidation step. ";
+
+// Only the host transport and search worker are synthetic; the registered context
+// callback, transform, fold owner, rendering and SQLite persistence run normally.
+async function fixture(
+    seed: number,
+    overrides: Record<string, unknown> = {},
+    initial = registerContext,
+) {
+    const base = join(tmpdir(), "magic-context/issue-709-review");
+    mkdirSync(base, { recursive: true });
+    const restoring = process.env.REVIEW709_RESTART_PHASE === "read";
+    const root =
+        process.env.REVIEW709_RESTART_ROOT ??
+        createTestTempDirFromPath(join(base, `seed-${seed}-`));
+    const keys = [
+        "HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "MAGIC_CONTEXT_STORAGE_DIR",
+        "MAGIC_CONTEXT_LOG_PATH",
+        "OPENCODE_DB",
+        "MC_OC2_INVISIBLE_FOLD",
+    ];
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    for (const key of keys.filter((key) => key !== "MC_OC2_INVISIBLE_FOLD"))
+        process.env[key] = join(root, key);
+    delete process.env.MC_OC2_INVISIBLE_FOLD;
+    let nowClock = 1770000000000 + seed * 10000000;
+    const clock = spyOn(Date, "now").mockImplementation(() => nowClock);
+    for (const key of keys.filter(
+        (key) => !["MAGIC_CONTEXT_LOG_PATH", "OPENCODE_DB", "MC_OC2_INVISIBLE_FOLD"].includes(key),
+    ))
+        mkdirSync(process.env[key]!, { recursive: true });
+    resetOpenCodeDbPathStateForTesting();
+    const raw = new Database(process.env.OPENCODE_DB!);
+    raw.exec(
+        "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, fork_boundary TEXT);",
+    );
+    const db = openDatabase();
+    if (!db) throw new Error("isolated review database unavailable");
+    const opened = db.prepare("PRAGMA database_list").all() as Array<{ file: string }>;
+    if (opened.some((row) => row.file && !row.file.startsWith(`${root}/`)))
+        throw new Error("review database escaped isolated root");
+    const config = MagicContextConfigSchema.parse({
+        auto_update: false,
+        embedding: { provider: "off" },
+        historian: { disable: true },
+        dreamer: {
+            disable: true,
+            inject_docs: true,
+            tasks: { "review-user-memories": { schedule: "0 0 * * *" } },
+        },
+        memory: {
+            enabled: true,
+            injection_budget_tokens: 1000,
+            auto_search: { enabled: true, score_threshold: 0.3 },
+            git_commit_indexing: { enabled: false },
+        },
+        temporal_awareness: true,
+        mural: { enabled: true },
+        history_budget_percentage: 0.17 + (seed % 13) / 100,
+        caveman_text_compression: { enabled: true, min_chars: 100 },
+        protected_tokens: 4000,
+        keep_reasoning_tokens: 100000,
+        commit_cluster_trigger: { enabled: false },
+        ...overrides,
+    });
+    const configPath = join(process.env.XDG_CONFIG_HOME!, "cortexkit");
+    mkdirSync(configPath, { recursive: true });
+    writeFileSync(join(configPath, "magic-context.jsonc"), JSON.stringify(config));
+    const project = resolveProjectIdentityForSession(root)!;
+    const now = Date.now();
+    if (!restoring) {
+        for (let i = 0; i < 18; i++) {
+            const content = `Project constraint ${seed}/${i}: ${prose.repeat(8)}`;
+            db.prepare(
+                "INSERT INTO memories (project_path,category,content,normalized_hash,first_seen_at,created_at,updated_at,last_seen_at,mural_cue,mural_cue_hash,mural_cue_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ).run(
+                project,
+                "CONSTRAINTS",
+                content,
+                `review-${i}`,
+                now,
+                now,
+                now,
+                now,
+                `Deployment constraint ${i}`,
+                createHash("sha256").update(content).digest("hex"),
+                now,
+            );
+        }
+        db.prepare(
+            "INSERT INTO user_memories(content,status,promoted_at,created_at,updated_at) VALUES (?,'active',?,?,?)",
+        ).run("Review preference: explain cache risks precisely.", now, now, now);
+        writeFileSync(
+            join(root, "ARCHITECTURE.md"),
+            "# Isolated architecture\nReview-only deployment cache.",
+        );
+    }
+    const vision = spyOn(models, "modelSupportsVision").mockReturnValue(true);
+    resetHostMediaForTests();
+    rememberHostMedia([
+        new ReviewMessage([
+            {
+                type: "media",
+                media: new ReviewAsset({
+                    source: { type: "base64", data: "aGVsbG8=", mediaType: "image/png" },
+                }),
+            },
+        ]),
+    ]);
+    const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
+        config,
+    } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
+    const probe = spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db);
+    const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockImplementation((project) =>
+        autoSearchTestSnapshot(project),
+    );
+    const lookup = spyOn(search, "searchAutoHint").mockResolvedValue([replayHint]);
+    const logs = spyOn(logger, "sessionLog");
+    const storage = new Map<string, unknown>();
+    let hooks = new Map<string, (draft: SessionContext) => Promise<void>>();
+    let duties: Awaited<ReturnType<typeof registerContext>>;
+    const host = {
+        location: { directory: root },
+        agent: { transform: async () => {}, reload: async () => {} },
+        model: {
+            list: () =>
+                ["gpt-4.1", "gpt-4.1-mini"].map((id) => ({
+                    id,
+                    providerID: "openai",
+                    limit: { context: 1000000 },
+                })),
+        },
+        storage: {
+            get: async (key: string) => storage.get(key),
+            set: async (key: string, value: unknown) => {
+                storage.set(key, structuredClone(value));
+            },
+        },
+        event: { subscribe: async function* () {} },
+        tool: { hook: async () => {} },
+        session: {
+            remove: async () => {},
+            compact: async () => {},
+            interrupt: async () => ({ interrupted: true }),
+            hook: async (name: string, callback: (draft: SessionContext) => Promise<void>) => {
+                hooks.set(name, callback);
+            },
+            get: async () => ({ location: { directory: root } }),
+        },
+    } as unknown as V2Context;
+    const session = `ses709review-${seed}`;
+    raw.prepare("INSERT OR IGNORE INTO session_v2(id,directory) VALUES (?,?)").run(session, root);
+    const source: V2Message[] = Array.from({ length: 24 + (seed % 8) }, (_, n) => ({
+        id: `s${seed}-${n}`,
+        role: n % 2 ? "assistant" : "user",
+        content: [{ type: "text", text: `${seed}/${n}: ${prose.repeat(2 + ((seed + n) % 7))}` }],
+    }));
+    if (source.at(-1)?.role !== "user") source.pop();
+    let model = "gpt-4.1";
+    let checkpoint: V2Message | undefined;
+    let lastDraft: SessionContext | undefined;
+    function persist() {
+        raw.prepare("DELETE FROM session_message WHERE session_id = ?").run(session);
+        for (const [seq, message] of source.entries()) {
+            raw.prepare(
+                "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
+            ).run(
+                message.id!,
+                session,
+                message.role,
+                seq,
+                Date.now() - 2000000 + seq * 1000,
+                JSON.stringify({
+                    content: message.content,
+                    model: { providerID: "openai", id: model },
+                    time: { completed: Date.now() },
+                    tokens: {
+                        input: 10000,
+                        output: 50,
+                        reasoning: 0,
+                        cache: { read: 0, write: 0 },
+                    },
+                }),
+            );
+        }
+    }
+    async function start(register = registerContext) {
+        await duties?.dispose();
+        resetCtxReduceRegisteredGloballyForTest();
+        resetLkgSlotsForTest();
+        hooks = new Map();
+        duties = await register(host);
+        if (!hooks.has("context")) throw new Error("real context hook missing");
+    }
+    async function pass() {
+        const draft: SessionContext = {
+            sessionID: session,
+            model: { providerID: "openai", id: model, limit: { context: 1000000 } },
+            agent: "build",
+            system: [{ type: "text", text: "Review the isolated project." }],
+            tools: { read: { description: "Read a file", input: { type: "object" } } },
+            options: {},
+            messages: structuredClone(checkpoint ? [checkpoint, ...source.slice(-3)] : source),
+        };
+        const before = logs.mock.calls.length;
+        await hooks.get("context")!(draft);
+        lastDraft = structuredClone(draft);
+        return {
+            bytes: JSON.stringify({
+                system: draft.system,
+                tools: draft.tools,
+                messages: draft.messages,
+            }),
+            draft,
+            logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
+        };
+    }
+    persist();
+    await start(initial);
+    return {
+        root,
+        db,
+        raw,
+        config,
+        session,
+        pass,
+        start,
+        lookup,
+        tags: () => getTagsBySession(db, session),
+        decisions: () => getAutoSearchHintDecisions(db, session),
+        meta: () => getOrCreateSessionMeta(db, session),
+        switchModel() {
+            model = model === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1";
+        },
+        async idle() {
+            nowClock += 3600000;
+        },
+        completeResponse() {
+            nowClock += 1000;
+            const row = raw
+                .prepare(
+                    "SELECT id,data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
+                )
+                .get(session) as { id: string; data: string };
+            const data = JSON.parse(row.data);
+            data.time.completed = nowClock;
+            raw.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(
+                JSON.stringify(data),
+                row.id,
+            );
+        },
+        async fold() {
+            const draft = structuredClone(lastDraft!);
+            await hooks.get("compaction")!(draft);
+            if (!draft.result) throw new Error("compaction hook supplied no summary");
+            const seq = source.length;
+            const id = `fold-${seed}`;
+            raw.prepare(
+                "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
+            ).run(
+                id,
+                session,
+                "compaction",
+                seq,
+                Date.now(),
+                JSON.stringify({
+                    status: "completed",
+                    summary: draft.result.summary,
+                    time: { completed: Date.now() },
+                }),
+            );
+            checkpoint = {
+                id,
+                role: "user",
+                content: [{ type: "text", text: `<summary>\n${draft.result.summary}\n</summary>` }],
+            };
+            return draft.result.summary;
+        },
+        freshTurn() {
+            const n = source.length;
+            source.push(
+                {
+                    id: `s${seed}-${n}`,
+                    role: "assistant",
+                    content: [{ type: "text", text: prose.repeat(3) }],
+                },
+                {
+                    id: `s${seed}-${n + 1}`,
+                    role: "user",
+                    content: [{ type: "text", text: `deployment widget ${seed}: ${prose}` }],
+                },
+            );
+            persist();
+        },
+        async cleanup() {
+            await duties?.dispose();
+            logs.mockRestore();
+            lookup.mockRestore();
+            snapshot.mockRestore();
+            probe.mockRestore();
+            load.mockRestore();
+            vision.mockRestore();
+            clock.mockRestore();
+            _resetDreamTimerForTests();
+            closeDatabase();
+            raw.close();
+            resetLkgSlotsForTest();
+            resetCtxReduceRegisteredGloballyForTest();
+            for (const key of keys) {
+                if (saved[key] === undefined) delete process.env[key];
+                else process.env[key] = saved[key];
+            }
+            resetOpenCodeDbPathStateForTesting();
+            resetHostMediaForTests();
+            if (!process.env.REVIEW709_RESTART_ROOT) cleanupTestTempDir(root);
+        },
+    };
+}
+
+test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 seeded passes", async () => {
+    const changes: Array<{ seed: number; step: number; logs: string[] }> = [];
+    let passes = 0;
+    const coverage: unknown[] = [];
+    for (let seed = 709; seed < 729; seed++) {
+        const f = await fixture(seed);
+        try {
+            let random = seed;
+            let previous: Awaited<ReturnType<typeof f.pass>> | undefined;
+            const next = () => {
+                random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+                return random;
+            };
+            for (let step = 0; step < 12; step++) {
+                if (step === 3) await f.start();
+                if (step === 5) f.switchModel();
+                if (step === 9) await f.fold();
+                if (step === 7) await f.idle();
+                const fresh = step > 0 && step < 9 && step !== 7 && next() % 3 === 0;
+                if (fresh) f.freshTurn();
+                const depthsBefore = new Map(
+                    f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]),
+                );
+                const first = await f.pass();
+                if (previous && ![5, 7, 9].includes(step)) {
+                    if (!fresh)
+                        expect(first.bytes, `same input seed ${seed} step ${step}`).toBe(
+                            previous.bytes,
+                        );
+                    else {
+                        expect(
+                            first.draft.messages.slice(0, previous.draft.messages.length),
+                            `old prefix seed ${seed} step ${step}`,
+                        ).toEqual(previous.draft.messages);
+                        expect(first.draft.system).toEqual(previous.draft.system);
+                        expect(first.draft.tools).toEqual(previous.draft.tools);
+                    }
+                }
+                passes++;
+                const newCompression = f
+                    .tags()
+                    .filter((t) => (t.cavemanDepth ?? 0) > (depthsBefore.get(t.messageId) ?? 0));
+                if (newCompression.length)
+                    expect(
+                        first.logs.some((line) =>
+                            /first_render|ttl_idle|bustsServedPrefix=true/.test(line),
+                        ),
+                        `compression first-apply seed ${seed} step ${step}`,
+                    ).toBe(true);
+                expect(first.bytes).toContain("Review preference");
+                expect(first.bytes).toContain("Isolated architecture");
+                expect(first.bytes).toContain("mediaType");
+                expect(first.bytes).toContain("image/png");
+                const decisionsBeforeReplay = f.decisions().length;
+                const depthsBeforeReplay = f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]);
+                const second = await f.pass();
+                passes++;
+                expect(f.decisions().length).toBe(decisionsBeforeReplay);
+                expect(f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0])).toEqual(
+                    depthsBeforeReplay,
+                );
+                if (step !== 7)
+                    expect(
+                        second.logs.some((line) =>
+                            /transform scheduler: .*decision=defer/.test(line),
+                        ),
+                        `seed ${seed} step ${step}: ${second.logs.join("\n")}`,
+                    ).toBe(true);
+                if (step === 7) expect(first.logs.join("\n")).toContain("ttl_idle");
+                if (second.bytes !== first.bytes) changes.push({ seed, step, logs: second.logs });
+                previous = second;
+                f.completeResponse();
+            }
+            expect(f.tags().some((t) => (t.cavemanDepth ?? 0) > 0)).toBe(true);
+            expect(f.decisions().some((d) => d.decision === "hint")).toBe(true);
+            coverage.push({
+                seed,
+                compressed: f.tags().filter((t) => (t.cavemanDepth ?? 0) > 0).length,
+                hintDecisions: f.decisions().length,
+                meta: f.db
+                    .prepare(
+                        "SELECT cached_m0_upgrade_state, cached_m0_mural_hash FROM session_meta WHERE session_id = ?",
+                    )
+                    .get(f.session),
+            });
+        } finally {
+            await f.cleanup();
+        }
+    }
+    console.log(JSON.stringify({ passes, deferChanges: changes, coverage }));
+    expect(passes).toBe(480);
+    expect(changes).toEqual([]);
+}, 120000);
+
+test.skipIf(!process.env.REVIEW709_BASELINE_MODULE)(
+    "issue 709 review: upgrade from exact cb9ba1d1 OC2 callback",
+    async () => {
+        const baseline = (await import(process.env.REVIEW709_BASELINE_MODULE!)) as {
+            registerContext: typeof registerContext;
+        };
+        const off = {
+            dreamer: { disable: true, inject_docs: true },
+            memory: {
+                enabled: true,
+                injection_budget_tokens: 1000,
+                auto_search: { enabled: false },
+                git_commit_indexing: { enabled: false },
+            },
+            temporal_awareness: false,
+            mural: { enabled: false },
+            caveman_text_compression: { enabled: false },
+            history_budget_percentage: 0.15,
+        };
+        const cases: Array<[string, Record<string, unknown>]> = [
+            ["control", {}],
+            ["autoSearch", { memory: { ...off.memory, auto_search: { enabled: true } } }],
+            ["caveman", { caveman_text_compression: { enabled: true, min_chars: 100 } }],
+            [
+                "userMemoryCollection",
+                {
+                    dreamer: {
+                        ...off.dreamer,
+                        tasks: { "review-user-memories": { schedule: "0 0 * * *" } },
+                    },
+                },
+            ],
+            ["temporal", { temporal_awareness: true }],
+            ["mural", { mural: { enabled: true } }],
+            ["historyBudget", { history_budget_percentage: 0.23 }],
+            ["injectDocsOff", { dreamer: { ...off.dreamer, inject_docs: false } }],
+            [
+                "allOn",
+                {
+                    dreamer: {
+                        disable: true,
+                        inject_docs: true,
+                        tasks: { "review-user-memories": { schedule: "0 0 * * *" } },
+                    },
+                    memory: { ...off.memory, auto_search: { enabled: true } },
+                    caveman_text_compression: { enabled: true, min_chars: 100 },
+                    temporal_awareness: true,
+                    mural: { enabled: true },
+                    history_budget_percentage: 0.23,
+                },
+            ],
+        ];
+        const results = [];
+        for (const [index, [feature, options]] of cases.entries()) {
+            const f = await fixture(1709 + index, { ...off, ...options }, baseline.registerContext);
+            try {
+                const old = await f.pass();
+                f.completeResponse();
+                const cachedOld = f.meta().cachedM0UpgradeState;
+                await f.start();
+                const upgraded = await f.pass();
+                const compressedOnUpgrade = f
+                    .tags()
+                    .filter((t) => (t.cavemanDepth ?? 0) > 0).length;
+                const replay = await f.pass();
+                f.switchModel();
+                const natural = await f.pass();
+                const naturalReplay = await f.pass();
+                results.push({
+                    feature,
+                    compressedOnUpgrade,
+                    compressedAfterNatural: f.tags().filter((t) => (t.cavemanDepth ?? 0) > 0)
+                        .length,
+                    naturalReplayChanged: natural.bytes !== naturalReplay.bytes,
+                    changed: old.bytes !== upgraded.bytes,
+                    secondChanged: upgraded.bytes !== replay.bytes,
+                    oldIdentity: cachedOld,
+                    newIdentity: f.meta().cachedM0UpgradeState,
+                    firstLogs: upgraded.logs.filter((line) =>
+                        /HARD|decision=|auto-search:|heuristics WILL/.test(line),
+                    ),
+                    secondLogs: replay.logs.filter((line) => /HARD.*executed=true/.test(line)),
+                });
+            } finally {
+                await f.cleanup();
+            }
+        }
+        console.log(`UPGRADE709 ${JSON.stringify(results, null, 2)}`);
+        expect(
+            results.every(
+                (result) =>
+                    !result.secondChanged &&
+                    !result.naturalReplayChanged &&
+                    result.secondLogs.length === 0 &&
+                    result.firstLogs.filter((line) => /HARD.*executed=true/.test(line)).length <= 1,
+            ),
+        ).toBe(true);
+    },
+    120000,
+);
+
+// The source store has timestamps separated by 10 minutes, so the fresh render
+// must include a temporal marker even though the provider draft omits timestamps.
+test("issue 709 witness: OC2 temporal awareness survives host payload projection", async () => {
+    const f = await fixture(2709);
+    try {
+        const rows = f.raw
+            .prepare("SELECT id,time_created,data FROM session_message ORDER BY seq")
+            .all() as Array<{ id: string; time_created: number; data: string }>;
+        for (const [n, row] of rows.entries()) {
+            const data = JSON.parse(row.data);
+            data.time.created = 1700000000000 + n * 600000;
+            data.time.completed = data.time.created + 1000;
+            f.raw
+                .prepare("UPDATE session_message SET time_created = ?,data = ? WHERE id = ?")
+                .run(data.time.created, JSON.stringify(data), row.id);
+        }
+        const candidates = collectTemporalCandidates(
+            rows.map((row, n) => ({
+                info: {
+                    id: row.id,
+                    role: n % 2 ? "assistant" : "user",
+                    time: {
+                        created: 1700000000000 + n * 600000,
+                        completed: 1700000001000 + n * 600000,
+                    },
+                },
+                parts: [{ type: "text", text: prose }],
+            })),
+        );
+        expect(
+            [...candidates.values()].filter((value) => value === "<!-- +9m -->\n").length,
+        ).toBeGreaterThan(0);
+        const output = await f.pass();
+        expect(output.logs.join("\n")).toContain("first_render");
+        expect(output.bytes.includes("<!-- +9m -->")).toBe(true);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("issue 709 witness: OC2 compaction honors inject_docs=false", async () => {
+    const f = await fixture(3709, { dreamer: { disable: true, inject_docs: false } });
+    try {
+        const before = await f.pass();
+        expect(before.bytes.includes("Isolated architecture")).toBe(false);
+        const summary = await f.fold();
+        expect(summary.includes("Isolated architecture")).toBe(false);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("issue 709 witness: OC2 compaction preserves mural and history render identity", async () => {
+    const f = await fixture(4709);
+    try {
+        await f.pass();
+        const before = f.meta().cachedM0UpgradeState;
+        expect(before).toContain("mural-enabled:1");
+        await f.fold();
+        const after = f.meta().cachedM0UpgradeState;
+        const correction = await f.pass();
+        const replay = await f.pass();
+        console.log(
+            `FOLD709 ${JSON.stringify({ before, after, correction: correction.logs.filter((line) => /HARD.*executed=true/.test(line)), replayChanged: correction.bytes !== replay.bytes })}`,
+        );
+        expect(after).toBe(before);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test.skipIf(!process.env.REVIEW709_RESTART_PHASE)("issue 709 restart child", async () => {
+    const f = await fixture(5709);
+    try {
+        const output = await f.pass();
+        const wire = join(f.root, "before-restart.json");
+        if (process.env.REVIEW709_RESTART_PHASE === "write") {
+            writeFileSync(wire, output.bytes);
+            f.completeResponse();
+        } else {
+            expect(
+                output.logs.some((line) => /transform scheduler: .*decision=defer/.test(line)),
+            ).toBe(true);
+            expect(output.bytes).toBe(readFileSync(wire, "utf8"));
+        }
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("issue 709 review: persisted OC2 bytes survive full process restart", async () => {
+    const base = join(tmpdir(), "magic-context/issue-709-review");
+    mkdirSync(base, { recursive: true });
+    const root = createTestTempDirFromPath(join(base, "restart-"));
+    try {
+        for (const phase of ["write", "read"]) {
+            const child = Bun.spawn(
+                [process.execPath, "test", import.meta.path, "-t", "^issue 709 restart child$"],
+                {
+                    cwd: process.cwd(),
+                    windowsHide: true,
+                    env: {
+                        ...process.env,
+                        REVIEW709_RESTART_PHASE: phase,
+                        REVIEW709_RESTART_ROOT: root,
+                    },
+                    stdout: "pipe",
+                    stderr: "pipe",
+                },
+            );
+            const [code, stdout, stderr] = await Promise.all([
+                child.exited,
+                new Response(child.stdout).text(),
+                new Response(child.stderr).text(),
+            ]);
+            expect(code, `${phase}: ${stdout}\n${stderr}`).toBe(0);
+        }
+        console.log(
+            "RESTART709 two OS processes, two complete real-hook passes, byte-identical persisted replay",
+        );
+    } finally {
+        cleanupTestTempDir(root);
+    }
+}, 60000);
