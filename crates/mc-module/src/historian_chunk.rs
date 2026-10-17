@@ -4266,6 +4266,7 @@ mod prompt_fit_tests {
                 extraction_free: false,
                 limit,
                 seed: &seed,
+                fallback_limits: &[],
                 system_tokens: 1000.0,
                 requested: 1000,
             });
