@@ -49,13 +49,13 @@ const KEPT_TOOL_STATE_FIELDS = new Set([
 const KEPT_TOOL_STATE_TIME_FIELD = "compacted";
 function tailProviderVisibleToolState(
     state: Record<string, unknown>,
-    interruptedOutput: boolean,
+    openCode1: boolean,
 ): Record<string, unknown> {
     const view: Record<string, unknown> = {};
     for (const key of Object.keys(state)) {
-        if (KEPT_TOOL_STATE_FIELDS.has(key)) {
+        if (tailToolStateFieldIsKept(key, openCode1)) {
             view[key] = state[key];
-        } else if (key === "time") {
+        } else if (key === "time" && openCode1) {
             const value = state.time;
             if (isRecord(value)) {
                 view.time =
@@ -63,7 +63,7 @@ function tailProviderVisibleToolState(
                         ? {}
                         : { [KEPT_TOOL_STATE_TIME_FIELD]: value[KEPT_TOOL_STATE_TIME_FIELD] };
             }
-        } else if (key === "metadata" && interruptedOutput && state.status === "error") {
+        } else if (key === "metadata" && openCode1 && state.status === "error") {
             // OpenCode 1 forwards only a string partial result of an interrupted tool.
             // Never enumerate the diagnostics/diffs beside those two fields.
             const metadata = state.metadata;
@@ -76,10 +76,15 @@ function tailProviderVisibleToolState(
     return view;
 }
 
+function tailToolStateFieldIsKept(key: string, openCode1: boolean): boolean {
+    // Only OpenCode 2 reads content; OpenCode 1 uses output/attachments instead.
+    return KEPT_TOOL_STATE_FIELDS.has(key) && (key !== "content" || !openCode1);
+}
+
 /** Only the allowlisted state fields can be reused without projecting time/metadata. */
-function tailToolStateIsReduced(state: Record<string, unknown>): boolean {
+function tailToolStateIsReduced(state: Record<string, unknown>, openCode1: boolean): boolean {
     for (const key of Object.keys(state)) {
-        if (KEPT_TOOL_STATE_FIELDS.has(key)) continue;
+        if (tailToolStateFieldIsKept(key, openCode1)) continue;
         return false;
     }
     return true;
@@ -96,17 +101,17 @@ export function providerVisiblePart(part: unknown): unknown {
     return { ...part, state: providerVisibleToolState(part.state) };
 }
 
-/** For OpenCode 1 errors, retain interrupted=true and only a string partial output. */
+/** OpenCode 1 reads compacted time and interrupted string output, but not state.content. */
 export function providerVisiblePartForTailHygiene(part: unknown): unknown {
     return providerVisiblePartForHost(part, true);
 }
 
-/** OpenCode 2 never forwards tool-state metadata, even for interrupted errors. */
+/** OpenCode 2 reads content, but never forwards tool-state metadata or OC1 compacted time. */
 export function providerVisiblePartForOpenCode2(part: unknown): unknown {
     return providerVisiblePartForHost(part, false);
 }
 
-function providerVisiblePartForHost(part: unknown, interruptedOutput: boolean): unknown {
+function providerVisiblePartForHost(part: unknown, openCode1: boolean): unknown {
     if (!isRecord(part)) return part;
     if (part.type !== "tool") {
         // Only native tool parts forward state. A state attached to a text or
@@ -119,8 +124,8 @@ function providerVisiblePartForHost(part: unknown, interruptedOutput: boolean): 
         return view;
     }
     if (!isRecord(part.state)) return part;
-    if (tailToolStateIsReduced(part.state)) return part;
-    return { ...part, state: tailProviderVisibleToolState(part.state, interruptedOutput) };
+    if (tailToolStateIsReduced(part.state, openCode1)) return part;
+    return { ...part, state: tailProviderVisibleToolState(part.state, openCode1) };
 }
 
 const KEPT_ERROR_METADATA_FIELDS = ["interrupted", "output"] as const;

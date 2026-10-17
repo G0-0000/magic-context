@@ -37,19 +37,26 @@ function pick(value: RecordValue, fields: readonly string[]): RecordValue {
 }
 
 /**
- * Inputs read by Pi's Anthropic, Google and OpenAI message converters, including
- * their signature/model replay checks. UI metadata/details are never enumerated.
+ * Inputs read by the request's Pi converter, including signature/model replay
+ * checks. Direct Anthropic, Google and OpenAI converters omit UI metadata/details.
+ * Native pi-messages sends raw context, so its identity must also traverse large
+ * metadata and unknown fields. That cost is confined to the native gateway API.
  * Tool arguments are opaque provider input: a field named metadata inside them
  * must not be removed. See pi-ai 0.87.1 dist/api/* message converters.
  */
-export function providerVisiblePiPart(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(providerVisiblePiPart);
+export function providerVisiblePiPart(
+	value: unknown,
+	providerApi?: string,
+): unknown {
+	if (providerApi === "pi-messages") return value;
+	if (Array.isArray(value))
+		return value.map((part) => providerVisiblePiPart(part, providerApi));
 	if (!isRecord(value)) return value;
 	if (typeof value.role === "string") {
 		const view = pick(value, MESSAGE_FIELDS);
 		if (Object.hasOwn(value, "content")) {
 			view.content = Array.isArray(value.content)
-				? value.content.map(providerVisiblePiPart)
+				? value.content.map((part) => providerVisiblePiPart(part, providerApi))
 				: typeof value.content === "string"
 					? value.content
 					: undefined;

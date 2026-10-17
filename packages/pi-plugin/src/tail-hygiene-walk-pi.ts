@@ -52,6 +52,8 @@ const FNV1A_32_PRIME = 0x01000193;
 
 export interface PiTailHygieneWalkInput {
 	messages: readonly unknown[];
+	/** Active request API, not the API recorded on an older assistant message. */
+	providerApi?: string;
 	tags: readonly TagEntry[];
 	/** Reuse the same key object for one connection/session lifetime, with canonical immutable row snapshots only. */
 	tagCacheKey?: object;
@@ -586,13 +588,17 @@ function attributeTags(
 const partJsonMemo = new TailHygieneJsonMemo();
 let excludedViews = new WeakMap<object, unknown>();
 
-function excludedDraft(key: string, value: unknown): DraftPart {
+function excludedDraftForApi(
+	key: string,
+	value: unknown,
+	providerApi?: string,
+): DraftPart {
 	let view =
 		value !== null && typeof value === "object"
 			? excludedViews.get(value)
 			: undefined;
 	if (view === undefined) {
-		view = providerVisiblePiPart(value);
+		view = providerVisiblePiPart(value, providerApi);
 		if (value !== null && typeof value === "object")
 			excludedViews.set(value, view);
 	}
@@ -681,6 +687,25 @@ export function measurePiTailHygiene(
 ): TailHygieneMeasurement & { realUserTurnCount: number } {
 	partJsonMemo.beginPass();
 	excludedViews = new WeakMap();
+	// Standalone walk/refresh callers can omit providerApi. The context handler
+	// supplies ctx.model.api so a model switch uses the active request converter,
+	// not the API recorded on an older assistant message.
+	let providerApi = input.providerApi;
+	if (providerApi === undefined) {
+		for (let index = input.messages.length - 1; index >= 0; index--) {
+			const message = input.messages[index];
+			if (
+				isRecord(message) &&
+				message.role === "assistant" &&
+				typeof message.api === "string"
+			) {
+				providerApi = message.api;
+				break;
+			}
+		}
+	}
+	const excludedDraft = (key: string, value: unknown): DraftPart =>
+		excludedDraftForApi(key, value, providerApi);
 	const { arcs, arcByPart, messageIds } = collectToolArcs(input);
 	const { messageTags, tagsByNumber } = attributeTags(input, arcs, messageIds);
 	const drafts: DraftPart[] = [];

@@ -1,6 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { providerVisiblePiPart } from "./provider-visible-parts-pi";
-import { refreshPiTailHygieneBaseline } from "./tail-hygiene-walk-pi";
+import {
+	measurePiTailHygiene,
+	refreshPiTailHygieneBaseline,
+} from "./tail-hygiene-walk-pi";
 
 test("excluded Pi identity visits zero UI metadata bytes", () => {
 	const data = { diagnostics: "x".repeat(18 * 1024 * 1024) };
@@ -30,9 +33,11 @@ test("excluded Pi identity visits zero UI metadata bytes", () => {
 		},
 	};
 	const input = {
+		providerApi: "anthropic-messages",
 		messages: [
 			{
 				role: "assistant",
+				api: "pi-messages",
 				content: [part, { type: "text", text: "first" }, part],
 			},
 			{ role: "user", content: "newest" },
@@ -138,4 +143,40 @@ test("Pi provider projection retains signatures, replay flags and opaque tool ar
 			arguments: argumentsWithMetadata,
 		}),
 	).toEqual({ type: "toolCall", arguments: argumentsWithMetadata });
+});
+
+test("Pi tail identity uses the active request API across historical API switches", () => {
+	const part = {
+		type: "thinking",
+		thinking: "reason",
+		thinkingSignature: "signature",
+		metadata: { diagnostic: "original" },
+		unknownField: "original",
+	};
+	const message = {
+		role: "assistant",
+		api: "pi-messages",
+		content: [part],
+	};
+	const input = {
+		messages: [message, { role: "user", content: "continue" }],
+		tags: [],
+		protectedTagNumbers: new Set<number>(),
+	};
+	const hash = (providerApi: string) =>
+		measurePiTailHygiene({ ...input, providerApi }).parts[0].contentHash;
+	const directBefore = hash("anthropic-messages");
+	const nativeBefore = hash("pi-messages");
+	part.metadata.diagnostic = "changed";
+	expect(hash("anthropic-messages")).toBe(directBefore);
+	expect(hash("pi-messages")).not.toBe(nativeBefore);
+
+	// The request API wins even when stored assistant messages came from a
+	// different converter, and unrecognized native fields remain wire-visible.
+	message.api = "anthropic-messages";
+	const nativeAfterMetadata = hash("pi-messages");
+	part.unknownField = "changed";
+	expect(hash("pi-messages")).not.toBe(nativeAfterMetadata);
+	expect(hash("anthropic-messages")).toBe(directBefore);
+	expect(providerVisiblePiPart(message, "pi-messages")).toBe(message);
 });
