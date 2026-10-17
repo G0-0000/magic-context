@@ -847,13 +847,49 @@ try {
 						),
 					],
 				};
-				if (only !== "all" && !shapes[only])
+				// Not part of "all": an own turn whose stored cache has no dt flag and
+				// carries cached-only user text, so OMP replaces the preceding input with
+				// it (the issue 692 replacement class). This one must refuse.
+				const replacement = toolTurn(
+					own,
+					[
+						signedText(
+							"HISTORY714 replaced commentary",
+							"msg_rep714",
+							"commentary",
+						),
+					],
+					"call_rep714|fc_rep714",
+					stamp + 45,
+					{
+						type: "openaiResponsesHistory",
+						provider: model.provider,
+						items: [
+							{
+								type: "message",
+								role: "user",
+								content: [
+									{ type: "input_text", text: "UNMANAGED_CACHE_ONLY_714" },
+								],
+							},
+							reasoning("rs_rep714"),
+							messageItem(
+								"HISTORY714 replaced commentary",
+								"msg_rep714",
+								"commentary",
+							),
+							callItem("call_rep714", "fc_rep714"),
+						],
+					},
+				);
+				if (only !== "all" && only !== "replacement" && !shapes[only])
 					throw new Error("unknown cross-model shape");
 				history = [
 					user("HISTORY714 cross-model prompt", stamp),
 					...Object.entries(shapes).flatMap(([name, rows]) =>
 						only === "all" || only === name ? rows : [],
 					),
+					...(only === "replacement" ? replacement : []),
 					{ ...reply, timestamp: stamp + 50 },
 				];
 				break;
@@ -1476,15 +1512,25 @@ try {
 		version,
 		bun: Bun.version,
 	});
-	const name =
-		mode === "managed-then-raw"
+	const replacementCase =
+		historyCase === "cross-model-responses" &&
+		process.argv[5] === "replacement";
+	const name = replacementCase
+		? `${selector}: replacement cache with cached-only user text refused before transport`
+		: mode === "managed-then-raw"
 			? `${selector}: mixed managed history turns admit and raw final turn refuses`
 			: mode === "drop-commentary"
 				? `${selector}: dropped signed commentary refused before transport`
 				: mode === "raw"
 					? `${selector}: raw request refused before transport`
 					: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
-	const ok = assistantEdit
+	const ok = replacementCase
+		? attempts.length === 1 &&
+			wires === 0 &&
+			refusals.length === 1 &&
+			refusals[0].data.message.includes("prepared turn structure") &&
+			JSON.stringify(attempts[0].payload).includes("UNMANAGED_CACHE_ONLY_714")
+		: assistantEdit
 		? managedOutcomes.every((outcome: any, index) =>
 				index === 0 || mode !== "text-edit-baseline"
 					? outcome.wires === 1 && outcome.refusals.length === 0
