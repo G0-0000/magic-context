@@ -4,7 +4,7 @@ import { configureContextDatabasePragmas } from "../../shared/sqlite-context-pra
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getDatabasePath } from "./storage-db";
 
-export type TransformDecisionHarness = "opencode" | "pi";
+export type TransformDecisionHarness = "opencode" | "opencode2" | "pi";
 export type TransformSchedulerDecision =
     | "execute"
     | "defer"
@@ -165,6 +165,41 @@ const pendingPiDecisionBySession = new Map<string, PendingPiTransformDecision>()
 const lastBoundMessageIdBySession = new Map<string, string>();
 const scheduledWriteTokensBySession = new Map<string, Set<symbol>>();
 
+/**
+ * A changed system prompt rewrites the provider's whole prompt cache on the
+ * first request that carries it, whatever Magic Context did to the messages.
+ * The pass that served that request may not have changed any message bytes
+ * itself (a deferred pass in the middle of a tool loop, or a Rust raw
+ * pass-through), so it would stage no decision, or one naming an unrelated
+ * reason. The system hook marks the session here and the decision bound to
+ * that request's assistant names `system_hash`. In-memory only: nothing is
+ * written to the database until a decision is bound to an assistant message.
+ */
+const systemHashChangedSessions = new Set<string>();
+const piSystemHashChangedSessions = new Set<string>();
+/**
+ * The latest OpenCode TypeScript pass that changed no message bytes. It stages
+ * no row by itself; it only supplies the scheduler decision when a system
+ * prompt change needs a row for that pass. Cleared when a pass starts.
+ */
+const unbustedPassBySession = new Map<string, PendingTransformDecision>();
+/**
+ * Newest assistant id in the input of the latest OpenCode 1 messages pass. Only
+ * a reply newer than this can answer that pass's request, so a late completion
+ * event for an earlier reply never takes a system prompt change's cause.
+ * OpenCode message ids sort by creation time.
+ */
+const newestInputAssistantBySession = new Map<string, string>();
+/**
+ * OpenCode 2 has no per-message completion event. A pass's decision is kept
+ * with the store sequence captured before the request was sent, and the next
+ * context pass binds it to the first assistant written after that sequence.
+ */
+const stagedV2DecisionBySession = new Map<
+    string,
+    { decision: PendingTransformDecision; responseAfterSequence: number }
+>();
+
 let writerOverrideForTests: TransformDecisionWriter | null = null;
 
 // Tests override the retention cap so the prune can be exercised with a handful
@@ -246,8 +281,20 @@ export function writeRustTransformDecision(args: {
     });
 }
 
-export function clearOpenCodePendingTransformDecision(sessionId: string): void {
+export function clearOpenCodePendingTransformDecision(
+    sessionId: string,
+    inputMessages?: readonly { info?: { id?: unknown; role?: unknown } }[],
+): void {
     pendingDecisionBySession.delete(sessionId);
+    unbustedPassBySession.delete(sessionId);
+    if (!inputMessages) return;
+    let newestAssistant = "";
+    for (const message of inputMessages) {
+        const id = message.info?.id;
+        if (message.info?.role !== "assistant" || typeof id !== "string") continue;
+        if (id > newestAssistant) newestAssistant = id;
+    }
+    newestInputAssistantBySession.set(sessionId, newestAssistant);
 }
 
 export function clearTransformDecisionSession(sessionId: string): void {
@@ -255,6 +302,85 @@ export function clearTransformDecisionSession(sessionId: string): void {
     pendingPiDecisionBySession.delete(sessionId);
     lastBoundMessageIdBySession.delete(sessionId);
     scheduledWriteTokensBySession.delete(sessionId);
+    systemHashChangedSessions.delete(sessionId);
+    piSystemHashChangedSessions.delete(sessionId);
+    unbustedPassBySession.delete(sessionId);
+    newestInputAssistantBySession.delete(sessionId);
+    stagedV2DecisionBySession.delete(sessionId);
+}
+
+/**
+ * Called by the OpenCode system hook (OpenCode 1 and 2) when the system prompt
+ * hash differs from the stored one. The decision for the request that carries
+ * the new prompt then names `system_hash`, whether or not its pass busted.
+ */
+export function noteSystemPromptHashChange(sessionId: string): void {
+    systemHashChangedSessions.add(sessionId);
+}
+
+/** Pi counterpart of {@link noteSystemPromptHashChange}, set in before_agent_start. */
+export function notePiSystemPromptHashChange(sessionId: string): void {
+    piSystemHashChangedSessions.add(sessionId);
+}
+
+/** True while a Pi system prompt change still waits for its pass's decision. */
+export function hasPendingPiSystemPromptHashChange(sessionId: string): boolean {
+    return piSystemHashChangedSessions.has(sessionId);
+}
+
+/**
+ * Remember an OpenCode TypeScript pass that staged no decision, so a system
+ * prompt change on the same request can still record that pass's scheduler
+ * decision. Memory only.
+ */
+export function noteOpenCodeUnbustedPass(
+    sessionId: string,
+    decision: PendingTransformDecision,
+): void {
+    unbustedPassBySession.set(sessionId, decision);
+}
+
+function withSystemHashReason(decision: PendingTransformDecision): PendingTransformDecision {
+    return { ...decision, materializeReason: "system_hash" };
+}
+
+/** A row for a request whose pass left no decision of its own (for example an early return). */
+function unknownPassDecision(): PendingTransformDecision {
+    return {
+        tsMs: Date.now(),
+        decision: "unknown",
+        materialized: false,
+        materializeReason: null,
+        systemHashPrev: null,
+        systemHashNew: null,
+        m0ModelKeyPrev: null,
+        m0ModelKeyNew: null,
+        emergency: false,
+        droppedTokens: 0,
+        droppedCount: 0,
+        inputTokens: 0,
+        bustedThisPass: false,
+    };
+}
+
+/**
+ * The decision to record for the request now being bound, or undefined when
+ * none applies. Without a system prompt change this is exactly the staged
+ * busting decision. With one, the request rewrote the provider cache anyway,
+ * so it always gets a row naming `system_hash`, built from the staged decision,
+ * else the pass's unbusted decision, else an `unknown` placeholder.
+ */
+function takeOpenCodeDecisionForBinding(
+    sessionId: string,
+    applySystemHashChange: boolean,
+): PendingTransformDecision | undefined {
+    const pending = pendingDecisionBySession.get(sessionId);
+    const unbusted = unbustedPassBySession.get(sessionId);
+    pendingDecisionBySession.delete(sessionId);
+    unbustedPassBySession.delete(sessionId);
+    if (!applySystemHashChange || !systemHashChangedSessions.has(sessionId)) return pending;
+    systemHashChangedSessions.delete(sessionId);
+    return withSystemHashReason(pending ?? unbusted ?? unknownPassDecision());
 }
 
 export function recordPendingTransformDecision(
@@ -275,9 +401,13 @@ export function recordPendingPiTransformDecision(
     publicationGuard?: () => void,
 ): void {
     publicationGuard?.();
-    if (!decision.bustedThisPass) return;
+    // A system prompt change noted in before_agent_start belongs to the first
+    // main context pass after it: that pass serves the request that rewrites the
+    // provider's prompt cache, so it records a row whether or not it busted.
+    const systemHashChanged = piSystemHashChangedSessions.delete(sessionId);
+    if (!decision.bustedThisPass && !systemHashChanged) return;
     pendingPiDecisionBySession.set(sessionId, {
-        ...decision,
+        ...(systemHashChanged ? withSystemHashReason(decision) : decision),
         snapshotNewestAssistantEntryId,
         publicationGuard,
     });
@@ -289,16 +419,23 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
     messageId: string;
     inputTokens: number;
 }): boolean {
-    const pending = pendingDecisionBySession.get(args.sessionId);
-    if (!pending) return false;
+    // Message ids sort by creation time. A reply whose id is not newer than the
+    // newest assistant id in the latest messages pass's input was already part of
+    // that input, so it answers an earlier request; a repeated or late completion
+    // event for it must not take the system prompt change.
+    const newestInput = newestInputAssistantBySession.get(args.sessionId) ?? "";
+    const systemHashChanged =
+        args.messageId > newestInput && systemHashChangedSessions.has(args.sessionId);
+    if (!pendingDecisionBySession.has(args.sessionId) && !systemHashChanged) return false;
     if (lastBoundMessageIdBySession.get(args.sessionId) === args.messageId) {
         return false;
     }
     const dbPath = getDatabasePath(args.db);
     if (!dbPath) return false;
 
+    const pending = takeOpenCodeDecisionForBinding(args.sessionId, systemHashChanged);
+    if (!pending) return false;
     lastBoundMessageIdBySession.set(args.sessionId, args.messageId);
-    pendingDecisionBySession.delete(args.sessionId);
     const token = addScheduledWriteToken(args.sessionId);
     inRootAsyncContext(() =>
         setTimeout(() => {
@@ -310,6 +447,86 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
                     harness: "opencode",
                     messageId: args.messageId,
                     inputTokens: args.inputTokens,
+                });
+            } finally {
+                deleteScheduledWriteToken(args.sessionId, token);
+            }
+        }, 0),
+    );
+    return true;
+}
+
+/** The parts of an OpenCode 2 assistant row that the decision binder reads. */
+export interface V2DecisionAssistant {
+    id: string;
+    /** `running` while the reply has neither a failure marker nor a completion. */
+    state: "succeeded" | "failed" | "running";
+    inputTokens: number;
+}
+
+/**
+ * OpenCode 2, after a context pass served its request: keep the decision
+ * OpenCode 1 would bind to that request's assistant. That is a busting pass's
+ * decision, or any pass of a request that carried a system prompt change. A
+ * non-busting pass keeps nothing, so ordinary passes never write a row.
+ * `responseAfterSequence` is the store's newest sequence captured before the
+ * request was sent; the reply is the first assistant written after it.
+ */
+export function stageOpenCodeV2TransformDecision(args: {
+    sessionId: string;
+    responseAfterSequence: number | undefined;
+}): boolean {
+    const systemHashChanged = systemHashChangedSessions.has(args.sessionId);
+    const decision = takeOpenCodeDecisionForBinding(args.sessionId, true);
+    // A newer pass replaces an unbound decision: that earlier request's reply
+    // never completed, and its row is dropped rather than bound to a later reply.
+    stagedV2DecisionBySession.delete(args.sessionId);
+    if (!decision || args.responseAfterSequence === undefined) return false;
+    if (!decision.bustedThisPass && !systemHashChanged) return false;
+    stagedV2DecisionBySession.set(args.sessionId, {
+        decision,
+        responseAfterSequence: args.responseAfterSequence,
+    });
+    return true;
+}
+
+/**
+ * OpenCode 2: write the staged decision against the reply to its request.
+ * Called when a context pass starts (`passStarting`, so the staged request is
+ * over) and after an execution succeeds. Binds only a successful reply; a
+ * failed or aborted reply, or no reply by the time the next pass starts, drops
+ * the decision so it can never attach to another request's message.
+ */
+export function bindOpenCodeV2TransformDecision(args: {
+    db: Database;
+    sessionId: string;
+    firstAssistantAfter: (sequence: number) => V2DecisionAssistant | undefined;
+    passStarting: boolean;
+}): boolean {
+    const staged = stagedV2DecisionBySession.get(args.sessionId);
+    if (!staged) return false;
+    const reply = args.firstAssistantAfter(staged.responseAfterSequence);
+    if (!reply || reply.state === "running") {
+        if (args.passStarting) stagedV2DecisionBySession.delete(args.sessionId);
+        return false;
+    }
+    stagedV2DecisionBySession.delete(args.sessionId);
+    if (reply.state === "failed") return false;
+    const dbPath = getDatabasePath(args.db);
+    if (!dbPath) return false;
+    const token = addScheduledWriteToken(args.sessionId);
+    inRootAsyncContext(() =>
+        setTimeout(() => {
+            try {
+                if (!hasScheduledWriteToken(args.sessionId, token)) return;
+                writeTransformDecisionBestEffort(dbPath, {
+                    ...staged.decision,
+                    sessionId: args.sessionId,
+                    harness: "opencode2",
+                    messageId: reply.id,
+                    inputTokens: Number.isFinite(reply.inputTokens)
+                        ? reply.inputTokens
+                        : staged.decision.inputTokens,
                 });
             } finally {
                 deleteScheduledWriteToken(args.sessionId, token);
@@ -567,11 +784,22 @@ export const __test = {
     getPendingPi(sessionId: string): PendingPiTransformDecision | undefined {
         return pendingPiDecisionBySession.get(sessionId);
     },
+    getStagedV2(sessionId: string): PendingTransformDecision | undefined {
+        return stagedV2DecisionBySession.get(sessionId)?.decision;
+    },
+    hasSystemHashChange(sessionId: string): boolean {
+        return systemHashChangedSessions.has(sessionId);
+    },
     reset(): void {
         pendingDecisionBySession.clear();
         pendingPiDecisionBySession.clear();
         lastBoundMessageIdBySession.clear();
         scheduledWriteTokensBySession.clear();
+        systemHashChangedSessions.clear();
+        piSystemHashChangedSessions.clear();
+        unbustedPassBySession.clear();
+        newestInputAssistantBySession.clear();
+        stagedV2DecisionBySession.clear();
         writerOverrideForTests = null;
         retentionOverrideForTests = null;
     },
