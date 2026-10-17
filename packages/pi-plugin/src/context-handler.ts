@@ -247,8 +247,9 @@ import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-cont
 import { formatTailHygienePrefixMismatch } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import { readServedTemporalDecisions } from "@magic-context/core/hooks/magic-context/temporal-served-projection";
 import {
-	advanceToolReclaimWatermarkToCurrentMax,
+	advanceToolReclaimWatermarkByDistance,
 	buildSyntheticToolReclaimOps,
+	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
@@ -568,6 +569,32 @@ let mutationGateObserverForTests:
 	  }) => void)
 	| undefined;
 let lkgRecoveryLogObserverForTests: ((message: string) => void) | undefined;
+let pipelineResultObserverForTests:
+	| ((
+			sessionId: string,
+			result: Readonly<
+				Pick<
+					RunPipelineResult,
+					| "prefixBustPermitted"
+					| "bustedThisPass"
+					| "identityRebuilt"
+					| "signedPrefixRewritten"
+				>
+			>,
+	  ) => void)
+	| undefined;
+
+function observePipelineResultForTests(
+	sessionId: string,
+	result: RunPipelineResult,
+): void {
+	pipelineResultObserverForTests?.(sessionId, {
+		prefixBustPermitted: result.prefixBustPermitted,
+		bustedThisPass: result.bustedThisPass,
+		identityRebuilt: result.identityRebuilt,
+		signedPrefixRewritten: result.signedPrefixRewritten,
+	});
+}
 
 let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 let beforePipelineForTests: (() => Promise<void>) | undefined;
@@ -688,6 +715,15 @@ export const __test = {
 		lkgRecoveryLogObserverForTests = fn;
 		return () => {
 			lkgRecoveryLogObserverForTests = undefined;
+		};
+	},
+	setPipelineResultObserverForTests(
+		fn: typeof pipelineResultObserverForTests,
+	): () => void {
+		const previous = pipelineResultObserverForTests;
+		pipelineResultObserverForTests = fn;
+		return () => {
+			pipelineResultObserverForTests = previous;
 		};
 	},
 };
@@ -5442,6 +5478,8 @@ export function registerPiContextHandler(
 				protectedTokens: options.protectedTokens,
 				protectedTokenTierOverrides: options.protectedTokenTierOverrides,
 				usableSoft: windowGeometry?.usableSoft ?? usageContextLimit ?? 200_000,
+				reclaimUsableWindow:
+					windowGeometry?.usableSoft ?? usageContextLimit ?? 0,
 				heuristics: options.heuristics,
 				emergencyCeilingTokens,
 				injection: options.injection
@@ -5567,6 +5605,7 @@ export function registerPiContextHandler(
 				},
 			};
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
+			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			if (result.identityRebuilt || result.lkgFrozenReleaseReason)
 				schedulerDecision = "execute";
@@ -6283,6 +6322,7 @@ export function registerPiContextHandler(
 							},
 						}),
 					);
+					observePipelineResultForTests(sessionId, result);
 					fitReclaimedThisPass = true;
 					// This input was consumed by the retry; it is no longer pristine.
 					inputForFitReclaim = undefined;
@@ -6493,6 +6533,7 @@ export function registerPiContextHandler(
 									}),
 								);
 								outputMessages = result.messages as PiAgentMessage[];
+								observePipelineResultForTests(sessionId, result);
 								// Reclaim replaces the postprocessed output with a pristine-input
 								// rebuild. Restore the todo pair before stripping and measuring it.
 								injectTodo();
@@ -8040,6 +8081,7 @@ interface RunPipelineArgs {
 	protectedTokens?: number;
 	protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
 	usableSoft: number;
+	reclaimUsableWindow?: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
 		caveman?: {
@@ -9477,6 +9519,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
 		: [];
+	const reclaimDistance = isCacheBustingPass
+		? toolReclaimDistanceEntries(mutationView, targets)
+		: [];
 	const protectedToolTags = protectedToolTagNumbers(
 		getActiveTagsBySession(args.db, args.sessionId),
 		args.protectedTools,
@@ -10150,6 +10195,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				}
 			}
 			const editReclaim = buildEditSupersessionReclaim({
+				watermark: reclaimMeta.toolReclaimWatermark ?? 0,
 				db: args.db,
 				sessionId: args.sessionId,
 				targets: newTargets,
@@ -10373,7 +10419,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 	if (toolReclaimApplicationOpportunity) {
-		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
+		advanceToolReclaimWatermarkByDistance(
+			args.db,
+			args.sessionId,
+			reclaimDistance,
+			args.reclaimUsableWindow ?? 0,
+		);
 	}
 	if (autoReclaimTargetCount > 0) {
 		sessionLog(

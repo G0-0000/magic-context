@@ -281,6 +281,8 @@ async fn explicit_flush_coalesces_m1_delta_queued_drop_and_tool_heuristic() {
         tool_result("result-old-call", 6, &tool_body),
     ];
     request_messages.push(ck("tail", 7, "continue"));
+    request_messages.push(ck("next-turn", 8, "next step"));
+    request_messages.push(ck("third-turn", 9, "move on"));
     let boot = call_transform_request(&handler, wire(request_messages.clone(), 10_000)).await;
     assert_eq!(boot["action"], "HARD", "{boot}");
     let aged = call_transform_request(&handler, wire(request_messages.clone(), 75_000)).await;
@@ -332,7 +334,7 @@ async fn explicit_flush_coalesces_m1_delta_queued_drop_and_tool_heuristic() {
     let target = queue_answer(&store);
     assert_eq!(store.load_pending_agent_drops("ses").unwrap().len(), 1);
     arm(&handler, &store).await;
-    request_messages.push(ck("new-user", 8, "apply the queued work"));
+    request_messages.push(ck("new-user", 10, "apply the queued work"));
     let flushed = call_transform_request(&handler, wire(request_messages.clone(), 75_000)).await;
     assert_eq!(flushed["status"], "ok", "{flushed}");
     assert_eq!(flushed["action"], "SOFT", "{flushed}");

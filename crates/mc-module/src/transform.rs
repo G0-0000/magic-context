@@ -7162,17 +7162,16 @@ fn apply_once(
     }
     timings.compose_m0m1 = elapsed_ms(compose_m0m1_started_at);
 
-    // Advance whenever a pressure pass allowed the age batch to apply, even if it selected
-    // no reductions. Ordinary execute-band passes that are not already changing provider-visible
-    // bytes leave the watermark frozen; an allowed empty batch records the current tail so later
-    // arcs can age into a future batch.
+    // Save the newest tool-call ordinal whose result now has three newer user
+    // turns or 25% of the usable window in newer content. Drops and compression
+    // above used the earlier saved ordinal, so newly distant bodies survive.
     if two_pass_batch_can_apply && !loaded.core.reconcile_pending {
-        meta.last_execute_ordinal = tail_for_selection
-            .iter()
-            .map(|item| item.ordinal)
-            .max()
-            .unwrap_or(0)
-            .max(meta.last_execute_ordinal);
+        meta.last_execute_ordinal = crate::reclaim_distance::tool_bookmark(
+            &projection,
+            &tail_for_selection,
+            resolved_context_limit_tokens(&effective_usage, req.geometry.as_ref()).unwrap_or(0.0),
+        )
+        .max(meta.last_execute_ordinal);
     }
 
     if tail_reclaim_enabled {
@@ -8623,13 +8622,20 @@ fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {
+    resolved_context_limit_tokens(usage, geometry).unwrap_or(200_000.0)
+}
+
+fn resolved_context_limit_tokens(
+    usage: &ModuleUsage,
+    geometry: Option<&TransformGeometry>,
+) -> Option<f64> {
     if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
         && geometry.is_none_or(|geometry| {
             geometry.absolute_wall < crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
                 || usage.context_limit_tokens <= geometry.absolute_wall
         })
     {
-        return usage.context_limit_tokens as f64;
+        return Some(usage.context_limit_tokens as f64);
     }
     // Usage is unfilled on the first pass of a session (no observed pass yet),
     // but geometry arrives on every request including the first. The resolved
@@ -8638,10 +8644,10 @@ fn effective_context_limit_tokens(
     // so this only replaces the fallback arm.
     if let Some(geometry) = geometry {
         if geometry.usable_soft >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT {
-            return geometry.usable_soft as f64;
+            return Some(geometry.usable_soft as f64);
         }
     }
-    200_000.0
+    None
 }
 
 fn effective_hard_context_limit_tokens(
@@ -22317,6 +22323,50 @@ pub(crate) mod tests {
         }
     }
 
+    // These marker fixtures need known counts below the 250-token full-drop
+    // threshold. Newer persisted tools carry the continuation protection, so
+    // neither unknown token counts nor the protected tail mask compression.
+    fn seed_small_edit_marker_fixture(s: &McStore, session: &str, messages: &[CkIngressMessage]) {
+        let mut rows = messages
+            .iter()
+            .flat_map(|message| {
+                message
+                    .ck
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, block)| {
+                        let kind = match &block.kind {
+                            ck_wire::CkKind::ToolCall { name, .. }
+                                if crate::selection::is_edit_tool(name) =>
+                            {
+                                "tool_call"
+                            }
+                            ck_wire::CkKind::ToolResult { tool_name, .. }
+                                if crate::selection::is_edit_tool(tool_name) =>
+                            {
+                                "tool_result"
+                            }
+                            _ => return None,
+                        };
+                        Some(mc_store::TagMintInput {
+                            block_id: format!("{}#{index}", message.mid),
+                            kind: kind.to_string(),
+                            token_count: 50,
+                            source_bytes: serde_json::to_vec(block).unwrap(),
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        rows.extend((0..3).map(|index| mc_store::TagMintInput {
+            block_id: format!("newer-history-{index}#0"),
+            kind: "tool_result".to_string(),
+            token_count: 20_000,
+            source_bytes: b"newer".to_vec(),
+        }));
+        s.seed_tags_for_test(session, &rows, 1).unwrap();
+    }
+
     fn edit_result(mid: &str, ordinal: u64, call_id: &str, text: &str) -> CkIngressMessage {
         let mut result = tool_result(mid, ordinal, call_id, text);
         if let ck_wire::CkKind::ToolResult { tool_name, .. } = &mut result.ck.content[0].kind {
@@ -24881,6 +24931,8 @@ pub(crate) mod tests {
                     assistant_tool_call("aged", 4, "aged"),
                     tool_result("aged-result", 5, "aged", &"x".repeat(20_000)),
                     item("tail", 6, "tail"),
+                    item("next-turn", 7, "next task step"),
+                    item("third-turn", 8, "continue the next step"),
                 ],
             ),
             90_000,
@@ -25575,6 +25627,8 @@ pub(crate) mod tests {
                     assistant_tool_call("aged", 4, "aged"),
                     tool_result("aged-result", 5, "aged", &"x".repeat(20_000)),
                     item("tail", 6, "tail"),
+                    item("next-turn", 7, "next task step"),
+                    item("third-turn", 8, "continue the next step"),
                 ],
             ),
             90_000,
@@ -25589,7 +25643,7 @@ pub(crate) mod tests {
         assert_eq!(first.action, "SOFT");
         let first_state = s.load("ses").unwrap();
         assert!(first_state.meta.has_prior_emergency_drop);
-        assert_eq!(first_state.meta.last_execute_ordinal, 6);
+        assert_eq!(first_state.meta.last_execute_ordinal, 4);
         assert!(first_state
             .core
             .frozen_units
@@ -26276,6 +26330,8 @@ pub(crate) mod tests {
                 assistant_tool_call("old-call", 4, "old-tool"),
                 tool_result("old-result", 5, "old-tool", &"old output ".repeat(200)),
                 item("tail", 6, "continue"),
+                item("next-turn", 7, "next step"),
+                item("third-turn", 8, "move on"),
             ],
         );
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 2000);
@@ -27363,6 +27419,219 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn distance_bookmark_keeps_current_task_through_repeated_ttl_and_model_switch() {
+        for rebuilds in [2, 3, 5] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments("ses", &[comp(1, 1, 1, "head", "SUMMARY")])
+                .unwrap();
+            let messages = vec![
+                item("head", 1, "current task"),
+                assistant_edit_call("call-a", 2, "a", "/a.rs"),
+                edit_result("result-a", 3, "a", &"unique a payload ".repeat(400)),
+                assistant_edit_call("call-b", 4, "b", "/b.rs"),
+                edit_result("result-b", 5, "b", &"unique b payload ".repeat(400)),
+            ];
+            let request = with_usage(req("ses", "cfg0", messages), 4000, 200_000);
+            let mut ctx = pctx("git:proj", "/nonexistent-docs", 1);
+            ctx.protected_tokens_floor = 0;
+            transform(&s, &request, &ctx).unwrap();
+            for pass in 1..=rebuilds {
+                ctx.now_ms = pass * 360_000 + 4;
+                ctx.observed_last_response_at_ms = Some((pass - 1) * 360_000 + 5);
+                let response = transform(&s, &request, &ctx).unwrap();
+                assert_eq!(response.action, "HARD");
+                let loaded = s.load("ses").unwrap();
+                assert_eq!(loaded.meta.last_execute_ordinal, 0);
+                assert!(!loaded
+                    .core
+                    .frozen_units
+                    .iter()
+                    .any(|unit| unit.key.starts_with("red:")));
+            }
+            let mut switched = request;
+            switched.model_key = Some("other/model".to_string());
+            transform(&s, &switched, &ctx).unwrap();
+            let loaded = s.load("ses").unwrap();
+            assert_eq!(loaded.meta.last_execute_ordinal, 0);
+            assert!(!loaded
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key.starts_with("red:")));
+        }
+    }
+
+    #[test]
+    fn distance_bookmark_edits_survive_one_rebuild_before_compressing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "head", "SUMMARY")])
+            .unwrap();
+        let mut messages = vec![
+            item("head", 1, "current task"),
+            assistant_edit_call("old-edit", 2, "a", "/feature.rs"),
+            edit_result("old-result", 3, "a", "edited"),
+            assistant_edit_call("new-edit", 4, "b", "/feature.rs"),
+            edit_result("new-result", 5, "b", "edited again"),
+        ];
+        for index in 0..24 {
+            let role = if index < 3 { "user" } else { "assistant" };
+            let message = wire_item(
+                role,
+                &format!("tail-{index}"),
+                index + 6,
+                &[if index < 3 {
+                    "Next user request"
+                } else {
+                    "Continuing work"
+                }],
+            );
+            messages.push(message);
+        }
+        // The newest three tool outputs stay protected even with a zero token
+        // floor. Put that protection on separate outputs, not on the old edit.
+        for index in 0..3 {
+            let call = format!("guard-{index}");
+            let ordinal = 30 + index * 2;
+            messages.push(assistant_edit_call(
+                &call,
+                ordinal,
+                &call,
+                &format!("/guard-{index}.rs"),
+            ));
+            messages.push(edit_result(
+                &format!("guard-result-{index}"),
+                ordinal + 1,
+                &call,
+                "continuation output",
+            ));
+        }
+        let mut request = with_usage(req("ses", "cfg0", messages), 4000, 200_000);
+        request.tool_present = true;
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 1);
+        ctx.protected_tokens_floor = 0;
+        transform(&s, &request, &ctx).unwrap();
+        let first = s.load("ses").unwrap();
+        assert_eq!(first.meta.last_execute_ordinal, 4);
+        assert!(!first
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.kind == "edit_marker"));
+        // Counts below 250 tokens prevent a full age drop. Unknown legacy counts
+        // allow full drops, so explicitly size these edits to test compression.
+        let token_rows = request
+            .messages
+            .iter()
+            .flat_map(|message| {
+                message
+                    .ck
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, block)| {
+                        let kind = match &block.kind {
+                            ck_wire::CkKind::ToolCall { .. } => "tool_call",
+                            ck_wire::CkKind::ToolResult { .. } => "tool_result",
+                            _ => return None,
+                        };
+                        Some(mc_store::TagMintInput {
+                            block_id: format!("{}#{index}", message.mid),
+                            kind: kind.to_string(),
+                            token_count: 50,
+                            source_bytes: serde_json::to_vec(block).unwrap(),
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        s.seed_tags_for_test("ses", &token_rows, 1).unwrap();
+        ctx.now_ms = 3;
+        ctx.observed_last_response_at_ms = Some(2);
+        let defer = transform(&s, &request, &ctx).unwrap();
+        let defer_again = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&defer.messages()).unwrap(),
+            serde_json::to_vec(&defer_again.messages()).unwrap()
+        );
+        assert_eq!(s.load("ses").unwrap().meta.last_execute_ordinal, 4);
+        ctx.now_ms = 360_002;
+        let response = transform(&s, &request, &ctx).unwrap();
+        let after = s.load("ses").unwrap();
+        assert!(
+            after
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:old-edit#0" && unit.kind == "edit_marker"),
+            "action={} bookmark={} units={:?}",
+            response.action,
+            after.meta.last_execute_ordinal,
+            after.core.frozen_units
+        );
+        assert!(!after
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:new-edit#0"));
+    }
+
+    #[test]
+    fn distance_bookmark_single_user_tool_loop_ages_by_newer_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "head", "SUMMARY")])
+            .unwrap();
+        let mut messages = vec![
+            item("head", 1, "one coding task"),
+            assistant_edit_call("old-call", 2, "old", "/old.rs"),
+            edit_result("old-result", 3, "old", &"old payload ".repeat(400)),
+        ];
+        for index in 0..3 {
+            let call = format!("loop-{index}");
+            let ordinal = 4 + index * 2;
+            messages.push(assistant_edit_call(
+                &call,
+                ordinal,
+                &call,
+                &format!("/loop-{index}.rs"),
+            ));
+            messages.push(edit_result(
+                &format!("result-{index}"),
+                ordinal + 1,
+                &call,
+                &"tail ".repeat(17_000),
+            ));
+        }
+        let mut request = with_usage(req("ses", "cfg0", messages), 4000, 200_000);
+        request.tool_present = true;
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 1);
+        ctx.protected_tokens_floor = 0;
+        transform(&s, &request, &ctx).unwrap();
+        let first = s.load("ses").unwrap();
+        assert_eq!(first.meta.last_execute_ordinal, 2);
+        assert!(!first
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:old-result#0"));
+        ctx.now_ms = 360_002;
+        ctx.observed_last_response_at_ms = Some(2);
+        transform(&s, &request, &ctx).unwrap();
+        let after = s.load("ses").unwrap();
+        assert!(after
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:old-result#0"));
+        assert!(!after
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:result-2#0"));
+    }
+
+    #[test]
     fn low_usage_ttl_fold_carries_age_reclaim_without_pressure() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -27526,9 +27795,8 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(
-            loaded.meta.last_execute_ordinal,
-            next_ordinal - 1,
-            "the applied batch advances the watermark once to the riding pass tail"
+            loaded.meta.last_execute_ordinal, FROZEN_WATERMARK,
+            "a free rebuild does not age the current task's new outputs"
         );
 
         let riding_bytes = canonical_output(riding.messages());
@@ -27544,7 +27812,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .meta
                 .last_execute_ordinal,
-            next_ordinal - 1,
+            FROZEN_WATERMARK,
             "replay must not advance the applied watermark again"
         );
     }
@@ -27590,7 +27858,7 @@ pub(crate) mod tests {
         for mid in ["old-call", "old-result"] {
             assert!(frozen_red_payload(&loaded.core, &format!("{mid}#0")).is_some());
         }
-        assert_eq!(loaded.meta.last_execute_ordinal, 4);
+        assert_eq!(loaded.meta.last_execute_ordinal, 3);
         let drained_reduction_count = loaded
             .core
             .frozen_units
@@ -27605,6 +27873,11 @@ pub(crate) mod tests {
             "fresh",
             "future eligible output",
         ));
+        messages.extend([
+            item("next-turn-1", 7, "continue"),
+            item("next-turn-2", 8, "another step"),
+            item("next-turn-3", 9, "move on"),
+        ]);
         let minted = transform(
             &s,
             &with_usage(req(SESSION, "cfg0", messages.clone()), 10, 100),
@@ -27612,7 +27885,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let minted_bytes = canonical_output(minted.messages());
-        assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 4);
+        assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 3);
 
         let loaded = s.load(SESSION).unwrap();
         let mut meta = loaded.meta.clone();
@@ -27633,7 +27906,7 @@ pub(crate) mod tests {
         );
         let loaded = s.load(SESSION).unwrap();
         assert_eq!(
-            loaded.meta.last_execute_ordinal, 6,
+            loaded.meta.last_execute_ordinal, 5,
             "the empty riding opportunity must advance over the fresh arc"
         );
         assert_eq!(
@@ -27676,9 +27949,9 @@ pub(crate) mod tests {
         // pinned above the execute threshold on EVERY pass) mints one new tool arc per
         // pass and takes a fold bust every third pass. Between folds each pass must
         // render byte-identically and leave the watermark frozen; at each fold the whole
-        // accumulated eligible batch must apply at once and the watermark must jump to
-        // that fold pass's tail ordinal. The pressure boot stamps the first watermark
-        // organically (an application opportunity with an empty batch), so no state is
+        // accumulated eligible batch must apply at once and the bookmark must jump to
+        // the newest output with three following user turns. Startup records that
+        // bookmark during a rebuild with no drops, so no persisted state is
         // poked directly. A parallel no-pressure store renders the same message arrays
         // as the byte-identity reference.
         const SESSION: &str = "two-pass-periodic-cadence";
@@ -27697,6 +27970,9 @@ pub(crate) mod tests {
             item("a", 1, "covered head"),
             assistant_tool_call("arc-call-0", 2, "arc-0"),
             tool_result("arc-result-0", 3, "arc-0", "arc zero output"),
+            item("turn-0-1", 4, "next step"),
+            item("turn-0-2", 5, "continue"),
+            item("turn-0-3", 6, "move on"),
         ];
         let mut context = pctx("git:proj", "/nonexistent-docs", 0);
         context.cache_ttl = "never".to_string();
@@ -27721,8 +27997,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             s.load(SESSION).unwrap().meta.last_execute_ordinal,
-            3,
-            "the pressure boot is an application opportunity and stamps the boot tail"
+            2,
+            "the boot bookmarks the output with three newer user turns"
         );
 
         let red_count = |target: &McStore| -> usize {
@@ -27736,8 +28012,8 @@ pub(crate) mod tests {
                 .count()
         };
         let mut frozen_reds = red_count(&s);
-        let mut expected_watermark = 3u64;
-        let mut next_ordinal = 4u64;
+        let mut expected_watermark = 2u64;
+        let mut next_ordinal = 7u64;
         let mut previous_bytes = canonical_output(boot.messages());
         for pass in 1..=TOTAL_PASSES {
             let fold = pass % 3 == 0;
@@ -27758,6 +28034,15 @@ pub(crate) mod tests {
             ));
             next_ordinal += 1;
 
+            for turn in 0..3 {
+                messages.push(item(
+                    &format!("turn-{pass}-{turn}"),
+                    next_ordinal,
+                    "next task step",
+                ));
+                next_ordinal += 1;
+            }
+
             let response = transform(
                 &s,
                 &with_usage(req(SESSION, "cfg0", messages.clone()), 70, 100),
@@ -27773,8 +28058,8 @@ pub(crate) mod tests {
             let bytes = canonical_output(response.messages());
             let reference_bytes = canonical_output(reference_response.messages());
             if fold {
-                // (b) + (c): the whole accumulated eligible batch applies at once and the
-                // watermark jumps to this fold pass's tail ordinal.
+                // Drop outputs at or before the previous saved tool-call ordinal,
+                // then record the newest qualifying call ordinal, not the trailing user rows.
                 assert_eq!(response.action, "SOFT", "fold pass {pass} must bust");
                 let fold_index = pass / 3;
                 let first_new = if fold_index == 1 {
@@ -27816,9 +28101,9 @@ pub(crate) mod tests {
                     bytes, previous_bytes,
                     "fold pass {pass} applies a non-empty batch and must change the render"
                 );
-                expected_watermark = next_ordinal - 1;
+                expected_watermark = next_ordinal - 5;
             } else {
-                // (a) + (d): byte-identity and a frozen watermark on every non-riding pass.
+                // Passes that preserve the cache keep both bytes and the saved ordinal.
                 assert_eq!(
                     response.action, "SOFT+",
                     "non-riding pass {pass} must stay defer-shaped"
@@ -27835,9 +28120,9 @@ pub(crate) mod tests {
                     );
                 }
                 assert_eq!(
-                    &bytes[bytes.len() - 2..],
-                    &reference_bytes[reference_bytes.len() - 2..],
-                    "non-riding pass {pass} must render the freshly minted arc unreduced"
+                    &bytes[bytes.len() - 5..],
+                    &reference_bytes[reference_bytes.len() - 5..],
+                    "non-riding pass {pass} must render the fresh arc and its newer turns unreduced"
                 );
                 assert_eq!(
                     red_count(&s),
@@ -27878,6 +28163,9 @@ pub(crate) mod tests {
             item("a", 1, "covered head"),
             assistant_tool_call("aged-call", 2, "aged-read"),
             tool_result("aged-result", 3, "aged-read", "aged eligible output"),
+            item("aged-next-1", 4, "continue"),
+            item("aged-next-2", 5, "next step"),
+            item("aged-next-3", 6, "move on"),
         ];
         let mut context = pctx("git:proj", "/nonexistent-docs", 0);
         context.cache_ttl = "never".to_string();
@@ -27890,8 +28178,13 @@ pub(crate) mod tests {
         assert_eq!(boot.action, "HARD");
 
         // Mint a fresh arc above the watermark; a low-usage defer cannot move it.
-        messages.push(assistant_edit_call("fresh-call", 4, "fresh-edit", "a.txt"));
-        messages.push(edit_result("fresh-result", 5, "fresh-edit", "fresh output"));
+        messages.push(assistant_edit_call("fresh-call", 7, "fresh-edit", "a.txt"));
+        messages.push(edit_result("fresh-result", 8, "fresh-edit", "fresh output"));
+        messages.extend([
+            item("fresh-next-1", 9, "continue"),
+            item("fresh-next-2", 10, "next step"),
+            item("fresh-next-3", 11, "move on"),
+        ]);
         let minted = transform(
             &s,
             &with_usage(req(SESSION, "cfg0", messages.clone()), 10, 100),
@@ -27899,7 +28192,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(minted.action, "SOFT+");
-        assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 3);
+        assert_eq!(s.load(SESSION).unwrap().meta.last_execute_ordinal, 2);
 
         let mut veto_ctx = pctx("git:proj", "/nonexistent-docs", 0);
         veto_ctx.cache_ttl = "never".to_string();
@@ -27918,7 +28211,7 @@ pub(crate) mod tests {
         );
         let loaded = s.load(SESSION).unwrap();
         assert_eq!(
-            loaded.meta.last_execute_ordinal, 3,
+            loaded.meta.last_execute_ordinal, 2,
             "the vetoed ordinary pass must keep the watermark frozen"
         );
         assert!(frozen_red_payload(&loaded.core, "aged-call#0").is_none());
@@ -27946,7 +28239,7 @@ pub(crate) mod tests {
             "the fresh arc stays above the pre-pass watermark"
         );
         assert_eq!(
-            loaded.meta.last_execute_ordinal, 5,
+            loaded.meta.last_execute_ordinal, 7,
             "the force pass must advance the watermark on that same pass"
         );
     }
@@ -27969,6 +28262,8 @@ pub(crate) mod tests {
             assistant_tool_call("old-call", 2, "old"),
             tool_result("old-result", 3, "old", "old eligible output"),
             item("tail", 4, "stable tail"),
+            item("next-turn", 5, "next step"),
+            item("third-turn", 6, "move on"),
         ];
         let mut context = pctx("git:proj", "/nonexistent-docs", 0);
         context.cache_ttl = "never".to_string();
@@ -27981,8 +28276,8 @@ pub(crate) mod tests {
         assert_eq!(boot.action, "HARD");
         assert_eq!(
             s.load(SESSION).unwrap().meta.last_execute_ordinal,
-            4,
-            "bootstrap is an independently priced fold"
+            2,
+            "bootstrap bookmarks the output followed by three user turns"
         );
         // Seed the legacy zero-watermark state to exercise an empty native batch.
         let mut loaded = s.load(SESSION).unwrap();
@@ -27990,9 +28285,8 @@ pub(crate) mod tests {
         s.commit(SESSION, loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
 
-        // Riding pass under injection: the native batch (empty at a zero watermark) is
-        // replaced by the injected decision, yet the opportunity predicate still advances
-        // the watermark over the whole tail — injection cannot starve it.
+        // Replace the selector's empty batch with a test-only reduction. The cache
+        // rebuild must still save the ordinal of the genuinely distant output.
         s.arm_soft_refresh(SESSION).unwrap();
         let mut riding_ctx = pctx("git:proj", "/nonexistent-docs", 0);
         riding_ctx.cache_ttl = "never".to_string();
@@ -28016,7 +28310,7 @@ pub(crate) mod tests {
             "the native decision set was replaced, not extended"
         );
         assert_eq!(
-            loaded.meta.last_execute_ordinal, 4,
+            loaded.meta.last_execute_ordinal, 2,
             "the riding opportunity must advance the watermark despite the injection"
         );
 
@@ -28039,7 +28333,7 @@ pub(crate) mod tests {
             "the injected decision applies on the defer-forced bust"
         );
         assert_eq!(
-            loaded.meta.last_execute_ordinal, 4,
+            loaded.meta.last_execute_ordinal, 2,
             "a pressure-free injection bust must not convey the watermark"
         );
     }
@@ -40251,6 +40545,7 @@ pub(crate) mod tests {
             previous_bytes = rendered;
         }
 
+        seed_small_edit_marker_fixture(&store, SESSION, &messages);
         let loaded = store.load(SESSION).unwrap();
         let mut meta = loaded.meta;
         meta.soft_refresh_pending = true;
@@ -40259,6 +40554,14 @@ pub(crate) mod tests {
         store
             .commit(SESSION, loaded.row_version, &loaded.core, &meta)
             .unwrap();
+        let bookmark_only = transform(
+            &store,
+            &with_usage(cc_req(SESSION, "cfg0", messages.clone()), 60, 100),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(canonical_output(bookmark_only.messages()), previous_bytes);
+        store.arm_soft_refresh(SESSION).unwrap();
         let riding = transform(
             &store,
             &with_usage(cc_req(SESSION, "cfg0", messages), 60, 100),
@@ -40427,6 +40730,7 @@ pub(crate) mod tests {
             previous_bytes = rendered;
         }
 
+        seed_small_edit_marker_fixture(&store, "supersession-trickle", &messages);
         let mut loaded = store.load("supersession-trickle").unwrap();
         loaded.meta.soft_refresh_pending = true;
         store
@@ -40442,6 +40746,9 @@ pub(crate) mod tests {
             10,
             100,
         );
+        let bookmark_only = transform(&store, &bust_request, &context).unwrap();
+        assert_eq!(canonical_output(bookmark_only.messages()), previous_bytes);
+        store.arm_soft_refresh("supersession-trickle").unwrap();
         let batch = transform(&store, &bust_request, &context).unwrap();
         assert_eq!(batch.action, "SOFT");
         let batch_bytes = canonical_output(batch.messages());

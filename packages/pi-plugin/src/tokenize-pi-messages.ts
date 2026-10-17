@@ -42,6 +42,8 @@
 
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 
+export const PI_IMAGE_TOKENS = 1200;
+
 export interface PiMessageTokenCounts {
 	conversation: number;
 	toolCall: number;
@@ -181,7 +183,7 @@ export function tokenizePiMessages(
 							// fallback (1200 tokens) — over-estimates small
 							// thumbnails, under-estimates 4K screenshots, but is
 							// stable and matches the OpenCode fallback path.
-							conversation += 1200;
+							conversation += PI_IMAGE_TOKENS;
 							break;
 						case "toolCall":
 							// Tool invocation: name + JSON-serialized arguments.
@@ -217,7 +219,7 @@ export function tokenizePiMessages(
 					if (p.type === "text" && typeof p.text === "string") {
 						toolCall += estimateTokens(p.text);
 					} else if (p.type === "image") {
-						toolCall += 1200;
+						toolCall += PI_IMAGE_TOKENS;
 					}
 				}
 			}

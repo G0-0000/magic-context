@@ -209,8 +209,9 @@ import {
 import { injectTemporalMarkers } from "./temporal-awareness";
 import { buildSyntheticTodoPart, isSyntheticTodoPart, type SyntheticTodoPart } from "./todo-view";
 import {
-    advanceToolReclaimWatermarkToCurrentMax,
+    advanceToolReclaimWatermarkByDistance,
     buildSyntheticToolReclaimOps,
+    toolReclaimDistanceEntries,
 } from "./tool-reclaim";
 import {
     appendReminderToUserMessageById,
@@ -2456,6 +2457,9 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    const reclaimDistance = isCacheBustingPass
+        ? toolReclaimDistanceEntries(args.messages, args.targets)
+        : [];
     const canEditWholePrefix = isCacheBustingPass && !activeThinkingPrefixHold;
     const previousTemporalDecisions =
         args.temporalCandidates && !compactionOff
@@ -3158,6 +3162,7 @@ export async function runPostTransformPhase(
                     }
                 }
                 const editReclaim = buildEditSupersessionReclaim({
+                    watermark: args.sessionMeta.toolReclaimWatermark ?? 0,
                     db: args.db,
                     sessionId: args.sessionId,
                     targets: newTargets,
@@ -3211,12 +3216,16 @@ export async function runPostTransformPhase(
         }
         const tBatchFinalize = performance.now();
         args.batch?.finalize();
-        // Advance whenever reclaim could have applied, even if no tags were
-        // selected. Plain execute-band residency does not advance the watermark;
-        // otherwise each newly eligible tag could drop separately instead of
-        // waiting for the next independently priced batch.
+        // Only outputs with three newer user turns or a quarter-window of newer
+        // content move the bookmark. Drops and edit compression above used the
+        // previous bookmark, so newly distant outputs survive this rebuild.
         if (toolReclaimApplicationOpportunity) {
-            const maxTagNumber = advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
+            const maxTagNumber = advanceToolReclaimWatermarkByDistance(
+                args.db,
+                args.sessionId,
+                reclaimDistance,
+                args.usableWindow,
+            );
             args.sessionMeta.toolReclaimWatermark = Math.max(
                 args.sessionMeta.toolReclaimWatermark ?? 0,
                 maxTagNumber,
