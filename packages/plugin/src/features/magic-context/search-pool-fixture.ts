@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import type { StoredCompartmentChunkEmbedding } from "./compartment-chunk-embedding";
@@ -28,13 +28,14 @@ export function searchPoolFixture(
         CREATE TABLE compartment_chunk_embeddings (id INTEGER PRIMARY KEY AUTOINCREMENT,
             compartment_id INTEGER, session_id TEXT, project_path TEXT, window_index INTEGER,
             start_ordinal INTEGER, end_ordinal INTEGER, chunk_hash TEXT, model_id TEXT,
-            dims INTEGER, vector BLOB);
+            dims INTEGER, vector BLOB, created_at INTEGER DEFAULT 0, harness TEXT DEFAULT 'opencode');
         CREATE INDEX idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
+        CREATE INDEX idx_cce_session ON compartment_chunk_embeddings(session_id);
     `);
     const compartment = db.prepare("INSERT INTO compartments VALUES (?, ?, ?, ?, ?)");
     const timestamp = db.prepare("INSERT INTO message_fts_rowid_map VALUES (?, ?, ?)");
     const insert = db.prepare(
-        "INSERT INTO compartment_chunk_embeddings VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO compartment_chunk_embeddings VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'opencode')",
     );
     const add = (id: number, session = "session", project = "/project", vector?: Float32Array) => {
         compartment.run(id, session, `title-${id}`, id * 2, id * 2 + 1);
@@ -113,25 +114,88 @@ export function baseSearchPool(
     }));
 }
 
-/** Heartbeat includes the first and last synchronous slice, not just timer ticks during awaits. */
-export async function measureSearchBlock<T>(operation: () => Promise<T> | T) {
+export interface SearchHeartbeatOutlier {
+    operation: string;
+    wallMs: number;
+    cpuMs: number;
+    cpuSource: string;
+    runnerLoadAverage: number[];
+    allocatedCPUs: number;
+}
+
+function cpuReader() {
+    const thread = (process as unknown as { threadCpuUsage?: () => NodeJS.CpuUsage })
+        .threadCpuUsage;
+    if (thread) {
+        try {
+            thread.call(process);
+            return { source: "thread", read: () => thread.call(process) };
+        } catch {
+            // Some runtimes expose threadCpuUsage before implementing it.
+        }
+    }
+    return { source: "process-upper-bound", read: () => process.cpuUsage() };
+}
+
+const searchCpu = cpuReader();
+
+/** Heartbeat includes first/last slices and samples CPU at the same gap boundaries. */
+export async function measureSearchBlock<T>(
+    operation: () => Promise<T> | T,
+    label = "pool loader",
+) {
+    let previousCpu = searchCpu.read();
     let previous = performance.now();
     let maximum = 0;
+    let cpuMsAtMaximum = 0;
+    let maximumCpuMs = 0;
+    const outliers: SearchHeartbeatOutlier[] = [];
     let running = true;
     const heartbeat = () => {
+        if (!running) return;
+        const cpu = searchCpu.read();
         const now = performance.now();
-        maximum = Math.max(maximum, now - previous);
+        const wallMs = now - previous;
+        const cpuMs = (cpu.user - previousCpu.user + cpu.system - previousCpu.system) / 1000;
+        if (wallMs > maximum) {
+            maximum = wallMs;
+            cpuMsAtMaximum = cpuMs;
+        }
+        maximumCpuMs = Math.max(maximumCpuMs, cpuMs);
+        if (wallMs > 50)
+            outliers.push({
+                operation: label,
+                wallMs,
+                cpuMs,
+                cpuSource: searchCpu.source,
+                runnerLoadAverage: loadavg(),
+                allocatedCPUs: availableParallelism(),
+            });
+        previousCpu = cpu;
         previous = now;
         if (running) setImmediate(heartbeat);
     };
     setImmediate(heartbeat);
     await new Promise<void>((resolve) => setImmediate(resolve));
+    const startedCpu = searchCpu.read();
     const started = performance.now();
     try {
         const value = await operation();
         const elapsed = performance.now() - started;
+        const finishedCpu = searchCpu.read();
+        const totalCpuMs =
+            (finishedCpu.user - startedCpu.user + finishedCpu.system - startedCpu.system) / 1000;
         await new Promise<void>((resolve) => setImmediate(resolve));
-        return { value, maximum, elapsed };
+        return {
+            value,
+            maximum,
+            elapsed,
+            totalCpuMs,
+            cpuMsAtMaximum,
+            maximumCpuMs,
+            cpuSource: searchCpu.source,
+            outliers,
+        };
     } finally {
         running = false;
     }

@@ -14,6 +14,7 @@
 	"include": [
 		"search-pool-benchmark.ts",
 		"../packages/plugin/src/features/magic-context/search-pool.test.ts",
+		"../packages/plugin/src/shared/chunk-vector-writer-guard.test.ts",
 		"ctx-search-benchmark.ts",
 		"ctx-search-rerank.ts",
 		"ctx-search-benchmark.test.ts",

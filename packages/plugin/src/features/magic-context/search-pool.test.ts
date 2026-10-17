@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import {
+    _getCompartmentChunkSearchCacheStatsForTests,
     _resetCompartmentChunkSearchCacheForTests,
     loadCompartmentChunkEmbeddingsForSearch,
     type StoredCompartmentChunkEmbedding,
@@ -11,13 +12,37 @@ import { baseSearchPool, measureSearchBlock, searchPoolFixture } from "./search-
 const load = (db: Database, date: { from: number; to: number } | null = null) =>
     loadCompartmentChunkEmbeddingsForSearch(db, "session", "/project", "model", date);
 
+function replaceVectorAtId(db: Database, id: number, vector: Float32Array, hash?: string): void {
+    const row = db.prepare("SELECT * FROM compartment_chunk_embeddings WHERE id = ?").get(id) as
+        | Record<string, string | number | Uint8Array | null>
+        | undefined;
+    if (!row) return;
+    db.transaction(() => {
+        db.prepare("DELETE FROM compartment_chunk_embeddings WHERE id = ?").run(id);
+        db.prepare(`INSERT INTO compartment_chunk_embeddings
+            (compartment_id, session_id, project_path, window_index, start_ordinal, end_ordinal,
+             chunk_hash, model_id, dims, vector, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            row.compartment_id,
+            row.session_id,
+            row.project_path,
+            row.window_index,
+            row.start_ordinal,
+            row.end_ordinal,
+            hash ?? row.chunk_hash,
+            row.model_id,
+            vector.length,
+            new Uint8Array(vector.buffer),
+            row.created_at,
+            row.harness,
+        );
+    }).immediate();
+}
+
 test("append rejects a changed prefix row even when count and max look append-only", async () => {
     const fixture = searchPoolFixture();
     try {
         await load(fixture.db);
-        fixture.db
-            .prepare("UPDATE compartment_chunk_embeddings SET vector = ? WHERE id = 1")
-            .run(new Uint8Array(new Float32Array(8).fill(0.75).buffer));
+        replaceVectorAtId(fixture.db, 1, new Float32Array(8).fill(0.75));
         fixture.add(81);
         const rows = await load(fixture.db);
         expect([...rows[0].vector]).toEqual(Array(8).fill(0.75));
@@ -54,21 +79,189 @@ test("pure append retains decoded prefix vectors and original compartment/window
     const fixture = searchPoolFixture();
     try {
         const first = await load(fixture.db);
-        // Create compartment metadata before warming so the measured delta is only embedding inserts.
-        fixture.db
-            .prepare("INSERT INTO compartments VALUES (81, 'session', 'new', 162, 163)")
-            .run();
-        const warm = await load(fixture.db);
-        fixture.db
-            .prepare(`INSERT INTO compartment_chunk_embeddings
-            SELECT NULL, 81, session_id, project_path, 0, 162, 163, chunk_hash, model_id, dims, vector
-            FROM compartment_chunk_embeddings WHERE id = 1`)
-            .run();
+        fixture.add(81);
         const appended = await load(fixture.db);
         expect(appended).toHaveLength(81);
-        expect(appended[0].vector).toBe(warm[0].vector);
+        expect(appended[0].vector).toBe(first[0].vector);
         expect(appended).toEqual(baseSearchPool(fixture.db));
         expect(first).toHaveLength(80);
+    } finally {
+        fixture.close();
+        _resetCompartmentChunkSearchCacheForTests();
+    }
+});
+
+test("in-scope delete plus insert keeping count rebuilds decoded vectors", async () => {
+    const fixture = searchPoolFixture();
+    try {
+        const first = await load(fixture.db);
+        fixture.db.prepare("DELETE FROM compartment_chunk_embeddings WHERE id = 1").run();
+        fixture.db
+            .prepare(`INSERT INTO compartment_chunk_embeddings
+            SELECT NULL, 1, session_id, project_path, 0, 2, 3, 'replacement', model_id, dims, vector, created_at, harness
+            FROM compartment_chunk_embeddings WHERE id = 2`)
+            .run();
+        const replaced = await load(fixture.db);
+        expect(replaced).toHaveLength(first.length);
+        expect(replaced).toEqual(baseSearchPool(fixture.db));
+        expect(replaced[1].vector).not.toBe(first[1].vector);
+    } finally {
+        fixture.close();
+        _resetCompartmentChunkSearchCacheForTests();
+    }
+});
+
+test("out-of-scope commits preserve decoded vectors including other-table and other-session writes", async () => {
+    const fixture = searchPoolFixture();
+    const writer = new Database(fixture.path);
+    try {
+        writer.exec("CREATE TABLE unrelated_activity (value INTEGER)");
+        const first = await load(fixture.db);
+        const stats = _getCompartmentChunkSearchCacheStatsForTests();
+        writer.prepare("INSERT INTO unrelated_activity VALUES (?)").run(1);
+        fixture.add(81, "other-session", "/other-project");
+        fixture.add(82, "other-session", "/project");
+        fixture.add(83, "session", "/other-project");
+        const warm = await load(fixture.db);
+        expect(warm).toEqual(baseSearchPool(fixture.db));
+        expect(warm[0].vector).toBe(first[0].vector);
+        expect(_getCompartmentChunkSearchCacheStatsForTests().fullRebuilds).toBe(
+            stats.fullRebuilds,
+        );
+    } finally {
+        writer.close();
+        fixture.close();
+        _resetCompartmentChunkSearchCacheForTests();
+    }
+});
+
+test("project scope never reads another project's vector payload", async () => {
+    const fixture = searchPoolFixture();
+    const cleanups: (() => void)[] = [];
+    let vectorRows = 0;
+    let vectorBytes = 0;
+    const prepare = fixture.db.prepare.bind(fixture.db);
+    const observePrepare = (sql: string) => {
+        const statement = prepare(sql);
+        if (sql.includes("e.vector AS vector")) {
+            const all = statement.all.bind(statement);
+            const spy = spyOn(statement, "all").mockImplementation((...args: unknown[]) => {
+                const rows = all(...args) as { vector: Uint8Array | ArrayBuffer }[];
+                vectorRows += rows.length;
+                vectorBytes += rows.reduce((bytes, row) => bytes + row.vector.byteLength, 0);
+                return rows;
+            });
+            cleanups.push(() => spy.mockRestore());
+        }
+        return statement;
+    };
+    const observer = spyOn(fixture.db, "prepare").mockImplementation(
+        observePrepare as typeof fixture.db.prepare,
+    );
+    try {
+        // Put the foreign row below this scope's maximum id so the keyset bound
+        // cannot hide a missing project predicate.
+        replaceVectorAtId(
+            fixture.db,
+            2,
+            Float32Array.from({ length: 8 }, (_, d) => Math.sin(2 + d)),
+        );
+        fixture.db
+            .prepare(
+                "INSERT INTO compartments VALUES (999, 'session', 'other project', 1998, 1999)",
+            )
+            .run();
+        fixture.db
+            .prepare(`INSERT INTO compartment_chunk_embeddings VALUES
+            (2, 999, 'session', '/other-project', 0, 1998, 1999, 'other', 'model', 8, ?, 0, 'opencode')`)
+            .run(new Uint8Array([1, 2, 3]));
+        expect(await load(fixture.db)).toEqual(baseSearchPool(fixture.db));
+        expect(vectorRows).toBe(80);
+        expect(vectorBytes).toBe(80 * 8 * 4);
+    } finally {
+        for (const cleanup of cleanups) cleanup();
+        observer.mockRestore();
+        fixture.close();
+        _resetCompartmentChunkSearchCacheForTests();
+    }
+});
+
+test("a pool evicted during its probe is rebuilt with accounted LRU bytes", async () => {
+    _resetCompartmentChunkSearchCacheForTests();
+    const fixture = searchPoolFixture(0, 4096);
+    const cleanups: (() => void)[] = [];
+    const overlap: { promise?: Promise<StoredCompartmentChunkEmbedding[]> } = {};
+    let eofCount = 0;
+    const prepare = fixture.db.prepare.bind(fixture.db);
+    const observePrepare = (sql: string) => {
+        const statement = prepare(sql);
+        if (sql.includes("length(e.vector) AS vectorBytes")) {
+            const all = statement.all.bind(statement);
+            const spy = spyOn(statement, "all").mockImplementation((...args: unknown[]) => {
+                const rows = all(...args);
+                if (args[0] === "other-session" && rows.length === 0 && ++eofCount === 2) {
+                    // Begin the small probe at the large probe's validation EOF,
+                    // immediately before the large pool evicts cached entries.
+                    overlap.promise = load(fixture.db);
+                }
+                return rows;
+            });
+            cleanups.push(() => spy.mockRestore());
+        }
+        return statement;
+    };
+    const observer = spyOn(fixture.db, "prepare").mockImplementation(
+        observePrepare as typeof fixture.db.prepare,
+    );
+    try {
+        fixture.db
+            .transaction(() => {
+                fixture.add(1);
+                // These vectors alone fill 256 MiB; metadata makes the pool too big
+                // to retain, so inserting it evicts both it and the small pool.
+                for (let id = 2; id <= 16385; id++)
+                    fixture.add(id, "other-session", "/other-project");
+            })
+            .immediate();
+        await load(fixture.db);
+        const initialBytes = _getCompartmentChunkSearchCacheStatsForTests().bytes;
+        const large = await loadCompartmentChunkEmbeddingsForSearch(
+            fixture.db,
+            "other-session",
+            "/other-project",
+            "model",
+        );
+        expect(large).toHaveLength(16384);
+        const joining = overlap.promise;
+        if (!joining) throw new Error("Warm probe did not overlap the oversized pool's eviction");
+        expect(await joining).toHaveLength(1);
+        expect(_getCompartmentChunkSearchCacheStatsForTests().bytes).toBe(initialBytes);
+    } finally {
+        for (const cleanup of cleanups) cleanup();
+        observer.mockRestore();
+        fixture.close();
+        _resetCompartmentChunkSearchCacheForTests();
+    }
+}, 60000);
+
+test("in-place metadata changes rebuild even when rowid and window-index sums stay equal", async () => {
+    const fixture = searchPoolFixture(3);
+    try {
+        fixture.db
+            .prepare("UPDATE compartment_chunk_embeddings SET window_index = 1 WHERE id = 2")
+            .run();
+        const first = await load(fixture.db);
+        fixture.db
+            .prepare(`UPDATE compartment_chunk_embeddings SET window_index =
+            CASE id WHEN 1 THEN 1 ELSE 0 END WHERE id IN (1, 2)`)
+            .run();
+        const changed = await load(fixture.db);
+        expect(changed).toEqual(baseSearchPool(fixture.db));
+        expect(changed[0].vector).not.toBe(first[0].vector);
+        fixture.db
+            .prepare("UPDATE compartment_chunk_embeddings SET harness = 'opencode2' WHERE id = 3")
+            .run();
+        expect((await load(fixture.db))[0].vector).not.toBe(changed[0].vector);
     } finally {
         fixture.close();
         _resetCompartmentChunkSearchCacheForTests();
@@ -88,7 +281,7 @@ test("other connections, low-id inserts, deletes and concurrent rebuilds never r
         await load(fixture.db);
         fixture.db
             .prepare(`INSERT INTO compartment_chunk_embeddings
-            SELECT 2, 2, session_id, project_path, 0, 4, 5, chunk_hash, model_id, dims, vector
+             SELECT 2, 2, session_id, project_path, 0, 4, 5, chunk_hash, model_id, dims, vector, created_at, harness
             FROM compartment_chunk_embeddings WHERE id = 1`)
             .run();
         const inFlight = load(fixture.db);
@@ -168,17 +361,12 @@ test("250 seeded searches equal base SQL rows, ids, ordering and exact scores af
                         .run(id);
                     break;
                 case 2:
-                    fixture.db
-                        .prepare(
-                            "UPDATE compartment_chunk_embeddings SET vector = ?, chunk_hash = ? WHERE id = ?",
-                        )
-                        .run(
-                            new Uint8Array(
-                                Float32Array.from({ length: 8 }, () => random() - 0.5).buffer,
-                            ),
-                            `new-${i}`,
-                            id,
-                        );
+                    replaceVectorAtId(
+                        fixture.db,
+                        id,
+                        Float32Array.from({ length: 8 }, () => random() - 0.5),
+                        `new-${i}`,
+                    );
                     break;
                 case 3:
                     fixture.db
@@ -223,7 +411,7 @@ test("cold full rebuild keeps every main-thread slice below 50ms", async () => {
         const result = await measureSearchBlock(() => load(fixture.db));
         expect(result.value).toHaveLength(15000);
         console.log(
-            `search-pool cold: max=${result.maximum.toFixed(2)}ms total=${result.elapsed.toFixed(2)}ms`,
+            `search-pool cold: max=${result.maximum.toFixed(2)}ms cpu-at-max=${result.cpuMsAtMaximum.toFixed(2)}ms (${result.cpuSource}) total=${result.elapsed.toFixed(2)}ms`,
         );
         expect(result.maximum).toBeLessThan(50);
     } finally {
@@ -231,3 +419,28 @@ test("cold full rebuild keeps every main-thread slice below 50ms", async () => {
         _resetCompartmentChunkSearchCacheForTests();
     }
 }, 30000);
+
+test("heartbeat CPU samples observe synchronous busy work", async () => {
+    const measured = await measureSearchBlock(() => {
+        let value = 1;
+        for (let i = 0; i < 20_000_000; i++) value = (Math.imul(value, 1664525) + 1013904223) | 0;
+        return value;
+    }, "CPU counter calibration");
+    expect(measured.value).not.toBe(0);
+    expect(measured.totalCpuMs).toBeGreaterThan(1);
+    expect(measured.maximumCpuMs).toBeGreaterThan(1);
+    console.log(
+        `heartbeat CPU calibration: source=${measured.cpuSource} total=${measured.totalCpuMs.toFixed(2)}ms max=${measured.maximumCpuMs.toFixed(2)}ms`,
+    );
+});
+
+test("heartbeat stops sampling when the measured operation ends", async () => {
+    const measured = await measureSearchBlock(() => 4, "short measurement");
+    const before = measured.outliers.slice();
+    const started = performance.now();
+    let value = 1;
+    while (performance.now() - started < 60) value = (Math.imul(value, 1664525) + 1013904223) | 0;
+    expect(Number.isInteger(value)).toBe(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(measured.outliers).toEqual(before);
+});

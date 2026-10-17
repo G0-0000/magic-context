@@ -55,16 +55,47 @@ interface SearchChunkRow {
 
 interface SearchPoolProbeRow {
     rowCount: number;
-    maxRowId: number | null;
+    maxRowId: number;
+    rowIdSum: number;
+    metadata: Map<number, SearchScopeMetadataRow>;
+    ids: readonly number[];
 }
+
+interface SearchScopeMetadataRow {
+    readonly [column: string]: number | string | null;
+    readonly rowId: number;
+}
+
+const SEARCH_SCOPE_METADATA_FIELDS = [
+    "rowId",
+    "compartmentId",
+    "sessionId",
+    "projectPath",
+    "harness",
+    "windowIndex",
+    "windowStart",
+    "windowEnd",
+    "chunkHash",
+    "modelId",
+    "dims",
+    "createdAt",
+    "vectorBytes",
+    "compartmentSessionId",
+    "title",
+    "compartmentStart",
+    "compartmentEnd",
+    "startTime",
+    "endTime",
+] as const;
 
 interface DecodedSearchPoolEntry {
     pool: Map<string, DecodedSearchPoolEntry>;
     key: string;
     rowCount: number;
     maxRowId: number;
-    changes: number;
-    dataVersion: number;
+    rowIdSum: number;
+    metadata: Map<number, SearchScopeMetadataRow>;
+    ids: readonly number[];
     rows: StoredCompartmentChunkEmbedding[];
     byteSize: number;
 }
@@ -143,8 +174,6 @@ const renumberEmbeddingWindowStatements = new WeakMap<Database, PreparedStatemen
 const searchRowsStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
 const searchPoolProbeStatements = new WeakMap<Database, PreparedStatement>();
-const searchPoolChangesStatements = new WeakMap<Database, PreparedStatement>();
-const searchPoolDataVersionStatements = new WeakMap<Database, PreparedStatement>();
 const pendingSearchPools = new WeakMap<Database, Map<string, Promise<void>>>();
 const backfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
 const shadowBackfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
@@ -153,6 +182,13 @@ const DECODED_SEARCH_POOL_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 const decodedSearchPools = new WeakMap<Database, Map<string, DecodedSearchPoolEntry>>();
 const decodedSearchPoolLru = new Map<DecodedSearchPoolEntry, true>();
 let decodedSearchPoolBytes = 0;
+const searchPoolStats = { fullRebuilds: 0, appends: 0, probes: 0, probeMs: 0, probePages: 0 };
+
+export function _getCompartmentChunkSearchCacheStatsForTests(): typeof searchPoolStats & {
+    bytes: number;
+} {
+    return { ...searchPoolStats, bytes: decodedSearchPoolBytes };
+}
 
 function getLoadFtsRowsStatement(db: Database): PreparedStatement {
     let stmt = loadFtsRowsStatements.get(db);
@@ -194,6 +230,9 @@ function getDeleteByCompartmentStatement(db: Database): PreparedStatement {
 function getInsertEmbeddingStatement(db: Database): PreparedStatement {
     let stmt = insertEmbeddingStatements.get(db);
     if (!stmt) {
+        // Vectors/dims are immutable at a rowid: refresh by deleting and inserting
+        // new rows. In-place window_index/project_path/harness repairs are
+        // observed by the search scope probe. The writer guard enforces this rule.
         stmt = db.prepare(
             `INSERT INTO compartment_chunk_embeddings (
                 compartment_id, session_id, project_path, harness, window_index,
@@ -224,17 +263,129 @@ function getRenumberEmbeddingWindowStatement(db: Database): PreparedStatement {
 function getSearchPoolProbeStatement(db: Database): PreparedStatement {
     let stmt = searchPoolProbeStatements.get(db);
     if (!stmt) {
-        // idx_cce_project_model bounds this to one project/model pool, with the
-        // session predicate applied before aggregation. Excluding vector keeps
-        // steady-state searches from reading or decoding blobs.
+        // Existing session and project/model indexes bound the scan; neither
+        // covers all scope fields and metadata. length(BLOB) skips overflow payload.
         stmt = db.prepare(
-            `SELECT COUNT(*) AS rowCount, MAX(id) AS maxRowId
-             FROM compartment_chunk_embeddings
-             WHERE session_id = ? AND project_path = ? AND model_id = ?`,
+            `SELECT e.id AS rowId, e.compartment_id AS compartmentId,
+                    e.session_id AS sessionId, e.project_path AS projectPath, e.harness AS harness,
+                    e.window_index AS windowIndex, e.start_ordinal AS windowStart,
+                    e.end_ordinal AS windowEnd, e.chunk_hash AS chunkHash,
+                    e.model_id AS modelId, e.dims AS dims, e.created_at AS createdAt,
+                    length(e.vector) AS vectorBytes,
+                    c.session_id AS compartmentSessionId, c.title AS title,
+                    c.start_message AS compartmentStart, c.end_message AS compartmentEnd,
+                    start_map.message_time_ms AS startTime, end_map.message_time_ms AS endTime
+             FROM compartment_chunk_embeddings e
+             LEFT JOIN compartments c ON c.id = e.compartment_id
+             LEFT JOIN message_fts_rowid_map start_map
+               ON start_map.session_id = c.session_id AND start_map.message_ordinal = c.start_message
+             LEFT JOIN message_fts_rowid_map end_map
+               ON end_map.session_id = c.session_id AND end_map.message_ordinal = c.end_message
+             WHERE e.session_id = ? AND e.project_path = ? AND e.model_id = ? AND e.id > ?
+             ORDER BY e.id ASC LIMIT 512`,
         );
         searchPoolProbeStatements.set(db, stmt);
     }
     return stmt;
+}
+
+function sameScopeMetadata(left: SearchScopeMetadataRow, right: SearchScopeMetadataRow): boolean {
+    for (let index = 0; index < SEARCH_SCOPE_METADATA_FIELDS.length; index++) {
+        const key = SEARCH_SCOPE_METADATA_FIELDS[index];
+        if (left[key] !== right[key]) return false;
+    }
+    return true;
+}
+
+async function probeSearchScope(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    modelId: string,
+    previous?: SearchPoolProbeRow,
+): Promise<SearchPoolProbeRow> {
+    const started = performance.now();
+    searchPoolStats.probes++;
+    const probe: SearchPoolProbeRow = {
+        rowCount: 0,
+        maxRowId: 0,
+        rowIdSum: 0,
+        metadata: previous?.metadata ?? new Map(),
+        ids: previous?.ids ?? [],
+    };
+    let copied = previous === undefined;
+    let oldIndex = 0;
+    // Reuse unchanged records and the map itself. A warm probe must not allocate
+    // another full metadata pool and force a large main-thread garbage collection.
+    const writable = () => {
+        if (!copied) {
+            probe.metadata = new Map(probe.metadata);
+            copied = true;
+        }
+        return probe.metadata;
+    };
+    await yieldSearchPool();
+    for (;;) {
+        const rows = getSearchPoolProbeStatement(db).all(
+            sessionId,
+            projectPath,
+            modelId,
+            probe.maxRowId,
+        ) as SearchScopeMetadataRow[];
+        searchPoolStats.probePages++;
+        if (rows.length === 0) {
+            if (previous) {
+                while (oldIndex < previous.ids.length) writable().delete(previous.ids[oldIndex++]);
+            }
+            if (copied) probe.ids = [...probe.metadata.keys()].sort((a, b) => a - b);
+            searchPoolStats.probeMs += performance.now() - started;
+            return probe;
+        }
+        for (const row of rows) {
+            probe.rowCount++;
+            probe.maxRowId = row.rowId;
+            probe.rowIdSum += row.rowId;
+            if (previous) {
+                while (oldIndex < previous.ids.length && previous.ids[oldIndex] < row.rowId) {
+                    writable().delete(previous.ids[oldIndex++]);
+                }
+            }
+            if (previous && previous.ids[oldIndex] === row.rowId) {
+                const old = previous.metadata.get(row.rowId);
+                if (!old || !sameScopeMetadata(old, row)) {
+                    writable().set(row.rowId, row);
+                }
+                oldIndex++;
+            } else writable().set(row.rowId, row);
+        }
+        await yieldSearchPool();
+    }
+}
+
+function sameSearchScope(left: SearchPoolProbeRow, right: SearchPoolProbeRow): boolean {
+    return (
+        left.rowCount === right.rowCount &&
+        left.maxRowId === right.maxRowId &&
+        left.rowIdSum === right.rowIdSum &&
+        (left.metadata === right.metadata ||
+            [...left.metadata].every(([id, value]) => right.metadata.get(id) === value))
+    );
+}
+
+function scopeOnlyAppended(cached: SearchPoolProbeRow, probe: SearchPoolProbeRow): boolean {
+    if (probe.rowCount <= cached.rowCount) return false;
+    let addedCount = 0;
+    let addedSum = 0;
+    for (const [id, fingerprint] of probe.metadata) {
+        if (id > cached.maxRowId) {
+            addedCount++;
+            addedSum += id;
+        } else if (cached.metadata.get(id) !== fingerprint) return false;
+    }
+    return (
+        addedCount === probe.rowCount - cached.rowCount &&
+        cached.rowIdSum + addedSum === probe.rowIdSum
+    );
 }
 
 /** Missing endpoint mappings and SQL NULL times cannot satisfy an inclusive overlap. */
@@ -390,10 +541,7 @@ function estimateDecodedSearchPoolBytes(rows: readonly StoredCompartmentChunkEmb
 function cacheDecodedSearchPool(
     pool: Map<string, DecodedSearchPoolEntry>,
     key: string,
-    rowCount: number,
-    maxRowId: number,
-    changes: number,
-    dataVersion: number,
+    probe: SearchPoolProbeRow,
     rows: StoredCompartmentChunkEmbedding[],
 ): void {
     const existing = pool.get(key);
@@ -402,13 +550,18 @@ function cacheDecodedSearchPool(
     const entry: DecodedSearchPoolEntry = {
         pool,
         key,
-        rowCount,
-        maxRowId,
-        changes,
-        dataVersion,
+        ...probe,
         rows,
         byteSize: estimateDecodedSearchPoolBytes(rows),
     };
+    entry.byteSize += probe.ids.length * 8;
+    for (const metadata of probe.metadata.values()) {
+        entry.byteSize += 320;
+        for (const key of SEARCH_SCOPE_METADATA_FIELDS) {
+            const value = metadata[key];
+            if (typeof value === "string") entry.byteSize += 2 * value.length;
+        }
+    }
     pool.set(key, entry);
     decodedSearchPoolLru.set(entry, true);
     decodedSearchPoolBytes += entry.byteSize;
@@ -429,6 +582,13 @@ export function _resetCompartmentChunkSearchCacheForTests(): void {
     }
     decodedSearchPoolLru.clear();
     decodedSearchPoolBytes = 0;
+    Object.assign(searchPoolStats, {
+        fullRebuilds: 0,
+        appends: 0,
+        probes: 0,
+        probeMs: 0,
+        probePages: 0,
+    });
 }
 
 function isFinitePositiveInteger(value: unknown): value is number {
@@ -918,23 +1078,6 @@ export function replaceCompartmentChunkEmbeddings(
     }).immediate();
 }
 
-function searchPoolVersion(db: Database): { changes: number; dataVersion: number } {
-    let changes = searchPoolChangesStatements.get(db);
-    let dataVersion = searchPoolDataVersionStatements.get(db);
-    if (!changes) {
-        changes = db.prepare("SELECT total_changes() AS value");
-        searchPoolChangesStatements.set(db, changes);
-    }
-    if (!dataVersion) {
-        dataVersion = db.prepare("PRAGMA data_version");
-        searchPoolDataVersionStatements.set(db, dataVersion);
-    }
-    return {
-        changes: (changes.get() as { value: number }).value,
-        dataVersion: Object.values(dataVersion.get() as Record<string, number>)[0],
-    };
-}
-
 const yieldSearchPool = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function searchPoolInTransaction(db: Database): boolean {
@@ -952,36 +1095,25 @@ async function refreshDecodedSearchPool(
     const pool = getDecodedSearchPool(db);
     for (;;) {
         const inTransaction = searchPoolInTransaction(db);
-        const version = searchPoolVersion(db);
-        const probe = getSearchPoolProbeStatement(db).get(
-            sessionId,
-            projectPath,
-            modelId,
-        ) as SearchPoolProbeRow;
+        const previous = pool.get(key);
+        const probe = await probeSearchScope(db, sessionId, projectPath, modelId, previous);
         const rowCount = probe.rowCount;
-        const maxRowId = probe.maxRowId ?? 0;
+        const maxRowId = probe.maxRowId;
+        // Another scope may evict the snapshot while the probe yields. Re-read
+        // the retained entry before touching the LRU or reusing cached vectors.
         const cached = pool.get(key);
-        const sameVersion = !inTransaction && cached && cached.dataVersion === version.dataVersion;
-        if (
-            sameVersion &&
-            cached.changes === version.changes &&
-            cached.rowCount === rowCount &&
-            cached.maxRowId === maxRowId
-        ) {
+        if (!inTransaction && cached && sameSearchScope(cached, probe)) {
             touchDecodedSearchPoolEntry(cached);
             return cached.rows;
         }
 
-        // total_changes counts every local INSERT, UPDATE and DELETE (including
-        // triggers and rolled-back writes). Growth equal to that delta proves
-        // there were only inserts into this pool. data_version fences writes by
-        // other connections, which total_changes cannot observe. Count/max/sum
-        // alone cannot detect a vector updated in place. Unrelated writes cause
-        // a conservative rebuild, never reuse of an unverified vector.
-        const append =
-            sameVersion &&
-            rowCount > cached.rowCount &&
-            version.changes - cached.changes === rowCount - cached.rowCount;
+        // Vectors/dims are immutable at a rowid: refreshes delete/insert new rows.
+        // In-place writers change window_index/project_path/harness, all covered
+        // by the exact metadata probe (and protected by the writer guard test).
+        // No database-wide commit/change counter participates in certification.
+        const append = !inTransaction && cached && scopeOnlyAppended(cached, probe);
+        if (append) searchPoolStats.appends++;
+        else searchPoolStats.fullRebuilds++;
         let afterId = append ? cached.maxRowId : 0;
         const added: StoredCompartmentChunkEmbedding[] = [];
         let appendedCount = 0;
@@ -1036,12 +1168,8 @@ async function refreshDecodedSearchPool(
             }
             await yieldSearchPool();
         }
-        const endVersion = searchPoolVersion(db);
-        if (
-            endVersion.changes !== version.changes ||
-            endVersion.dataVersion !== version.dataVersion ||
-            searchPoolInTransaction(db) !== inTransaction
-        ) {
+        const endProbe = await probeSearchScope(db, sessionId, projectPath, modelId, probe);
+        if (!sameSearchScope(probe, endProbe) || searchPoolInTransaction(db) !== inTransaction) {
             // No transaction spans a yield on this shared connection. Discard a
             // raced read and retry rather than publishing a mixed/partial pool.
             continue;
@@ -1054,18 +1182,9 @@ async function refreshDecodedSearchPool(
         }
         const decoded = append ? cached.rows.concat(added) : added;
         decoded.sort((a, b) => a.compartmentId - b.compartmentId || a.windowIndex - b.windowIndex);
-        // ROLLBACK does not advance total_changes. A transaction-local snapshot
-        // must not become a reusable cache entry after its transaction ends.
-        if (!inTransaction)
-            cacheDecodedSearchPool(
-                pool,
-                key,
-                rowCount,
-                maxRowId,
-                version.changes,
-                version.dataVersion,
-                decoded,
-            );
+        // A transaction-local snapshot must not become a reusable cache entry
+        // after its transaction ends or rolls back.
+        if (!inTransaction) cacheDecodedSearchPool(pool, key, probe, decoded);
         return decoded;
     }
 }
@@ -1088,18 +1207,11 @@ export async function loadCompartmentChunkEmbeddingsForSearch(
     }
     for (;;) {
         while (pending.has(key)) await pending.get(key);
-        const version = searchPoolVersion(db);
         const operation = refreshDecodedSearchPool(db, sessionId, projectPath, modelId);
         const completion = operation.then(() => {});
         pending.set(key, completion);
         try {
             const rows = await operation;
-            const endVersion = searchPoolVersion(db);
-            if (
-                version.changes !== endVersion.changes ||
-                version.dataVersion !== endVersion.dataVersion
-            )
-                continue;
             return filterSearchPoolDates(rows, dateRange);
         } finally {
             pending.delete(key);
