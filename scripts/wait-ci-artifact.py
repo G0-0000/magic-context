@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-DEFAULT_MAX_WAIT_SECONDS = 45 * 60
+QUEUE_ALLOWANCE_SECONDS = 30 * 60
 ARTIFACT_PROPAGATION_GRACE_SECONDS = 60
 TRANSIENT_RETRY_DELAYS = (1, 2, 4)
 
@@ -32,6 +32,14 @@ def _timestamp(value, producer):
     return parsed.timestamp()
 
 
+def resolve_max_wait_seconds(producer_timeout, override=None):
+    if override is None:
+        return producer_timeout + QUEUE_ALLOWANCE_SECONDS
+    if override < producer_timeout:
+        raise ValueError("maximum wait override cannot be less than producer timeout")
+    return override
+
+
 def wait_for_artifact(
     fetch,
     producer,
@@ -39,9 +47,10 @@ def wait_for_artifact(
     timeout,
     clock=time.monotonic,
     pause=time.sleep,
-    max_wait=DEFAULT_MAX_WAIT_SECONDS,
+    max_wait=None,
     wall_clock=time.time,
 ):
+    max_wait = resolve_max_wait_seconds(timeout, max_wait)
     total_deadline = clock() + max_wait
     success_missing_deadline = None
     while True:
@@ -205,41 +214,47 @@ class WaitTests(unittest.TestCase):
         now = [0]
         fetch = lambda kind: {kind: []}
         with self.assertRaisesRegex(RuntimeError, "producer: artifact wait timed out after 23s total cap"):
-            wait_for_artifact(fetch, "producer", "artifact", 600, lambda: now[0], lambda seconds: now.__setitem__(0, now[0] + seconds), 23)
+            wait_for_artifact(fetch, "producer", "artifact", 20, lambda: now[0], lambda seconds: now.__setitem__(0, now[0] + seconds), 23)
         self.assertEqual(now[0], 23)
 
-    def test_queued_producer_can_wait_past_consumer_timeout(self):
+    def test_queued_producer_at_40_minutes_can_run_60_minutes(self):
         now = [0]
         wall = [datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()]
+        queue_duration = 40 * 60
+        producer_runtime = 60 * 60
 
         def fetch(kind):
             if kind == "jobs":
-                if now[0] < 650:
+                if now[0] < queue_duration:
                     return {"jobs": [{"name": "producer", "status": "queued", "conclusion": None}]}
-                started_at = datetime.fromtimestamp(wall[0] - 10, timezone.utc).isoformat()
-                status = "in_progress" if now[0] < 660 else "completed"
+                started_at = datetime.fromtimestamp(wall[0] - (now[0] - queue_duration), timezone.utc).isoformat()
+                status = "in_progress" if now[0] < queue_duration + producer_runtime else "completed"
                 conclusion = None if status == "in_progress" else "success"
                 return {"jobs": [{"name": "producer", "status": status, "conclusion": conclusion, "started_at": started_at}]}
-            return {"artifacts": [{"name": "artifact", "expired": False, "id": 7}] if now[0] >= 660 else []}
+            return {"artifacts": [{"name": "artifact", "expired": False, "id": 7}] if now[0] >= queue_duration + producer_runtime else []}
 
         def pause(seconds):
             now[0] += seconds
             wall[0] += seconds
 
-        artifact_id = wait_for_artifact(fetch, "producer", "artifact", 600, lambda: now[0], pause, wall_clock=lambda: wall[0])
+        artifact_id = wait_for_artifact(fetch, "producer", "artifact", 120 * 60, lambda: now[0], pause, wall_clock=lambda: wall[0])
         self.assertEqual(artifact_id, 7)
-        self.assertGreaterEqual(now[0], 660)
+        self.assertEqual(now[0], queue_duration + producer_runtime)
 
     def test_producer_runtime_timeout_starts_at_started_at(self):
         with self.assertRaisesRegex(RuntimeError, "producer: artifact wait timed out after 20s since producer started"):
             self.run_wait(status="in_progress", timeout=20, started_at=21)
 
-    def test_total_wait_cap_ends_a_queued_producer(self):
+    def test_default_total_wait_cap_is_timeout_plus_30_minute_queue_allowance(self):
         now = [0]
         fetch = lambda kind: {"jobs": [{"name": "producer", "status": "queued", "conclusion": None}]} if kind == "jobs" else {"artifacts": []}
-        with self.assertRaisesRegex(RuntimeError, "producer: artifact wait timed out after 45s total cap"):
-            wait_for_artifact(fetch, "producer", "artifact", 600, lambda: now[0], lambda seconds: now.__setitem__(0, now[0] + seconds), 45)
-        self.assertEqual(now[0], 45)
+        with self.assertRaisesRegex(RuntimeError, "producer: artifact wait timed out after 9000s total cap"):
+            wait_for_artifact(fetch, "producer", "artifact", 120 * 60, lambda: now[0], lambda seconds: now.__setitem__(0, now[0] + seconds))
+        self.assertEqual(now[0], 150 * 60)
+
+    def test_max_wait_override_below_producer_timeout_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "maximum wait override cannot be less than producer timeout"):
+            resolve_max_wait_seconds(120 * 60, 119 * 60)
 
     def test_transient_api_errors_are_retried(self):
         import io
@@ -286,15 +301,20 @@ def main():
     parser.add_argument("--producer", required=True)
     parser.add_argument("--artifact", required=True)
     parser.add_argument("--timeout-minutes", type=float, required=True)
-    parser.add_argument("--max-wait-minutes", type=float, default=45)
+    parser.add_argument("--max-wait-minutes", type=float)
     args = parser.parse_args()
     if not 0 < args.timeout_minutes <= 360:
         parser.error("timeout must be positive and no more than six hours")
-    if not 0 < args.max_wait_minutes <= 360:
+    if args.max_wait_minutes is not None and not 0 < args.max_wait_minutes <= 360:
         parser.error("maximum wait must be positive and no more than six hours")
+    producer_timeout = args.timeout_minutes * 60
+    override = args.max_wait_minutes * 60 if args.max_wait_minutes is not None else None
+    try:
+        max_wait = resolve_max_wait_seconds(producer_timeout, override)
+    except ValueError as error:
+        parser.error(str(error))
     base = os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]
     attempt = os.environ["GITHUB_RUN_ATTEMPT"]
-    max_wait = args.max_wait_minutes * 60
     deadline = time.monotonic() + max_wait
     selected_attempt = [attempt]
 
@@ -339,10 +359,10 @@ def main():
 
     print(
         f"Waiting for {args.producer}: {args.artifact} (producer runtime {args.timeout_minutes:g} minutes, "
-        f"total wait at most {args.max_wait_minutes:g} minutes)",
+        f"total wait at most {max_wait / 60:g} minutes)",
         flush=True,
     )
-    artifact_id = wait_for_artifact(fetch, args.producer, args.artifact, args.timeout_minutes * 60, max_wait=max_wait)
+    artifact_id = wait_for_artifact(fetch, args.producer, args.artifact, producer_timeout, max_wait=max_wait)
     print(f"{args.producer}: artifact {artifact_id} ready", flush=True)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:

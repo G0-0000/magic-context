@@ -46,13 +46,13 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
 
 test("artifact waits allow runner queue time without extending the producer runtime", () => {
     expect(waitAction.inputs["max-wait-minutes"]).toEqual({
-        description: "Maximum total consumer wait, including time spent in the runner queue",
-        default: "45",
+        description: "Optional total-wait override; must be at least the producer timeout",
         required: false,
     });
     expect(waitAction.runs.steps[0]!.env!.WAIT_TIMEOUT).toBe("${{ inputs.timeout-minutes }}");
     expect(waitAction.runs.steps[0]!.env!.WAIT_MAX_WAIT).toBe("${{ inputs.max-wait-minutes }}");
     expect(waitAction.runs.steps[0]!.run).toContain("--timeout-minutes \"$WAIT_TIMEOUT\"");
+    expect(waitAction.runs.steps[0]!.run).toContain('if [[ -n "$WAIT_MAX_WAIT" ]]');
     expect(waitAction.runs.steps[0]!.run).toContain("--max-wait-minutes \"$WAIT_MAX_WAIT\"");
 });
 

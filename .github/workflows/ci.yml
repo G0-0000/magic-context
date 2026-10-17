@@ -1052,7 +1052,7 @@ jobs:
   e2e-rust-hermetic:
     name: E2E (Rust hermetic ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # Artifact waits have a 45-minute total cap; tests retain their own timeouts.
+    # Artifact waits allow 30 minutes of queue time beyond the producer timeout; tests retain their own timeouts.
     timeout-minutes: 180
     strategy:
       fail-fast: false
