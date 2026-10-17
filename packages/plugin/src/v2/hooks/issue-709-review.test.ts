@@ -743,3 +743,37 @@ test("issue 709 review: persisted OC2 bytes survive full process restart", async
         cleanupTestTempDir(root);
     }
 }, 60000);
+
+test("issue 709 fixes: temporal first application waits for a rebuilding pass and replays", async () => {
+    const f = await fixture(7709, { temporal_awareness: false });
+    try {
+        const before = await f.pass();
+        expect(before.bytes).not.toContain("<!-- +9m -->");
+        const rows = f.raw
+            .prepare("SELECT id,data FROM session_message ORDER BY seq")
+            .all() as Array<{ id: string; data: string }>;
+        for (const [n, row] of rows.entries()) {
+            const data = JSON.parse(row.data);
+            data.time.created = 1700000000000 + n * 600000;
+            data.time.completed = data.time.created + 1000;
+            f.raw
+                .prepare("UPDATE session_message SET time_created = ?,data = ? WHERE id = ?")
+                .run(data.time.created, JSON.stringify(data), row.id);
+        }
+        // Enabling temporal awareness after a restart must not rewrite the warm prefix.
+        f.config.temporal_awareness = true;
+        await f.start();
+        const defer = await f.pass();
+        expect(defer.bytes).toBe(before.bytes);
+        expect(defer.logs.join("\n")).toContain("decision=defer");
+        f.switchModel();
+        const rebuild = await f.pass();
+        expect(rebuild.bytes).toContain("<!-- +9m -->");
+        expect(rebuild.logs.join("\n")).toContain("bustsServedPrefix=true");
+        const replay = await f.pass();
+        expect(replay.bytes).toBe(rebuild.bytes);
+        expect(replay.logs.join("\n")).toContain("decision=defer");
+    } finally {
+        await f.cleanup();
+    }
+});

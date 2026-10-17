@@ -102,7 +102,6 @@ import { deriveTriggerBudget } from "./derive-budgets";
 import { contextRefusalError, EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
     escalationBands,
-    historyBudgetPolicyIdentity,
     resolveContextWindowGeometry,
     resolveExecuteThreshold,
     resolveExecuteThresholdDetail,
@@ -172,6 +171,7 @@ import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
 } from "./reasoning-budget";
+import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
@@ -1766,12 +1766,6 @@ export function createTransform(deps: TransformDeps) {
         const boundaryUsageForProtectedTail = persistedUsageFreshForBoundary ?? contextUsageEarly;
         const boundaryUsageSource = persistedUsageFreshForBoundary ? "persisted" : "live";
 
-        const historyPolicyIdentity = historyBudgetPolicyIdentity(
-            deps.historyBudgetPercentage,
-            deps.executeThresholdPercentage,
-            currentModelKeyForBoundary,
-            deps.executeThresholdTokens,
-        );
         // A cold-pass usage reset must not hide the last matched usable window.
         // For catalog-absent models, rendering against the 60K default here would
         // manufacture a larger baseline, then force a shrink on the next pass.
@@ -1785,14 +1779,13 @@ export function createTransform(deps: TransformDeps) {
             persistedUsageBeforeResets.lastUsageContextLimit > 0
                 ? persistedUsageBeforeResets.lastUsageContextLimit
                 : undefined);
-        const historyBudgetTokens = resolveHistoryBudgetTokens(
-            deps.historyBudgetPercentage,
+        const renderOptions = createM0RenderOptions(
+            deps,
             contextUsageEarly,
-            deps.executeThresholdPercentage,
-            deps.getModelKey?.(sessionId),
-            deps.executeThresholdTokens,
+            currentModelKeyForBoundary,
             historyContextLimit,
         );
+        const { historyBudgetTokens } = renderOptions;
         // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
         // (the usable working ceiling, NOT scaled by history_budget_percentage).
         // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
@@ -2738,12 +2731,9 @@ export function createTransform(deps: TransformDeps) {
                 state: sessionMeta,
                 projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
-                injectDocs: deps.injectDocs,
+                ...renderOptions,
                 memoryEnabled: deps.memoryConfig?.enabled,
-                muralEnabled: deps.muralEnabled,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
-                historyBudgetTokens,
-                historyBudgetPolicyIdentity: historyPolicyIdentity,
                 hardSignals: m0HardSignals,
             }).value;
         const protectionCacheBustingPass =
@@ -2973,14 +2963,10 @@ export function createTransform(deps: TransformDeps) {
                 // disable those.
                 projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
-                injectDocs: deps.injectDocs,
+                ...renderOptions,
                 memoryEnabled: deps.memoryConfig?.enabled,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
-                historyBudgetTokens,
-                historyBudgetPolicyIdentity: historyPolicyIdentity,
-                temporalAwareness: deps.experimentalTemporalAwareness,
                 hardSignals: m0HardSignals,
-                muralEnabled: deps.muralEnabled,
             },
         });
         if (recovery.prefix && !recoveryNormalized) {
@@ -3685,54 +3671,7 @@ export function createTransform(deps: TransformDeps) {
     });
 }
 
-export function resolveHistoryBudgetTokens(
-    historyBudgetPercentage: number | undefined,
-    contextUsage: ContextUsage,
-    executeThresholdPercentage:
-        | number
-        | { default: number; [modelKey: string]: number }
-        | undefined,
-    modelKey: string | undefined,
-    executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined },
-    resolvedContextLimit?: number,
-): number | undefined {
-    if (!historyBudgetPercentage) {
-        return undefined;
-    }
-
-    // Derive the budget from the model's STABLE context limit, resolved
-    // directly (models.dev + any detected-overflow override). The previous
-    // design back-derived the limit from live usage as inputTokens/percentage,
-    // which collapses to 0/0 on the FIRST transform pass after a restart
-    // (percentage=0, inputTokens=0). When a re-materialize was forced on that
-    // very pass (e.g. the m[1] cache was cleared by a migration), the budget
-    // fell through to the hard-coded 60K default — far below a large model's
-    // real history budget — and the decay renderer archived the oldest
-    // compartments to fit 60K, then stuck there via cache_hit replay. The
-    // resolved limit is available even at percentage=0 (recovered from the
-    // OpenCode DB), so it removes the hole. The live-usage back-derivation is
-    // kept only as a last-resort fallback if a limit couldn't be resolved.
-    let contextLimit = resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : 0;
-    if (contextLimit <= 0) {
-        if (contextUsage.percentage <= 0) {
-            return undefined;
-        }
-        contextLimit = contextUsage.inputTokens / (contextUsage.percentage / 100);
-    }
-    if (!Number.isFinite(contextLimit) || contextLimit <= 0) {
-        return undefined;
-    }
-
-    return Math.floor(
-        contextLimit *
-            (resolveExecuteThreshold(executeThresholdPercentage ?? 65, modelKey, 65, {
-                tokensConfig: executeThresholdTokens,
-                contextLimit,
-            }) /
-                100) *
-            historyBudgetPercentage,
-    );
-}
+export { resolveHistoryBudgetTokens } from "./render-options";
 
 import { protectedToolTokenCount } from "../../features/magic-context/reclaim-protection";
 import { resolveDecisionCalibration } from "./decision-calibration";

@@ -85,6 +85,7 @@ import {
     estimateTokens,
     preloadTokenizer,
 } from "../../hooks/magic-context/read-session-formatting";
+import { createM0RenderOptions } from "../../hooks/magic-context/render-options";
 import { servedModuleM0Text } from "../../hooks/magic-context/rust-served-m0";
 import {
     STORAGE_BUSY_MESSAGE,
@@ -1356,7 +1357,24 @@ export async function registerContext(context: V2Context) {
     const materialize = (draft: SessionContext) => {
         db = storage.require();
         const state = getOrCreateSessionMeta(db, draft.sessionID);
+        const modelKey = `${draft.model.providerID}/${draft.model.id}`;
+        const contextLimit =
+            resolveContextLimit(draft.model.providerID, draft.model.id, {
+                db,
+                sessionID: draft.sessionID,
+            }) ||
+            draft.model.limit?.context ||
+            (state.lastObservedModelKey === modelKey ? state.lastUsageContextLimit : undefined);
         return materializeM0({
+            ...createM0RenderOptions(
+                {
+                    ...createV2TransformFeatureDeps(config, compactionOff, directory),
+                    ...createV2ThresholdDeps(config),
+                },
+                usage.get(draft.sessionID)?.usage ?? { percentage: 0, inputTokens: 0 },
+                modelKey,
+                contextLimit,
+            ),
             db,
             sessionId: draft.sessionID,
             state,
@@ -1865,6 +1883,7 @@ export async function registerContext(context: V2Context) {
                 ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
             });
             const admitted = new Set<string>();
+            let messageTimes: ReturnType<V2StoreReader["messageTimes"]> | undefined;
             const reader = openStoreReader();
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
@@ -2054,6 +2073,11 @@ export async function registerContext(context: V2Context) {
                         ...draft.messages.filter((message) => message !== incoming),
                     );
                 }
+                if (config.temporal_awareness === true)
+                    messageTimes = reader.messageTimes(
+                        draft.sessionID,
+                        draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
+                    );
             } finally {
                 reader.close();
             }
@@ -2078,7 +2102,7 @@ export async function registerContext(context: V2Context) {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
                 }
             }
-            const mapped = adaptPayload(draft, admitted);
+            const mapped = adaptPayload(draft, admitted, messageTimes);
             bindSystemDateRequestIdentity(mapped, draft);
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },

@@ -251,6 +251,7 @@ export type MessageInfo = {
     id?: string;
     role?: string;
     sessionID?: string;
+    time?: { created?: number; completed?: number };
     summary?: boolean;
     /** Marks one of the two m[0]/m[1] messages prepended by compartment injection. */
     syntheticHead?: boolean;
