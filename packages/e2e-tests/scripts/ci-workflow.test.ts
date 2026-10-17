@@ -1,12 +1,25 @@
 import { expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { failedRequiredJobs } from "./check-ci-results";
 
 const root = resolve(import.meta.dir, "../../..");
 const text = await Bun.file(resolve(root, ".github/workflows/ci.yml")).text();
+const releaseText = await Bun.file(resolve(root, ".github/workflows/release.yml")).text();
+const waitActionText = await Bun.file(resolve(root, ".github/actions/wait-ci-artifact/action.yml")).text();
 type Step = { name?: string; run?: string; if?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> };
-type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard: number[]; mode?: string[] } } };
+type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard: number[]; mode?: string[] } } };
 const workflow = Bun.YAML.parse(text) as { jobs: Record<string, Job> };
+const releaseWorkflow = Bun.YAML.parse(releaseText) as { jobs: Record<string, Job> };
+const allWorkflowDocuments = await Promise.all(
+    (await readdir(resolve(root, ".github/workflows")))
+        .filter((file) => file.endsWith(".yml"))
+        .map(async (file) => ({
+            file,
+            workflow: Bun.YAML.parse(await Bun.file(resolve(root, ".github/workflows", file)).text()) as { jobs: Record<string, Job> },
+        })),
+);
+const waitAction = Bun.YAML.parse(waitActionText) as { inputs: Record<string, { description: string; default?: string; required: boolean }>; runs: { steps: Array<{ env?: Record<string, string>; run?: string }> } };
 
 test("summary requires every job and always runs", () => {
     const summary = workflow.jobs["ci-summary"]!;
@@ -40,6 +53,69 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
     }
     expect(workflow.jobs["e2e-host-opencode"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2, 3] } });
     expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1] } });
+});
+
+test("same-run artifact downloads retry transient failures and guard consumers", () => {
+    const ciConsumers = ["rust-mc-module-lib", "rust-mc-module-parity", "e2e-rust-hermetic", "rust-raw-replay-review"];
+    const actualCiConsumers = Object.entries(workflow.jobs)
+        .filter(([, job]) => job.steps.some((step) => step.run?.includes("scripts/download-ci-artifact.py") && /--artifact-(?:id|name)/.test(step.run)))
+        .map(([id]) => id)
+        .sort();
+    expect(actualCiConsumers).toEqual([...ciConsumers].sort());
+
+    const actualReleaseConsumers = Object.entries(releaseWorkflow.jobs)
+        .filter(([, job]) => job.steps.some((step) => step.run?.includes("scripts/download-ci-artifact.py")))
+        .map(([id]) => id);
+    expect(actualReleaseConsumers).toEqual(["e2e-rust-hermetic"]);
+    const actualRetryConsumers = allWorkflowDocuments.flatMap(({ file, workflow: current }) =>
+        Object.entries(current.jobs)
+            .filter(([, job]) => (job.steps ?? []).some((step) => step.run?.includes("scripts/download-ci-artifact.py") && /--artifact-(?:id|name)/.test(step.run)))
+            .map(([id]) => `${file}:${id}`),
+    ).sort();
+    expect(actualRetryConsumers).toEqual([
+        "ci.yml:e2e-rust-hermetic",
+        "ci.yml:rust-mc-module-lib",
+        "ci.yml:rust-mc-module-parity",
+        "ci.yml:rust-raw-replay-review",
+        "release.yml:e2e-rust-hermetic",
+    ]);
+    for (const { workflow: current } of allWorkflowDocuments) {
+        expect(Object.values(current.jobs).flatMap((job) => job.steps ?? []).filter((step) => step.uses?.startsWith("actions/download-artifact@"))).toEqual([]);
+    }
+    for (const id of ciConsumers) {
+        const job = workflow.jobs[id]!;
+        const downloadIndex = job.steps.findIndex((step) => step.run?.includes("scripts/download-ci-artifact.py"));
+        const download = job.steps[downloadIndex]!;
+        const guardIndex = job.steps.findIndex((step) => step.run?.includes("artifact not downloaded"));
+        const testIndex = job.steps.findIndex((step) => /cargo nextest run|run-rust-hermetic-e2e\.sh|test-rust-raw-replay\.sh/.test(step.run ?? ""));
+        expect(download.run).toContain("--artifact-id");
+        expect(download.env!.GH_TOKEN).toBe("${{ github.token }}");
+        expect(guardIndex).toBeGreaterThan(downloadIndex);
+        expect(guardIndex).toBeLessThan(testIndex);
+    }
+
+    const releaseJob = releaseWorkflow.jobs["e2e-rust-hermetic"]!;
+    const releaseDownloadIndex = releaseJob.steps.findIndex((step) => step.run?.includes("scripts/download-ci-artifact.py"));
+    const releaseDownload = releaseJob.steps[releaseDownloadIndex]!;
+    const releaseGuardIndex = releaseJob.steps.findIndex((step) => step.run?.includes("artifact not downloaded"));
+    const releaseTestIndex = releaseJob.steps.findIndex((step) => step.run?.includes("run-rust-hermetic-e2e.sh"));
+    expect(releaseDownload.run).toContain("--artifact-name rust-hermetic-binaries");
+    expect(releaseDownload.env!.GH_TOKEN).toBe("${{ github.token }}");
+    expect(releaseJob.permissions!.actions).toBe("read");
+    expect(releaseGuardIndex).toBeGreaterThan(releaseDownloadIndex);
+    expect(releaseGuardIndex).toBeLessThan(releaseTestIndex);
+});
+
+test("artifact waits allow runner queue time without extending the producer runtime", () => {
+    expect(waitAction.inputs["max-wait-minutes"]).toEqual({
+        description: "Optional total-wait override; must be at least the producer timeout",
+        required: false,
+    });
+    expect(waitAction.runs.steps[0]!.env!.WAIT_TIMEOUT).toBe("${{ inputs.timeout-minutes }}");
+    expect(waitAction.runs.steps[0]!.env!.WAIT_MAX_WAIT).toBe("${{ inputs.max-wait-minutes }}");
+    expect(waitAction.runs.steps[0]!.run).toContain("--timeout-minutes \"$WAIT_TIMEOUT\"");
+    expect(waitAction.runs.steps[0]!.run).toContain('if [[ -n "$WAIT_MAX_WAIT" ]]');
+    expect(waitAction.runs.steps[0]!.run).toContain("--max-wait-minutes \"$WAIT_MAX_WAIT\"");
 });
 
 test("cache oracle and separate OC2 regressions run exactly once even after a suite failure", () => {

@@ -85,6 +85,7 @@ jobs:
           python3 scripts/cargo-lock-pins.py --self-test
           python3 scripts/check-nextest-inventory.py --self-test
           python3 scripts/wait-ci-artifact.py --self-test
+          python3 scripts/download-ci-artifact.py --self-test
           timeout 180s python3 scripts/ci-gate.test.py -v
           timeout 180s python3 scripts/release.test.py -v
           timeout 180s python3 scripts/merge-pr.test.py -v
@@ -862,13 +863,17 @@ jobs:
           artifact: rust-lib-${{ github.sha }}
           producer: Rust (mc-module lib archive)
           timeout-minutes: "45"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.archive.outputs.artifact-id }}
-          merge-multiple: true
-          path: ci-rust-lib
+      - name: Download lib archive (retry transient failures and verify digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.archive.outputs.artifact-id }}
+        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path ci-rust-lib
       - name: Verify archive provenance
         run: |
+          if [[ ! -f "ci-rust-lib/lib-${{ matrix.shard }}-names.txt" || ! -f ci-rust-lib/archive.tar.zst || ! -f ci-rust-lib/archive.sha256 || ! -f ci-rust-lib/commit.txt || ! -f ci-rust-lib/rustc.txt ]]; then
+            echo "::error::artifact not downloaded: missing Rust lib archive files for shard ${{ matrix.shard }}" >&2
+            exit 1
+          fi
           test "$(cat ci-rust-lib/commit.txt)" = "$GITHUB_SHA"
           sha256sum --check ci-rust-lib/archive.sha256
           rustc -vV | diff - ci-rust-lib/rustc.txt
@@ -900,13 +905,17 @@ jobs:
           artifact: rust-lib-${{ github.sha }}
           producer: Rust (mc-module lib archive)
           timeout-minutes: "45"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.archive.outputs.artifact-id }}
-          merge-multiple: true
-          path: ci-rust-lib
+      - name: Download lib archive (retry transient failures and verify digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.archive.outputs.artifact-id }}
+        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path ci-rust-lib
       - name: Verify archive provenance
         run: |
+          if [[ ! -f ci-rust-lib/parity-names.txt || ! -f ci-rust-lib/archive.tar.zst || ! -f ci-rust-lib/archive.sha256 || ! -f ci-rust-lib/commit.txt || ! -f ci-rust-lib/rustc.txt ]]; then
+            echo "::error::artifact not downloaded: missing Rust parity archive files" >&2
+            exit 1
+          fi
           test "$(cat ci-rust-lib/commit.txt)" = "$GITHUB_SHA"
           sha256sum --check ci-rust-lib/archive.sha256
           rustc -vV | diff - ci-rust-lib/rustc.txt
@@ -1052,7 +1061,7 @@ jobs:
   e2e-rust-hermetic:
     name: E2E (Rust hermetic ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # Waiting is capped at the producer's 120 minutes; tests retain their own timeouts.
+    # Artifact waits allow 30 minutes of queue time beyond the producer timeout; tests retain their own timeouts.
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -1080,13 +1089,17 @@ jobs:
           artifact: rust-hermetic-binaries-${{ github.sha }}
           producer: E2E (Rust hermetic build)
           timeout-minutes: "120"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.binaries.outputs.artifact-id }}
-          merge-multiple: true
-          path: ${{ runner.temp }}/hermetic-artifact
+      - name: Download hermetic binaries (retry transient failures and verify digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.binaries.outputs.artifact-id }}
+        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path "$RUNNER_TEMP/hermetic-artifact"
       - name: Restore executable and auxiliary binaries
         run: |
+          if [[ ! -f "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.tar.gz" || ! -f "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.sha256" ]]; then
+            echo "::error::artifact not downloaded: missing hermetic binaries archive or checksum" >&2
+            exit 1
+          fi
           (cd "$RUNNER_TEMP/hermetic-artifact" && sha256sum --check rust-hermetic-binaries.sha256)
           mkdir -p packages/e2e-tests/.cache/prebuilt
           tar -xzf "$RUNNER_TEMP/hermetic-artifact/rust-hermetic-binaries.tar.gz" -C packages/e2e-tests/.cache/prebuilt
@@ -1124,15 +1137,19 @@ jobs:
           artifact: rust-hermetic-binaries-${{ github.sha }}
           producer: E2E (Rust hermetic build)
           timeout-minutes: "120"
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.binaries.outputs.artifact-id }}
-          merge-multiple: true
-          path: ${{ runner.temp }}/raw-replay-download
+      - name: Download hermetic binaries (retry transient failures and verify digest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.binaries.outputs.artifact-id }}
+        run: python3 scripts/download-ci-artifact.py --artifact-id "$ARTIFACT_ID" --path "$RUNNER_TEMP/raw-replay-download"
       - name: Restore staged native driver
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! -f "$RUNNER_TEMP/raw-replay-download/rust-hermetic-binaries.tar.gz" || ! -f "$RUNNER_TEMP/raw-replay-download/rust-hermetic-binaries.sha256" ]]; then
+            echo "::error::artifact not downloaded: missing raw replay binaries archive or checksum" >&2
+            exit 1
+          fi
           (cd "$RUNNER_TEMP/raw-replay-download" && sha256sum --check rust-hermetic-binaries.sha256)
           mkdir -p "$RUNNER_TEMP/raw-replay-artifact"
           tar -xzf "$RUNNER_TEMP/raw-replay-download/rust-hermetic-binaries.tar.gz" -C "$RUNNER_TEMP/raw-replay-artifact"
