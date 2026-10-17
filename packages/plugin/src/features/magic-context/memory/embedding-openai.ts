@@ -205,7 +205,10 @@ export function parseRetryAfterMs(value: string | null, nowMs: number): number |
  * [nominal, nominal * (1 + jitter)] with nominal = 1 s * 2^consecutive, and
  * never exceeds RATE_LIMIT_BACKOFF_CAP_MS.
  */
-export function rateLimitBackoffMs(consecutive: number, random: () => number = Math.random): number {
+export function rateLimitBackoffMs(
+    consecutive: number,
+    random: () => number = Math.random,
+): number {
     const exponent = Math.min(Math.max(0, Math.floor(consecutive)), 30);
     const nominal = Math.min(RATE_LIMIT_BACKOFF_CAP_MS, RATE_LIMIT_BACKOFF_BASE_MS * 2 ** exponent);
     const jitter = Math.min(1, Math.max(0, random())) * RATE_LIMIT_BACKOFF_JITTER;
@@ -407,9 +410,9 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             return Array.from({ length: texts.length }, () => null);
         }
 
-        // Rate-limit cooldown (see RETRY_AFTER_CAP_MS). Queries never wait and a
-        // 429 never reaches the circuit breaker; passage batches wait out the
-        // cooldown and resend, a bounded number of times.
+        // Rate-limit cooldown (described above RETRY_AFTER_CAP_MS). Queries never
+        // wait and a 429 never reaches the circuit breaker; passage batches wait
+        // out the cooldown and resend, a bounded number of times.
         const isQuery = purpose === "query";
         for (let deferrals = 0; ; deferrals++) {
             if (Date.now() < this.rateLimit.until) {
@@ -495,8 +498,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             });
 
             if (response.status === 429) {
-                // Drain the body so the connection can be reused; its content
-                // is not needed because a 429 is handled the same way always.
+                // Drain the body so the connection can be reused. Its content
+                // is not needed: every 429 is handled the same way.
                 await response.text().catch(() => "");
                 this.noteRateLimit(response.headers.get("retry-after"));
                 return RATE_LIMITED;
