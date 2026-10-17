@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parsePluginConfig } from "../config";
+import { loadPluginConfigDetailed, parsePluginConfig } from "../config";
 import { isDreamerRunnable, isSmartNoteSurfaceAvailable } from "../config/agent-disable";
+import { pluginConfigReader } from "../config/live-run-config";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
 import type { Database } from "../shared/sqlite";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
@@ -111,4 +112,50 @@ test("the OpenCode 2 per-request rewrite receives the dreamer-aware smart-note f
     expect(source).toMatch(
         /applyV2PromptSurfaceTools\(\s*draft,\s*promptSurfaceRuntime,\s*config\.prompt_surface,[^)]*isSmartNoteSurfaceAvailable\(config\),\s*\)/,
     );
+});
+
+test("a live dreamer toggle never changes the tool bytes registered for this process", async () => {
+    const previousHome = process.env.HOME;
+    const previousConfigHome = process.env.XDG_CONFIG_HOME;
+    try {
+        for (const [bootDreamer, liveDreamer] of [
+            [{}, { disable: true }],
+            [{ disable: true }, { disable: false }],
+        ] as const) {
+            const root = createTestTempDirFromPath(join(dir, "live-"));
+            process.env.HOME = root;
+            process.env.XDG_CONFIG_HOME = join(root, "config");
+            const directory = join(root, "project");
+            const configPath = join(root, "config", "cortexkit", "magic-context.jsonc");
+            mkdirSync(directory, { recursive: true });
+            mkdirSync(join(root, "config", "cortexkit"), { recursive: true });
+            writeFileSync(configPath, JSON.stringify({ dreamer: bootDreamer }));
+            const boot = loadPluginConfigDetailed(directory, false).config;
+            const bootAvailable = isSmartNoteSurfaceAvailable(boot);
+            // Registration reads the boot config once, as the hosts do.
+            const registered = () =>
+                renderToolSurfaces({
+                    config: boot,
+                    directory,
+                    db,
+                    oc2SmartNotes: isSmartNoteSurfaceAvailable(boot),
+                });
+            const before = await registered();
+
+            const reader = pluginConfigReader(directory, boot);
+            writeFileSync(configPath, JSON.stringify({ dreamer: liveDreamer }));
+            const effective = reader.poll().effective;
+            // The live view did flip, so the comparison below is not vacuous...
+            expect(isSmartNoteSurfaceAvailable(effective)).toBe(!bootAvailable);
+            // ...while the boot config the tools were built from is untouched.
+            expect(isSmartNoteSurfaceAvailable(boot)).toBe(bootAvailable);
+            const after = await registered();
+            expect(after.text).toEqual(before.text);
+        }
+    } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    }
 });
