@@ -1032,7 +1032,7 @@
       }
     },
     "dreamer": {
-      "description": "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block.",
+      "description": "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block. Scheduled tasks run only while memory.enabled is true. Smart notes and user-observation collection need the dreamer runnable.",
       "type": "object",
       "properties": {
         "temperature": {
@@ -1062,7 +1062,7 @@
           }
         },
         "disable": {
-          "description": "Disable this agent",
+          "description": "Disable the dreamer: no scheduled or manual dream task runs. Also turns off smart notes (ctx_note drops surface_condition even with smart_notes.enabled true) and the historian's collection of user observations for review-user-memories. dreamer.inject_docs still applies.",
           "x-mc-live-reload": true,
           "type": "boolean"
         },
@@ -1970,6 +1970,7 @@
                 "schedule": "0 3 * * *",
                 "promotion_threshold": 3
               },
+              "description": "Promote recurring user observations into the <user-profile> block. A non-empty schedule also makes the historian collect user observations, but only while the dreamer is runnable (dreamer.disable not true); scheduled runs also need memory.enabled true.",
               "type": "object",
               "properties": {
                 "schedule": {
@@ -2051,7 +2052,7 @@
         },
         "inject_docs": {
           "default": true,
-          "description": "Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true)",
+          "description": "Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true). Not a dreamer setting despite its place under dreamer: it applies on every host, also with dreamer.disable true.",
           "type": "boolean"
         }
       }
@@ -2066,7 +2067,7 @@
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Enable smart-note authoring and condition evaluation. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface.",
+          "description": "Enable smart-note authoring and condition evaluation. Needs a runnable dreamer, which evaluates the conditions: with dreamer.disable true (or no dreamer block) ctx_note offers no surface_condition whatever this says. User-level only: tool definitions are process-wide. Changes require a host restart and rebuild each session's cached prompt once. Pending notes remain stored and unchecked; already-ready notes still surface.",
           "type": "boolean"
         },
         "retina_handoff": {
@@ -2282,7 +2283,7 @@
     },
     "historian_timeout_ms": {
       "default": 600000,
-      "description": "Timeout for each historian prompt call in both TypeScript and Rust transform modes, in milliseconds (default: 600000)",
+      "description": "Timeout for each historian prompt call in both TypeScript and Rust transform modes, in milliseconds (default: 600000). A historian setting kept at the top level for compatibility; no effect while historian.disable is true or compaction.enabled is false.",
       "x-mc-live-reload": true,
       "type": "number",
       "minimum": 60000
@@ -2292,7 +2293,7 @@
         "enabled": true,
         "min_clusters": 3
       },
-      "description": "Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail",
+      "description": "Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail. A historian setting kept at the top level for compatibility; no effect while historian.disable is true or compaction.enabled is false.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2631,12 +2632,12 @@
           "max_commits": 2000
         }
       },
-      "description": "Cross-session memory configuration",
+      "description": "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",
       "type": "object",
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Enable cross-session memory (default: true). Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
+          "description": "Enable cross-session project memory (default: true). Also gates the dreamer's schedule: while false, no scheduled dreamer task runs for the project (including retrospective, maintain-docs, evaluate-smart-notes, review-user-memories and the primer tasks), and a manual /ctx-dream runs only evaluate-smart-notes. memory.auto_search and memory.git_commit_indexing do not depend on it. Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
           "type": "boolean"
         },
         "injection_budget_tokens": {
@@ -2648,13 +2649,13 @@
         },
         "auto_promote": {
           "default": true,
-          "description": "Automatically promote eligible session facts into memory (default: true)",
+          "description": "Automatically promote eligible session facts into memory (default: true). No effect while memory.enabled is false.",
           "x-mc-live-reload": true,
           "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {
           "default": 3,
-          "description": "retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3)",
+          "description": "Currently has no effect: no code reads this value, and memories are not promoted to permanent by retrieval count. Kept so existing configs stay valid (min: 1, default: 3).",
           "type": "number",
           "minimum": 1
         },
@@ -2664,12 +2665,12 @@
             "score_threshold": 0.6,
             "min_prompt_chars": 20
           },
-          "description": "Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled.",
+          "description": "Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled despite its place under memory: with memory off it still searches past conversation and commits.",
           "type": "object",
           "properties": {
             "enabled": {
               "default": true,
-              "description": "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled.",
+              "description": "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled despite its place under memory: with memory off it still searches past conversation and commits, only the memory source is skipped.",
               "type": "boolean"
             },
             "score_threshold": {
@@ -2694,12 +2695,12 @@
             "since_days": 365,
             "max_commits": 2000
           },
-          "description": "Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled.",
+          "description": "Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled despite its place under memory.",
           "type": "object",
           "properties": {
             "enabled": {
               "default": false,
-              "description": "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled.",
+              "description": "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled despite its place under memory.",
               "x-mc-live-reload": true,
               "type": "boolean"
             },

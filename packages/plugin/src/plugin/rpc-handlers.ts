@@ -1645,9 +1645,8 @@ export function registerRpcHandlers(
         const { resolveHistorianModel } = await importPluginModule(
             () => import("../shared/model-resolution"),
         );
-        const { userMemoryCollectionEnabled } = await importPluginModule(
-            () => import("../features/magic-context/dreamer/task-config"),
-        );
+        const { userObservationCollectionEnabled, userObservationsRequested } =
+            await importPluginModule(() => import("../features/magic-context/dreamer/task-config"));
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
         const runConfig = historianRunConfig(
             config,
@@ -1670,7 +1669,8 @@ export function registerRpcHandlers(
             autoPromote: runConfig.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,
             fallbackModels: historianModel.fallbacks,
-            userMemoriesEnabled: userMemoryCollectionEnabled(runConfig.dreamer),
+            userMemoriesEnabled: userObservationCollectionEnabled(runConfig.dreamer),
+            userObservationsRequested: userObservationsRequested(runConfig.dreamer),
             historianTwoPass: runConfig.historian?.two_pass === true,
             historianExpandTools: runConfig.historian?.expand_tools,
             getNotificationParams: (sessionId) =>

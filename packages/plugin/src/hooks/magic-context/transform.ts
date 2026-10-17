@@ -553,6 +553,8 @@ export interface TransformDeps {
         expandTools?: Record<string, string | false>;
         autoPromote: boolean;
         userMemoriesEnabled: boolean;
+        /** False when the dreamer is not runnable; see userObservationsRequested(). */
+        userObservationsRequested?: boolean;
         commitClusterTrigger?: { enabled: boolean; min_clusters: number };
         toastDurationMs?: number;
         chunkTokens: number;
@@ -598,6 +600,8 @@ export interface TransformDeps {
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
+    /** False when the dreamer is not runnable, so the historian skips user observations. */
+    userObservationsRequested?: boolean;
 
     /** When true, inject wall-clock gap markers (<!-- +Xm -->) on user messages and
      *  add compact date ranges to compartment headings in <session-history>.
@@ -1968,6 +1972,8 @@ export function createTransform(deps: TransformDeps) {
                     getNotificationParams: () => notificationParams,
                     experimentalUserMemories:
                         historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
+                    userObservationsRequested:
+                        historianRun?.userObservationsRequested ?? deps.userObservationsRequested,
                     experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                     historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
                     historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
@@ -2634,6 +2640,8 @@ export function createTransform(deps: TransformDeps) {
             deferredHistoryRefreshSessions,
             experimentalUserMemories:
                 historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
+            userObservationsRequested:
+                historianRun?.userObservationsRequested ?? deps.userObservationsRequested,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
             historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,

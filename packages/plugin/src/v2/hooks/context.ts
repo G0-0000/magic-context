@@ -1,5 +1,6 @@
 import { loadPluginConfigDetailed } from "../../config";
-import { isCompactionEnabled } from "../../config/agent-disable";
+import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
+import { logConfigDependencyNotesOnce } from "../../config/dependency-notes";
 import { withLiveDreamerOutputCap } from "../../config/live-child-output-cap";
 import {
     dreamerRunConfig,
@@ -8,7 +9,10 @@ import {
 } from "../../config/live-run-config";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
-import { userMemoryCollectionEnabled } from "../../features/magic-context/dreamer/task-config";
+import {
+    userObservationCollectionEnabled,
+    userObservationsRequested,
+} from "../../features/magic-context/dreamer/task-config";
 import { formatUnsupportedDreamTasks } from "../../features/magic-context/dreamer/task-registry";
 import {
     type FailClosedReason,
@@ -673,6 +677,9 @@ export async function registerContext(context: V2Context) {
         directory,
         warn: (message) => log(`[magic-context] config warning: ${message}`),
     });
+    // Settings that are on but inert because another section turns off what
+    // they rely on (for example smart notes with the dreamer disabled).
+    logConfigDependencyNotesOnce(config, log);
     // Tools are registered only when this first open succeeds: registering them
     // later would change the tool list mid-session, so they need a restart. A
     // refused open is retried on later turns through the gate, and the first
@@ -975,7 +982,8 @@ export async function registerContext(context: V2Context) {
             twoPass: fresh.historian?.two_pass === true,
             expandTools: fresh.historian?.expand_tools,
             autoPromote: fresh.memory?.auto_promote ?? true,
-            userMemoriesEnabled: userMemoryCollectionEnabled(fresh.dreamer),
+            userMemoriesEnabled: userObservationCollectionEnabled(fresh.dreamer),
+            userObservationsRequested: userObservationsRequested(fresh.dreamer),
             commitClusterTrigger: fresh.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(
                 resolveHistorianContextLimit(models.primary?.model),
@@ -1578,7 +1586,9 @@ export async function registerContext(context: V2Context) {
             draft,
             promptSurfaceRuntime,
             config.prompt_surface,
-            config.smart_notes.enabled,
+            // A disabled dreamer cannot evaluate smart notes, so ctx_note loses
+            // its smart-note text exactly as with smart_notes.enabled=false.
+            isSmartNoteSurfaceAvailable(config),
         );
         const admissionDb = db ?? storage.current();
         const replayFits: NonNullable<

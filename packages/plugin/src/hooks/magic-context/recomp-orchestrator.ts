@@ -68,6 +68,8 @@ export interface ManagedRecompContext {
      *  be empty when `/ctx-recomp` runs before the first transform pass). */
     fallbackModelId?: string;
     userMemoriesEnabled: boolean;
+    /** False when the dreamer is not runnable; wrapup's historian then skips user observations. */
+    userObservationsRequested?: boolean;
     /** Two-pass historian (editor cleanup) — config `historian.two_pass`. */
     historianTwoPass?: boolean;
     historianExpandTools?: Record<string, string | false>;

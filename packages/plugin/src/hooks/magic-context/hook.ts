@@ -17,6 +17,8 @@ import { OpenCodeRetrospectiveRawProvider } from "../../features/magic-context/d
 import {
     buildDreamTaskRuntimeConfigs,
     userMemoryCollectionEnabled,
+    userObservationCollectionEnabled,
+    userObservationsRequested,
 } from "../../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
 import {
@@ -326,7 +328,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             twoPass: config.historian?.two_pass === true,
             expandTools: config.historian?.expand_tools,
             autoPromote: config.memory?.auto_promote ?? true,
-            userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
+            userMemoriesEnabled: userObservationCollectionEnabled(config.dreamer),
+            userObservationsRequested: userObservationsRequested(config.dreamer),
             commitClusterTrigger: config.commit_cluster_trigger,
             chunkTokens: deriveHistorianChunkTokens(
                 resolveHistorianContextLimit(attempts.primary?.model),
@@ -507,6 +510,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             // review-user-memories task (schedule != ""). Replaces the v1
             // user_memories.enabled flag that gated both collection and review.
             userMemoriesEnabled: historianRun.userMemoriesEnabled,
+            userObservationsRequested: historianRun.userObservationsRequested,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
             getNotificationParams: (sid) =>
                 getLiveNotificationParams(
@@ -798,7 +802,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         projectPath,
         historianRunnable,
         compactionOff,
-        experimentalUserMemories: userMemoryCollectionEnabled(dreamerConfig),
+        experimentalUserMemories: userObservationCollectionEnabled(dreamerConfig),
+        userObservationsRequested: userObservationsRequested(dreamerConfig),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         muralEnabled: deps.config.mural?.enabled === true,
         historianTwoPass: deps.config.historian?.two_pass === true,

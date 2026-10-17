@@ -1,5 +1,8 @@
 import type { MagicContextPluginConfig } from "../../config";
-import { userMemoryCollectionEnabled } from "../../features/magic-context/dreamer/task-config";
+import {
+    userObservationCollectionEnabled,
+    userObservationsRequested,
+} from "../../features/magic-context/dreamer/task-config";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import {
     getAutoEmbeddingSessionCoverage,
@@ -39,7 +42,8 @@ export function createV2TransformFeatureDeps(
         },
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         historyBudgetPercentage: config.history_budget_percentage,
-        experimentalUserMemories: userMemoryCollectionEnabled(config.dreamer),
+        experimentalUserMemories: userObservationCollectionEnabled(config.dreamer),
+        userObservationsRequested: userObservationsRequested(config.dreamer),
         experimentalTemporalAwareness: config.temporal_awareness === true,
         muralEnabled: config.mural?.enabled === true,
         autoSearch: {

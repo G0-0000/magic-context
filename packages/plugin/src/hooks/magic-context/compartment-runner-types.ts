@@ -175,6 +175,9 @@ export interface CompartmentRunnerDeps<
     getNotificationParams?: () => NotificationParams;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
+    /** False when the dreamer is not runnable, so the historian prompt asks it
+     *  to skip user observations nothing could review. Undefined counts as true. */
+    userObservationsRequested?: boolean;
     /** When true, inject wall-clock dates on compartments in <session-history>. */
     experimentalTemporalAwareness?: boolean;
     /** When true, run an editor pass after successful historian output to clean

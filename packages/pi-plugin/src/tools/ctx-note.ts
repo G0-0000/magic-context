@@ -262,7 +262,13 @@ export function createCtxNoteTool(
 	const resolveProject =
 		deps.resolveProjectIdentity ?? resolveProjectIdentityForSession;
 	const parameters = structuredClone(ParamsSchema);
-	if (deps.smartNotesEnabled === false) {
+	// The dreamer evaluates smart-note conditions, so a disabled dreamer hides the
+	// smart-note argument and text exactly as smart_notes.enabled=false does.
+	// Registration happens once, from the boot project's settings; an omitted
+	// dreamerEnabled counts as not disabled.
+	const smartNoteSurface =
+		deps.smartNotesEnabled !== false && deps.dreamerEnabled !== false;
+	if (!smartNoteSurface) {
 		delete (parameters.properties as Record<string, unknown>).surface_condition;
 		(
 			parameters.properties.filter as unknown as { description: string }
@@ -271,10 +277,9 @@ export function createCtxNoteTool(
 	return {
 		name: "ctx_note",
 		label: "Magic Context: Notes",
-		description:
-			deps.smartNotesEnabled === false
-				? withoutSmartNoteText(CTX_NOTE_DESCRIPTION)
-				: CTX_NOTE_DESCRIPTION,
+		description: smartNoteSurface
+			? CTX_NOTE_DESCRIPTION
+			: withoutSmartNoteText(CTX_NOTE_DESCRIPTION),
 		parameters,
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {
 			params = unwrapImitatedReducedArgs(params, ["action", "content"], {

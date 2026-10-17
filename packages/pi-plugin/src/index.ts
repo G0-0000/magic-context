@@ -28,6 +28,7 @@ import {
 	isCompactionEnabled,
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
+import { logConfigDependencyNotesOnce } from "@magic-context/core/config/dependency-notes";
 import {
 	changedLiveKeys,
 	dreamerRunConfig,
@@ -44,6 +45,8 @@ import type {
 import {
 	summarizeDreamSchedule,
 	userMemoryCollectionEnabled,
+	userObservationCollectionEnabled,
+	userObservationsRequested,
 } from "@magic-context/core/features/magic-context/dreamer/task-config";
 import {
 	type FailClosedReason,
@@ -1114,7 +1117,8 @@ export function resolveHistorianFromConfig(
 		historyBudgetPercentage: config.history_budget_percentage,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
-		userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
+		userMemoriesEnabled: userObservationCollectionEnabled(config.dreamer),
+		userObservationsRequested: userObservationsRequested(config.dreamer),
 		language: config.language,
 		allowHomeProject: config.allow_home_project,
 	};
@@ -1401,6 +1405,9 @@ async function startPiMagicContextRuntime(
 		`loaded v${PLUGIN_VERSION} | harness=${PI_HARNESS_KIND} (via ${PI_HARNESS_DETECTION.via}) | db=${dbPath} | ` +
 			`project=${projectIdentity || "(none)"} | dir=${projectDir}`,
 	);
+	// Settings that are on but inert because another section turns off what
+	// they rely on (for example smart notes with the dreamer disabled).
+	logConfigDependencyNotesOnce(config, log);
 	// Pi tools are registered once per process, so this mode is intentionally
 	// boot-resolved rather than following later /cd project config changes.
 	const compactionOff = !isCompactionEnabled(config);
@@ -2208,7 +2215,10 @@ async function startPiMagicContextRuntime(
 		memoryEnabled: bootProjectDeps.config.memory.enabled,
 		autoPromote: bootProjectDeps.config.memory.auto_promote,
 		compactionOff,
-		userMemoriesEnabled: userMemoryCollectionEnabled(
+		userMemoriesEnabled: userObservationCollectionEnabled(
+			bootProjectDeps.config.dreamer,
+		),
+		userObservationsRequested: userObservationsRequested(
 			bootProjectDeps.config.dreamer,
 		),
 		executeThresholdPercentage:
@@ -2233,7 +2243,10 @@ async function startPiMagicContextRuntime(
 				memoryEnabled: current.config.memory.enabled,
 				autoPromote: fresh.memory.auto_promote,
 				compactionOff,
-				userMemoriesEnabled: userMemoryCollectionEnabled(
+				userMemoriesEnabled: userObservationCollectionEnabled(
+					current.config.dreamer,
+				),
+				userObservationsRequested: userObservationsRequested(
 					current.config.dreamer,
 				),
 				executeThresholdPercentage: current.config.execute_threshold_percentage,

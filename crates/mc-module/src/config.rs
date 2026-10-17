@@ -126,8 +126,12 @@ pub struct McModuleConfig {
     /// Mirrors the TS auto-promote switch. Facts are dropped when this is false.
     pub auto_promote: bool,
     /// Privacy gate controlling whether historian user observations may be collected for later
-    /// review and promotion.
+    /// review and promotion. False whenever `dreamer.disable` is true, because the dreamer runs
+    /// the review that would read them.
     pub user_memory_collection_enabled: bool,
+    /// Whether the historian prompt asks for `<user_observations>` at all: false when the
+    /// dreamer is not runnable (the plugin's `userObservationsRequested`).
+    pub user_observations_requested: bool,
     /// Historian model context limit; configurable until the module has a model catalog.
     pub historian_context_limit_tokens: usize,
     /// True only when the user supplied a known historian model window.
@@ -194,6 +198,7 @@ impl Default for McModuleConfig {
             caveman: CavemanConfig::default(),
             auto_promote: true,
             user_memory_collection_enabled: false,
+            user_observations_requested: true,
             historian_context_limit_tokens: DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS,
             historian_context_limit_known: false,
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
@@ -919,6 +924,14 @@ fn merge_tiers_with_warnings(
     }
 
     apply_catalog_config(&mut cfg.catalog, user, project);
+    // The dreamer runs review-user-memories, so with `dreamer.disable: true` no
+    // review could ever read collected observations: collect none, whatever the
+    // schedule says. The historian prompt asks for them only while the dreamer
+    // is runnable, matching the plugin's userObservationsRequested.
+    if dreamer_disabled(user, project) {
+        cfg.user_memory_collection_enabled = false;
+    }
+    cfg.user_observations_requested = cfg.catalog.dreamer_runnable;
     cfg.smart_notes_enabled = user
         .and_then(|value| value.pointer("/smart_notes/enabled"))
         .and_then(Value::as_bool)
@@ -1005,13 +1018,17 @@ fn apply_catalog_config(
         .into_iter()
         .flatten()
         .any(|tier| tier.pointer("/dreamer").is_some_and(Value::is_object));
-    // The project tier's `disable` takes precedence over the user tier's.
-    let disabled = [project, user]
+    catalog.dreamer_runnable = configured && !dreamer_disabled(user, project);
+}
+
+/// `dreamer.disable` across both tiers; the project tier's value takes
+/// precedence over the user tier's.
+fn dreamer_disabled(user: Option<&Value>, project: Option<&Value>) -> bool {
+    [project, user]
         .into_iter()
         .flatten()
         .find_map(|tier| tier.pointer("/dreamer/disable").and_then(Value::as_bool))
-        .unwrap_or(false);
-    catalog.dreamer_runnable = configured && !disabled;
+        .unwrap_or(false)
 }
 
 fn warn_ignored_project_key(value: &Value, pointer: &str, warnings: &mut Vec<String>) {
@@ -2081,6 +2098,38 @@ mod tests {
             "user_memories": { "enabled": false }
         });
         assert!(!user_memory_collection_at(&legacy_disabled).unwrap());
+    }
+
+    #[test]
+    fn dreamer_disable_stops_user_observation_collection_and_request() {
+        let scheduled = serde_json::json!({
+            "dreamer": { "tasks": { "review-user-memories": { "schedule": "0 3 * * *" } } }
+        });
+        let enabled = merge_tiers(Some(&scheduled), None);
+        assert!(enabled.user_memory_collection_enabled);
+        assert!(enabled.user_observations_requested);
+
+        // A project-tier disable wins over the user tier's schedule.
+        let project_off = serde_json::json!({ "dreamer": { "disable": true } });
+        let disabled = merge_tiers(Some(&scheduled), Some(&project_off));
+        assert!(!disabled.user_memory_collection_enabled);
+        assert!(!disabled.user_observations_requested);
+
+        // ...and a project-tier `disable: false` wins over a user-tier `true`.
+        let user_off = serde_json::json!({
+            "dreamer": {
+                "disable": true,
+                "tasks": { "review-user-memories": { "schedule": "0 3 * * *" } }
+            }
+        });
+        let project_on = serde_json::json!({ "dreamer": { "disable": false } });
+        let reenabled = merge_tiers(Some(&user_off), Some(&project_on));
+        assert!(reenabled.user_memory_collection_enabled);
+        assert!(reenabled.user_observations_requested);
+
+        // With no dreamer block the dreamer never runs, so nothing is requested.
+        let none = merge_tiers(Some(&serde_json::json!({})), None);
+        assert!(!none.user_observations_requested);
     }
 
     #[test]

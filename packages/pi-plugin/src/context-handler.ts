@@ -1529,6 +1529,8 @@ export interface PiHistorianOptions {
 	/** User-memory feature gate (`dreamer.user_memories.enabled`). Gates whether
 	 *  historian user observations are persisted as candidates. */
 	userMemoriesEnabled?: boolean;
+	/** False when the dreamer is not runnable; the historian then skips user observations. */
+	userObservationsRequested?: boolean;
 	language?: string;
 	/** Notify UI/status surfaces after historian state changes. */
 	onStatusChange?: (ctx: ExtensionContext, sessionId: string) => void;
@@ -7425,6 +7427,7 @@ function spawnPiHistorianRun(args: {
 					allowHomeProject: historian.allowHomeProject,
 					autoPromote: historian.autoPromote,
 					userMemoriesEnabled: historian.userMemoriesEnabled,
+					userObservationsRequested: historian.userObservationsRequested,
 					language: historian.language,
 					compartmentLeaseHolderId: holderId,
 					notifyIssue: (text) => {

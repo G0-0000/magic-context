@@ -577,6 +577,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             sessionCompartments: priorCompartments,
             memories: () => getMemoriesByProject(db, projectPath, ["active", "permanent"]),
             memoryEnabled: deps.memoryEnabled !== false,
+            userObservationsRequested: deps.userObservationsRequested,
         });
         if (!promptFit.ok) {
             telemetry.failureReason = promptFit.reason;
@@ -768,6 +769,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             projectMemory: promptFit.projectMemory,
             inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
             memoryEnabled: deps.memoryEnabled !== false,
+            userObservationsRequested: deps.userObservationsRequested,
         });
 
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
