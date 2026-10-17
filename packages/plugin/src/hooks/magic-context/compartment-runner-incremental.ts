@@ -554,8 +554,18 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const producerLimits = { input: producerWindow.inputLimitTokens };
         const producerReserve = producerWindow.maxOutputTokens;
         const projectPath = resolveProjectIdentity(directory ?? process.cwd());
+        // Every attempt in the chain (configured fallbacks, then the session
+        // model as the last resort) sends this same prompt, so size it for each
+        // of their windows too, resolved as their pre-send check resolves them.
+        const fallbackWindows = [
+            ...(deps.fallbackModels ?? []).map((entry) => toModelEntry(entry)?.model),
+            deps.fallbackModelId,
+        ]
+            .filter((key): key is string => typeof key === "string" && key !== producerModel)
+            .map((key) => resolveHistorianProducerWindow(key, deps.historianMaxOutputTokens));
         const promptFit = fitHistorianPrompt({
             window: producerWindow,
+            fallbackWindows,
             systemPrompt: withContentLanguageDirective(
                 COMPARTMENT_AGENT_SYSTEM_PROMPT,
                 deps.language,
@@ -803,8 +813,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             twoPass: deps.historianTwoPass,
             language: deps.language,
         });
-        // A window refusal here comes from a fallback model (the primary was fitted
-        // above). Treat it like any other failed pass: count it, notify, and keep
+        // A window refusal here comes from a fallback too small to hold even a
+        // minimal prompt (every other chain model was fitted above). Treat it like
+        // any other failed pass: count it, notify, and keep
         // the reserved drain budget spent so the next trigger does not retry at once.
         if (!validatedPass.ok) {
             // Always track historian failures regardless of usage percentage.

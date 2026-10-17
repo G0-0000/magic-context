@@ -1910,6 +1910,44 @@ pub(crate) fn producer_input_token_limit_with_input(
     (limit > 0).then_some(limit)
 }
 
+/// The input limit the per-attempt admission check measures a historian prompt
+/// against before sending it to `model`, or None when no positive limit can be
+/// derived (an unknown window, or one the output reserve fills) and the prompt
+/// goes out unguarded.
+///
+/// `legacy_window` is the older single-window setting for this chain entry: the
+/// configured historian context limit for the primary, a supplied fallback limit
+/// otherwise. The chunk assembler sizes the chunk with this same function, so a
+/// prompt it builds passes the check for every model it was sized for.
+pub(crate) fn attempt_producer_input_limit(
+    model: &str,
+    model_limits: &std::collections::BTreeMap<String, HistorianModelLimits>,
+    legacy_window: Option<usize>,
+    historian_context_limit_tokens: Option<usize>,
+    max_output_tokens: u32,
+) -> Option<usize> {
+    let resolved = model_limits.get(model);
+    let current_window = resolved
+        .and_then(|limit| limit.context)
+        .or(legacy_window)
+        .or(historian_context_limit_tokens)
+        .map(|window| {
+            if resolved.and_then(|limit| limit.input).is_some() {
+                window
+            } else {
+                historian_context_limit_tokens.map_or(window, |cap| window.min(cap))
+            }
+        });
+    let output = resolved
+        .and_then(|limit| limit.output)
+        .unwrap_or(max_output_tokens);
+    producer_input_token_limit_with_input(
+        current_window,
+        resolved.and_then(|limit| limit.input),
+        output,
+    )
+}
+
 pub(crate) fn producer_window_failure_reason_with_input(
     producer_source_tokens: usize,
     context_limit_tokens: Option<usize>,
@@ -2163,32 +2201,17 @@ where
             },
             true,
         );
-        let resolved = request.model_limits.get(model);
         let legacy_window = if index == 0 {
             request.historian_context_limit_tokens
         } else {
             request.fallback_context_limits.get(model).copied()
         };
-        let current_window = resolved
-            .and_then(|limit| limit.context)
-            .or(legacy_window)
-            .or(request.historian_context_limit_tokens)
-            .map(|window| {
-                if resolved.and_then(|limit| limit.input).is_some() {
-                    window
-                } else {
-                    request
-                        .historian_context_limit_tokens
-                        .map_or(window, |cap| window.min(cap))
-                }
-            });
-        let output = resolved
-            .and_then(|limit| limit.output)
-            .unwrap_or(request.max_output_tokens);
-        let fit_limit = producer_input_token_limit_with_input(
-            current_window,
-            resolved.and_then(|limit| limit.input),
-            output,
+        let fit_limit = attempt_producer_input_limit(
+            model,
+            &request.model_limits,
+            legacy_window,
+            request.historian_context_limit_tokens,
+            request.max_output_tokens,
         );
         if fit_limit.is_none() {
             static UNKNOWN_WINDOWS: std::sync::OnceLock<
