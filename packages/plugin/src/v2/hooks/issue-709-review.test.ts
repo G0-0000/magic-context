@@ -425,9 +425,11 @@ async function fixture(
             const draft = beforeContext ? inputDraft() : structuredClone(lastDraft!);
             await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("compaction hook supplied no summary");
-            // Compaction no longer refuses before durable storage opens, so a test
-            // may fold twice in one session. Each fold gets its own id and the next
-            // free seq, after the source rows and any earlier fold.
+            // The compaction hook used to reject a request that arrived while the
+            // durable store was still opening, so tests that retried a cold fold
+            // only ever wrote one fold row. It now waits for the store and both
+            // attempts succeed, so each fold row needs its own id and a seq after
+            // the source rows and any earlier fold.
             const { last } = raw
                 .prepare("SELECT MAX(seq) AS last FROM session_message WHERE session_id = ?")
                 .get(session) as { last: number | null };

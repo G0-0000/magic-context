@@ -1392,11 +1392,11 @@ export async function registerContext(context: V2Context) {
             state,
             projectDirectory: directory,
             hardSignals: {
-                // Reuse systemPromptHash persisted by the system hook after guidance,
-                // preset and date resolution. Hashing the raw compaction draft instead
-                // would make the next unchanged context pass rebuild the cached head.
-                // Compaction can run before that hook, so an unknown identity stays
-                // empty for the hook to initialize.
+                // Reuse the systemPromptHash saved by the system hook after it has
+                // resolved guidance, presets and the date. Hashing the raw compaction
+                // draft instead would make the next unchanged context pass rebuild the
+                // cached head. Compaction can run before the system hook, so an
+                // unknown identity stays empty for that hook to initialize.
                 systemHash: state.systemPromptHash ?? "",
                 toolSetHash: getCurrentToolSetHash(
                     draft.model.providerID,
