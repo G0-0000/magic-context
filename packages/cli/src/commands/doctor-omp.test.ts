@@ -552,8 +552,10 @@ describe("OMP doctor", () => {
 
 describe("OMP doctor Hide Secrets check", () => {
     /**
-     * Healthy OMP fixture under $TMPDIR/magic-context/omp-hide-secrets/ with
-     * `userConfig` as the OMP agent config.yml (omitted when undefined).
+     * OMP install with Magic Context installed and enabled, built under
+     * $TMPDIR/magic-context/omp-hide-secrets/ so the real ~/.omp is never read.
+     * `userConfig` is the OMP agent config.yml content; undefined writes no
+     * file, and `{ directory: true }` puts a directory there so reading fails.
      */
     async function runWithUserConfig(
         userConfig: string | undefined | { directory: true },

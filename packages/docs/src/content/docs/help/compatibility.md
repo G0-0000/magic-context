@@ -69,14 +69,14 @@ These settings don't make Magic Context disable itself, but they can stop turns 
 
 **Key:** `secrets.enabled` in OMP's `config.yml` (shown as **Hide Secrets** in OMP's settings; off by default)
 
-**What happens:** With Hide Secrets on, OMP replaces secrets in message text after Magic Context has prepared the request. The request then no longer matches what Magic Context checked, so Magic Context refuses to send it and shows "Magic Context could not safely prepare this turn; send your message again." Sending again doesn't help, because the same text is masked the same way. This happens when:
+**What happens:** With Hide Secrets on, OMP replaces secrets in message text after Magic Context has prepared the request. The request then no longer matches what Magic Context checked, so Magic Context refuses to send it and shows "Magic Context could not safely prepare this turn; send your message again." Sending again usually hits the same refusal, because OMP masks the same text the same way. This happens when:
 
-- **A reply from the agent contains a secret** and you use an OpenAI Responses model (`openai-responses`, `azure-openai-responses` or `openai-codex-responses`). Every turn in that session is refused after you restart OMP.
+- **A reply from the agent contains a secret** and your model uses OpenAI's Responses API (OMP API types `openai-responses`, `azure-openai-responses` and `openai-codex-responses`). Every turn in that session is refused after you restart OMP.
 - **A tool result contains a secret** and the tool call that produced it is no longer in the conversation. Most providers are affected.
 
 Secrets in your own messages, and in tool results whose tool call is still in the conversation, don't cause refusals.
 
-**Workaround:** Turn Hide Secrets off for sessions that Magic Context manages. If a session is already stuck, start a new session. A proper fix needs a change in OMP, which has been requested.
+**Workaround:** Turn Hide Secrets off for sessions that Magic Context manages. If a session is already stuck, start a new session. A proper fix needs a new extension hook in OMP.
 
 ## What "Magic Context disabled itself" looks like
 
