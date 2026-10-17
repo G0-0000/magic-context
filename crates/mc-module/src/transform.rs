@@ -7038,7 +7038,7 @@ fn apply_once(
         meta.last_execute_ordinal = crate::reclaim_distance::tool_bookmark(
             &projection,
             &tail_for_selection,
-            context_limit_tokens,
+            resolved_context_limit_tokens(&effective_usage, req.geometry.as_ref()).unwrap_or(0.0),
         )
         .max(meta.last_execute_ordinal);
     }
@@ -8478,13 +8478,20 @@ fn effective_context_limit_tokens(
     usage: &ModuleUsage,
     geometry: Option<&TransformGeometry>,
 ) -> f64 {
+    resolved_context_limit_tokens(usage, geometry).unwrap_or(200_000.0)
+}
+
+fn resolved_context_limit_tokens(
+    usage: &ModuleUsage,
+    geometry: Option<&TransformGeometry>,
+) -> Option<f64> {
     if usage.context_limit_tokens >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
         && geometry.is_none_or(|geometry| {
             geometry.absolute_wall < crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT
                 || usage.context_limit_tokens <= geometry.absolute_wall
         })
     {
-        return usage.context_limit_tokens as f64;
+        return Some(usage.context_limit_tokens as f64);
     }
     // Usage is unfilled on the first pass of a session (no observed pass yet),
     // but geometry arrives on every request including the first. The resolved
@@ -8493,10 +8500,10 @@ fn effective_context_limit_tokens(
     // so this only replaces the fallback arm.
     if let Some(geometry) = geometry {
         if geometry.usable_soft >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT {
-            return geometry.usable_soft as f64;
+            return Some(geometry.usable_soft as f64);
         }
     }
-    200_000.0
+    None
 }
 
 fn effective_hard_context_limit_tokens(
@@ -27186,13 +27193,16 @@ pub(crate) mod tests {
         ];
         for index in 0..24 {
             let role = if index < 3 { "user" } else { "assistant" };
-            let mut message = wire_item(
+            let message = wire_item(
                 role,
                 &format!("tail-{index}"),
                 index + 6,
-                &["Background task finished."],
+                &[if index < 3 {
+                    "Next user request"
+                } else {
+                    "Continuing work"
+                }],
             );
-            message.ck.meta.synthetic = index < 3;
             messages.push(message);
         }
         // The newest three tool outputs stay protected even with a zero token

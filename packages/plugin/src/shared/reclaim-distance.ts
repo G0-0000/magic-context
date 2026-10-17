@@ -10,16 +10,21 @@ export interface ReclaimDistanceEntry {
     toolOutputTag?: number;
 }
 
-/** Magic Context's reminders do not start a task; host wake notices still advance it. */
+/** Only authored content starts a user turn; host control notices do not. */
 export function isReclaimUserTurn(args: {
     role?: string;
     syntheticHead?: boolean;
-    parts: readonly { kind: string; text?: string }[];
+    synthetic?: boolean;
+    ignored?: boolean;
+    parts: readonly { kind: string; text?: string; synthetic?: boolean; ignored?: boolean }[];
 }): boolean {
     return (
         args.role === "user" &&
         !args.syntheticHead &&
+        !args.synthetic &&
+        !args.ignored &&
         args.parts.some((part) => {
+            if (part.synthetic || part.ignored) return false;
             if (part.kind !== "text" && part.kind !== "image" && part.kind !== "file") return false;
             if (part.kind !== "text") return true;
             return stripReclaimMcText(part.text ?? "").trim().length > 0;
@@ -44,7 +49,7 @@ export function stripReclaimMcText(text: string): string {
 /**
  * A free cache rebuild is not evidence that the model has moved on. An output
  * is far behind only after three newer user turns or a quarter-window of newer
- * content. Return the newest such output; callers drop against the PREVIOUS
+ * content. Return a prefix of qualifying tags; callers drop against the PREVIOUS
  * durable bookmark before advancing it, so distance must survive two rebuilds.
  */
 export function farBehindToolBookmark(
@@ -53,7 +58,8 @@ export function farBehindToolBookmark(
 ): number {
     let newerTurns = 0;
     let newerTokens = 0;
-    let bookmark = 0;
+    const farTags: number[] = [];
+    let firstYoungTag = Infinity;
     const seenOutputs = new Set<number>();
     const tokenDistance =
         usableWindow > 0 && Number.isFinite(usableWindow)
@@ -68,11 +74,18 @@ export function farBehindToolBookmark(
         if (tag !== undefined && !seenOutputs.has(tag)) {
             seenOutputs.add(tag);
             if (newerTurns >= RECLAIM_DISTANCE_USER_TURNS || newerTokens >= tokenDistance) {
-                bookmark = Math.max(bookmark, tag);
+                farTags.push(tag);
+            } else {
+                firstYoungTag = Math.min(firstYoungTag, tag);
             }
         }
         if (entry.userTurn) newerTurns++;
         if (Number.isFinite(entry.tokens) && entry.tokens > 0) newerTokens += entry.tokens;
     }
-    return bookmark;
+    // Tags follow call order, not result arrival. A late lower-tag sibling must
+    // hold the prefix even when a higher-tag result is already distant.
+    return farTags.reduce(
+        (bookmark, tag) => (tag < firstYoungTag ? Math.max(bookmark, tag) : bookmark),
+        0,
+    );
 }

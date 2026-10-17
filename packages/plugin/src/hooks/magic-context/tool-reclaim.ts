@@ -12,6 +12,7 @@ import {
     type ReclaimDistanceEntry,
     stripReclaimMcText,
 } from "../../shared/reclaim-distance";
+import { estimatePartImageTokens } from "./final-wire-token-estimate";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike, TagTarget } from "./tag-messages";
 
@@ -82,11 +83,11 @@ export function toolReclaimDistanceEntries(
         const parts = message.parts.map(distancePart);
         let userTurn = isReclaimUserTurn({ ...message.info, parts });
         for (const [index, part] of parts.entries()) {
-            const authored = part.kind === "text" || part.kind === "image" || part.kind === "file";
+            const authored = isReclaimUserTurn({ role: "user", parts: [part] });
             entries.push({
                 tokens: message.info.syntheticHead
                     ? 0
-                    : estimateTokens(stripReclaimMcText(part.text ?? "")),
+                    : estimateTokens(stripReclaimMcText(part.text ?? "")) + part.imageTokens,
                 userTurn: userTurn && authored,
                 toolOutputTag: outputTags.get(message.parts[index]),
             });
@@ -96,24 +97,39 @@ export function toolReclaimDistanceEntries(
     return entries;
 }
 
-function distancePart(raw: unknown): { kind: string; text?: string } {
-    if (!raw || typeof raw !== "object") return { kind: "structural" };
+function distancePart(raw: unknown): {
+    kind: string;
+    text?: string;
+    synthetic?: boolean;
+    ignored?: boolean;
+    imageTokens: number;
+} {
+    if (!raw || typeof raw !== "object") return { kind: "structural", imageTokens: 0 };
     const part = raw as Record<string, unknown>;
+    const provenance = { synthetic: part.synthetic === true, ignored: part.ignored === true };
     if (typeof part.getText === "function") {
         const text: unknown = part.getText();
-        return { kind: String(part.kind), text: typeof text === "string" ? text : undefined };
+        return {
+            ...provenance,
+            kind: String(part.kind),
+            text: typeof text === "string" ? text : undefined,
+            imageTokens: typeof part.imageTokens === "function" ? Number(part.imageTokens()) : 0,
+        };
     }
+    const metadata = { ...provenance, imageTokens: estimatePartImageTokens(raw) };
     if (part.type === "tool") {
         const state = part.state as { input?: unknown; output?: unknown } | undefined;
         return {
+            ...metadata,
             kind: "tool",
             text: `${JSON.stringify(state?.input ?? {})}\n${typeof state?.output === "string" ? state.output : JSON.stringify(state?.output ?? "")}`,
         };
     }
     if (part.type === "tool_use")
-        return { kind: "tool_use", text: JSON.stringify(part.input ?? {}) };
+        return { ...metadata, kind: "tool_use", text: JSON.stringify(part.input ?? {}) };
     if (part.type === "tool_result")
         return {
+            ...metadata,
             kind: "tool_result",
             text:
                 typeof part.content === "string"
@@ -121,6 +137,7 @@ function distancePart(raw: unknown): { kind: string; text?: string } {
                     : JSON.stringify(part.content ?? ""),
         };
     return {
+        ...metadata,
         kind: String(part.type),
         text:
             typeof part.text === "string"

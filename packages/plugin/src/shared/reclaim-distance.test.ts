@@ -45,18 +45,19 @@ describe("reclaim distance", () => {
         expect(farBehindToolBookmark([output(1), turn(), turn(), turn()], 0)).toBe(1);
     });
 
-    it("counts host wake notices but not MC reminders, heads or result carriers", () => {
+    it("excludes synthetic host wakes, MC reminders, heads and result carriers", () => {
         expect(
             isReclaimUserTurn({
                 role: "user",
                 parts: [
                     {
                         kind: "text",
+                        synthetic: true,
                         text: "<system-reminder>Background task finished.</system-reminder>",
                     },
                 ],
             }),
-        ).toBe(true);
+        ).toBe(false);
         expect(
             isReclaimUserTurn({
                 role: "user",
@@ -87,5 +88,24 @@ describe("reclaim distance", () => {
                 ],
             }),
         ).toBe(true);
+    });
+
+    it("counts an authored part even after synthetic or ignored parts", () => {
+        for (const provenance of [{ synthetic: true }, { ignored: true }]) {
+            expect(
+                isReclaimUserTurn({ role: "user", parts: [{ kind: "image", ...provenance }] }),
+            ).toBe(false);
+            expect(
+                isReclaimUserTurn({
+                    role: "user",
+                    parts: [{ kind: "text", text: "notice", ...provenance }, { kind: "image" }],
+                }),
+            ).toBe(true);
+        }
+    });
+
+    it("a young lower-tag result holds back distant higher tags", () => {
+        expect(farBehindToolBookmark([output(2), output(3, 50_000), output(1)], 200_000)).toBe(0);
+        expect(farBehindToolBookmark([output(1), output(3, 50_000), output(2)], 200_000)).toBe(1);
     });
 });

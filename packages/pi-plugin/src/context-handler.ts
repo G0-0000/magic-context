@@ -5473,6 +5473,8 @@ export function registerPiContextHandler(
 				protectedTokens: options.protectedTokens,
 				protectedTokenTierOverrides: options.protectedTokenTierOverrides,
 				usableSoft: windowGeometry?.usableSoft ?? usageContextLimit ?? 200_000,
+				reclaimUsableWindow:
+					windowGeometry?.usableSoft ?? usageContextLimit ?? 0,
 				heuristics: options.heuristics,
 				emergencyCeilingTokens,
 				injection: options.injection
@@ -8004,6 +8006,7 @@ interface RunPipelineArgs {
 	protectedTokens?: number;
 	protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
 	usableSoft: number;
+	reclaimUsableWindow?: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
 		caveman?: {
@@ -10278,7 +10281,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.db,
 			args.sessionId,
 			reclaimDistance,
-			args.usableSoft,
+			args.reclaimUsableWindow ?? 0,
 		);
 	}
 	if (autoReclaimTargetCount > 0) {

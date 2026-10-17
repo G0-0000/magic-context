@@ -74,6 +74,25 @@ function serializedTokens(value: unknown, bounded = false): number {
 
 type WireBucket = keyof MessageTokenEstimate;
 
+/** Price native image parts and tool attachments identically for wire and distance accounting. */
+export function estimatePartImageTokens(raw: unknown): number {
+    if (!raw || typeof raw !== "object") return 0;
+    const part = raw as {
+        type?: string;
+        ignored?: boolean;
+        mime?: string;
+        url?: unknown;
+        state?: unknown;
+    };
+    if (part.ignored) return 0;
+    if (part.type === "file" && part.mime?.startsWith("image/")) {
+        return typeof part.url === "string" && part.url.startsWith("data:")
+            ? estimateImageTokensFromDataUrl(part.url)
+            : 1200;
+    }
+    return part.type === "tool" ? estimateToolAttachmentImageTokens(part.state) : 0;
+}
+
 /**
  * Visit every field of a message that reaches the provider request: `text` with
  * the field's value (a string, or a value the request carries serialized), and
@@ -150,14 +169,7 @@ function visitWireContent(
                 opaque();
                 break;
             case "file":
-                if (typeof p.mime === "string" && p.mime.startsWith("image/")) {
-                    visit.image(
-                        "conversation",
-                        typeof p.url === "string" && p.url.startsWith("data:")
-                            ? estimateImageTokensFromDataUrl(p.url)
-                            : 1200,
-                    );
-                }
+                visit.image("conversation", estimatePartImageTokens(part));
                 break;
             case "tool":
                 tool(p.state?.input ?? p.input ?? p.args);
@@ -165,7 +177,7 @@ function visitWireContent(
                 tool(p.state?.error);
                 // Legacy skeletons may still carry media. Count what the wire
                 // actually contains, not what its output marker implies.
-                visit.image("toolCall", estimateToolAttachmentImageTokens(p.state));
+                visit.image("toolCall", estimatePartImageTokens(part));
                 break;
             case "tool-call":
                 tool(p.input ?? p.args);

@@ -40,9 +40,8 @@ pub(crate) fn far_behind_bookmark(entries: &[DistanceEntry], usable_window: f64)
     bookmark
 }
 
-/// Host wake notices count even when the host marks them synthetic. Magic Context's
-/// injected history/reduction/note reminders and tool-only user carriers are
-/// excluded from user turns.
+/// Only authored blocks count as user turns. Host control notices, Magic Context's
+/// injected history/reduction/note reminders and tool-only user carriers do not.
 pub(crate) fn tool_bookmark(
     projection: &FlatProjection,
     items: &[SelItem],
@@ -74,17 +73,22 @@ pub(crate) fn tool_bookmark(
             && cleaned
                 .as_deref()
                 .is_none_or(|text| !text.trim().is_empty());
-        let user_turn =
-            block.role == "user" && authored && user_messages.insert(block.mid.as_str());
-        let tokens = if let (Some(original), Some(cleaned)) = (text.as_deref(), cleaned.as_deref())
-        {
+        let user_turn = block.role == "user"
+            && !block.synthetic
+            && authored
+            && user_messages.insert(block.mid.as_str());
+        let tokens = if let crate::ck_wire::CkKind::Media(media) = &block.wire_shape().kind {
+            crate::image_tokens::media_image_tokens(media)
+                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes))
+        } else if let (Some(original), Some(cleaned)) = (text.as_deref(), cleaned.as_deref()) {
             if cleaned != original {
                 mc_tokenizer::estimate_tokens(cleaned)
             } else {
                 item.and_then(|item| item.served_token_count).unwrap_or(0)
             }
         } else {
-            item.and_then(|item| item.served_token_count).unwrap_or(0)
+            item.and_then(|item| item.served_token_count)
+                .unwrap_or_else(|| mc_tokenizer::estimate_tokens(&block.bytes))
         };
         let tool_output_ordinal = if block.kind_tag == "tool_result" && item.is_some() {
             block

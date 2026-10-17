@@ -85,6 +85,7 @@ import {
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 import { isPiSystemEntry, type PiSystemEntry } from "./system-entry-pi";
+import { PI_IMAGE_TOKENS } from "./tokenize-pi-messages";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
 // Importing from @earendil-works/pi-ai directly would couple the plugin
@@ -92,14 +93,23 @@ import { isPiSystemEntry, type PiSystemEntry } from "./system-entry-pi";
 // to construct synthetic messages, and a local type makes that easier.
 // The shape MUST stay structurally compatible with pi-ai's exports.
 
-type PiTextContent = { type: "text"; text: string; textSignature?: string };
+type PiProvenance = { synthetic?: boolean; ignored?: boolean };
+type PiTextContent = PiProvenance & {
+	type: "text";
+	text: string;
+	textSignature?: string;
+};
 type PiThinkingContent = {
 	type: "thinking";
 	thinking: string;
 	thinkingSignature?: string;
 	redacted?: boolean;
 };
-type PiImageContent = { type: "image"; data: string; mimeType: string };
+type PiImageContent = PiProvenance & {
+	type: "image";
+	data: string;
+	mimeType: string;
+};
 type PiToolCall = {
 	type: "toolCall";
 	id: string;
@@ -108,7 +118,7 @@ type PiToolCall = {
 	thoughtSignature?: string;
 };
 
-type PiUserMessage = {
+type PiUserMessage = PiProvenance & {
 	role: "user";
 	content: string | (PiTextContent | PiImageContent)[];
 	timestamp: number;
@@ -605,6 +615,12 @@ function createPiUserStringPart(
 ): TranscriptPart {
 	return {
 		kind: "text",
+		get synthetic() {
+			return (working[messageIndex] as PiUserMessage).synthetic;
+		},
+		get ignored() {
+			return (working[messageIndex] as PiUserMessage).ignored;
+		},
 		// User text parts do not need per-part ids: tagTranscript keys them by
 		// the stable parent message id plus text ordinal.
 		id: undefined,
@@ -652,6 +668,14 @@ function createPiUserArrayPart(
 	const kind: TranscriptPartKind = classifyContent(part);
 	return {
 		kind,
+		synthetic: msg.synthetic || part?.synthetic,
+		ignored: msg.ignored || part?.ignored,
+		imageTokens() {
+			const current = (working[messageIndex] as PiUserMessage).content;
+			return Array.isArray(current) && current[partIndex]?.type === "image"
+				? PI_IMAGE_TOKENS
+				: 0;
+		},
 		// User array parts are not tool/content units. Text is keyed by parent
 		// message id + ordinal; images remain non-droppable user payloads.
 		id: undefined,
@@ -916,6 +940,12 @@ function createPiToolResultPart(
 	return {
 		kind,
 		id: msg.toolCallId,
+		imageTokens() {
+			return (working[messageIndex] as PiToolResultMessage).content[partIndex]
+				?.type === "image"
+				? PI_IMAGE_TOKENS
+				: 0;
+		},
 		remove(): boolean {
 			return markToolRemoval(working, messageIndex, partIndex);
 		},
