@@ -11,7 +11,7 @@ set -euo pipefail
 # What it does:
 #   1. Validates the version is semver
 #   2. Checks for clean working tree (no uncommitted changes)
-#   3. Syncs version in package.json
+#   3. Syncs package.json and Rust workspace crate versions
 #   4. Runs pre-release checks (lint, typecheck, build)
 #   5. Commits the version bump
 #   6. Creates a git tag (v0.1.0)
@@ -466,6 +466,7 @@ echo ""
 echo "→ Committing version bump..."
 if [[ -n "$CI_GATE_SHA" ]]; then
   git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
+    crates/mc-core/Cargo.toml crates/mc-store/Cargo.toml crates/mc-module/Cargo.toml crates/mc-tokenizer/Cargo.toml Cargo.lock \
     CHANGELOG.md "$NOTES_FILE"
   python3 "$SCRIPT_DIR/check-release-bump.py" "$CI_GATE_SHA" "$VERSION" --staged
   if [[ -n "$(git diff --name-only)" || -n "$(git ls-files --others --exclude-standard)" ]]; then
@@ -474,6 +475,7 @@ if [[ -n "$CI_GATE_SHA" ]]; then
   fi
 else
 git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
+  crates/mc-core/Cargo.toml crates/mc-store/Cargo.toml crates/mc-module/Cargo.toml crates/mc-tokenizer/Cargo.toml Cargo.lock \
   assets/magic-context.schema.json \
   packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts
 # Cargo.lock is the common dirty file here: Cargo can update the resolved versions

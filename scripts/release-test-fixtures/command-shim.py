@@ -78,6 +78,12 @@ elif name == "bun":
             manifest = json.loads(path.read_text())
             manifest["dependencies"] = {"unverified": "1.0.0"}
             path.write_text(json.dumps(manifest) + "\n")
+        if scenario.get("cargo_manifest_content"):
+            path = cwd / "crates/mc-module/Cargo.toml"
+            path.write_text(path.read_text() + 'description = "unverified fixture edit"\n')
+        if scenario.get("cargo_lock_content"):
+            path = cwd / "Cargo.lock"
+            path.write_text(path.read_text() + "# unverified fixture edit\n")
     elif args[:1] == ["packages/plugin/scripts/build-schema.ts"]:
         (cwd / "assets/magic-context.schema.json").write_text('{"fixture": "fresh schema"}\n')
         if scenario.get("fail_generator") == "schema":

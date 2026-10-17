@@ -45,6 +45,18 @@ class ReleaseTests(unittest.TestCase):
             path = self.repo / "packages" / package
             path.mkdir(parents=True)
             (path / "package.json").write_text(json.dumps({"name": package, "version": "1.0.0"}) + "\n")
+        crates = ("mc-core", "mc-store", "mc-module", "mc-tokenizer")
+        for crate in crates:
+            path = self.repo / "crates" / crate
+            path.mkdir(parents=True)
+            (path / "Cargo.toml").write_text(
+                f'[package]\nname = "{crate}"\nversion = "1.0.0"\nedition = "2021"\n'
+            )
+        lock_packages = [f'[[package]]\nname = "{crate}"\nversion = "1.0.0"\n' for crate in crates]
+        (self.repo / "Cargo.lock").write_text(
+            'version = 4\n\n[[package]]\nname = "fixture-external"\nversion = "2.3.4"\n\n'
+            + "\n".join(lock_packages)
+        )
         (self.repo / "README.md").write_text("fixture readme\n")
         (self.repo / "packages/plugin/README.md").write_text("fixture readme\n")
         (self.repo / "CHANGELOG.md").write_text("# Changelog\n")
@@ -148,7 +160,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(["packages/plugin/scripts/build-reference-seeds.ts"], runners)
         self.assertFalse(any(arg in ("lint", "typecheck", "test") for args in runners for arg in args))
         changed = set(self.git("diff", "--name-only", self.base, "HEAD").splitlines())
-        self.assertEqual(changed, {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")})
+        self.assertEqual(
+            changed,
+            {f"packages/{package}/package.json" for package in ("plugin", "pi-plugin", "cli")}
+            | {f"crates/{crate}/Cargo.toml" for crate in ("mc-core", "mc-store", "mc-module", "mc-tokenizer")}
+            | {"Cargo.lock"},
+        )
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertTrue(any(args[:2] == ["tag", "-a"] for args in self.commands("git")))
         self.assertTrue(any(args[:2] == ["run", "watch"] for args in self.commands("gh")))
@@ -218,6 +235,41 @@ class ReleaseTests(unittest.TestCase):
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("CI reuse refuses non-version manifest change", run.stderr)
+        self.assert_no_publish()
+
+    def test_version_sync_updates_cargo_manifests_and_lock_consistently(self):
+        run = subprocess.run([str(REAL_BUN), "scripts/version-sync.mjs", "9.8.7"],
+                             cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        crates = ("mc-core", "mc-store", "mc-module", "mc-tokenizer")
+        for crate in crates:
+            manifest = (self.repo / "crates" / crate / "Cargo.toml").read_text()
+            self.assertIn('version = "9.8.7"', manifest)
+        lock = (self.repo / "Cargo.lock").read_text()
+        versions = {}
+        for block in re.split(r"(?m)(?=^\[\[package\]\])", lock):
+            name = re.search(r'(?m)^name = "([^"]+)"$', block)
+            package_version = re.search(r'(?m)^version = "([^"]+)"$', block)
+            if name is not None and package_version is not None:
+                versions[name.group(1)] = package_version.group(1)
+        self.assertEqual(
+            {name: versions[name] for name in crates},
+            {name: "9.8.7" for name in crates},
+        )
+        self.assertEqual(versions["fixture-external"], "2.3.4")
+
+    def test_bump_refuses_non_version_cargo_manifest_content(self):
+        self.scenario["cargo_manifest_content"] = True
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CI reuse refuses non-version manifest change: crates/mc-module/Cargo.toml", run.stderr)
+        self.assert_no_publish()
+
+    def test_bump_refuses_non_version_cargo_lock_content(self):
+        self.scenario["cargo_lock_content"] = True
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("CI reuse refuses non-version Cargo.lock change", run.stderr)
         self.assert_no_publish()
 
     def test_committed_bump_is_rechecked_before_tag(self):
