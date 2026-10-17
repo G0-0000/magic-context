@@ -568,7 +568,7 @@ pub fn build_compartment_agent_prompt(inputs: &CompartmentPromptInputs<'_>) -> S
     if !inputs.session_references.is_empty() {
         parts.push(inputs.session_references.to_string());
     }
-    if !inputs.project_memory.is_empty() {
+    if inputs.memory_enabled && !inputs.project_memory.is_empty() {
         parts.push(inputs.project_memory.to_string());
     }
     if inputs.extraction_free {

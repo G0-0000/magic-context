@@ -142,7 +142,7 @@ import {
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
-import { FoldOwner, foldDigest } from "../fold/owner";
+import { FoldOwner } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -1347,7 +1347,10 @@ export async function registerContext(context: V2Context) {
                 !!resolveProjectIdentityForSession(directory, config.allow_home_project),
             memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
             hardSignals: {
-                systemHash: foldDigest(JSON.stringify(draft.system)),
+                // The system-prompt callback owns the resolved provider-visible identity.
+                // Compaction can run before it, so leave an unknown identity empty for
+                // that callback to initialize rather than hashing the raw draft system.
+                systemHash: state.systemPromptHash ?? "",
                 toolSetHash: getCurrentToolSetHash(
                     draft.model.providerID,
                     draft.model.id,
@@ -1382,6 +1385,9 @@ export async function registerContext(context: V2Context) {
         if (nativeFoldReplay) rememberHostMedia(draft.messages);
         const reader = openStoreReader();
         try {
+            // Compaction may precede the first context callback. Wait for the pending
+            // database open instead of refusing while its asynchronous probe is running.
+            await storage.probe();
             const watermark = reader.latestSequenceForIds(
                 draft.sessionID,
                 draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
@@ -2318,6 +2324,7 @@ export async function registerContext(context: V2Context) {
             db: runDb,
             dreamer: manualDreamer,
             smartNotesEnabled: config.smart_notes.enabled,
+            memoryEnabled: config.memory.enabled,
             projectIdentity:
                 resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             directory,

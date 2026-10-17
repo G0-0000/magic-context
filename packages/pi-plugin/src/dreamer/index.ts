@@ -381,6 +381,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		const manualRun = runManualDream({
 			db: manualOpts.db,
 			projectIdentity: manualOpts.projectIdentity,
+			projectMemoryEnabled: manualOpts.memoryEnabled,
 			tasks: manualOpts.modelRegistry
 				? validatePiDreamerModels(
 						buildDreamTaskRuntimeConfigs(

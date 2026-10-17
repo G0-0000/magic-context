@@ -900,7 +900,11 @@ fn fit_historian_prompt(input: &HistorianPromptFitInput<'_>) -> HistorianPromptF
         input.session_id,
         input.chunk_start as i64,
     );
-    let memories = order_historian_memories(input.memories);
+    let memories = order_historian_memories(if input.memory_enabled {
+        input.memories
+    } else {
+        &[]
+    });
     let render = |refs: usize, memory_count: usize, seed_count: usize| {
         (
             render_seed_examples_block(&seeds[..seed_count]),
@@ -1089,7 +1093,11 @@ pub fn assemble_historian_firing(
     // Size the prompt to the producer window before selecting the chunk: the
     // system prompt, the fixed user-prompt blocks and the output reserve come off
     // the window first, and the chunk gets what is left.
-    let memories = store.load_active_memories(&config.project_path, now_ms)?;
+    let memories = if config.memory_enabled {
+        store.load_active_memories(&config.project_path, now_ms)?
+    } else {
+        Vec::new()
+    };
     let system_tokens = estimate_tokens(crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT) as f64;
     let primary_limits = config
         .model_chain
@@ -3846,6 +3854,40 @@ mod prompt_fit_tests {
         assert!(fit.kept.1 > 0 && fit.kept.1 < 300);
         assert_eq!(fit.kept.2, SEED_FLOOR);
         assert!(sent <= limit as f64);
+    }
+
+    #[test]
+    fn memory_off_fit_and_prompt_omit_project_memories() {
+        let memories = memories(3);
+        let seed = DecisionCalibration::for_model(Some(MODEL));
+        for limit in [None, Some(1_000_000)] {
+            let fit = fit_historian_prompt(&HistorianPromptFitInput {
+                session_id: "ses-memory-off",
+                chunk_start: 1,
+                last_ordinal: 5,
+                compartments: &[],
+                memories: &memories,
+                memory_enabled: false,
+                extraction_free: false,
+                limit,
+                seed: &seed,
+                system_tokens: 1000.0,
+                requested: 1000,
+            });
+            assert!(fit.memory_block.is_empty());
+            assert_eq!(fit.kept.1, 0);
+        }
+        let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
+            seed_examples: "",
+            session_references: "",
+            project_memory: "<project-memory>private project memory</project-memory>",
+            input_source: "Messages 1-5: transcript",
+            memory_enabled: false,
+            extraction_free: false,
+        });
+        assert!(!prompt.contains("private project memory"));
+        assert!(!prompt.contains("<project-memory>"));
+        assert!(prompt.contains("Messages 1-5: transcript"));
     }
 
     #[test]

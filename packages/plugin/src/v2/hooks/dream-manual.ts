@@ -70,6 +70,7 @@ export async function runManualDreamNow(args: {
     db: ContextDatabase;
     dreamer: DreamerConfig;
     smartNotesEnabled?: boolean;
+    memoryEnabled?: boolean;
     projectIdentity: string;
     directory: string;
     language?: string;
@@ -102,6 +103,7 @@ export async function runManualDreamNow(args: {
     const summary = await runManualDream({
         db: args.db,
         projectIdentity: args.projectIdentity,
+        projectMemoryEnabled: args.memoryEnabled,
         tasks: selection.runnable,
         executor,
         ...(args.task !== undefined ? { task: args.task } : {}),

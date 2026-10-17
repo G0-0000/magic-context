@@ -1,3 +1,5 @@
+import { readEnabledProjectMemories } from "../../features/magic-context/memory-enabled";
+
 // The historian system prompt is generated from historian-prompt.source.md.
 // Edit that source and run scripts/build-historian-prompt.ts; never hand-edit
 // the generated constant.
@@ -127,7 +129,11 @@ export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): st
     const parts: string[] = [];
     if (inputs.seedExamples) parts.push(inputs.seedExamples);
     if (inputs.sessionReferences) parts.push(inputs.sessionReferences);
-    if (inputs.projectMemory) parts.push(inputs.projectMemory);
+    parts.push(
+        ...readEnabledProjectMemories(inputs.memoryEnabled, () =>
+            inputs.projectMemory ? [inputs.projectMemory] : [],
+        ),
+    );
     if (inputs.extractionFree) {
         parts.push(
             "<extraction>disabled</extraction>\nStructural recomp mode: emit compartments and <meta> only. Do NOT emit <facts>, <events>, <user_observations>, or <primer_candidates>.",
