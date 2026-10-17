@@ -380,4 +380,44 @@ describe("OMP doctor --issue --report", () => {
         const body = readFileSync(join(root, "omp-diagnostics.md"), "utf-8");
         expect(body).not.toContain(secret);
     });
+
+    it("reports the Hide Secrets check as a readable line without paths", async () => {
+        const parent = join(tmpdir(), "magic-context", "omp-hide-secrets");
+        mkdirSync(parent, { recursive: true });
+        const root = createTestTempDirFromPath(join(parent, "issue-"));
+        roots.push(root);
+        restores.push(() => {
+            for (const [key, value] of Object.entries(savedEnv)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+        });
+        const { deps } = prepareOmpIssueFixture(root, "");
+        const agentDir = join(root, ".omp", "agent");
+        writeFileSync(join(agentDir, "config.yml"), "secrets:\n  enabled: true\n");
+        writeFileSync(
+            join(agentDir, "secrets.yml"),
+            "- type: plain\n  content: sk-fixture-SECRET\n",
+        );
+
+        const code = await ompDoctor.runDoctor({
+            issue: true,
+            report: "omp-diagnostics.md",
+            cwd: root,
+            prompts: new NoPrompts(),
+            deps,
+        });
+
+        expect(code).toBe(0);
+        const body = readFileSync(join(root, "omp-diagnostics.md"), "utf-8");
+        const line = body.split("\n").find((entry) => entry.includes("Hide Secrets"));
+        expect(line).toStartWith(
+            "- WARN: OMP Hide Secrets (secrets.enabled) is on in OMP user settings: ",
+        );
+        expect(line).toContain(
+            "https://docs.cortexkit.io/magic-context/help/compatibility/#omp-hide-secrets",
+        );
+        expect(line).not.toContain(agentDir);
+        expect(body).not.toContain("sk-fixture-SECRET");
+    });
 });
