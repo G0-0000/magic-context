@@ -2,6 +2,7 @@ import { protectedToolTagNumbers } from "@magic-context/core/features/magic-cont
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import { estimateImageTokensFromDataUrl } from "@magic-context/core/hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { rememberCurrentToolOutputCount } from "@magic-context/core/hooks/magic-context/tail-hygiene-output-count";
 import {
 	compareMeasuredTailPrefix,
 	freezeTailHygieneMeasurement,
@@ -12,6 +13,11 @@ import {
 	type TailHygienePartMeasurement,
 	type TailHygienePrefixMismatch,
 } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
+import {
+	piJsonHash,
+	TailHygieneJsonMemo,
+} from "@magic-context/core/shared/tail-hygiene-json";
+import { providerVisiblePiPart } from "./provider-visible-parts-pi";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 const TAG_PREFIX = /^§(\d+)§\s*/;
@@ -46,6 +52,8 @@ const FNV1A_32_PRIME = 0x01000193;
 
 export interface PiTailHygieneWalkInput {
 	messages: readonly unknown[];
+	/** Active request API, not the API recorded on an older assistant message. */
+	providerApi?: string;
 	tags: readonly TagEntry[];
 	/** Reuse the same key object for one connection/session lifetime, with canonical immutable row snapshots only. */
 	tagCacheKey?: object;
@@ -77,6 +85,7 @@ interface DraftPart {
 	key: string;
 	kind: TailHygienePartKind;
 	content: string;
+	contentHash?: string;
 	tokens: number;
 	tag?: TagEntry;
 }
@@ -576,11 +585,36 @@ function attributeTags(
 	return { messageTags, tagsByNumber };
 }
 
-function excludedDraft(key: string, value: unknown): DraftPart {
+const partJsonMemo = new TailHygieneJsonMemo();
+let excludedViews = new WeakMap<object, unknown>();
+
+function excludedDraftForApi(
+	key: string,
+	value: unknown,
+	providerApi?: string,
+): DraftPart {
+	let view =
+		value !== null && typeof value === "object"
+			? excludedViews.get(value)
+			: undefined;
+	if (view === undefined) {
+		view = providerVisiblePiPart(value, providerApi);
+		if (value !== null && typeof value === "object")
+			excludedViews.set(value, view);
+	}
 	return {
 		key,
 		kind: "excluded",
-		content: typeof value === "string" ? value : safeStableStringify(value),
+		content: "",
+		contentHash: partJsonMemo.get(
+			key,
+			view,
+			() =>
+				typeof view === "string"
+					? partHash("excluded", view)
+					: piJsonHash(view, () => safeStableStringify(view)),
+			true,
+		),
 		tokens: 0,
 	};
 }
@@ -623,7 +657,7 @@ function finalizeParts(
 		u += uTokens;
 		return {
 			key: draft.key,
-			contentHash: partHash(draft.kind, draft.content),
+			contentHash: draft.contentHash ?? partHash(draft.kind, draft.content),
 			kind: draft.kind,
 			tokens,
 			uTokens,
@@ -651,6 +685,27 @@ function finalizeParts(
 export function measurePiTailHygiene(
 	input: PiTailHygieneWalkInput,
 ): TailHygieneMeasurement & { realUserTurnCount: number } {
+	partJsonMemo.beginPass();
+	excludedViews = new WeakMap();
+	// Standalone walk/refresh callers can omit providerApi. The context handler
+	// supplies ctx.model.api so a model switch uses the active request converter,
+	// not the API recorded on an older assistant message.
+	let providerApi = input.providerApi;
+	if (providerApi === undefined) {
+		for (let index = input.messages.length - 1; index >= 0; index--) {
+			const message = input.messages[index];
+			if (
+				isRecord(message) &&
+				message.role === "assistant" &&
+				typeof message.api === "string"
+			) {
+				providerApi = message.api;
+				break;
+			}
+		}
+	}
+	const excludedDraft = (key: string, value: unknown): DraftPart =>
+		excludedDraftForApi(key, value, providerApi);
 	const { arcs, arcByPart, messageIds } = collectToolArcs(input);
 	const { messageTags, tagsByNumber } = attributeTags(input, arcs, messageIds);
 	const drafts: DraftPart[] = [];
@@ -788,7 +843,9 @@ export function measurePiTailHygiene(
 					drafts.push(excludedDraft(`${key}\0toolInput`, part));
 					continue;
 				}
-				const content = safeStableStringify(part.arguments);
+				const content = partJsonMemo.get(`${key}\0input`, part.arguments, () =>
+					safeStableStringify(part.arguments),
+				);
 				if (!content) {
 					drafts.push(excludedDraft(`${key}\0toolInput`, part));
 				} else {
@@ -872,21 +929,25 @@ export function refreshPiTailHygieneBaseline(
 	const now = input.now ?? Date.now();
 	const refrozen = (
 		mismatch?: TailHygienePrefixMismatch,
-	): TailHygieneBaseline & { realUserTurnCount: number } => ({
-		...freezeTailHygieneMeasurement(measured),
-		protectedToolsPolicy,
-		hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
-		toolsRatio: frozenCalibration.toolsRatio,
-		proseRatio: frozenCalibration.proseRatio,
-		baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
-		computedAt: now,
-		evaluable: true,
-		generationInvalidated: false,
-		contentSignature: measured.contentSignature,
-		channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
-		lastPrefixMismatch: mismatch,
-		realUserTurnCount: rawMeasured.realUserTurnCount,
-	});
+	): TailHygieneBaseline & { realUserTurnCount: number } =>
+		rememberCurrentToolOutputCount(
+			{
+				...freezeTailHygieneMeasurement(measured),
+				protectedToolsPolicy,
+				hygieneUnitsVersion: frozenCalibration.hygieneUnitsVersion,
+				toolsRatio: frozenCalibration.toolsRatio,
+				proseRatio: frozenCalibration.proseRatio,
+				baselineGeneration: (input.previous?.baselineGeneration ?? 0) + 1,
+				computedAt: now,
+				evaluable: true,
+				generationInvalidated: false,
+				contentSignature: measured.contentSignature,
+				channel1PostReduceGrace: input.previous?.channel1PostReduceGrace,
+				lastPrefixMismatch: mismatch,
+				realUserTurnCount: rawMeasured.realUserTurnCount,
+			},
+			measured,
+		);
 	if (input.cacheBusting || !input.previous) return refrozen();
 
 	const prefix = compareMeasuredTailPrefix(
@@ -914,17 +975,20 @@ export function refreshPiTailHygieneBaseline(
 		if (part.kind !== "toolOutput" || !part.protected)
 			turnDeltaU += part.uTokens;
 	}
-	return {
-		...input.previous,
-		protectedToolsPolicy,
-		turnDeltaU,
-		turnDeltaT,
-		evaluable: true,
-		generationInvalidated: false,
-		contentSignature: measured.contentSignature,
-		lastPrefixMismatch: undefined,
-		realUserTurnCount: rawMeasured.realUserTurnCount,
-	};
+	return rememberCurrentToolOutputCount(
+		{
+			...input.previous,
+			protectedToolsPolicy,
+			turnDeltaU,
+			turnDeltaT,
+			evaluable: true,
+			generationInvalidated: false,
+			contentSignature: measured.contentSignature,
+			lastPrefixMismatch: undefined,
+			realUserTurnCount: rawMeasured.realUserTurnCount,
+		},
+		measured,
+	);
 }
 
 export function effectivePiTailHygiene(

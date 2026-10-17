@@ -6043,6 +6043,7 @@ export function registerPiContextHandler(
 					const previousBaseline = getPiChannel1Baseline(sessionId);
 					const baseline = refreshPiTailHygieneBaseline({
 						messages: outputMessages,
+						providerApi: ctx.model?.api,
 						tags,
 						tagCacheKey: result.channelBaselineSnapshot.tagCacheKey,
 						protectedTagNumbers,
