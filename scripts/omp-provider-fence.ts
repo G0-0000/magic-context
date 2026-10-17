@@ -37,8 +37,10 @@ const host = join(
 const version = JSON.parse(
 	readFileSync(join(host, "package.json"), "utf8"),
 ).version;
-if (!["18.10.4", "18.11.0", "18.11.1"].includes(version))
-	throw new Error(`expected OMP 18.10.4, 18.11.0 or 18.11.1, got ${version}`);
+if (!["18.10.4", "18.11.0", "18.11.1", "18.11.3"].includes(version))
+	throw new Error(
+		`expected OMP 18.10.4, 18.11.0, 18.11.1 or 18.11.3, got ${version}`,
+	);
 const selector = process.argv[2]!;
 const api = selector === "cline-pass" ? "openai-completions" : selector;
 const mode = process.argv[3] ?? "managed";
@@ -79,6 +81,8 @@ if (
 		"assistant-drop",
 		"assistant-caveman",
 		"cross-model-thinking",
+		"cross-model-responses",
+		"natural-codex-tool",
 		"custom-summary",
 		"composite-cross",
 		"composite-same",
@@ -103,7 +107,136 @@ const mock = Bun.serve({
 		)
 			return Response.json({ data: [] });
 		wires++;
-		audit({ phase: "wire", url: request.url, body: await request.text() });
+		const requestBody = await request.text();
+		audit({ phase: "wire", url: request.url, body: requestBody });
+		if (historyCase === "natural-codex-tool") {
+			// A Codex-shaped completion through OMP's own SSE parser. The first request
+			// of each prompt answers with reasoning, signed commentary and a function
+			// call; the follow-up after the tool result answers with a final message.
+			// OMP persists those native items as the assistant's providerPayload.
+			const body = JSON.parse(requestBody);
+			const input: any[] = Array.isArray(body.input) ? body.input : [];
+			const last = input.at(-1);
+			const toolTurn = last?.type !== "function_call_output";
+			const tool = (body.tools ?? []).find(
+				(entry: any) => entry.type === "function" && entry.name === "read",
+			)?.name;
+			const output = toolTurn
+				? [
+						{
+							type: "reasoning",
+							id: `rs_natural714_${wires}`,
+							summary: [],
+							encrypted_content: `HISTORY714_OPAQUE_${wires}`,
+						},
+						{
+							type: "message",
+							id: `msg_natural714_${wires}`,
+							role: "assistant",
+							phase: "commentary",
+							status: "completed",
+							content: [
+								{
+									type: "output_text",
+									text: `HISTORY714 natural commentary ${wires}`,
+									annotations: [],
+								},
+							],
+						},
+						{
+							type: "function_call",
+							id: `fc_natural714_${wires}`,
+							call_id: `call_natural714_${wires}`,
+							name: tool ?? "read",
+							arguments: JSON.stringify({ path: "seed.txt" }),
+							status: "completed",
+						},
+					]
+				: [
+						{
+							type: "message",
+							id: `msg_natural714_${wires}`,
+							role: "assistant",
+							phase: "final_answer",
+							status: "completed",
+							content: [
+								{
+									type: "output_text",
+									text: `HISTORY714 natural final ${wires}`,
+									annotations: [],
+								},
+							],
+						},
+					];
+			const response = {
+				id: `resp_natural714_${wires}`,
+				object: "response",
+				created_at: 1792020000,
+				model: "mock-model",
+				status: "completed",
+				output,
+				usage: {
+					input_tokens: 100,
+					output_tokens: 10,
+					total_tokens: 110,
+					input_tokens_details: { cached_tokens: 0 },
+					output_tokens_details: { reasoning_tokens: 0 },
+				},
+			};
+			const event = (type: string, data: object) =>
+				`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+			let sse = event("response.created", {
+				response: { ...response, status: "in_progress", output: [] },
+			});
+			output.forEach((item: any, index) => {
+				const opening =
+					item.type === "message"
+						? { ...item, status: "in_progress", content: [] }
+						: item.type === "function_call"
+							? { ...item, status: "in_progress", arguments: "" }
+							: item;
+				sse += event("response.output_item.added", {
+					output_index: index,
+					item: opening,
+				});
+				if (item.type === "message") {
+					const part = item.content[0];
+					const ids = {
+						output_index: index,
+						content_index: 0,
+						item_id: item.id,
+					};
+					sse +=
+						event("response.content_part.added", {
+							...ids,
+							part: { type: "output_text", text: "", annotations: [] },
+						}) +
+						event("response.output_text.delta", { ...ids, delta: part.text }) +
+						event("response.output_text.done", { ...ids, text: part.text }) +
+						event("response.content_part.done", { ...ids, part });
+				}
+				if (item.type === "function_call")
+					sse +=
+						event("response.function_call_arguments.delta", {
+							output_index: index,
+							item_id: item.id,
+							delta: item.arguments,
+						}) +
+						event("response.function_call_arguments.done", {
+							output_index: index,
+							item_id: item.id,
+							arguments: item.arguments,
+						});
+				sse += event("response.output_item.done", {
+					output_index: index,
+					item,
+				});
+			});
+			sse += event("response.completed", { response });
+			return new Response(sse, {
+				headers: { "content-type": "text/event-stream" },
+			});
+		}
 		if (historyCase === "mixed") {
 			const chunk = (delta: object, finish_reason: string | null) =>
 				`data: ${JSON.stringify({ id: "chatcmpl-history683", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010 } })}\n\n`;
@@ -375,7 +508,9 @@ try {
 		join(host, "src/session/session-manager.ts")
 	);
 	let historyManager: any;
-	if (historyCase !== "fresh") {
+	if (historyCase === "natural-codex-tool")
+		writeFileSync(join(root, "seed.txt"), "HISTORY714 seed file\n");
+	if (historyCase !== "fresh" && historyCase !== "natural-codex-tool") {
 		const stamp = Date.now() - 10000;
 		const png =
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1kAAAAASUVORK5CYII=";
@@ -508,6 +643,256 @@ try {
 					foreign("google-antigravity", "google-gemini-cli", "gemini_call_686"),
 					{ ...result, toolCallId: "gemini_call_686" },
 					reply,
+				];
+				break;
+			}
+			case "cross-model-responses": {
+				// Responses-lane history whose assistant turns come from other models:
+				// demoted thinking, a signed phase, both together, plus native items from
+				// this model. Optional argv[5] keeps one shape for isolating a refusal.
+				const only = process.argv[5] ?? "all";
+				const reasoning = (id: string) => ({
+					type: "reasoning",
+					id,
+					summary: [],
+					encrypted_content: `HISTORY714_OPAQUE_${id}`,
+				});
+				const signedText = (text: string, id: string, phase: string) => ({
+					type: "text",
+					text,
+					textSignature: JSON.stringify({ v: 1, id, phase }),
+				});
+				const messageItem = (text: string, id: string, phase: string) => ({
+					type: "message",
+					role: "assistant",
+					id,
+					phase,
+					status: "completed",
+					content: [{ type: "output_text", text, annotations: [] }],
+				});
+				const callItem = (callId: string, itemId: string) => ({
+					type: "function_call",
+					id: itemId,
+					call_id: callId,
+					name: toolName,
+					arguments: "{}",
+				});
+				const toolTurn = (
+					source: { api: string; provider: string; model: string },
+					content: unknown[],
+					id: string,
+					timestamp: number,
+					providerPayload?: unknown,
+				) => [
+					{
+						...assistant(
+							[
+								...content,
+								{ type: "toolCall", id, name: toolName, arguments: {} },
+							],
+							timestamp,
+							"toolUse",
+						),
+						...source,
+						...(providerPayload ? { providerPayload } : {}),
+					},
+					{ ...result, toolCallId: id, timestamp: timestamp + 1 },
+				];
+				const openrouter = {
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "z-ai/glm-5.3",
+				};
+				const cline = {
+					api: "openai-completions",
+					provider: "cline",
+					model: "anthropic/claude-sonnet-4.6",
+				};
+				const otherResponses = {
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5.5",
+				};
+				const otherCodex = {
+					api: model.api,
+					provider: model.provider,
+					model: `${model.id}-other714`,
+				};
+				const own = {
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+				};
+				const shapes: Record<string, unknown[]> = {
+					// Another model's thinking with no phase on its text.
+					thinking: [
+						...toolTurn(
+							openrouter,
+							[
+								{
+									type: "thinking",
+									thinking: "HISTORY714 openrouter reasoning",
+								},
+								{ type: "text", text: "HISTORY714 openrouter answer" },
+							],
+							"or_call_714",
+							stamp + 10,
+						),
+						{
+							...assistant(
+								[
+									{ type: "thinking", thinking: "HISTORY714 cline reasoning" },
+									{ type: "text", text: "HISTORY714 cline answer" },
+								],
+								stamp + 12,
+							),
+							...cline,
+						},
+						user("HISTORY714 after cline", stamp + 13),
+					],
+					// Another model's signed text with a non-null phase and its own cache.
+					phase: [
+						...toolTurn(
+							otherResponses,
+							[
+								signedText(
+									"HISTORY714 responses commentary",
+									"msg_or714",
+									"commentary",
+								),
+							],
+							"call_or714|fc_or714",
+							stamp + 20,
+							{
+								type: "openaiResponsesHistory",
+								provider: otherResponses.provider,
+								dt: true,
+								items: [
+									messageItem(
+										"HISTORY714 responses commentary",
+										"msg_or714",
+										"commentary",
+									),
+									callItem("call_or714", "fc_or714"),
+								],
+							},
+						),
+					],
+					// Another Codex model: signed reasoning, phase and a tool call together.
+					both: [
+						...toolTurn(
+							otherCodex,
+							[
+								{
+									type: "thinking",
+									thinking: "HISTORY714 other codex reasoning",
+									thinkingSignature: JSON.stringify(reasoning("rs_oc714")),
+								},
+								signedText(
+									"HISTORY714 other codex final",
+									"msg_oc714",
+									"final_answer",
+								),
+							],
+							"call_oc714|fc_oc714",
+							stamp + 30,
+							{
+								type: "openaiResponsesHistory",
+								provider: model.provider,
+								dt: true,
+								items: [
+									reasoning("rs_oc714"),
+									messageItem(
+										"HISTORY714 other codex final",
+										"msg_oc714",
+										"final_answer",
+									),
+									callItem("call_oc714", "fc_oc714"),
+								],
+							},
+						),
+					],
+					// A turn from the session's own Codex model, stored the way OMP's Codex
+					// parser stores it: reasoning, commentary and a call as native items.
+					own: [
+						...toolTurn(
+							own,
+							[
+								{
+									type: "thinking",
+									thinking: "",
+									thinkingSignature: JSON.stringify(reasoning("rs_own714")),
+								},
+								signedText(
+									"HISTORY714 own commentary",
+									"msg_own714",
+									"commentary",
+								),
+							],
+							"call_own714|fc_own714",
+							stamp + 40,
+							{
+								type: "openaiResponsesHistory",
+								provider: model.provider,
+								dt: true,
+								items: [
+									reasoning("rs_own714"),
+									messageItem(
+										"HISTORY714 own commentary",
+										"msg_own714",
+										"commentary",
+									),
+									callItem("call_own714", "fc_own714"),
+								],
+							},
+						),
+					],
+				};
+				// Selected only by argv[5] "replacement", never by "all": a turn from the
+				// session's own model whose stored cache has no dt flag and carries user
+				// text that exists only in the cache. OMP then replaces all preceding
+				// input with the cached items, so the request must refuse.
+				const replacement = toolTurn(
+					own,
+					[
+						signedText(
+							"HISTORY714 replaced commentary",
+							"msg_rep714",
+							"commentary",
+						),
+					],
+					"call_rep714|fc_rep714",
+					stamp + 45,
+					{
+						type: "openaiResponsesHistory",
+						provider: model.provider,
+						items: [
+							{
+								type: "message",
+								role: "user",
+								content: [
+									{ type: "input_text", text: "UNMANAGED_CACHE_ONLY_714" },
+								],
+							},
+							reasoning("rs_rep714"),
+							messageItem(
+								"HISTORY714 replaced commentary",
+								"msg_rep714",
+								"commentary",
+							),
+							callItem("call_rep714", "fc_rep714"),
+						],
+					},
+				);
+				if (only !== "all" && only !== "replacement" && !shapes[only])
+					throw new Error("unknown cross-model shape");
+				history = [
+					user("HISTORY714 cross-model prompt", stamp),
+					...Object.entries(shapes).flatMap(([name, rows]) =>
+						only === "all" || only === name ? rows : [],
+					),
+					...(only === "replacement" ? replacement : []),
+					{ ...reply, timestamp: stamp + 50 },
 				];
 				break;
 			}
@@ -793,6 +1178,7 @@ try {
 			historyCase === "summary" ||
 			historyCase === "mixed" ||
 			historyCase === "responses-history" ||
+			historyCase === "cross-model-responses" ||
 			historyCase === "composite-cross" ||
 			historyCase === "composite-same" ||
 			historyCase === "interrupted-tool"
@@ -857,7 +1243,8 @@ try {
 	isolation("start");
 	const managedTurns = assistantEdit
 		? 5
-		: historyCase === "mixed" && mode !== "raw"
+		: (historyCase === "mixed" || historyCase === "natural-codex-tool") &&
+				mode !== "raw"
 			? 3
 			: 1;
 	const managedOutcomes: object[] = [];
@@ -1079,6 +1466,28 @@ try {
 			eventOrder: hooks.map((event) => event.phase),
 		});
 	}
+	if (historyCase === "natural-codex-tool" && mode !== "raw") {
+		// Every prompt must reach the tool follow-up after OMP stored the first
+		// answer's reasoning, commentary and call as one native payload.
+		const native = hooks
+			.filter((event) => event.phase === "prepared")
+			.flatMap((event) => event.messages ?? [])
+			.find((message: any) =>
+				["reasoning", "message", "function_call"].every((type) =>
+					message.providerPayload?.items?.some(
+						(item: any) => item.type === type,
+					),
+				),
+			);
+		if (!native || wires !== managedTurns * 2)
+			throw new Error("natural Codex tool turns did not replay native items");
+		audit({
+			phase: "natural-codex-proof",
+			wires,
+			items: native.providerPayload.items.map((item: any) => item.type),
+			content: native.content.map((part: any) => part.type),
+		});
+	}
 	if (historyCase === "materialized") {
 		const proof = hooks.find((event) => event.phase === "materialized-proof");
 		if (
@@ -1105,37 +1514,51 @@ try {
 		version,
 		bun: Bun.version,
 	});
-	const name =
-		mode === "managed-then-raw"
+	const replacementCase =
+		historyCase === "cross-model-responses" &&
+		process.argv[5] === "replacement";
+	const name = replacementCase
+		? `${selector}: replacement cache with cached-only user text refused before transport`
+		: mode === "managed-then-raw"
 			? `${selector}: mixed managed history turns admit and raw final turn refuses`
 			: mode === "drop-commentary"
 				? `${selector}: dropped signed commentary refused before transport`
 				: mode === "raw"
 					? `${selector}: raw request refused before transport`
 					: `${selector}: prepared ${historyCase === "fresh" ? "first" : historyCase} turn admitted`;
-	const ok = assistantEdit
-		? managedOutcomes.every((outcome: any, index) =>
-				index === 0 || mode !== "text-edit-baseline"
-					? outcome.wires === 1 && outcome.refusals.length === 0
-					: outcome.wires === 0 &&
-						outcome.refusals.length === 1 &&
-						outcome.refusals[0].includes("comparison=content"),
-			)
-		: mode === "managed-then-raw"
-			? managedOutcomes.length === managedTurns &&
-				attempts.length === managedTurns + 1 &&
-				wires === managedTurns &&
-				refusals.length === 1 &&
-				refusals[0].data.message.includes("missing current receipt signature")
-			: mode === "drop-commentary"
-				? attempts.length === 1 &&
-					wires === 0 &&
+	const ok = replacementCase
+		? attempts.length === 1 &&
+			wires === 0 &&
+			refusals.length === 1 &&
+			// The replacement erases the managed head, so the receipt-signature
+			// check refuses before the structural comparison runs.
+			/missing current receipt signature|prepared turn structure/.test(
+				refusals[0].data.message,
+			) &&
+			JSON.stringify(attempts[0].payload).includes("UNMANAGED_CACHE_ONLY_714")
+		: assistantEdit
+			? managedOutcomes.every((outcome: any, index) =>
+					index === 0 || mode !== "text-edit-baseline"
+						? outcome.wires === 1 && outcome.refusals.length === 0
+						: outcome.wires === 0 &&
+							outcome.refusals.length === 1 &&
+							outcome.refusals[0].includes("comparison=content"),
+				)
+			: mode === "managed-then-raw"
+				? managedOutcomes.length === managedTurns &&
+					attempts.length === managedTurns + 1 &&
+					wires === managedTurns &&
 					refusals.length === 1 &&
-					refusals[0].data.message.includes("comparison=content") &&
-					hooks.some((event) => event.phase === "dropped-commentary")
-				: mode === "raw"
-					? attempts.length > 0 && wires === 0 && refusals.length === 1
-					: attempts.length > 0 && wires > 0 && refusals.length === 0;
+					refusals[0].data.message.includes("missing current receipt signature")
+				: mode === "drop-commentary"
+					? attempts.length === 1 &&
+						wires === 0 &&
+						refusals.length === 1 &&
+						refusals[0].data.message.includes("comparison=content") &&
+						hooks.some((event) => event.phase === "dropped-commentary")
+					: mode === "raw"
+						? attempts.length > 0 && wires === 0 && refusals.length === 1
+						: attempts.length > 0 && wires > 0 && refusals.length === 0;
 	console.log(
 		`Bun ${Bun.version}; OMP ${version}; ${ok ? "PASS" : "FAIL"} ${name}; attempts=${attempts.length} wires=${wires} refusals=${refusals.length}; evidence=${root}`,
 	);
