@@ -2,6 +2,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import { formatDateTime } from "../../lib/api";
 import {
   cacheCauseLabel,
+  cacheCauseText,
   cacheCauseTooltip,
   cacheEventColorClass,
   cacheEventLabel,
@@ -115,6 +116,9 @@ export default function CacheTimeline(props: {
     const dropLine = event.is_drop
       ? `\n⬇ MC reclaimed context${event.cause ? ` — ${cacheCauseLabel(event.cause)}` : ""}`
       : "";
+    // A cause on a step that is not a drop gets its own line, worded as in the
+    // Turns table; a drop already names its cause on the drop line.
+    const causeLine = !event.is_drop && event.cause ? `\n${cacheCauseText(event.cause)}` : "";
     const isSelected = () => props.selectedStepId === event.message_id;
     const barProps = {
       role: "button" as const,
@@ -129,7 +133,7 @@ export default function CacheTimeline(props: {
     };
     const windowLabel = g.limit > 0 ? g.limit.toLocaleString() : "unknown";
     const causeTip = event.cause ? cacheCauseTooltip(event.cause) : undefined;
-    const title = `${formatDateTime(event.timestamp)}\n${cacheEventLabel(event)}${g.overflow ? " · OVERFLOW" : ""}\nPrompt: ${g.prompt.toLocaleString()} / ${windowLabel} (${pctOfWindow.toFixed(1)}% of window)\n${cachedLine}\nUncached: ${(event.input_tokens + event.cache_write).toLocaleString()}\nCache writes: ${cacheWriteLabel([event])}${dropLine}${causeTip ? `\n${causeTip}` : ""}\n(click → jump to step in list)`;
+    const title = `${formatDateTime(event.timestamp)}\n${cacheEventLabel(event)}${g.overflow ? " · OVERFLOW" : ""}\nPrompt: ${g.prompt.toLocaleString()} / ${windowLabel} (${pctOfWindow.toFixed(1)}% of window)\n${cachedLine}\nUncached: ${(event.input_tokens + event.cache_write).toLocaleString()}\nCache writes: ${cacheWriteLabel([event])}${dropLine}${causeLine}${causeTip ? `\n${causeTip}` : ""}\n(click → jump to step in list)`;
     return (
       <div class="ctx-bar-slot">
         <Show when={isBust}>
@@ -181,7 +185,7 @@ export default function CacheTimeline(props: {
               <div class="ctx-drop-tip-row">
                 {(() => {
                   const cause = tip().event.cause;
-                  return cause ? `Cause: ${cacheCauseLabel(cause)}` : "Cause not recorded";
+                  return cause ? cacheCauseText(cause) : "Cause not recorded";
                 })()}
               </div>
               <div class="ctx-drop-tip-hint">click → jump to step</div>

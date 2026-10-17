@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import {
   cacheCauseColor,
   cacheCauseLabel,
+  cacheCauseText,
+  cacheCauseTooltip,
   cacheEventColorClass,
   cacheEventLabel,
   cacheReadLabel,
@@ -10,6 +12,7 @@ import {
   latestContextFill,
   niceTokenCeil,
   normalizeEstimatedContextLimits,
+  PROVIDER_CACHE_MISS_CAUSE,
   selectWorstCacheEvent,
   sentenceCaseLabel,
   timelineAxis,
@@ -49,6 +52,34 @@ describe("cacheCauseLabel", () => {
     expect(cacheCauseColor("mc_transform_failed_open")).toBe("red");
     expect(cacheCauseLabel("mc_transform_missing")).toBe("No attribution recorded");
     expect(cacheCauseColor("mc_transform_missing")).toBe("amber");
+  });
+
+  it("sets provider-side losses apart from Magic Context causes", () => {
+    const idle = "Cache expired after 11 min idle";
+    expect(cacheCauseLabel(idle)).toBe(idle);
+    expect(cacheCauseColor(idle)).toBe("text-secondary");
+    expect(cacheCauseTooltip(idle)).toContain("longer than the cache lifetime");
+    expect(cacheCauseLabel(PROVIDER_CACHE_MISS_CAUSE)).toBe(
+      "Provider cache miss (no change recorded by Magic Context)",
+    );
+    expect(cacheCauseColor(PROVIDER_CACHE_MISS_CAUSE)).toBe("text-secondary");
+    expect(cacheCauseTooltip(PROVIDER_CACHE_MISS_CAUSE)).toContain("did not shrink");
+    // The Turns table and the timeline tooltip share one cause line.
+    expect(cacheCauseText(PROVIDER_CACHE_MISS_CAUSE)).toBe(
+      "Cause: Provider cache miss (no change recorded by Magic Context)",
+    );
+    expect(cacheCauseText("mc_transform_failed_open")).toBe(
+      "Cause: Magic Context transform failed open",
+    );
+    // Magic Context's own causes keep their tone and carry no provider tooltip.
+    for (const cause of [
+      "System prompt change",
+      "Compaction pressure",
+      "Unattributed cache bust",
+    ]) {
+      expect(cacheCauseColor(cause)).toBe("amber");
+      expect(cacheCauseTooltip(cause)).toBeUndefined();
+    }
   });
 });
 
