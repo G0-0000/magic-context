@@ -263,7 +263,7 @@ describe("system prompt change names system_hash on its request's decision row",
             const control = h.rows().slice(before);
             expect(control.map((row) => row.materialize_reason)).not.toContain("system_hash");
 
-            // The same kind of busting pass on the request that carries a new prompt.
+            // A user flush busting the pass again, now on the request that carries a new prompt.
             requestPendingMaterialization(
                 h.pendingMaterializationSessions,
                 h.sessionId,
@@ -305,8 +305,9 @@ describe("system prompt change names system_hash on its request's decision row",
         await h.serve({
             messages: [user, h.toolStep("msg_0002")],
             prompt: "Base instructions, version two.",
-            // The completion that arrives first is a repeat for msg_0002, which the
-            // pass already had in its input: it belongs to the earlier request.
+            // The first completion event is a repeat for msg_0002. This request's
+            // messages pass already had msg_0002 in its input, so that reply
+            // answers the earlier request and must not take the change.
             reply: "msg_0002",
             schedule: "defer",
         });

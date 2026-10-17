@@ -779,8 +779,9 @@ export function signalPiSystemHashChange(
 	signalPiSystemPromptRefresh(sessionId);
 	if (!pendingMaterializationSessions.has(sessionId))
 		signalPiPendingMaterialization(sessionId, "system_hash");
-	// The next main context pass serves the request that carries the new
-	// prompt; its transform decision names the change even if it defers.
+	// The next main context pass serves the first request that carries the new
+	// system prompt. Record that the transform decision for that request must
+	// name system_hash, even when the pass keeps m[0]/m[1] unchanged.
 	notePiSystemPromptHashChange(sessionId);
 }
 

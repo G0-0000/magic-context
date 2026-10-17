@@ -156,8 +156,8 @@ function fixture() {
 		const served = (await handler({ messages } as never, ctx as never)) as {
 			messages: unknown[];
 		};
-		// The provider answers this request; its reply is the entry the
-		// pass's decision row binds to when the next pass starts.
+		// The provider answers this request. The decision row staged by this
+		// pass is written against this reply's entry id when the next pass starts.
 		const message = {
 			role: "assistant",
 			timestamp: Date.now() + ++responseCounter,
@@ -176,8 +176,9 @@ function fixture() {
 			piContextWindow: 200000,
 			message,
 		});
-		// The pass queues the previous pass's row write on a timer, and a
-		// newer pass discards it. Real requests are seconds apart.
+		// The next context pass queues the row write for this pass on a timer,
+		// and a pass that starts before the timer fires discards it. Real
+		// requests are seconds apart, so let the timer run.
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		return { messages: served.messages, prompt, id };
 	};
@@ -245,7 +246,7 @@ it("Pi: the held pass that carries a system prompt change records system_hash", 
 		// The change rode a held signed loop: m[0]/m[1] did not move.
 		expect(f.pair()).toBe(prefix);
 		const after = await f.serve("genuine changed instruction");
-		// One more pass resolves the previous pass's pending row.
+		// The row staged by the pass before this one is written when this pass starts.
 		await f.serve("genuine changed instruction");
 		await new Promise((resolve) => setTimeout(resolve, 50));
 

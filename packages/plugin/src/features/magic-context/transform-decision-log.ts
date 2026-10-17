@@ -401,8 +401,9 @@ export function recordPendingPiTransformDecision(
     publicationGuard?: () => void,
 ): void {
     publicationGuard?.();
-    // The first main pass after before_agent_start saw a changed system prompt
-    // serves the request that rewrites the provider cache, busting or not.
+    // A system prompt change noted in before_agent_start belongs to the first
+    // main context pass after it: that pass serves the request that rewrites the
+    // provider's prompt cache, so it records a row whether or not it busted.
     const systemHashChanged = piSystemHashChangedSessions.delete(sessionId);
     if (!decision.bustedThisPass && !systemHashChanged) return;
     pendingPiDecisionBySession.set(sessionId, {
@@ -418,9 +419,10 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
     messageId: string;
     inputTokens: number;
 }): boolean {
-    // A reply that the latest messages pass already had in its input belongs to
-    // an earlier request; a repeated or late event for it must not take the
-    // system prompt change, which belongs to the request that pass prepared.
+    // Message ids sort by creation time. A reply whose id is not newer than the
+    // newest assistant id in the latest messages pass's input was already part of
+    // that input, so it answers an earlier request; a repeated or late completion
+    // event for it must not take the system prompt change.
     const newestInput = newestInputAssistantBySession.get(args.sessionId) ?? "";
     const systemHashChanged =
         args.messageId > newestInput && systemHashChangedSessions.has(args.sessionId);
@@ -454,7 +456,7 @@ export function scheduleOpenCodeTransformDecisionWrite(args: {
     return true;
 }
 
-/** The first assistant written after a staged OpenCode 2 request, as the binder needs it. */
+/** The parts of an OpenCode 2 assistant row that the decision binder reads. */
 export interface V2DecisionAssistant {
     id: string;
     /** `running` while the reply has neither a failure marker nor a completion. */

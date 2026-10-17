@@ -3475,9 +3475,10 @@ export function createTransform(deps: TransformDeps) {
                 lkgFrozenReleaseReason: recoveryReleaseReason,
             });
         } else {
-            // Memory only: supplies this pass's decision if the system hook saw a
-            // changed system prompt on the same request (that request rewrites the
-            // provider cache even though this pass changed no message bytes).
+            // A pass that changed no message bytes stages no decision row. Keep its
+            // decision in memory anyway: if the system prompt hook detects a changed
+            // prompt on the same request, that request still rewrites the provider's
+            // prompt cache and its row is built from this decision.
             noteOpenCodeUnbustedPass(sessionId, {
                 tsMs: Date.now(),
                 decision: schedulerDecision,

@@ -111,14 +111,14 @@ async function createFixture(): Promise<Fixture> {
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
     const probe = spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db);
-    // What the next pass's transform stages, set by the test before each pass.
+    // Whether the scripted transform stages a busting decision on the next pass.
     let nextBusted = false;
     const scriptedTransform = Object.assign(
         async (_input: unknown, output: { messages: MessageLike[] }) => {
             const sessionId = output.messages[0]?.info.sessionID ?? SESSION;
-            // The shared transform clears its staged decision when a pass starts
-            // and stages one at the end: busting passes for binding, others as
-            // the pass's own decision for a system prompt change.
+            // Like the shared transform (transform.ts): clear the staged decision
+            // when a pass starts, then stage a busting decision for binding, or
+            // remember a non-busting one in case the system prompt changed.
             clearOpenCodePendingTransformDecision(sessionId, output.messages);
             if (nextBusted) recordPendingTransformDecision(sessionId, decision(true));
             else noteOpenCodeUnbustedPass(sessionId, decision(false));
@@ -275,7 +275,8 @@ describe("OpenCode 2 transform decision rows", () => {
             fixture.reply();
             await fixture.pass({ busted: true });
             if (finish !== "none") fixture.reply(finish);
-            // The retry and the following steps change nothing.
+            // Later passes do not bust, so any row would be the dropped one
+            // bound to the wrong reply.
             await fixture.pass({ busted: false });
             fixture.reply();
             await fixture.pass({ busted: false });

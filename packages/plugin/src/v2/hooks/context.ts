@@ -2069,7 +2069,9 @@ export async function registerContext(context: V2Context) {
                 >[1],
             );
             mapped.commit();
-            // Keep this pass's decision for its reply, bound at the next pass.
+            // Keep the transform decision this pass staged (if any) together with
+            // the store sequence captured before the request; the next pass binds it
+            // to the reply written after that sequence.
             stageOpenCodeV2TransformDecision({
                 sessionId: draft.sessionID,
                 responseAfterSequence,
