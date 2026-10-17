@@ -34,6 +34,7 @@ import {
     type OmpBinaryInfo,
     runOmpCommand,
 } from "../lib/omp-helpers";
+import { checkOmpHideSecrets, collectHideSecretsSources } from "../lib/omp-hide-secrets";
 import {
     getOmpAgentDir,
     getOmpConfigPath,
@@ -50,6 +51,8 @@ type Status = "pass" | "warn" | "fail" | "info";
 interface CheckResult {
     status: Status;
     message: string;
+    /** Fixed text with no paths or values, used verbatim by the issue report. */
+    issueMessage?: string;
 }
 interface RepairPlan {
     installPlugin: boolean;
@@ -250,6 +253,9 @@ async function runHealthChecks(options: {
                     );
                     repairPlan.disableMemory = true;
                 } else add(results, "fail", "Could not read OMP memory.backend");
+
+                for (const check of checkOmpHideSecrets(collectHideSecretsSources(options.cwd)))
+                    results.push(check);
 
                 const nonGlobalSources = getOmpNonGlobalConfigSources(options.cwd);
                 if (
@@ -461,7 +467,7 @@ function ompIssueBody(
         `- Magic Context CLI: v${selfVersion()}`,
         ...report.results.map(
             (result) =>
-                `- ${result.status.toUpperCase()}: ${privacy.healthMessage(result.message)}`,
+                `- ${result.status.toUpperCase()}: ${result.issueMessage ?? privacy.healthMessage(result.message)}`,
         ),
         "",
         "## Recent errors (last 20, sanitized)",
