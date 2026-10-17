@@ -117,18 +117,43 @@ const CACHE_CAUSE_LABELS: Record<string, string> = {
   mc_transform_missing: "No attribution recorded",
 };
 
+/**
+ * Causes the backend names for a cache loss on the provider's side, on a
+ * request whose prompt Magic Context recorded no change to. The idle label
+ * carries the idle time ("Cache expired after 11 min idle"), so it is matched
+ * by its prefix.
+ */
+export const PROVIDER_CACHE_MISS_CAUSE = "Provider cache miss (not caused by Magic Context)";
+export const IDLE_EXPIRY_CAUSE_PREFIX = "Cache expired after ";
+
+function isProviderSideCause(cause: string): boolean {
+  return cause === PROVIDER_CACHE_MISS_CAUSE || cause.startsWith(IDLE_EXPIRY_CAUSE_PREFIX);
+}
+
 export function cacheCauseLabel(cause: string): string {
   return CACHE_CAUSE_LABELS[cause] ?? cause;
 }
 
+/**
+ * CSS color variable name for a cause line. A provider-side loss is set in the
+ * secondary text color so it reads as context, not as something Magic Context did.
+ */
 export function cacheCauseColor(cause: string): string {
-  return cause === "mc_transform_failed_open" ? "red" : "amber";
+  if (cause === "mc_transform_failed_open") return "red";
+  return isProviderSideCause(cause) ? "text-secondary" : "amber";
 }
 
 export function cacheCauseTooltip(cause: string): string | undefined {
-  return cause === "mc_transform_failed_open"
-    ? "Magic Context recorded a transform error and returned the original messages for this pass."
-    : undefined;
+  if (cause === "mc_transform_failed_open") {
+    return "Magic Context recorded a transform error and returned the original messages for this pass.";
+  }
+  if (cause === PROVIDER_CACHE_MISS_CAUSE) {
+    return "The previous request read the cache moments earlier, within its lifetime, and Magic Context recorded no change to this request's prompt. The provider did not reuse its cache.";
+  }
+  if (cause.startsWith(IDLE_EXPIRY_CAUSE_PREFIX)) {
+    return "The time since the previous request is longer than the cache lifetime, so the provider dropped the cache. Magic Context recorded no change to this request's prompt.";
+  }
+  return undefined;
 }
 
 // Collapse ESTIMATED (max-prompt fallback) context limits to a single stable
