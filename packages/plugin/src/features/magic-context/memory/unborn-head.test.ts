@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { type ExecFileSyncOptions, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -100,9 +100,9 @@ function expectedDirIdentity(directory: string): string {
 function countGitSpawns(): { count: () => number } {
     let spawns = 0;
     __setProjectIdentityTestHooks({
-        execFileSync: ((...args: Parameters<typeof execFileSync>) => {
+        execFileSync: ((file: string, args: string[], options: ExecFileSyncOptions) => {
             spawns++;
-            return execFileSync(...args);
+            return execFileSync(file, args, { ...options, windowsHide: true });
         }) as typeof execFileSync,
     });
     return { count: () => spawns };
