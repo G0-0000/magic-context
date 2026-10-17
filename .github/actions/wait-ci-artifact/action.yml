@@ -1,5 +1,5 @@
 name: Wait for same-attempt artifact
-description: Bound artifact waiting by the producer cap and reject terminal producer failures
+description: Wait for a producer within its runtime and total queue-wait caps
 inputs:
   artifact:
     description: Same-commit artifact prefix, followed by its producer attempt
@@ -10,6 +10,10 @@ inputs:
   timeout-minutes:
     description: Producer job timeout in minutes
     required: true
+  max-wait-minutes:
+    description: Maximum total consumer wait, including time spent in the runner queue
+    default: "45"
+    required: false
 outputs:
   artifact-id:
     description: Immutable artifact ID selected from the producer's attempt
@@ -24,4 +28,5 @@ runs:
         WAIT_ARTIFACT: ${{ inputs.artifact }}
         WAIT_PRODUCER: ${{ inputs.producer }}
         WAIT_TIMEOUT: ${{ inputs.timeout-minutes }}
-      run: python3 scripts/wait-ci-artifact.py --artifact "$WAIT_ARTIFACT" --producer "$WAIT_PRODUCER" --timeout-minutes "$WAIT_TIMEOUT"
+        WAIT_MAX_WAIT: ${{ inputs.max-wait-minutes }}
+      run: python3 scripts/wait-ci-artifact.py --artifact "$WAIT_ARTIFACT" --producer "$WAIT_PRODUCER" --timeout-minutes "$WAIT_TIMEOUT" --max-wait-minutes "$WAIT_MAX_WAIT"

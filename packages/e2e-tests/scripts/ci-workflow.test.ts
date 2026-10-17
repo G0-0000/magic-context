@@ -4,9 +4,11 @@ import { failedRequiredJobs } from "./check-ci-results";
 
 const root = resolve(import.meta.dir, "../../..");
 const text = await Bun.file(resolve(root, ".github/workflows/ci.yml")).text();
+const waitActionText = await Bun.file(resolve(root, ".github/actions/wait-ci-artifact/action.yml")).text();
 type Step = { name?: string; run?: string; if?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> };
 type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard: number[]; mode?: string[] } } };
 const workflow = Bun.YAML.parse(text) as { jobs: Record<string, Job> };
+const waitAction = Bun.YAML.parse(waitActionText) as { inputs: Record<string, { description: string; default?: string; required: boolean }>; runs: { steps: Array<{ env?: Record<string, string>; run?: string }> } };
 
 test("summary requires every job and always runs", () => {
     const summary = workflow.jobs["ci-summary"]!;
@@ -40,6 +42,18 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
     }
     expect(workflow.jobs["e2e-host-opencode"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2, 3] } });
     expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1] } });
+});
+
+test("artifact waits allow runner queue time without extending the producer runtime", () => {
+    expect(waitAction.inputs["max-wait-minutes"]).toEqual({
+        description: "Maximum total consumer wait, including time spent in the runner queue",
+        default: "45",
+        required: false,
+    });
+    expect(waitAction.runs.steps[0]!.env!.WAIT_TIMEOUT).toBe("${{ inputs.timeout-minutes }}");
+    expect(waitAction.runs.steps[0]!.env!.WAIT_MAX_WAIT).toBe("${{ inputs.max-wait-minutes }}");
+    expect(waitAction.runs.steps[0]!.run).toContain("--timeout-minutes \"$WAIT_TIMEOUT\"");
+    expect(waitAction.runs.steps[0]!.run).toContain("--max-wait-minutes \"$WAIT_MAX_WAIT\"");
 });
 
 test("cache oracle and separate OC2 regressions run exactly once even after a suite failure", () => {
