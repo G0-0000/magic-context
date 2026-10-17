@@ -1046,6 +1046,36 @@ describe("prepared prefix source-order trimming", () => {
         ]);
     });
 
+    it("render review: shipped trim retains instruction bytes before a visible boundary", () => {
+        db = makeDb();
+        const source = [
+            message("covered", "user"),
+            hostSystem("covered instruction"),
+            message("served-boundary", "assistant"),
+            hostSystem("instruction row"),
+            message("after", "user"),
+        ];
+        const evidence = capturePrefixTrimSourceOrder(source);
+        const live = [...source];
+        const result = withServedBoundary({ "instruction-row": "served-boundary" }, () =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                messages: live,
+                preparedPrefix: preparedPrefix("instruction-row"),
+                prefixTrimSourceOrder: evidence,
+            }),
+        );
+        expect(result.prefixTrimStatus).toBe("applied");
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
+            "new prefix",
+            "covered instruction",
+            "instruction row",
+            "after",
+        ]);
+    });
+
     it("retains id-less host instructions even before a visible boundary", () => {
         db = makeDb();
         const source = [

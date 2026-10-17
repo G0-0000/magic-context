@@ -79,6 +79,21 @@ function limitOf(input: HistorianPromptFitArgs): number {
 }
 
 describe("fitHistorianPrompt", () => {
+    test("render review: memory-off historian request must not contain project memories", () => {
+        const input = args({ memoryEnabled: false, memories: [memory(0)] });
+        const fit = fitHistorianPrompt(input);
+        if (!fit.ok) throw new Error(fit.reason);
+        const prompt = buildCompartmentAgentPrompt({
+            seedExamples: fit.seedExamples,
+            sessionReferences: fit.sessionReferences,
+            projectMemory: fit.projectMemory,
+            inputSource: "Messages 61-62:\n\nA new task.",
+            memoryEnabled: false,
+        });
+        expect(prompt).not.toContain("Fact 0:");
+        expect(prompt).not.toContain("<project-memory>");
+    });
+
     test("fit drops diverse examples before recent, and oldest recent first", () => {
         const input = args({
             memories: [],
