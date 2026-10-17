@@ -1,10 +1,11 @@
-import { harnessOwnsOpenCodeStore } from "../../shared/harness";
+import { getHarness, harnessOwnsOpenCodeStore } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import {
     assertOpenCodeStoreGeneration,
     claimOpenCodeDbDiagnosticOnce,
     clearOpenCodeDbReadFailure,
     type OpenCodeDbPathResolution,
+    type OpenCodeHostGeneration,
     openCodeDbPathExists,
     recordOpenCodeDbReadFailure,
     resolveOpenCodeDbPath,
@@ -53,23 +54,30 @@ export function openCodeDbExists(): boolean {
     return harnessOwnsOpenCodeStore() && openCodeDbPathExists(resolveOpenCodeDbPath());
 }
 
-let cachedReadOnlyDb: { path: string; db: Database } | null = null;
+// One cached read-only handle per store generation. The v1 handle serves every
+// OpenCode 1 reader in this module; the v2 handle serves only the readers that
+// also know the OpenCode 2 schema (see getMessageTimesFromOpenCodeDb).
+const cachedReadOnlyDbs: Record<OpenCodeHostGeneration, { path: string; db: Database } | null> = {
+    v1: null,
+    v2: null,
+};
 
-function closeCachedReadOnlyDb(): void {
-    if (!cachedReadOnlyDb) {
+function closeCachedReadOnlyDb(generation: OpenCodeHostGeneration): void {
+    const cached = cachedReadOnlyDbs[generation];
+    if (!cached) {
         return;
     }
 
     try {
-        closeQuietly(cachedReadOnlyDb.db);
+        closeQuietly(cached.db);
     } catch (error) {
         log("[magic-context] failed to close cached OpenCode read-only DB:", error);
     } finally {
-        cachedReadOnlyDb = null;
+        cachedReadOnlyDbs[generation] = null;
     }
 }
 
-function getReadOnlySessionDb(): Database {
+function getReadOnlySessionDb(generation: OpenCodeHostGeneration = "v1"): Database {
     if (!harnessOwnsOpenCodeStore()) {
         throw new Error(
             "OpenCode session database is not readable from a Pi-compatible process; its history lives in Pi sessions",
@@ -82,19 +90,20 @@ function getReadOnlySessionDb(): Database {
             `OpenCode session database is unavailable at ${dbPath} (source=${resolution.source})`,
         );
     }
-    if (cachedReadOnlyDb?.path === dbPath) {
-        return cachedReadOnlyDb.db;
+    const cached = cachedReadOnlyDbs[generation];
+    if (cached?.path === dbPath) {
+        return cached.db;
     }
 
-    closeCachedReadOnlyDb();
+    closeCachedReadOnlyDb(generation);
     const db = new Database(dbPath, { readonly: true });
     try {
-        assertOpenCodeStoreGeneration(db, "v1", dbPath);
+        assertOpenCodeStoreGeneration(db, generation, dbPath);
     } catch (error) {
         closeQuietly(db);
         throw error;
     }
-    cachedReadOnlyDb = { path: dbPath, db };
+    cachedReadOnlyDbs[generation] = { path: dbPath, db };
     clearOpenCodeDbReadFailure();
     return db;
 }
@@ -105,7 +114,8 @@ export function withReadOnlySessionDb<T>(fn: (db: Database) => T): T {
 
 // Intentional: exported for tests; production relies on process-exit cleanup (same as closeDatabase)
 export function closeReadOnlySessionDb(): void {
-    closeCachedReadOnlyDb();
+    closeCachedReadOnlyDb("v1");
+    closeCachedReadOnlyDb("v2");
 }
 
 export function getRawSessionMessageCountFromDb(db: Database, sessionId: string): number {
@@ -644,6 +654,11 @@ interface MessageTimeRow {
  * Used by temporal-awareness to map compartment start/end message IDs to
  * wall-clock dates for `## start-end · date · title` headings in
  * `<session-history>`.
+ *
+ * An OpenCode 2 process reads its own store (native, or a v1 store the 2.x host
+ * migrated) from `session_message`, the table the v2 store reader uses. Reading
+ * the v1 `message` table there either refuses on the store-generation guard (a
+ * native v2 store) or reads rows the 2.x host no longer writes (a migrated one).
  */
 export function getMessageTimesFromOpenCodeDb(
     sessionId: string,
@@ -653,21 +668,30 @@ export function getMessageTimesFromOpenCodeDb(
     if (messageIds.length === 0 || !harnessOwnsOpenCodeStore()) return result;
 
     try {
-        withReadOnlySessionDb((db) => {
-            // Unary + excludes the session index from planning. The requested
-            // primary keys, not the size of the session, must bound this lookup.
-            const placeholders = messageIds.map(() => "?").join(",");
-            const rows = db
-                .prepare(
-                    `SELECT id, time_created FROM message WHERE +session_id = ? AND id IN (${placeholders})`,
-                )
-                .all(sessionId, ...messageIds) as MessageTimeRow[];
-            for (const row of rows) {
-                if (typeof row.id === "string" && typeof row.time_created === "number") {
-                    result.set(row.id, row.time_created);
-                }
+        const placeholders = messageIds.map(() => "?").join(",");
+        // Unary + excludes the session index from planning. The requested
+        // primary keys, not the size of the session, must bound this lookup.
+        const rows =
+            getHarness() === "opencode2"
+                ? (getReadOnlySessionDb("v2")
+                      .prepare(
+                          `SELECT id, COALESCE(time_created, json_extract(data, '$.time.created')) AS time_created
+                             FROM session_message WHERE +session_id = ? AND id IN (${placeholders})`,
+                      )
+                      .all(sessionId, ...messageIds) as MessageTimeRow[])
+                : withReadOnlySessionDb(
+                      (db) =>
+                          db
+                              .prepare(
+                                  `SELECT id, time_created FROM message WHERE +session_id = ? AND id IN (${placeholders})`,
+                              )
+                              .all(sessionId, ...messageIds) as MessageTimeRow[],
+                  );
+        for (const row of rows) {
+            if (typeof row.id === "string" && typeof row.time_created === "number") {
+                result.set(row.id, row.time_created);
             }
-        });
+        }
     } catch (error) {
         logProbeFailureOnce(resolveOpenCodeDbPath(), error);
     }

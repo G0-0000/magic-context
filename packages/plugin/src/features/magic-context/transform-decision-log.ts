@@ -172,7 +172,8 @@ const scheduledWriteTokensBySession = new Map<string, Set<symbol>>();
  * itself (a deferred pass in the middle of a tool loop, or a Rust raw
  * pass-through), so it would stage no decision, or one naming an unrelated
  * reason. The system hook marks the session here and the decision bound to
- * that request's assistant names `system_hash`. In-memory only: nothing is
+ * that request's assistant names `system_hash`, unless the provider cache had
+ * already expired from idle time on that request. In-memory only: nothing is
  * written to the database until a decision is bound to an assistant message.
  */
 const systemHashChangedSessions = new Set<string>();
@@ -340,7 +341,25 @@ export function noteOpenCodeUnbustedPass(
     unbustedPassBySession.set(sessionId, decision);
 }
 
+/**
+ * Reasons meaning the provider's cached prompt had already expired from idle
+ * time before this request was sent. That request rebuilds the provider cache
+ * whatever else changed, so a system prompt change arriving on the same request
+ * costs nothing extra: the expiry keeps the cause.
+ */
+const IDLE_EXPIRY_REASONS: ReadonlySet<CanonicalMaterializeReason | null> = new Set([
+    "ttl_idle",
+    "ttl_expiry",
+]);
+
+/**
+ * The decision recorded for a request that carried a changed system prompt.
+ * `system_hash` becomes the cause unless the pass already named an idle expiry:
+ * then the provider cache was dead before the new prompt arrived, and the row
+ * keeps a single cause column, so the expiry stays the recorded reason.
+ */
 function withSystemHashReason(decision: PendingTransformDecision): PendingTransformDecision {
+    if (IDLE_EXPIRY_REASONS.has(decision.materializeReason)) return decision;
     return { ...decision, materializeReason: "system_hash" };
 }
 
@@ -367,8 +386,9 @@ function unknownPassDecision(): PendingTransformDecision {
  * The decision to record for the request now being bound, or undefined when
  * none applies. Without a system prompt change this is exactly the staged
  * busting decision. With one, the request rewrote the provider cache anyway,
- * so it always gets a row naming `system_hash`, built from the staged decision,
- * else the pass's unbusted decision, else an `unknown` placeholder.
+ * so it always gets a row, built from the staged decision, else the pass's
+ * unbusted decision, else an `unknown` placeholder. The row names `system_hash`
+ * unless the pass named an idle expiry (see withSystemHashReason).
  */
 function takeOpenCodeDecisionForBinding(
     sessionId: string,

@@ -9,6 +9,11 @@ import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import {
     __test,
+    type CanonicalMaterializeReason,
+    notePiSystemPromptHashChange,
+    noteSystemPromptHashChange,
+    recordPendingPiTransformDecision,
+    stageOpenCodeV2TransformDecision,
     TRANSFORM_DECISIONS_RETENTION,
     writeRustTransformDecision,
 } from "./transform-decision-log";
@@ -299,6 +304,66 @@ describe("transform_decisions retention cap", () => {
     it("keeps the production retention constant sane", () => {
         // Guard against accidental drift of the real cap.
         expect(TRANSFORM_DECISIONS_RETENTION).toBe(2000);
+    });
+});
+
+describe("system prompt change on the same request as another cause", () => {
+    function passDecision(materializeReason: CanonicalMaterializeReason | null) {
+        return {
+            tsMs: 1,
+            decision: "execute" as const,
+            materialized: false,
+            materializeReason,
+            systemHashPrev: null,
+            systemHashNew: null,
+            m0ModelKeyPrev: null,
+            m0ModelKeyNew: null,
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 100,
+            bustedThisPass: true,
+        };
+    }
+
+    // OpenCode 1 and OpenCode 2 pick the recorded row's reason with the same
+    // function. OpenCode 1 writes the row on a timer after a completion event;
+    // OpenCode 2 staging keeps the chosen decision in memory, so the test reads
+    // the reason back immediately.
+    function stagedReasonWithSystemChange(materializeReason: string | null): string | null {
+        writeRustTransformDecision({
+            sessionId: "ses-1",
+            decision: "EXECUTE",
+            materializeReason,
+            inputTokens: 100,
+        });
+        noteSystemPromptHashChange("ses-1");
+        expect(
+            stageOpenCodeV2TransformDecision({ sessionId: "ses-1", responseAfterSequence: 7 }),
+        ).toBe(true);
+        return __test.getStagedV2("ses-1")?.materializeReason ?? null;
+    }
+
+    it("keeps an idle expiry as the cause when the cache had already expired", () => {
+        expect(stagedReasonWithSystemChange("ttl_idle")).toBe("ttl_idle");
+        __test.reset();
+        expect(stagedReasonWithSystemChange("ttl_expiry")).toBe("ttl_expiry");
+    });
+
+    it("names system_hash when the cache was still warm", () => {
+        expect(stagedReasonWithSystemChange("pressure_refold")).toBe("system_hash");
+        __test.reset();
+        expect(stagedReasonWithSystemChange(null)).toBe("system_hash");
+    });
+
+    it("applies the same precedence to Pi decisions", () => {
+        notePiSystemPromptHashChange("ses-1");
+        recordPendingPiTransformDecision("ses-1", passDecision("ttl_idle"), null);
+        expect(__test.getPendingPi("ses-1")?.materializeReason).toBe("ttl_idle");
+        __test.reset();
+        notePiSystemPromptHashChange("ses-1");
+        recordPendingPiTransformDecision("ses-1", passDecision("model_change"), null);
+        expect(__test.getPendingPi("ses-1")?.materializeReason).toBe("system_hash");
     });
 });
 
