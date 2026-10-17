@@ -211,6 +211,7 @@ async function fixture(
     let system = "Review the isolated project.";
     let checkpoint: V2Message | undefined;
     let lastDraft: SessionContext | undefined;
+    let folds = 0;
     function persist() {
         raw.prepare("DELETE FROM session_message WHERE session_id = ?").run(session);
         for (const [seq, message] of source.entries()) {
@@ -424,8 +425,15 @@ async function fixture(
             const draft = beforeContext ? inputDraft() : structuredClone(lastDraft!);
             await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("compaction hook supplied no summary");
-            const seq = source.length;
-            const id = `fold-${seed}`;
+            // Compaction no longer refuses before durable storage opens, so a test
+            // may fold twice in one session. Each fold gets its own id and the next
+            // free seq, after the source rows and any earlier fold.
+            const { last } = raw
+                .prepare("SELECT MAX(seq) AS last FROM session_message WHERE session_id = ?")
+                .get(session) as { last: number | null };
+            const seq = Math.max(source.length, (last ?? -1) + 1);
+            const id = folds === 0 ? `fold-${seed}` : `fold-${seed}-${folds}`;
+            folds++;
             raw.prepare(
                 "INSERT INTO session_message(id,session_id,type,seq,time_created,data) VALUES (?,?,?,?,?,?)",
             ).run(
