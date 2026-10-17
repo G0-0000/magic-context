@@ -185,5 +185,25 @@
         "class": "double_bust_after_reclaim",
         "decision": { "decision": "defer", "droppedCount": 2 },
         "input": { "previousBustClass": "accounted_hard_marker_drain" }
+    },
+    {
+        "class": "idle_cache_expiry",
+        "decision": { "decision": "execute", "canonicalDecision": "execute" },
+        "input": {
+            "idleCacheExpiry": true,
+            "missingBreakpointAfterRead": true,
+            "previousBustClass": "accounted_hard_marker_drain"
+        }
+    },
+    {
+        "class": "missing_breakpoint_after_read",
+        "decision": { "decision": "execute", "canonicalDecision": "execute" },
+        "input": {
+            "missingBreakpointAfterRead": true,
+            "providerShortReadWithIdenticalPrefix": true,
+            "providerComparableRead": 47083,
+            "directInput": 474788,
+            "previousTotal": 521668
+        }
     }
 ]

@@ -1,5 +1,38 @@
 #!/usr/bin/env bun
-
+/**
+ * analyze-pi-cache-busts.ts — read a Pi/OMP session's assistant usage meter and
+ * Magic Context's served-array ledger, and name every request whose prompt cache
+ * was not reused.
+ *
+ * Usage fields (Pi's normalized `usage` on each assistant message, written by
+ * @earendil-works/pi-ai):
+ *   input       Uncached prompt tokens on every provider. Anthropic reports
+ *               `input_tokens`, the tokens after the last cache breakpoint
+ *               (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#tracking-cache-performance).
+ *               pi-ai subtracts the cached part for implicit caches: OpenAI
+ *               Responses `input_tokens - cached_tokens - cache_write_tokens`
+ *               (api/openai-responses-shared.js), Gemini `promptTokenCount -
+ *               cachedContentTokenCount` (api/google-generative-ai.js).
+ *   cacheRead   Tokens served from cache: Anthropic `cache_read_input_tokens`,
+ *               OpenAI `input_tokens_details.cached_tokens`, Gemini
+ *               `cachedContentTokenCount`.
+ *   cacheWrite  Tokens written to cache: Anthropic `cache_creation_input_tokens`
+ *               (Bedrock `cacheWriteInputTokens`). OpenAI and Gemini cache
+ *               implicitly and report 0 here: every prompt prefix they serve is
+ *               stored automatically with no write premium
+ *               (https://platform.openai.com/docs/guides/prompt-caching,
+ *               https://ai.google.dev/gemini-api/docs/caching, "Implicit caching").
+ *
+ * Meter: a request is cache-healthy when cacheRead >= previous cacheRead +
+ * previous cacheWrite - 64. Uncached input never counts as reuse. Counting it
+ * ("cacheRead + input") made a request that read only the 47k-token head and
+ * billed the other ~475k as input look exactly like a warm hit. On an
+ * Anthropic-style explicit-breakpoint meter, such a short read with no write
+ * and a large uncached input is `missing_breakpoint_after_read`; a short read
+ * with a large write is a rewrite and goes through the shared classifier. A
+ * short read more than --cache-ttl (default 5m) after the prefix was last read
+ * in full or written is `idle_cache_expiry`.
+ */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
@@ -8,9 +41,15 @@ import {
 	type CacheBustDecisionAttribution,
 	type CacheBustDivergenceClass,
 	type CacheBustSessionAnalysis,
+	cachedPrefixFloor,
 	classifyBustAfterReclaim,
 	classifyCacheBust,
+	DEFAULT_CACHE_TTL_MS,
+	isIdleCacheExpiry,
+	isMissingBreakpointAfterRead,
 	nearestCacheBustDecision,
+	parseCacheTtl,
+	refreshesCachedPrefix,
 } from "../../plugin/scripts/cache-bust-attribution";
 import {
 	clippedBodyPairVersions,
@@ -39,6 +78,7 @@ interface Args {
 	until?: string;
 	limit?: number;
 	bodiesDir?: string;
+	cacheTtl?: string;
 	showDiff: boolean;
 	allRows: boolean;
 	help: boolean;
@@ -61,6 +101,10 @@ interface PiUsageRow {
 	cacheRead: number;
 	cacheWrite: number;
 	total: number;
+	/** pi-ai `api`, `provider`, and `model` of the message; they name the cache kind. */
+	api?: string;
+	provider?: string;
+	model?: string;
 }
 
 export interface PiSessionFile {
@@ -83,7 +127,12 @@ export interface AnalysisRow {
 	verdict: Verdict;
 	prevTotal?: number;
 	meterFloor?: number;
+	/** The provider cache read; uncached input is not part of it. */
 	comparableRead?: number;
+	/** Time since the cached prefix was last read in full or written. */
+	idleGapMs?: number;
+	/** The meter is an explicit-breakpoint (Anthropic-style) cache. */
+	explicitBreakpoints?: boolean;
 	rewrittenTokens?: number;
 	attribution: string;
 	divergenceIndex: number;
@@ -113,6 +162,8 @@ export interface PiCacheBustAnalysisOptions {
 	db?: string;
 	bodiesDir?: string;
 	decisions?: readonly CacheBustDecisionAttribution[];
+	/** Idle time after which the provider prefix counts as expired; default 5 min. */
+	cacheTtlMs?: number;
 }
 
 function asJson(value: unknown): Json | undefined {
@@ -198,6 +249,7 @@ function parseArgs(argv: string[]): Args {
 		"--until",
 		"--limit",
 		"--bodies-dir",
+		"--cache-ttl",
 	]);
 	let positionalSession = "";
 	for (let index = 0; index < args.length; index += 1) {
@@ -222,6 +274,7 @@ function parseArgs(argv: string[]): Args {
 		until: getOpt("--until"),
 		limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
 		bodiesDir: getOpt("--bodies-dir"),
+		cacheTtl: getOpt("--cache-ttl"),
 		showDiff: args.includes("--show-diff"),
 		allRows: args.includes("--all-rows"),
 		help: args.includes("--help") || args.includes("-h"),
@@ -291,6 +344,11 @@ function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
 			cacheRead,
 			cacheWrite,
 			total: input + cacheRead + cacheWrite,
+			...(typeof message.api === "string" ? { api: message.api } : {}),
+			...(typeof message.provider === "string"
+				? { provider: message.provider }
+				: {}),
+			...(typeof message.model === "string" ? { model: message.model } : {}),
 		});
 	}
 	if (!sessionId) return undefined;
@@ -575,13 +633,36 @@ function isUsageMissing(pass: JoinedPass): boolean {
 	return pass.usage.cacheRead === 0 && pass.usage.input === 0;
 }
 
+/**
+ * Does this request's provider cache at explicit breakpoints (Anthropic, also
+ * through Bedrock or a Claude model behind another API) rather than implicitly
+ * (OpenAI, Gemini)? A row without any provider name falls back to whether a
+ * cache write was ever reported, since implicit caches never report one.
+ */
+export function usesExplicitBreakpoints(
+	usage: PiUsageRow,
+	previous?: PiUsageRow,
+): boolean {
+	const names = [usage.api, usage.provider, usage.model].filter(
+		(name): name is string => typeof name === "string" && name.length > 0,
+	);
+	if (names.length > 0)
+		return names.some((name) => /anthropic|bedrock|claude/i.test(name));
+	return usage.cacheWrite > 0 || (previous?.cacheWrite ?? 0) > 0;
+}
+
 export function analyzeJoinedPasses(
 	joined: readonly JoinedPass[],
 	options: {
 		bodies?: ReadonlyMap<string, PiBodySnapshot>;
 		decisions?: readonly CacheBustDecisionAttribution[];
+		cacheTtlMs?: number;
 	} = {},
 ): AnalysisRow[] {
+	const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+	// When the reusable prefix was last read in full or written; see
+	// refreshesCachedPrefix for which requests move it.
+	let prefixRefreshedAtMs: number | undefined;
 	let previousBust = false;
 	let previousBustClass: CacheBustDivergenceClass | undefined;
 	let previousBustDivergenceIndex: number | undefined;
@@ -602,6 +683,7 @@ export function analyzeJoinedPasses(
 		}
 		if (!previousMetered) {
 			previousMetered = current;
+			prefixRefreshedAtMs = current.usage.timestamp;
 			return {
 				current,
 				verdict: "BASE",
@@ -611,15 +693,50 @@ export function analyzeJoinedPasses(
 		}
 		const previous = previousMetered;
 		const prevTotal = previous.usage.total;
-		const meterFloor = prevTotal - Math.max(64, previous.usage.input);
-		const comparableRead = current.usage.cacheRead + current.usage.input;
-		// A bust's large direct input cannot forgive another rewrite at the
-		// same cache floor. Cache reads must recover before forgiveness resumes.
+		// Only the cache read counts as reuse: it must cover what the previous
+		// request read or wrote. Uncached input is billed in full and caches
+		// nothing, so it never stands in for a read.
+		const meterFloor = cachedPrefixFloor({
+			read: previous.usage.cacheRead,
+			write: previous.usage.cacheWrite,
+			input: previous.usage.input,
+		});
+		const comparableRead = current.usage.cacheRead;
+		// After a bust, a read that does not grow past the previous read is
+		// another bust even when it matches the previous request's small prefix.
 		const rebust =
 			previousBust && current.usage.cacheRead <= previous.usage.cacheRead;
 		const bust = rebust || comparableRead < meterFloor;
 		const bustFollowsBust = previousBust;
 		previousBust = bust;
+		const explicitBreakpoints = usesExplicitBreakpoints(
+			current.usage,
+			previous.usage,
+		);
+		const reading = {
+			read: current.usage.cacheRead,
+			write: current.usage.cacheWrite,
+			input: current.usage.input,
+		};
+		const idleGapMs =
+			current.usage.timestamp -
+			(prefixRefreshedAtMs ?? previous.usage.timestamp);
+		const idleCacheExpiry =
+			bust &&
+			isIdleCacheExpiry(
+				current.usage.timestamp,
+				prefixRefreshedAtMs ?? previous.usage.timestamp,
+				cacheTtlMs,
+			);
+		const missingBreakpointAfterRead = isMissingBreakpointAfterRead(reading, {
+			shortRead: bust,
+			explicitBreakpoints,
+		});
+		if (
+			refreshesCachedPrefix(reading, { shortRead: bust, explicitBreakpoints })
+		) {
+			prefixRefreshedAtMs = current.usage.timestamp;
+		}
 		let previousBody = options.bodies?.get(passBodyKey(previous.ledger));
 		let currentBody = options.bodies?.get(passBodyKey(current.ledger));
 		let bodyDivergence =
@@ -731,6 +848,8 @@ export function analyzeJoinedPasses(
 					compactionSeam,
 					inheritedFold: attributionDecision !== decision,
 					decision: attributionDecision,
+					idleCacheExpiry,
+					missingBreakpointAfterRead,
 				})
 			: undefined;
 		const divergenceClass =
@@ -748,6 +867,8 @@ export function analyzeJoinedPasses(
 			prevTotal,
 			meterFloor,
 			comparableRead,
+			idleGapMs,
+			explicitBreakpoints,
 			rewrittenTokens,
 			previousModel: previousBody?.wireModel,
 			currentModel: currentBody?.wireModel,
@@ -850,6 +971,7 @@ export async function analyzePiCacheBustSession(
 	const rows = analyzeJoinedPasses(analysisJoined, {
 		bodies,
 		decisions,
+		cacheTtlMs: options.cacheTtlMs,
 	});
 	const requests: AnalyzedCacheRequest[] = rows.flatMap((row) => {
 		const timestampMs = row.current.usage.timestamp;
@@ -898,7 +1020,7 @@ function meterCell(row: AnalysisRow): string {
 		row.previousModel !== row.currentModel
 			? `; wireModel=${row.previousModel} → ${row.currentModel}`
 			: "";
-	return `read=${row.current.usage.cacheRead.toLocaleString()} + input=${row.current.usage.input.toLocaleString()} = ${row.comparableRead?.toLocaleString()}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()})${rewritten}${wireModel}`;
+	return `read=${row.current.usage.cacheRead.toLocaleString()} (write=${row.current.usage.cacheWrite.toLocaleString()}, uncached input=${row.current.usage.input.toLocaleString()}); floor=${row.meterFloor?.toLocaleString()} (prev read+write-64; prevTotal=${row.prevTotal?.toLocaleString()})${rewritten}${wireModel}`;
 }
 
 const HELP = `usage: bun scripts/analyze-pi-cache-busts.ts --session <prefix> [options]
@@ -915,6 +1037,8 @@ Options:
   --bodies-dir <path>  override the body session directory (or its parent)
   --since/--until <t>  ISO timestamp or duration ago (for example 4h)
   --limit <N>          keep the last N digest records in range
+  --cache-ttl <dur>    idle time after which the provider prefix counts as
+                       expired (default 5m; for example 1h)
   --show-diff          print both versions of the first-diverging real message
   --all-rows           also print BASE and STABLE rows`;
 
@@ -994,9 +1118,11 @@ async function main(): Promise<void> {
 		options.ledgerDir,
 		options.db,
 	);
+	const cacheTtlMs = parseCacheTtl(options.cacheTtl);
 	const rows = analyzeJoinedPasses(joinPasses(ledgers, session), {
 		bodies: bodyJoin.byPass,
 		decisions,
+		cacheTtlMs,
 	});
 	console.log(`Session: ${session.sessionId}`);
 	console.log(`JSONL:   ${session.path}`);
@@ -1015,7 +1141,7 @@ async function main(): Promise<void> {
 	console.log(`Digests: ${ledgers.length}`);
 	console.log("");
 	console.log(
-		"Meter rule (Pi host): BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). After a bust, a read that does not grow past the prior read is another BUST (rewritten≈current input). The meter decides the verdict; normalized pi-llm-debugging request bodies attribute changed messages.",
+		`Meter rule (Pi host): BUST when cacheRead < prior cacheRead + prior cacheWrite - 64; uncached input never counts as reuse. After a bust, a read that does not grow past the prior read is another BUST (rewritten≈current input). On an explicit-breakpoint meter (Anthropic) a short read with no write and ≥1,024 uncached input tokens is missing_breakpoint_after_read; a short read more than ${options.cacheTtl ?? "5m"} after the prefix was last read in full or written is idle_cache_expiry. The meter decides the verdict; normalized pi-llm-debugging request bodies attribute changed messages.`,
 	);
 	console.log(
 		"time(UTC)            | verdict | meter                                                                  | first divergence",
