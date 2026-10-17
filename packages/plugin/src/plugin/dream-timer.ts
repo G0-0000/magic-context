@@ -536,7 +536,7 @@ async function runProjectMaintenance(
     const projectMaintenanceEnabled =
         Boolean(current.dreamerConfig && current.dreamerConfig.disable !== true) ||
         reg.memoryEnabled === true ||
-        reg.gitCommitIndexing?.enabled === true ||
+        current.gitCommitIndexing?.enabled === true ||
         reg.historianChildSweep !== undefined;
     if (!projectMaintenanceEnabled) return;
 
@@ -552,7 +552,9 @@ async function runProjectMaintenance(
         // Compartment-chunk backfill remains demand-driven to avoid bursty
         // requests to local embedding endpoints.
     }
-    await sweepProject(current, origin, db);
+    // Indexing commit text does not require an embedding provider. Only the
+    // optional vector backfill depends on the embedding snapshot.
+    await sweepProject(current, origin, db, current.gitCommitIndexing?.enabled === true);
 }
 
 /**

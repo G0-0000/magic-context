@@ -4,7 +4,12 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
-import { _getDreamTimerStateForTests, _resetDreamTimerForTests } from "../../plugin/dream-timer";
+import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
+import {
+    _getDreamTimerStateForTests,
+    _resetDreamTimerForTests,
+    _setDreamTimerStagesForTests,
+} from "../../plugin/dream-timer";
 import { _resetHarnessForTesting } from "../../shared/harness";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -60,16 +65,19 @@ function fakeHost(directory: string): V2Context {
 }
 
 /** A configuration with the dreamer on, and nothing else that starts background work. */
-function mockConfig(dreamer: { disable: boolean }) {
+function mockConfig(dreamer: { disable: boolean }, gitIndexing = false) {
     const config = MagicContextConfigSchema.parse({
         auto_update: false,
         historian: { disable: true },
         dreamer,
-        memory: { enabled: false },
+        memory: { enabled: false, git_commit_indexing: { enabled: gitIndexing } },
+        embedding: { provider: "off" },
     });
+    const detailed = configLoader.loadPluginConfigDetailed(projectDirectory(), false);
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
+        ...detailed,
         config,
-    } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
+    });
     // Storage opens at boot, so the dreamer's carrier is wired during setup.
     const db = openDatabase();
     if (!db) throw new Error("throwaway test store unavailable");
@@ -78,6 +86,7 @@ function mockConfig(dreamer: { disable: boolean }) {
         load.mockRestore();
         probe.mockRestore();
     });
+    return config;
 }
 
 describe("OpenCode 2 dream schedule timer registration", () => {
@@ -93,12 +102,81 @@ describe("OpenCode 2 dream schedule timer registration", () => {
         expect(_getDreamTimerStateForTests()).toEqual({ active: false, directories: [] });
     });
 
-    test("a disabled dreamer registers nothing", async () => {
+    test("a disabled dreamer still registers independent maintenance", async () => {
         mockConfig({ disable: true });
-        const dispose = await setup(fakeHost(projectDirectory()));
+        const directory = projectDirectory();
+        const dispose = await setup(fakeHost(directory));
         disposers.unshift(dispose);
-        expect(_getDreamTimerStateForTests()).toEqual({ active: false, directories: [] });
+        expect(_getDreamTimerStateForTests()).toEqual({ active: true, directories: [directory] });
     });
+
+    for (const [dreamerDisabled, bootGitEnabled] of [
+        [true, true],
+        [false, true],
+        [true, false],
+    ]) {
+        const name = bootGitEnabled
+            ? `git sweep indexes commits exactly once with dreamer ${dreamerDisabled ? "disabled" : "enabled"}`
+            : "live git indexing starts after boot with dreamer disabled and embeddings off";
+        test(name, async () => {
+            const config = mockConfig({ disable: dreamerDisabled }, bootGitEnabled);
+            const directory = projectDirectory();
+            const commitMessage = `independent commit indexing ${directory}`;
+            for (const args of [
+                ["init", "--quiet"],
+                [
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    commitMessage,
+                ],
+            ]) {
+                const result = Bun.spawnSync(["git", "-C", directory, ...args], {
+                    windowsHide: true,
+                });
+                if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+            }
+            setBootQuietPeriodForTests(0);
+            const restoreStages = _setDreamTimerStagesForTests({
+                runMessageHistoryMaintenance: async () => {},
+            });
+            disposers.push(async () => restoreStages());
+            const logs = spyOn(logger, "log");
+            disposers.push(async () => logs.mockRestore());
+            const duties = await registerContext(fakeHost(directory));
+            config.memory.git_commit_indexing.enabled = true;
+            disposers.unshift(async () => {
+                await duties?.dispose();
+            });
+            const db = openDatabase()!;
+            const deadline = Date.now() + 10000;
+            let count = 0;
+            while (Date.now() < deadline) {
+                count = (
+                    db
+                        .prepare("SELECT count(*) AS n FROM git_commits WHERE message = ?")
+                        .get(commitMessage) as { n: number }
+                ).n;
+                if (count > 0) break;
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            expect(count, logs.mock.calls.map((args) => args.join(" ")).join("\n")).toBe(1);
+            expect(
+                logs.mock.calls.filter(([line]) =>
+                    String(line).includes("[git-commits] sweep starting"),
+                ).length,
+            ).toBe(1);
+            expect(_getDreamTimerStateForTests()).toEqual({
+                active: true,
+                directories: [directory],
+            });
+        }, 15000);
+    }
 
     test("several contexts share one timer, and each cleanup removes only its own project", async () => {
         mockConfig({ disable: false });
