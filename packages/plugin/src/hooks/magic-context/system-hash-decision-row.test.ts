@@ -33,7 +33,6 @@ import {
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
 import { clearInjectionCache } from "./inject-compartments";
-import { requestPendingMaterialization } from "./pending-materialization";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-messages";
@@ -82,6 +81,9 @@ function harness(order: Order, label: string) {
     const systemPromptRefreshSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
     let schedule: "execute" | "defer" = "execute";
+    // The messages transform reads the live model; the system hook keeps the
+    // fixed route, so a model switch alone does not change the prompt hash.
+    const liveModelBySession = new Map([[sessionId, model]]);
     const transform = createTransform({
         tagger: createTagger(),
         scheduler: { shouldExecute: () => schedule },
@@ -96,7 +98,7 @@ function harness(order: Order, label: string) {
         protectedTokens: 0,
         directory: root,
         sessionDirectoryBySession: new Map([[sessionId, root]]),
-        liveModelBySession: new Map([[sessionId, model]]),
+        liveModelBySession,
     });
     const system = createSystemPromptHashHandler({
         db,
@@ -168,7 +170,9 @@ function harness(order: Order, label: string) {
                   WHERE session_id = ? ORDER BY rowid`,
             )
             .all(sessionId) as DecisionRow[];
-    return { db, sessionId, serve, rows, text, toolStep, pendingMaterializationSessions };
+    const switchModel = (modelID: string) =>
+        liveModelBySession.set(sessionId, { providerID: model.providerID, modelID });
+    return { db, sessionId, serve, rows, text, toolStep, switchModel };
 }
 
 describe("system prompt change names system_hash on its request's decision row", () => {
@@ -240,39 +244,34 @@ describe("system prompt change names system_hash on its request's decision row",
 
         it(`TS normal: a busting pass that carries the change records system_hash, not its own reason (${order})`, async () => {
             const h = harness(order, "normal");
-            const first = h.text("msg_0001", "user");
+            const user = h.text("msg_0001", "user");
             await h.serve({
-                messages: [first],
+                messages: [user],
                 prompt: "Base instructions, version one.",
                 reply: "msg_0002",
                 schedule: "execute",
             });
-            // Control: a user flush with an unchanged prompt keeps its own reason.
-            requestPendingMaterialization(
-                h.pendingMaterializationSessions,
-                h.sessionId,
-                "user_flush",
-            );
+
+            // Control: a model switch with an unchanged prompt busts and records
+            // its own reason.
+            h.switchModel("claude-opus-5-6");
             const before = h.rows().length;
             await h.serve({
-                messages: [first, h.text("msg_0002", "assistant"), h.text("msg_0003", "user")],
+                messages: [user, h.text("msg_0002", "assistant"), h.text("msg_0003", "user")],
                 prompt: "Base instructions, version one.",
                 reply: "msg_0004",
                 schedule: "execute",
             });
-            const control = h.rows().slice(before);
-            expect(control.map((row) => row.materialize_reason)).not.toContain("system_hash");
+            expect(h.rows().slice(before)).toEqual([
+                { message_id: "msg_0004", decision: "execute", materialize_reason: "model_change" },
+            ]);
 
-            // A user flush busting the pass again, now on the request that carries a new prompt.
-            requestPendingMaterialization(
-                h.pendingMaterializationSessions,
-                h.sessionId,
-                "user_flush",
-            );
+            // The same kind of busting pass on the request that carries a new prompt.
+            h.switchModel("claude-opus-5-7");
             const beforeChange = h.rows().length;
             await h.serve({
                 messages: [
-                    first,
+                    user,
                     h.text("msg_0002", "assistant"),
                     h.text("msg_0003", "user"),
                     h.text("msg_0004", "assistant"),
@@ -282,12 +281,8 @@ describe("system prompt change names system_hash on its request's decision row",
                 reply: "msg_0006",
                 schedule: "execute",
             });
-            const added = h.rows().slice(beforeChange);
-            expect(added).toEqual([
-                expect.objectContaining({
-                    message_id: "msg_0006",
-                    materialize_reason: "system_hash",
-                }),
+            expect(h.rows().slice(beforeChange)).toEqual([
+                { message_id: "msg_0006", decision: "execute", materialize_reason: "system_hash" },
             ]);
         });
     }
