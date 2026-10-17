@@ -43,8 +43,8 @@ class ReviewMessage {
 const prose =
     "Please review the implementation and verify the results carefully before we continue with the next deployment cache invalidation step. ";
 
-// Only the host transport and search worker are synthetic; the registered context
-// callback, transform, fold owner, rendering and SQLite persistence run normally.
+// Host/config/model probes, embedding availability and search results are synthetic.
+// The registered context callback, transform, fold owner, rendering and SQLite run normally.
 async function fixture(
     seed: number,
     overrides: Record<string, unknown> = {},
@@ -283,6 +283,27 @@ async function fixture(
         async idle() {
             nowClock += 3600000;
         },
+        changeExternalFeatures() {
+            db.prepare("UPDATE user_memories SET content = content || ?").run(
+                ` Updated preference ${seed}.`,
+            );
+            const memory = db
+                .prepare("SELECT id,content FROM memories ORDER BY id DESC LIMIT 1")
+                .get() as { id: number; content: string };
+            const content = `${memory.content} Updated constraint ${seed}.`;
+            db.prepare(
+                "UPDATE memories SET content = ?,mural_cue = ?,mural_cue_hash = ? WHERE id = ?",
+            ).run(
+                content,
+                `Updated cue ${seed}`,
+                createHash("sha256").update(content).digest("hex"),
+                memory.id,
+            );
+            writeFileSync(
+                join(root, "ARCHITECTURE.md"),
+                `# Isolated architecture\nReview-only deployment cache. Updated architecture ${seed}.`,
+            );
+        },
         completeResponse() {
             nowClock += 1000;
             const row = raw
@@ -379,6 +400,8 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
                 return random;
             };
             for (let step = 0; step < 12; step++) {
+                // Storage changes alone must not authorize edits to a served prefix.
+                if (step === 2) f.changeExternalFeatures();
                 if (step === 3) await f.start();
                 if (step === 5) f.switchModel();
                 if (step === 9) await f.fold();
@@ -418,6 +441,12 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
                 expect(first.bytes).toContain("Isolated architecture");
                 expect(first.bytes).toContain("mediaType");
                 expect(first.bytes).toContain("image/png");
+                expect(first.bytes.includes(`Updated preference ${seed}.`)).toBe(step >= 5);
+                expect(first.bytes.includes(`Updated architecture ${seed}.`)).toBe(step >= 5);
+                expect(f.meta().cachedM0UpgradeState).toContain("mural-enabled:1");
+                expect(f.meta().cachedM0UpgradeState).toContain(
+                    `hp${f.config.history_budget_percentage}:percentage:65`,
+                );
                 const decisionsBeforeReplay = f.decisions().length;
                 const depthsBeforeReplay = f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]);
                 const second = await f.pass();
@@ -520,15 +549,41 @@ test.skipIf(!process.env.REVIEW709_BASELINE_MODULE)(
                 const cachedOld = f.meta().cachedM0UpgradeState;
                 await f.start();
                 const upgraded = await f.pass();
+                const upgradedIdentity = f.meta().cachedM0UpgradeState;
+                const hintsOnUpgrade = f.decisions().filter((d) => d.decision === "hint").length;
                 const compressedOnUpgrade = f
                     .tags()
                     .filter((t) => (t.cavemanDepth ?? 0) > 0).length;
                 const replay = await f.pass();
+                expect(
+                    upgraded.logs.filter((line) => /HARD.*executed=true/.test(line)).length,
+                    `${feature}: first upgrade pass`,
+                ).toBe(1);
+                expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+                expect(replay.bytes, `${feature}: upgrade replay`).toBe(upgraded.bytes);
+                expect(cachedOld).toContain("hpdefault");
+                expect(upgradedIdentity).toContain(
+                    `hp${f.config.history_budget_percentage}:percentage:65`,
+                );
+                expect(upgradedIdentity).toContain(
+                    `mural-enabled:${feature === "mural" || feature === "allOn" ? 1 : 0}`,
+                );
+                expect(hintsOnUpgrade > 0).toBe(feature === "autoSearch" || feature === "allOn");
+                expect(old.bytes.includes("Review preference")).toBe(true);
+                expect(upgraded.bytes.includes("Isolated architecture")).toBe(
+                    feature !== "injectDocsOff",
+                );
+                expect(compressedOnUpgrade > 0).toBe(feature === "allOn");
                 f.switchModel();
                 const natural = await f.pass();
                 const naturalReplay = await f.pass();
+                if (feature === "caveman")
+                    expect(
+                        f.tags().filter((t) => (t.cavemanDepth ?? 0) > 0).length,
+                    ).toBeGreaterThan(0);
                 results.push({
                     feature,
+                    hintsOnUpgrade,
                     compressedOnUpgrade,
                     compressedAfterNatural: f.tags().filter((t) => (t.cavemanDepth ?? 0) > 0)
                         .length,
@@ -536,7 +591,11 @@ test.skipIf(!process.env.REVIEW709_BASELINE_MODULE)(
                     changed: old.bytes !== upgraded.bytes,
                     secondChanged: upgraded.bytes !== replay.bytes,
                     oldIdentity: cachedOld,
-                    newIdentity: f.meta().cachedM0UpgradeState,
+                    newIdentity: upgradedIdentity,
+                    userMemoryOnBase: old.bytes.includes("Review preference"),
+                    userMemoryOnUpgrade: upgraded.bytes.includes("Review preference"),
+                    docsOnUpgrade: upgraded.bytes.includes("Isolated architecture"),
+                    naturalChanged: upgraded.bytes !== natural.bytes,
                     firstLogs: upgraded.logs.filter((line) =>
                         /HARD|decision=|auto-search:|heuristics WILL/.test(line),
                     ),

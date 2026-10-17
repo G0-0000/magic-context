@@ -27,7 +27,7 @@ import { registerV2DreamScheduleTimer } from "../../plugin/src/v2/hooks/dream-ti
 import { __test, registerPiDreamerProject } from "./dreamer";
 
 // Each adapter reaches the real process-wide timer, SQLite lease and git indexer.
-// Only the timer's clock edge is driven manually; the sweep is not mocked away.
+// Ticks are driven manually; unrelated message-history maintenance is disabled.
 for (const lane of ["OC1", "OC2", "Pi"] as const) {
 	for (const enabled of [false, true]) {
 		test(`issue 709 maintenance: ${lane} git=${enabled} embeds=off deduplicates repeated ticks`, async () => {
@@ -46,6 +46,7 @@ for (const lane of ["OC1", "OC2", "Pi"] as const) {
 				"XDG_STATE_HOME",
 				"MAGIC_CONTEXT_TEST_DATA_DIR",
 				"MAGIC_CONTEXT_TEST_CONFIG_DIR",
+				"MAGIC_CONTEXT_STORAGE_DIR",
 			]) {
 				const directory = join(root, key);
 				process.env[key] = directory;
@@ -89,6 +90,11 @@ for (const lane of ["OC1", "OC2", "Pi"] as const) {
 			);
 			const db = openDatabase();
 			if (!db) throw new Error("isolated maintenance database unavailable");
+			const opened = db.prepare("PRAGMA database_list").all() as Array<{
+				file: string;
+			}>;
+			if (opened.some((row) => row.file && !row.file.startsWith(`${root}/`)))
+				throw new Error("maintenance database escaped isolated root");
 			const project = resolveProjectIdentityForSession(root);
 			if (!project)
 				throw new Error("isolated git project identity unavailable");
