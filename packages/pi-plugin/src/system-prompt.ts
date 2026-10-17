@@ -8,7 +8,6 @@
  * by the m[0]/m[1] message materializer instead.
  */
 
-import { createHash } from "node:crypto";
 import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
 import { computeHardCacheExpired } from "@magic-context/core/features/magic-context/scheduler";
 import {
@@ -20,7 +19,7 @@ import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-ses
 import { systemPromptDates } from "@magic-context/core/hooks/magic-context/system-prompt-dates";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { PromptSurfacePreset } from "@magic-context/core/shared/prompt-surface";
-import { promptSurfaceHashMaterial } from "@magic-context/core/shared/prompt-surface-runtime";
+import { systemPromptFingerprint } from "@magic-context/core/shared/prompt-surface-runtime";
 import { clearPiSystemPromptDelivery } from "./system-prompt-delivery-pi";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
@@ -155,11 +154,10 @@ export function processSystemPromptForCache(args: {
 	const dates = systemPromptDates(systemPrompt, stickyDate);
 	const liveDate = dates.live;
 	const stableCandidate = dates.stable;
-	const stableCandidateHash = createHash("md5")
-		.update(
-			promptSurfaceHashMaterial(stableCandidate, args.promptSurfacePreset),
-		)
-		.digest("hex");
+	const stableCandidateHash = systemPromptFingerprint(
+		stableCandidate,
+		args.promptSurfacePreset,
+	);
 	const contentOrPresetChanged =
 		!isFirstHash && stableCandidateHash !== previousHash;
 	// before_agent_start precedes the context scheduler. Read the provider's
@@ -193,9 +191,10 @@ export function processSystemPromptForCache(args: {
 		}
 	}
 
-	const currentHash = createHash("md5")
-		.update(promptSurfaceHashMaterial(frozenPrompt, args.promptSurfacePreset))
-		.digest("hex");
+	const currentHash = systemPromptFingerprint(
+		frozenPrompt,
+		args.promptSurfacePreset,
+	);
 	const hashChanged = !isFirstHash && currentHash !== previousHash;
 
 	if (hashChanged) {

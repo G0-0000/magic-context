@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import {
@@ -14,7 +13,7 @@ import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
-    promptSurfaceHashMaterial,
+    systemPromptFingerprint,
 } from "../../shared/prompt-surface-runtime";
 import {
     ctxReduceSpawnPermissionReadNeeded,
@@ -483,9 +482,7 @@ export function createSystemPromptHashHandler(deps: {
         const dates = systemPromptDates(liveSystemContent, stickyDate);
         const currentDate = dates.live;
         const stableCandidate = dates.stable;
-        const stableCandidateHash = createHash("md5")
-            .update(promptSurfaceHashMaterial(stableCandidate, promptSurface.preset))
-            .digest("hex");
+        const stableCandidateHash = systemPromptFingerprint(stableCandidate, promptSurface.preset);
         const contentOrPresetChanged = hasPersistedHash && stableCandidateHash !== previousHash;
         const rewritePermission = systemDateRefreshPermission(
             deps.historyRefreshSessions,
@@ -516,9 +513,7 @@ export function createSystemPromptHashHandler(deps: {
                     }
                     try {
                         const content = liveElements.join("\n");
-                        const hash = createHash("md5")
-                            .update(promptSurfaceHashMaterial(content, promptSurface.preset))
-                            .digest("hex");
+                        const hash = systemPromptFingerprint(content, promptSurface.preset);
                         updateSessionMeta(deps.db, sessionId, {
                             systemPromptHash: hash,
                             cachedM0SystemHash: hash,
@@ -591,9 +586,7 @@ export function createSystemPromptHashHandler(deps: {
         // causing precision loss on read-back and infinite hash-change flushes.
         // node:crypto MD5 produces identical digests to Bun.CryptoHasher("md5"),
         // so persisted hashes remain stable across the Bun→Node runtime swap.
-        const currentHash = createHash("md5")
-            .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
-            .digest("hex");
+        const currentHash = systemPromptFingerprint(systemContent, promptSurface.preset);
 
         recordSystemPromptForRequest(
             sessionId,

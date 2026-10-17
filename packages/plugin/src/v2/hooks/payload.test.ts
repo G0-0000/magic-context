@@ -90,6 +90,22 @@ function callsAndResults(messages: V2Message[]) {
 }
 
 describe("adaptPayload", () => {
+    it("observes store timestamps internally without serializing info to the host draft", () => {
+        const context = draft([
+            { id: "timed", role: "user", content: [{ type: "text", text: "hello" }] },
+            { role: "assistant", content: [{ type: "text", text: "world" }] },
+        ]);
+        const before = JSON.stringify(context);
+        const time = { created: 1700000000000, completed: 1700000001000 };
+        const payload = adaptPayload(context, new Set(), new Map([["timed", time]]));
+        expect(payload.messages[0].info.time).toEqual(time);
+        expect(payload.messages[1].info.time).toBeUndefined();
+        payload.messages[0].info.time = { created: 42, completed: 43 };
+        payload.commit();
+        expect(JSON.stringify(context)).toBe(before);
+        expect(context.messages.every((message) => !("info" in message))).toBe(true);
+    });
+
     it("preserves restored and normalized tool errors as errors with identical tagged text", () => {
         const failure = {
             error: { type: "tool.execution", message: "File not found: missing.txt" },

@@ -241,7 +241,6 @@ let startDreamScheduleTimerFn: typeof defaultStartDreamScheduleTimer =
 export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	const directory = resolve(opts.projectDir);
 	if (
-		opts.config.disable === true ||
 		// A directory the identity resolver refuses (home, or a folder inside a
 		// dotfiles repository rooted at home) arrives with an empty identity.
 		// It is not a project, so nothing may be scheduled under that key.
@@ -368,6 +367,11 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		}
 		const sampled = manualOpts.sampleDreamRun?.();
 		const dreamerConfig = sampled?.dreamerConfig ?? manualOpts.config;
+		if (dreamerConfig.disable === true) {
+			throw new Error(
+				`Pi dreamer is disabled for project ${opts.projectIdentity}`,
+			);
+		}
 		const mural = sampled?.mural ?? manualOpts.mural;
 		const manualClient = createPiDreamerClient(
 			manualOpts,

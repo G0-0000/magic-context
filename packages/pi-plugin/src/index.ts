@@ -1846,7 +1846,9 @@ async function startPiMagicContextRuntime(
 			return;
 		}
 		seenDreamerProjectIdentities.add(current.projectIdentity);
-		if (!current.dreamerConfig) {
+		// A disabled dreamer still needs commit indexing and live timer settings.
+		const timerConfig = current.dreamerConfig ?? current.config.dreamer;
+		if (!timerConfig) {
 			unregisterPiDreamerProject({
 				projectIdentity: current.projectIdentity,
 				registrationOwner: dreamerRegistrationOwner,
@@ -1858,7 +1860,7 @@ async function startPiMagicContextRuntime(
 			projectDir: current.projectDir,
 			projectIdentity: current.projectIdentity,
 			registrationOwner: dreamerRegistrationOwner,
-			config: current.dreamerConfig,
+			config: timerConfig,
 			modelRegistry,
 			sampleDreamRun: () => {
 				const fresh = liveReaderFor(current.projectDir, current.config).poll()

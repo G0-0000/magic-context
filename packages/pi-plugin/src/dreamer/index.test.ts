@@ -486,19 +486,37 @@ describe("Pi dreamer wiring", () => {
 			"custody accounts exhausted",
 		);
 	});
-	test("disable=true config is a no-op", () => {
+	test("disabled dreamer registers maintenance once but cannot run dream tasks", async () => {
 		db = createDb();
-
-		registerPiDreamerProject(
-			dreamerOptions({
+		const starts: unknown[] = [];
+		__test.setStartDreamScheduleTimerFactory(async (args) => {
+			starts.push(args);
+			return mock(() => {});
+		});
+		const opts = {
+			...dreamerOptions({
 				database: db,
 				projectDir: "/tmp/pi-project-disabled",
 				projectIdentity: "git:pi-disabled",
 				config: disabledConfig(),
 			}),
-		);
-
-		expect(__test.registeredProjectCount()).toBe(0);
+			gitCommitIndexing: { enabled: true, since_days: 30, max_commits: 200 },
+		};
+		registerPiDreamerProject(opts);
+		registerPiDreamerProject(opts);
+		expect(__test.registeredProjectCount()).toBe(1);
+		expect(starts).toHaveLength(1);
+		expect(starts[0]).toMatchObject({
+			dreamerConfig: { disable: true },
+			gitCommitIndexing: { enabled: true },
+		});
+		await expect(
+			runPiDreamForProject(
+				opts.projectIdentity,
+				"verify",
+				opts.registrationOwner,
+			),
+		).rejects.toThrow("dreamer is disabled");
 	});
 
 	test("runnable config registers once for the same project", () => {
