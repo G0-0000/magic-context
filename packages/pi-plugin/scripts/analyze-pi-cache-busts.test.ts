@@ -484,12 +484,211 @@ describe("Pi cache-bust analyzer meter", () => {
 		);
 
 		expect(rows[1].prevTotal).toBe(10_520);
-		expect(rows[1].comparableRead).toBe(10_470);
+		// Only the cache read is compared, against the previous read + write - 64.
+		expect(rows[1].comparableRead).toBe(10_450);
+		expect(rows[1].meterFloor).toBe(10_436);
 		expect(rows[1].verdict).toBe("STABLE");
 		expect(rows[1].attribution).toBe("identical digest");
 	});
 });
 
+
+describe("Pi cache-bust analyzer: uncached input never counts as reuse", () => {
+	type Reading = readonly [at: string, input: number, read: number, write: number];
+	const anthropic = {
+		api: "cortexkit-anthropic-messages",
+		provider: "anthropic",
+		model: "claude-opus-5-5",
+	};
+	const openai = {
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		model: "gpt-fixture",
+	};
+	function passes(
+		readings: readonly Reading[],
+		names: { api: string; provider: string; model: string },
+	) {
+		return readings.map(([at, input, cacheRead, cacheWrite], index) => {
+			const timestamp = Date.parse(at);
+			return {
+				ledger: {
+					version: 1 as const,
+					session_id: "uncached-input",
+					pass_ts: new Date(timestamp - 500).toISOString(),
+					sequence: index,
+					message_count: index + 2,
+					sha256: String(index),
+					previous_sha256: index === 0 ? null : String(index - 1),
+					first_divergence_message_index: index + 1,
+					block_vector_start: 0,
+					block_vectors: ["user:text(1)"],
+				},
+				usage: {
+					timestamp,
+					createdAt: new Date(timestamp).toISOString(),
+					line: index,
+					ordinal: index,
+					messageId: String(index),
+					input,
+					cacheRead,
+					cacheWrite,
+					total: input + cacheRead + cacheWrite,
+					...names,
+				},
+				intervening: [],
+			};
+		});
+	}
+
+	test("flags the 2026-10-17 requests that read only the 47k head and wrote nothing", () => {
+		// Session 019de471-4fdc-762d-9286-624dfad0b5fe, exact usage numbers. The old
+		// "read + input" meter labelled 14:05:06, 14:09:55 and 14:10:11 STABLE.
+		const rows = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T14:04:44.317Z", 2, 519_900, 506],
+					["2026-10-17T14:05:06.355Z", 474_229, 47_083, 0],
+					["2026-10-17T14:05:11.503Z", 2, 520_406, 1_260],
+					["2026-10-17T14:09:55.464Z", 474_788, 47_083, 0],
+					["2026-10-17T14:10:11.085Z", 479_189, 47_083, 0],
+					["2026-10-17T14:10:23.287Z", 2, 47_083, 483_683],
+					["2026-10-17T14:10:34.445Z", 2, 530_766, 1_126],
+				],
+				anthropic,
+			),
+		);
+
+		expect(rows.map((row) => row.verdict)).toEqual([
+			"BASE",
+			"BUST",
+			"STABLE",
+			"BUST",
+			"BUST",
+			"BUST",
+			"STABLE",
+		]);
+		expect(rows.map((row) => row.divergenceClass)).toEqual([
+			undefined,
+			"missing_breakpoint_after_read",
+			undefined,
+			"missing_breakpoint_after_read",
+			"missing_breakpoint_after_read",
+			// 14:10:23 wrote the rest, but the 521k prefix was last read at
+			// 14:05:11, 5 min 12 s earlier: the two head-only reads in between did
+			// not refresh it, so it had expired.
+			"idle_cache_expiry",
+			undefined,
+		]);
+		expect(rows[3].comparableRead).toBe(47_083);
+		expect(rows[3].meterFloor).toBe(521_602);
+		expect(rows[3].explicitBreakpoints).toBe(true);
+	});
+
+	test("flags the 019e8905 13:52 request that read 47k of a 621k prompt", () => {
+		const rows = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T13:51:37.698Z", 2, 614_837, 2_869],
+					["2026-10-17T13:52:16.089Z", 573_919, 47_081, 0],
+					["2026-10-17T13:52:21.895Z", 2, 617_706, 3_741],
+				],
+				anthropic,
+			),
+		);
+
+		expect(rows.map((row) => row.verdict)).toEqual(["BASE", "BUST", "STABLE"]);
+		expect(rows[1].divergenceClass).toBe("missing_breakpoint_after_read");
+	});
+
+	test("keeps a warm tool loop STABLE", () => {
+		const rows = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T14:10:34.445Z", 2, 530_766, 1_126],
+					["2026-10-17T14:10:41.091Z", 2, 531_892, 784],
+					["2026-10-17T14:11:01.762Z", 2, 532_676, 1_688],
+					["2026-10-17T14:15:58.303Z", 2, 534_364, 1_950],
+				],
+				anthropic,
+			),
+		);
+
+		expect(rows.map((row) => row.verdict)).toEqual([
+			"BASE",
+			"STABLE",
+			"STABLE",
+			"STABLE",
+		]);
+	});
+
+	test("labels a short read after more than the TTL idle as expiry", () => {
+		// Session 019e8905: 17 min idle after 13:28:40, then a turn start that
+		// read nothing and rewrote the prompt over two requests.
+		const rows = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T13:28:40.073Z", 2, 600_452, 719],
+					["2026-10-17T13:46:00.084Z", 554_630, 0, 47_081],
+					["2026-10-17T13:46:24.402Z", 2, 47_081, 555_984],
+					["2026-10-17T13:46:44.637Z", 2, 603_065, 648],
+				],
+				anthropic,
+			),
+		);
+
+		expect(rows[1].verdict).toBe("BUST");
+		expect(rows[1].divergenceClass).toBe("idle_cache_expiry");
+		expect(rows[1].idleGapMs).toBe(1_040_011);
+		expect(rows.slice(2).map((row) => row.verdict)).toEqual([
+			"STABLE",
+			"STABLE",
+		]);
+		// A 1 h TTL keeps the same gap from counting as expiry.
+		const longTtl = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T13:28:40.073Z", 2, 600_452, 719],
+					["2026-10-17T13:46:00.084Z", 554_630, 0, 47_081],
+				],
+				anthropic,
+			),
+			{ cacheTtlMs: 3_600_000 },
+		);
+		expect(longTtl[1].divergenceClass).not.toBe("idle_cache_expiry");
+	});
+
+	test("reads an OpenAI implicit cache by cached tokens alone and never names a missing breakpoint", () => {
+		// pi-ai reports OpenAI usage as input = prompt - cached, cacheRead = cached,
+		// cacheWrite = 0. A full re-prefill (read 0) used to pass because read +
+		// input still added up to the whole prompt.
+		const rows = __test.analyzeJoinedPasses(
+			passes(
+				[
+					["2026-10-17T12:00:00.000Z", 50_000, 0, 0],
+					["2026-10-17T12:00:10.000Z", 1_280, 49_920, 0],
+					["2026-10-17T12:00:20.000Z", 928, 51_072, 0],
+					["2026-10-17T12:00:30.000Z", 42_888, 10_112, 0],
+					["2026-10-17T12:00:40.000Z", 53_800, 0, 0],
+					["2026-10-17T12:00:50.000Z", 808, 53_120, 0],
+				],
+				openai,
+			),
+		);
+
+		expect(rows.map((row) => row.verdict)).toEqual([
+			"BASE",
+			"STABLE",
+			"STABLE",
+			"BUST",
+			"BUST",
+			"STABLE",
+		]);
+		expect(rows[3].explicitBreakpoints).toBe(false);
+		expect(rows[3].divergenceClass).not.toBe("missing_breakpoint_after_read");
+		expect(rows[4].divergenceClass).toBe("provider_full_miss");
+	});
+});
 
 describe("Pi cache-bust analyzer context.db join and attribution", () => {
 	function setupBustFixture(options: {
