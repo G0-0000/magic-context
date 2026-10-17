@@ -56,7 +56,9 @@ import {
 } from "./lib/ctx-search-rerank";
 
 const SNAPSHOT_ROOT = resolve("local-ignore/ctx-search-rerank");
-const EVIDENCE_ROOT = resolve(".cortexkit/internal-docs/investigations/reports/ctx-search-rerank-spike");
+const EVIDENCE_ROOT = resolve(
+	".cortexkit/internal-docs/investigations/reports/ctx-search-rerank-spike",
+);
 const LANE_LIMIT = 25;
 
 interface SpikeRow extends RankRow {
@@ -303,7 +305,7 @@ export async function collectLanes(
 				b.score - a.score || b.support - a.support || a.primerId - b.primerId,
 		)
 		.slice(0, LANE_LIMIT);
-	const chunks = loadCompartmentChunkEmbeddingsForSearch(
+	const chunks = await loadCompartmentChunkEmbeddingsForSearch(
 		db,
 		project.sessionId,
 		project.projectPath,

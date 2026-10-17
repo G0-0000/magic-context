@@ -787,15 +787,15 @@ function normalizeCosine(score: number): number {
 	return Math.max(0, Math.min(1, (score + 1) / 2));
 }
 
-function rawChunkSearch(
+async function rawChunkSearch(
 	db: DatabaseType,
 	project: ProjectFixture,
 	modelId: string,
 	vector: Float32Array,
 	maxOrdinal: number,
 	limit = 50,
-): RawChunkHit[] {
-	const rows = loadCompartmentChunkEmbeddingsForSearch(
+): Promise<RawChunkHit[]> {
+	const rows = await loadCompartmentChunkEmbeddingsForSearch(
 		db,
 		project.sessionId,
 		project.projectPath,
@@ -1562,7 +1562,7 @@ async function runSpaceComparison(args: {
 			);
 			laneResults[`${space}_memory_hybrid`] = memory.map(safeResult);
 			laneResults[`${space}_commit`] = commits.map(safeResult);
-			laneResults[`${space}_chunk_vector`] = rawChunkSearch(
+			laneResults[`${space}_chunk_vector`] = await rawChunkSearch(
 				db,
 				project,
 				captured.chunkModelId,
@@ -1848,7 +1848,7 @@ async function main(): Promise<void> {
 			const notes = await run(query.query, { sources: ["note"] });
 			const captured = await embedOnce(query.project, query.query);
 			if (!captured) throw new Error(`Query embedding failed for ${query.id}`);
-			const chunkRaw = rawChunkSearch(
+			const chunkRaw = await rawChunkSearch(
 				db,
 				project,
 				snapshot.chunkModelId,
@@ -1860,7 +1860,7 @@ async function main(): Promise<void> {
 				? await embedOnce(query.project, query.controlQuery)
 				: null;
 			const controlChunk = controlCaptured
-				? rawChunkSearch(
+				? await rawChunkSearch(
 						db,
 						project,
 						snapshot.chunkModelId,

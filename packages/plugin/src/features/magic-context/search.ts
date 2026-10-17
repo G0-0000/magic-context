@@ -1718,7 +1718,7 @@ function searchNotes(args: {
     }));
 }
 
-function searchCompartmentChunks(args: {
+async function searchCompartmentChunks(args: {
     db: Database;
     sessionId: string;
     projectPath: string;
@@ -1727,11 +1727,11 @@ function searchCompartmentChunks(args: {
     maxOrdinal?: number;
     modelId?: string | null;
     dateRange: InclusiveDateRange | null;
-}): CompartmentSearchResult[] {
+}): Promise<CompartmentSearchResult[]> {
     if (!args.queryEmbedding || args.limit <= 0 || !args.modelId || args.modelId === "off")
         return [];
     const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
-    const rows = loadCompartmentChunkEmbeddingsForSearch(
+    const rows = await loadCompartmentChunkEmbeddingsForSearch(
         args.db,
         args.sessionId,
         args.projectPath,
@@ -1744,7 +1744,12 @@ function searchCompartmentChunks(args: {
         number,
         { row: StoredCompartmentChunkEmbedding; score: number }
     >();
+    let sliceStarted = performance.now();
     for (const row of rows) {
+        if (performance.now() - sliceStarted >= 4) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            sliceStarted = performance.now();
+        }
         if (cutoff !== null && row.endOrdinal > cutoff) {
             continue;
         }
@@ -2346,7 +2351,7 @@ export async function unifiedSearch(
         options.chunkModelIdOverride ??
         embeddingSnapshot?.chunkModelId;
     const compartmentResults = runCompartmentChunks
-        ? searchCompartmentChunks({
+        ? await searchCompartmentChunks({
               db,
               sessionId,
               projectPath,
