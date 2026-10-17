@@ -62,8 +62,8 @@ export function buildDreamTaskRuntimeConfigs(
 }
 
 /**
- * The collection privacy gate (Option C): the review-user-memories task is
- * scheduled (schedule != ""). Replaces the v1 `user_memories.enabled` flag,
+ * The user-memory privacy gate: the review-user-memories task is scheduled
+ * (schedule != ""). Replaces the v1 `user_memories.enabled` flag,
  * which both gated collection AND review. The `<user-profile>` system-prompt
  * block keys on this alone; historian collection uses
  * `userObservationCollectionEnabled`, which also needs a runnable dreamer.
