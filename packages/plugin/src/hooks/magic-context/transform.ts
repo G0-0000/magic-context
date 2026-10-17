@@ -59,6 +59,7 @@ import { observeTemporalDecisions } from "../../features/magic-context/temporal-
 import {
     clearOpenCodePendingTransformDecision,
     normalizeMaterializeReason,
+    noteOpenCodeUnbustedPass,
     recordPendingTransformDecision,
 } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
@@ -834,7 +835,7 @@ export function createTransform(deps: TransformDeps) {
                 : { ...params, toastDurationMs: historianRun.toastDurationMs };
         };
         beginLkgPass(sessionId);
-        clearOpenCodePendingTransformDecision(sessionId);
+        clearOpenCodePendingTransformDecision(sessionId, messages);
 
         const db = deps.db;
 
@@ -3472,6 +3473,31 @@ export function createTransform(deps: TransformDeps) {
                 inputTokens: contextUsage.inputTokens,
                 bustedThisPass: true,
                 lkgFrozenReleaseReason: recoveryReleaseReason,
+            });
+        } else {
+            // Memory only: supplies this pass's decision if the system hook saw a
+            // changed system prompt on the same request (that request rewrites the
+            // provider cache even though this pass changed no message bytes).
+            noteOpenCodeUnbustedPass(sessionId, {
+                tsMs: Date.now(),
+                decision: schedulerDecision,
+                materialized: postTransformResult.materialized,
+                materializeReason: normalizeMaterializeReason(
+                    "opencode",
+                    postTransformResult.materializeReason,
+                    postTransformResult.materialized,
+                ),
+                systemHashPrev: postTransformResult.systemHashPrev,
+                systemHashNew: postTransformResult.systemHashNew,
+                m0ToolSetHashPrev: postTransformResult.m0ToolSetHashPrev,
+                m0ToolSetHashNew: postTransformResult.m0ToolSetHashNew,
+                m0ModelKeyPrev: postTransformResult.m0ModelKeyPrev,
+                m0ModelKeyNew: postTransformResult.m0ModelKeyNew,
+                emergency: postTransformResult.emergency,
+                droppedTokens: postTransformResult.droppedTokens,
+                droppedCount: postTransformResult.droppedCount,
+                inputTokens: contextUsage.inputTokens,
+                bustedThisPass: false,
             });
         }
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);

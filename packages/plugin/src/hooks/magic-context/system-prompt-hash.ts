@@ -6,6 +6,7 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { noteSystemPromptHashChange } from "../../features/magic-context/transform-decision-log";
 import type { PluginContext } from "../../plugin/types";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
@@ -620,6 +621,10 @@ export function createSystemPromptHashHandler(deps: {
                 sessionId,
                 `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), ${idleCacheExpired ? "adopting on idle-expired request" : requestMessagesFinal ? "adopting on the request whose messages are already final" : "triggering flush"}`,
             );
+            // This request carries the new prompt, so the provider rewrites its
+            // cache from the system block onward whatever the messages pass did.
+            // Its transform decision names the change, in every branch below.
+            noteSystemPromptHashChange(sessionId);
             // When the following messages transform can still fold into this
             // request, signal all three independent refresh lifetimes. The semantic
             // prompt epoch changed on this turn, so history rebuild, adjunct refresh,

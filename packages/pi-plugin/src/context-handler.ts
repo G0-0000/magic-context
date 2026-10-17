@@ -148,7 +148,9 @@ import {
 } from "@magic-context/core/features/magic-context/temporal-decisions";
 import {
 	findNewestPiAssistantEntryId,
+	hasPendingPiSystemPromptHashChange,
 	normalizeMaterializeReason,
+	notePiSystemPromptHashChange,
 	recordPendingPiTransformDecision,
 	schedulePiTransformDecisionResolve,
 } from "@magic-context/core/features/magic-context/transform-decision-log";
@@ -777,6 +779,9 @@ export function signalPiSystemHashChange(
 	signalPiSystemPromptRefresh(sessionId);
 	if (!pendingMaterializationSessions.has(sessionId))
 		signalPiPendingMaterialization(sessionId, "system_hash");
+	// The next main context pass serves the request that carries the new
+	// prompt; its transform decision names the change even if it defers.
+	notePiSystemPromptHashChange(sessionId);
 }
 
 function deferPiDeliveredSystemRefresh(
@@ -5583,9 +5588,10 @@ export function registerPiContextHandler(
 					branchEntries,
 				);
 			}
-			const piDecisionSnapshotNewestAssistant = result.bustedThisPass
-				? findNewestPiAssistantEntryId(branchEntries)
-				: undefined;
+			const piDecisionSnapshotNewestAssistant =
+				result.bustedThisPass || hasPendingPiSystemPromptHashChange(sessionId)
+					? findNewestPiAssistantEntryId(branchEntries)
+					: undefined;
 			const publishTransformDecision =
 				!budget.sideTurn && piDecisionSnapshotNewestAssistant !== undefined
 					? () => {

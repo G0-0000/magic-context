@@ -40,6 +40,7 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
+import { stageOpenCodeV2TransformDecision } from "../../features/magic-context/transform-decision-log";
 import {
     type HiddenCompletionExecutor,
     HiddenCompletionRefusal,
@@ -193,6 +194,7 @@ import {
 } from "./store";
 import { bindV2SystemPromptResponse } from "./system-prompt-response";
 import { registerTools } from "./tools";
+import { bindV2TransformDecision } from "./transform-decision-binding";
 import type { SessionContext, V2Context, V2Message } from "./types";
 import { persistV2UsageReading } from "./usage-persist";
 import { resolveUsageReading } from "./usage-reading";
@@ -1120,6 +1122,7 @@ export async function registerContext(context: V2Context) {
     const latestLkgResponseIds = new BoundedSessionMap<string | undefined>(1000);
     const recordUsage = async (
         draft: Pick<SessionContext, "sessionID" | "model">,
+        passStarting = false,
     ): Promise<boolean> => {
         let unsafe = false;
         try {
@@ -1141,6 +1144,14 @@ export async function registerContext(context: V2Context) {
                         error,
                     );
                 }
+                // The previous pass's busting or system-change decision belongs to
+                // the reply its request produced. Best-effort; never refuses a turn.
+                bindV2TransformDecision({
+                    db,
+                    sessionId: draft.sessionID,
+                    reader,
+                    passStarting,
+                });
                 if (latest)
                     noteLkgProviderResponse({
                         sessionId: draft.sessionID,
@@ -1608,7 +1619,7 @@ export async function registerContext(context: V2Context) {
             // left to the transform below: its force band and emergency path are what
             // reduce an over-limit session, and refusing ahead of them would refuse
             // the same stored reading again on every later turn.
-            if ((await recordUsage(draft)) && !compactionOff) {
+            if ((await recordUsage(draft, true)) && !compactionOff) {
                 const storageReason = storage.current() ? null : storage.reason();
                 if (storageReason) {
                     noticeStorageRefusal(draft.sessionID, storageReason);
@@ -2058,6 +2069,11 @@ export async function registerContext(context: V2Context) {
                 >[1],
             );
             mapped.commit();
+            // Keep this pass's decision for its reply, bound at the next pass.
+            stageOpenCodeV2TransformDecision({
+                sessionId: draft.sessionID,
+                responseAfterSequence,
+            });
             if (db) {
                 await deliverPendingChannel2(
                     context,

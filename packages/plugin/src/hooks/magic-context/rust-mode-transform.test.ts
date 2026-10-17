@@ -463,6 +463,98 @@ for (const order of ["system-first", "messages-first"] as const) {
     });
 }
 
+for (const order of ["system-first", "messages-first"] as const) {
+    it(`Rust passthrough: the raw pass-through that carries a system prompt change records system_hash (${order})`, async () => {
+        // The module's share-nothing raw pass-through reports `pending_rewrite`
+        // whatever the system prompt did. The request that carries a changed
+        // prompt still rewrote the provider cache, so its row must name that.
+        const sessionId = `rust-system-hash-row-${order}`;
+        sessions.push(sessionId);
+        const db = makeFileDb();
+        installRawProvider(sessionId);
+        makeMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { cacheTtl: "never", lastResponseTime: Date.now() });
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "passthrough",
+                          materialize_reason: "pending_rewrite",
+                          native_messages: [],
+                      }
+                    : { ok: true },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.contextUsageMap.set(sessionId, {
+            usage: { inputTokens: 123, percentage: 1 },
+            updatedAt: Date.now(),
+        });
+        const route = { providerID: "test-provider", modelID: "test-model" };
+        const system = createSystemPromptHashHandler({
+            db,
+            dreamerEnabled: false,
+            resolveModel: () => route,
+            historyRefreshSessions: deps.historyRefreshSessions,
+            pendingMaterializationSessions: deps.pendingMaterializationSessions,
+            systemPromptRefreshSessions: new Set<string>(),
+            lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
+            consumeMessagesPrepared: () => order === "messages-first",
+        });
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const serve = async (prompt: string, reply: string) => {
+            const input = makeMessages(sessionId);
+            const output = { messages: structuredClone(input) as unknown[] };
+            const systemOutput = { system: [prompt] };
+            if (order === "system-first")
+                await system.handler({ sessionID: sessionId }, systemOutput);
+            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            if (order === "messages-first")
+                await system.handler({ sessionID: sessionId }, systemOutput);
+            scheduleOpenCodeTransformDecisionWrite({
+                db,
+                sessionId,
+                messageId: reply,
+                inputTokens: 123,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        };
+        try {
+            resolveCtxReduceAvailabilityFromMessages(sessionId, makeMessages(sessionId) as never);
+            await system.handler({ sessionID: sessionId }, { system: ["Base, version one."] });
+            await serve("Base, version one.", "msg_0002");
+            await serve("Base, version two.", "msg_0003");
+            await serve("Base, version two.", "msg_0004");
+            expect(
+                db
+                    .prepare(
+                        "SELECT message_id, decision, materialize_reason FROM transform_decisions WHERE session_id = ? ORDER BY rowid",
+                    )
+                    .all(sessionId),
+            ).toEqual([
+                {
+                    message_id: "msg_0002",
+                    decision: "passthrough",
+                    materialize_reason: "pending_rewrite",
+                },
+                {
+                    message_id: "msg_0003",
+                    decision: "passthrough",
+                    materialize_reason: "system_hash",
+                },
+                {
+                    message_id: "msg_0004",
+                    decision: "passthrough",
+                    materialize_reason: "pending_rewrite",
+                },
+            ]);
+        } finally {
+            system.clearSession(sessionId);
+            transform.dispose();
+            clearCtxReduceAvailability(sessionId);
+        }
+    });
+}
+
 function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string, unknown>): void {
     const dataHome = createTestTempDirFromPath(join(tmpdir(), "rust-mode-availability-"));
     availabilityDataHomes.push(dataHome);
