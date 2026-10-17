@@ -14,6 +14,7 @@ import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
 	handlePiProviderFailure,
+	PiThinkingBindingRecoveryRefusal,
 } from "./provider-error-recovery-pi";
 import { createTestDb } from "./test-utils.test";
 
@@ -96,6 +97,36 @@ function multiAssistantCompletedMessages(): unknown[] {
 }
 
 describe("Pi provider failure recovery", () => {
+	it("refuses an incomplete strip identity set before leaving a signed middle gap", () => {
+		const database = db();
+		const sessionId = "pi-binding-unmapped-strip";
+		const messages = multiAssistantCompletedMessages();
+		const original = structuredClone(messages);
+		handlePiProviderFailure({
+			db: database,
+			sessionId,
+			message: {
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				errorMessage: `400 ${JSON.stringify(LIVE_BINDING_400_BODY)}`,
+			},
+			report: () => {},
+		});
+		expect(() =>
+			applyPiThinkingBindingRecovery({
+				db: database,
+				sessionId,
+				messages,
+				entryIds: ["u1", "a1", "u2", undefined, "u3", "a3", "tr3", "u4"],
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+			}),
+		).toThrow(PiThinkingBindingRecoveryRefusal);
+		expect(messages).toEqual(original);
+		expect(getMergedReasoningStrippedIds(database, sessionId).size).toBe(0);
+	});
+
 	it("arms message_end binding recovery and re-serves stripped bytes after restart", () => {
 		const database = db();
 		const sessionId = "pi-fable-binding-recovery";
