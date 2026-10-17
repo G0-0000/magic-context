@@ -148,8 +148,9 @@ const FETCH_TIMEOUT_MS = 30_000;
  *     consecutive 429 and capped at RATE_LIMIT_BACKOFF_CAP_MS, plus up to
  *     RATE_LIMIT_BACKOFF_JITTER of extra delay so separate processes spread out.
  *   - Passage (stored-content) embeds come from background drains and backfills,
- *     so they wait out the cooldown without sending anything and then resend
- *     the same batch, at most MAX_RATE_LIMIT_DEFERRALS times per call.
+ *     so they wait out each cooldown without sending anything and then resend
+ *     the same batch. They stop only when their caller aborts or a real result
+ *     arrives; a rate limit never becomes a batch failure.
  *   - Query embeds serve ctx_search and auto-search, which must stay fast: they
  *     never wait. During a cooldown they return no vector at once, so that one
  *     search runs lexical-only.
@@ -161,7 +162,6 @@ const RETRY_AFTER_CAP_MS = 60_000;
 const RATE_LIMIT_BACKOFF_BASE_MS = 1_000;
 const RATE_LIMIT_BACKOFF_CAP_MS = 30_000;
 const RATE_LIMIT_BACKOFF_JITTER = 0.25;
-const MAX_RATE_LIMIT_DEFERRALS = 3;
 
 interface RateLimitState {
     /** Epoch ms before which no request may be sent to this endpoint. */
@@ -412,9 +412,9 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
 
         // Rate-limit cooldown (described above RETRY_AFTER_CAP_MS). Queries never
         // wait and a 429 never reaches the circuit breaker; passage batches wait
-        // out the cooldown and resend, a bounded number of times.
+        // out each cooldown and retry until they succeed or their caller aborts.
         const isQuery = purpose === "query";
-        for (let deferrals = 0; ; deferrals++) {
+        for (;;) {
             if (Date.now() < this.rateLimit.until) {
                 if (isQuery) return Array.from({ length: texts.length }, () => null);
                 if (!(await this.waitForRateLimitCooldown(signal))) {
@@ -423,9 +423,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             }
             const outcome = await this.requestOnce(texts, requestTexts, signal, purpose);
             if (outcome !== RATE_LIMITED) return outcome;
-            if (isQuery || deferrals >= MAX_RATE_LIMIT_DEFERRALS) {
-                return Array.from({ length: texts.length }, () => null);
-            }
+            if (isQuery) return Array.from({ length: texts.length }, () => null);
         }
     }
 
@@ -725,14 +723,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         const alreadyCoolingDown = now < state.until;
         state.until = Math.max(state.until, now + delayMs);
         const seconds = Math.ceil(delayMs / 1_000);
-        // Reported only when a call ends without vectors; deliberately not
-        // passed to recordFailure, so the breaker never counts it.
-        this.lastFailureReason = this.failure(
-            "http_error",
-            `HTTP 429 from endpoint (rate limited; cooling down for ${seconds}s)`,
-            true,
-        );
-        // One line per cooldown: a 429 that only extends a running cooldown
+        // A rate limit is not a failed embedding; leave the last real failure
+        // untouched. One line per cooldown: a 429 that only extends a running cooldown
         // (concurrent requests sent before it began) stays quiet.
         if (!alreadyCoolingDown) {
             log(

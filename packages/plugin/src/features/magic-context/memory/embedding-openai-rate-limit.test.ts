@@ -126,10 +126,30 @@ describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
         expect(server.arrivals).toHaveLength(5);
         expect(provider._getFailureCount()).toBe(0);
         expect(provider._getCircuitState()).toBe("closed");
-        expect(provider.getLastFailureReason()).toMatchObject({
-            class: "http_error",
-            retryable: true,
-        });
+        expect(provider.getLastFailureReason()).toBeNull();
+    });
+
+    test("background batches keep deferring repeated 429s instead of failing or hot-retrying", async () => {
+        const limitedResponses = 4;
+        server = startFakeEmbeddingServer((index) =>
+            index < limitedResponses
+                ? { status: 429, headers: { "Retry-After": "1" } }
+                : { status: 200 },
+        );
+        const provider = providerFor(server.endpoint, 8_000);
+
+        const vectors = await provider.embedBatch(["stored passage"]);
+
+        expect(vectors[0]).not.toBeNull();
+        expect(server.arrivals).toHaveLength(limitedResponses + 1);
+        for (let index = 1; index < server.arrivals.length; index++) {
+            expect(
+                (server.arrivals[index] as number) - (server.arrivals[index - 1] as number),
+            ).toBeGreaterThanOrEqual(990);
+        }
+        expect(provider._getCircuitState()).toBe("closed");
+        expect(provider._getFailureCount()).toBe(0);
+        expect(provider.getLastFailureReason()).toBeNull();
     });
 
     test("a query during a cooldown returns no vector at once and is not counted", async () => {
