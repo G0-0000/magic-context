@@ -1911,8 +1911,9 @@ pub(crate) fn producer_input_token_limit_with_input(
 }
 
 /// The input limit the per-attempt admission check measures a historian prompt
-/// against before sending it to `model`, or None when the model's window is
-/// unknown and the prompt goes out unguarded.
+/// against before sending it to `model`, or None when no positive limit can be
+/// derived (an unknown window, or one the output reserve fills) and the prompt
+/// goes out unguarded.
 ///
 /// `legacy_window` is the older single-window setting for this chain entry: the
 /// configured historian context limit for the primary, a supplied fallback limit

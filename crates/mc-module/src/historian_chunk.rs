@@ -2595,8 +2595,8 @@ mod tests {
         assert_eq!(validated.compartments[0].end_message, 3);
     }
 
-    /// Small primary whose input limit is the one in the live refusal:
-    /// (200,000 - 32,000 output) x 0.97 = 162,960.
+    /// Small primary: a 200,000-token window with a 32,000-token output reserve
+    /// and the 3% estimator margin leaves an input limit of 162,960 tokens.
     const SMALL_PRIMARY: &str = "opencode/small-free-historian";
     /// Large fallback with a one-million-token window.
     const LARGE_FALLBACK: &str = "google/large-flash-historian";

@@ -243,8 +243,8 @@ function refusalFor(
 }
 
 describe("fitHistorianPrompt across the attempt chain", () => {
-    // The small window's input limit is the one in the live refusal:
-    // (200,000 - 32,000 output) x 0.97 = 162,960.
+    // A 200,000-token window with a 32,000-token output reserve and the 3%
+    // estimator margin leaves the small model an input limit of 162,960 tokens.
     const small = {
         modelKey: "opencode/small-free",
         contextLimitTokens: 200_000,
