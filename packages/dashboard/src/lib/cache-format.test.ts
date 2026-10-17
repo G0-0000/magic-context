@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   cacheCauseColor,
   cacheCauseLabel,
+  cacheCauseText,
   cacheCauseTooltip,
   cacheEventColorClass,
   cacheEventLabel,
@@ -59,10 +60,17 @@ describe("cacheCauseLabel", () => {
     expect(cacheCauseColor(idle)).toBe("text-secondary");
     expect(cacheCauseTooltip(idle)).toContain("longer than the cache lifetime");
     expect(cacheCauseLabel(PROVIDER_CACHE_MISS_CAUSE)).toBe(
-      "Provider cache miss (not caused by Magic Context)",
+      "Provider cache miss (no change recorded by Magic Context)",
     );
     expect(cacheCauseColor(PROVIDER_CACHE_MISS_CAUSE)).toBe("text-secondary");
-    expect(cacheCauseTooltip(PROVIDER_CACHE_MISS_CAUSE)).toContain("did not reuse its cache");
+    expect(cacheCauseTooltip(PROVIDER_CACHE_MISS_CAUSE)).toContain("did not shrink");
+    // The Turns table and the timeline tooltip share one cause line.
+    expect(cacheCauseText(PROVIDER_CACHE_MISS_CAUSE)).toBe(
+      "Cause: Provider cache miss (no change recorded by Magic Context)",
+    );
+    expect(cacheCauseText("mc_transform_failed_open")).toBe(
+      "Cause: Magic Context transform failed open",
+    );
     // Magic Context's own causes keep their tone and carry no provider tooltip.
     for (const cause of [
       "System prompt change",

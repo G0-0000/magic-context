@@ -2,7 +2,7 @@ import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-j
 import { formatDateTime, getSessionCacheEvents, getSessionCacheStatsFromDb } from "../../lib/api";
 import {
   cacheCauseColor,
-  cacheCauseLabel,
+  cacheCauseText,
   cacheCauseTooltip,
   cacheEventColorClass,
   cacheEventLabel,
@@ -914,7 +914,7 @@ export default function CacheDiagnostics() {
                             style={{ color: `var(--${cacheCauseColor(cause())})` }}
                             title={cacheCauseTooltip(cause())}
                           >
-                            Cause: {cacheCauseLabel(cause())}
+                            {cacheCauseText(cause())}
                           </div>
                         )}
                       </Show>
@@ -966,7 +966,7 @@ export default function CacheDiagnostics() {
                                         style={{ color: `var(--${cacheCauseColor(cause())})` }}
                                         title={cacheCauseTooltip(cause())}
                                       >
-                                        Cause: {cacheCauseLabel(cause())}
+                                        {cacheCauseText(cause())}
                                       </div>
                                     )}
                                   </Show>

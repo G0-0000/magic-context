@@ -123,7 +123,8 @@ const CACHE_CAUSE_LABELS: Record<string, string> = {
  * carries the idle time ("Cache expired after 11 min idle"), so it is matched
  * by its prefix.
  */
-export const PROVIDER_CACHE_MISS_CAUSE = "Provider cache miss (not caused by Magic Context)";
+export const PROVIDER_CACHE_MISS_CAUSE =
+  "Provider cache miss (no change recorded by Magic Context)";
 export const IDLE_EXPIRY_CAUSE_PREFIX = "Cache expired after ";
 
 function isProviderSideCause(cause: string): boolean {
@@ -132,6 +133,11 @@ function isProviderSideCause(cause: string): boolean {
 
 export function cacheCauseLabel(cause: string): string {
   return CACHE_CAUSE_LABELS[cause] ?? cause;
+}
+
+/** The cause line, worded the same in the Turns table and the timeline tooltip. */
+export function cacheCauseText(cause: string): string {
+  return `Cause: ${cacheCauseLabel(cause)}`;
 }
 
 /**
@@ -148,7 +154,7 @@ export function cacheCauseTooltip(cause: string): string | undefined {
     return "Magic Context recorded a transform error and returned the original messages for this pass.";
   }
   if (cause === PROVIDER_CACHE_MISS_CAUSE) {
-    return "The previous request read the cache moments earlier, within its lifetime, and Magic Context recorded no change to this request's prompt. The provider did not reuse its cache.";
+    return "The previous request read the cache moments earlier, within its lifetime. This request's prompt did not shrink and Magic Context recorded no change to it, yet the provider did not reuse its cache.";
   }
   if (cause.startsWith(IDLE_EXPIRY_CAUSE_PREFIX)) {
     return "The time since the previous request is longer than the cache lifetime, so the provider dropped the cache. Magic Context recorded no change to this request's prompt.";

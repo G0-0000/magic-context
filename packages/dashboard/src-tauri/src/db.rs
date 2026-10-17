@@ -1782,9 +1782,10 @@ fn transform_decision_cause(decision: Option<&TransformDecisionCause>) -> Option
     None
 }
 
-/// A cache loss right after a warm read, on a request whose prompt Magic
-/// Context recorded no change to.
-const PROVIDER_CACHE_MISS_CAUSE: &str = "Provider cache miss (not caused by Magic Context)";
+/// A cache loss right after a warm read, on a request whose prompt did not
+/// shrink and that Magic Context recorded no change to. The label states that
+/// evidence; it does not claim Magic Context could not have been involved.
+const PROVIDER_CACHE_MISS_CAUSE: &str = "Provider cache miss (no change recorded by Magic Context)";
 
 const MINUTE_MS: i64 = 60_000;
 
@@ -1862,14 +1863,27 @@ fn meter_reports_short_read(
     current: &DbCacheEvent,
     explicit_cache_writes: bool,
 ) -> bool {
-    let previous_total = previous.input_tokens + previous.cache_read + previous.cache_write;
-    let epsilon = METER_EPSILON_MIN_TOKENS.max(previous.input_tokens);
     let comparable_read = if explicit_cache_writes {
         current.cache_read + current.input_tokens
     } else {
         current.cache_read
     };
-    comparable_read < previous_total - epsilon
+    comparable_read < meter_floor(previous)
+}
+
+/// The previous request's prompt total minus the meter's allowance
+/// `max(64, previous uncached input)`.
+fn meter_floor(previous: &DbCacheEvent) -> i64 {
+    let previous_total = previous.input_tokens + previous.cache_read + previous.cache_write;
+    previous_total - METER_EPSILON_MIN_TOKENS.max(previous.input_tokens)
+}
+
+/// The request's whole prompt is no smaller than the previous one, within the
+/// same allowance the meter uses. A prompt that shrank proves the request
+/// itself changed (Magic Context or the host removed something), so its cache
+/// loss cannot be put on the provider alone.
+fn prompt_did_not_shrink(previous: &DbCacheEvent, current: &DbCacheEvent) -> bool {
+    current.input_tokens + current.cache_read + current.cache_write >= meter_floor(previous)
 }
 
 /// "N min" below two hours, "H h M min" above, rounded down to the minute.
@@ -1893,8 +1907,9 @@ fn format_idle_gap(gap_ms: i64) -> String {
 /// - The gap since the previous request is longer than the longest lifetime:
 ///   the cache expired while the session sat idle.
 /// - The gap is shorter than the shortest lifetime, the previous request read
-///   from the cache, and this one read far less: the provider did not reuse a
-///   cache that was still alive.
+///   from the cache, this one read far less, and its prompt did not shrink:
+///   the provider did not reuse a cache that was still alive. A prompt that
+///   shrank changed the request, so it gets no provider-side label.
 /// - Between the two, either is possible, so no label is given.
 fn provider_side_cause(
     previous: &DbCacheEvent,
@@ -1914,6 +1929,7 @@ fn provider_side_cause(
         && gap_ms < lifetime.shortest_ms
         && previous.cache_read > 0
         && meter_reports_short_read(previous, current, explicit_cache_writes)
+        && prompt_did_not_shrink(previous, current)
     {
         return Some(PROVIDER_CACHE_MISS_CAUSE.to_string());
     }
@@ -11326,7 +11342,7 @@ mod cache_turn_tests {
     // Fixtures model an Anthropic OpenCode session with a large cached prompt:
     // the warm request read 682k from the cache (prompt total 695,053, so the
     // short-read floor is 694,989), and the busting request read 0 cached + 4
-    // uncached tokens and rewrote 681,906.
+    // uncached tokens and rewrote its whole prompt, which grew to 695,104.
 
     const T0: i64 = 1_760_000_000_000;
     const SECOND: i64 = 1_000;
@@ -11353,11 +11369,18 @@ mod cache_turn_tests {
         event
     }
 
-    /// A warm Anthropic request, then one `gap_ms` later that read nothing.
+    /// A warm Anthropic request, then one `gap_ms` later that read nothing and
+    /// rewrote a prompt no smaller than the previous one.
     fn warm_then_cold(gap_ms: i64) -> Vec<RawDbCacheEvent> {
+        warm_then_cold_rewriting(gap_ms, 695_100)
+    }
+
+    /// Like `warm_then_cold`, with the busting request writing `rewritten`
+    /// tokens (its prompt total is `rewritten + 4`).
+    fn warm_then_cold_rewriting(gap_ms: i64, rewritten: i64) -> Vec<RawDbCacheEvent> {
         vec![
             anthropic_step("m1", T0, 3, 682_000, 13_050),
-            anthropic_step("m2", T0 + gap_ms, 4, 0, 681_906),
+            anthropic_step("m2", T0 + gap_ms, 4, 0, rewritten),
         ]
     }
 
@@ -11632,6 +11655,46 @@ mod cache_turn_tests {
         ];
         let events = attribute(rows, None, Some("never"));
         assert_eq!(events[1].severity, "bust");
+        assert_eq!(m2_cause(&events), Some(UNATTRIBUTED_CACHE_BUST_CAUSE));
+    }
+
+    #[test]
+    fn fast_cold_read_with_a_shrunk_prompt_gets_no_provider_label() {
+        // 10 s after a warm read the prompt shrank by 13,143 tokens (below the
+        // 15k drop marker): the request changed, so the loss is not put on the
+        // provider.
+        let events = attribute(
+            warm_then_cold_rewriting(10 * SECOND, 681_906),
+            None,
+            Some("never"),
+        );
+        assert_eq!(events[1].severity, "full_bust");
+        assert!(!events[1].is_drop);
+        assert_eq!(m2_cause(&events), Some(UNATTRIBUTED_CACHE_BUST_CAUSE));
+        // A prompt total 55k smaller than the previous one is also marked as a
+        // context drop (is_drop, 15k or more). The step still gets the single
+        // Unattributed cause, never the provider-miss label next to the drop.
+        let events = attribute(
+            warm_then_cold_rewriting(10 * SECOND, 640_000),
+            None,
+            Some("never"),
+        );
+        assert!(events[1].is_drop);
+        assert_eq!(m2_cause(&events), Some(UNATTRIBUTED_CACHE_BUST_CAUSE));
+        // The shrink check uses the same floor as the short-read meter rule
+        // (previous prompt total 695,053 minus max(64, 3) = 694,989): a prompt
+        // total of exactly 694,989 did not shrink, one token less did.
+        let events = attribute(
+            warm_then_cold_rewriting(10 * SECOND, 694_985),
+            None,
+            Some("never"),
+        );
+        assert_eq!(m2_cause(&events), Some(PROVIDER_CACHE_MISS_CAUSE));
+        let events = attribute(
+            warm_then_cold_rewriting(10 * SECOND, 694_984),
+            None,
+            Some("never"),
+        );
         assert_eq!(m2_cause(&events), Some(UNATTRIBUTED_CACHE_BUST_CAUSE));
     }
 
