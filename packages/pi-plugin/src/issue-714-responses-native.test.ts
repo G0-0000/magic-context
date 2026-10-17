@@ -175,20 +175,60 @@ test("issue 714 Codex native replay: own turn with reasoning, commentary and a c
 });
 
 test("issue 714 Codex native replay: whitespace-only final_answer that OMP drops admits", async () => {
-	const turn = codexToolTurn({
-		items: [
-			reasoningItem("rs_own"),
-			messageItem("checking the file", "msg_own", "commentary"),
-			messageItem("", "msg_empty", "final_answer"),
-			callItem("call_own", "fc_own"),
+	// gpt-5.6 Codex can end a commentary-only turn with an empty final_answer
+	// message; OMP drops it from replay (utils.ts:343-420 in 18.11.3).
+	const turn = {
+		role: "assistant",
+		...own,
+		stopReason: "stop",
+		content: [
+			{
+				type: "text",
+				text: "§2§ checking the file",
+				textSignature: signature("msg_own", "commentary"),
+			},
+			{
+				type: "text",
+				text: "",
+				textSignature: signature("msg_empty", "final_answer"),
+			},
 		],
-	});
-	turn.content.splice(2, 0, {
-		type: "text",
-		text: "",
-		textSignature: signature("msg_empty", "final_answer"),
-	});
-	const h = await dispatch(prepared(turn), wire());
+		providerPayload: {
+			type: "openaiResponsesHistory",
+			provider: model.provider,
+			dt: true,
+			items: [
+				messageItem("checking the file", "msg_own", "commentary"),
+				messageItem("", "msg_empty", "final_answer"),
+			],
+		},
+	};
+	const head = {
+		role: "user",
+		content: [
+			{
+				type: "input_text",
+				text: "<session-history>managed</session-history>",
+			},
+		],
+	};
+	const h = await dispatch(
+		[
+			userMessage("<session-history>managed</session-history>", 1),
+			turn,
+			userMessage("§4§ current prompt", 2),
+		],
+		{
+			input: [
+				head,
+				wireText("checking the file", "commentary"),
+				{
+					role: "user",
+					content: [{ type: "input_text", text: "§4§ current prompt" }],
+				},
+			],
+		},
+	);
 	expect(h.refusals).toEqual([]);
 	expect(h.aborts).toBe(0);
 });

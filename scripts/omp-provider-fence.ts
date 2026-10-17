@@ -1528,31 +1528,35 @@ try {
 		? attempts.length === 1 &&
 			wires === 0 &&
 			refusals.length === 1 &&
-			refusals[0].data.message.includes("prepared turn structure") &&
+			// The replacement erases the managed head, so the receipt-signature
+			// check refuses before the structural comparison runs.
+			/missing current receipt signature|prepared turn structure/.test(
+				refusals[0].data.message,
+			) &&
 			JSON.stringify(attempts[0].payload).includes("UNMANAGED_CACHE_ONLY_714")
 		: assistantEdit
-		? managedOutcomes.every((outcome: any, index) =>
-				index === 0 || mode !== "text-edit-baseline"
-					? outcome.wires === 1 && outcome.refusals.length === 0
-					: outcome.wires === 0 &&
-						outcome.refusals.length === 1 &&
-						outcome.refusals[0].includes("comparison=content"),
-			)
-		: mode === "managed-then-raw"
-			? managedOutcomes.length === managedTurns &&
-				attempts.length === managedTurns + 1 &&
-				wires === managedTurns &&
-				refusals.length === 1 &&
-				refusals[0].data.message.includes("missing current receipt signature")
-			: mode === "drop-commentary"
-				? attempts.length === 1 &&
-					wires === 0 &&
+			? managedOutcomes.every((outcome: any, index) =>
+					index === 0 || mode !== "text-edit-baseline"
+						? outcome.wires === 1 && outcome.refusals.length === 0
+						: outcome.wires === 0 &&
+							outcome.refusals.length === 1 &&
+							outcome.refusals[0].includes("comparison=content"),
+				)
+			: mode === "managed-then-raw"
+				? managedOutcomes.length === managedTurns &&
+					attempts.length === managedTurns + 1 &&
+					wires === managedTurns &&
 					refusals.length === 1 &&
-					refusals[0].data.message.includes("comparison=content") &&
-					hooks.some((event) => event.phase === "dropped-commentary")
-				: mode === "raw"
-					? attempts.length > 0 && wires === 0 && refusals.length === 1
-					: attempts.length > 0 && wires > 0 && refusals.length === 0;
+					refusals[0].data.message.includes("missing current receipt signature")
+				: mode === "drop-commentary"
+					? attempts.length === 1 &&
+						wires === 0 &&
+						refusals.length === 1 &&
+						refusals[0].data.message.includes("comparison=content") &&
+						hooks.some((event) => event.phase === "dropped-commentary")
+					: mode === "raw"
+						? attempts.length > 0 && wires === 0 && refusals.length === 1
+						: attempts.length > 0 && wires > 0 && refusals.length === 0;
 	console.log(
 		`Bun ${Bun.version}; OMP ${version}; ${ok ? "PASS" : "FAIL"} ${name}; attempts=${attempts.length} wires=${wires} refusals=${refusals.length}; evidence=${root}`,
 	);
