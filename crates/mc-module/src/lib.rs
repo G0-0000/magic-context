@@ -12120,6 +12120,12 @@ impl McHandler {
                 Ok(value) => value,
                 Err(outcome) => return outcome,
             };
+        if !binding.config.memory_enabled {
+            return HandlerOutcome::Error {
+                code: "memory_disabled".to_string(),
+                message: "project memory is disabled; dreamer tasks cannot run".to_string(),
+            };
+        }
         let Some(store) = self.store.get().cloned() else {
             return self.store_refusal();
         };

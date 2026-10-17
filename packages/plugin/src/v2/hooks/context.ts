@@ -1384,6 +1384,8 @@ export async function registerContext(context: V2Context) {
                 // Reuse systemPromptHash persisted by the system hook after guidance,
                 // preset and date resolution. Hashing the raw compaction draft instead
                 // would make the next unchanged context pass rebuild the cached head.
+                // Compaction can run before that hook, so an unknown identity stays
+                // empty for the hook to initialize.
                 systemHash: state.systemPromptHash ?? "",
                 toolSetHash: getCurrentToolSetHash(
                     draft.model.providerID,
@@ -1419,6 +1421,9 @@ export async function registerContext(context: V2Context) {
         if (nativeFoldReplay) rememberHostMedia(draft.messages);
         const reader = openStoreReader();
         try {
+            // Compaction may precede the first context callback. Wait for the pending
+            // database open instead of refusing while its asynchronous probe is running.
+            await storage.probe();
             const watermark = reader.latestSequenceForIds(
                 draft.sessionID,
                 draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
@@ -2370,6 +2375,7 @@ export async function registerContext(context: V2Context) {
             db: runDb,
             dreamer: manualDreamer,
             smartNotesEnabled: config.smart_notes.enabled,
+            memoryEnabled: config.memory.enabled,
             projectIdentity:
                 resolveProjectIdentityForSession(directory, config.allow_home_project) ?? "",
             directory,

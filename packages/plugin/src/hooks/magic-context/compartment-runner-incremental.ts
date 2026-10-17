@@ -554,7 +554,6 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         const producerLimits = { input: producerWindow.inputLimitTokens };
         const producerReserve = producerWindow.maxOutputTokens;
         const projectPath = resolveProjectIdentity(directory ?? process.cwd());
-        const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
         const promptFit = fitHistorianPrompt({
             window: producerWindow,
             systemPrompt: withContentLanguageDirective(
@@ -566,7 +565,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             chunkStart: Math.max(1, offset),
             lastOrdinal: eligibleEndOrdinal - 1,
             sessionCompartments: priorCompartments,
-            memories,
+            memories: () => getMemoriesByProject(db, projectPath, ["active", "permanent"]),
             memoryEnabled: deps.memoryEnabled !== false,
         });
         if (!promptFit.ok) {

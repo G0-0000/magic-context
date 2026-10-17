@@ -79,6 +79,53 @@ function limitOf(input: HistorianPromptFitArgs): number {
 }
 
 describe("fitHistorianPrompt", () => {
+    test("memory-on loads the lazy pool once and preserves the supplied-array fit", () => {
+        const memories = [memory(0), memory(1)];
+        const input = args({ memories });
+        let reads = 0;
+        const fit = fitHistorianPrompt({
+            ...input,
+            memories: () => {
+                reads += 1;
+                return memories;
+            },
+        });
+        expect(reads).toBe(1);
+        expect(fit).toEqual(fitHistorianPrompt(input));
+        if (!fit.ok) throw new Error(fit.reason);
+        expect(fit.projectMemory).toContain("Fact 0:");
+    });
+
+    test("memory-off never loads project memories for fitting, even with an unknown window", () => {
+        for (const window of [args({}).window, { maxOutputTokens: 8_000 }]) {
+            const fit = fitHistorianPrompt(
+                args({
+                    window,
+                    memoryEnabled: false,
+                    memories: () => {
+                        throw new Error("project memories were read");
+                    },
+                }),
+            );
+            if (!fit.ok) throw new Error(fit.reason);
+            expect(fit.projectMemory).toBe("");
+            expect(fit.kept.memories).toBe(0);
+        }
+    });
+
+    test("memory-off final prompt rejects a supplied project-memory block", () => {
+        const prompt = buildCompartmentAgentPrompt({
+            seedExamples: "seed examples",
+            sessionReferences: "session references",
+            projectMemory: "<project-memory>private memory</project-memory>",
+            inputSource: "session transcript",
+            memoryEnabled: false,
+        });
+        expect(prompt).not.toContain("private memory");
+        expect(prompt).not.toContain("<project-memory>");
+        expect(prompt).toContain("session transcript");
+    });
+
     test("render review: memory-off historian request must not contain project memories", () => {
         const input = args({ memoryEnabled: false, memories: [memory(0)] });
         const fit = fitHistorianPrompt(input);

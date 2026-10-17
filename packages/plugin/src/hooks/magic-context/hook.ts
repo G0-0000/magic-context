@@ -1082,6 +1082,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       return runManualDream({
                           db,
                           projectIdentity: projectPath,
+                          projectMemoryEnabled: sampledDream.memory?.enabled,
                           tasks: buildDreamTaskRuntimeConfigs(
                               currentDreamer,
                               "opencode",

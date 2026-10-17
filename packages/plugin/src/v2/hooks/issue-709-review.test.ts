@@ -945,6 +945,25 @@ test("render review: first compaction before context initializes durable storage
     }
 });
 
+test("cold fold adopts the initialized MD5 system identity without a corrective HARD", async () => {
+    const f = await fixture(4911, foldFeaturesOff);
+    try {
+        await f.fold(true);
+        expect(f.meta().cachedM0SystemHash ?? "").toBe("");
+        const first = await f.pass();
+        expect(f.meta().systemPromptHash).toMatch(/^[a-f0-9]{32}$/);
+        expect(f.meta().cachedM0SystemHash).toBe(f.meta().systemPromptHash);
+        const replay = await f.pass();
+        expect(replay.bytes).toBe(first.bytes);
+        expect(
+            [...first.logs, ...replay.logs].filter((line) =>
+                /HARD.*executed=true|HARD reason=boot_recovery/.test(line),
+            ),
+        ).toEqual([]);
+    } finally {
+        await f.cleanup();
+    }
+});
 test("render review: absent system identity after storage probe needs no corrective HARD", async () => {
     const f = await fixture(4913, foldFeaturesOff);
     try {

@@ -6,6 +6,7 @@ import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import type { Database } from "../../../shared/sqlite";
 import { isUsableProjectIdentity } from "../memory/project-identity";
+import { isProjectMemoryEnabled } from "../memory-enabled";
 import { nextDueAtMs } from "./cron";
 import { pruneIdleScheduleIdentities } from "./idle-schedule-prune";
 import {
@@ -585,6 +586,10 @@ export async function runManualDream(
         // All enabled tasks (schedule != ""); disabled tasks stay off even manually.
         selected = deps.tasks.filter((t) => t.schedule.trim() !== "");
     }
+    // Smart-note checks read notes, not project memories, and remain independently
+    // available. A forced memory task must still honor the project's memory opt-out.
+    if (!isProjectMemoryEnabled(deps.projectMemoryEnabled))
+        selected = selected.filter((config) => config.task === "evaluate-smart-notes");
     if (selected.length === 0) return result;
 
     const selectedTaskNames = selected.map((config) => config.task);
@@ -685,7 +690,7 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
     // they record (retrospective watermark, open verify-broad cycle, curate
     // rotation). An identity with no memories and nothing else to do loses its
     // rows to the daily idle prune instead.
-    if (deps.projectMemoryEnabled === false) return 0;
+    if (!isProjectMemoryEnabled(deps.projectMemoryEnabled)) return 0;
     const now = deps.now ?? Date.now();
     const due = planDueTasks(deps.db, deps.projectIdentity, deps.tasks, now);
     if (due.length === 0) return 0;

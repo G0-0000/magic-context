@@ -23,6 +23,7 @@
 
 import { withContentLanguageDirective } from "../../agents/language-directive";
 import type { Memory } from "../../features/magic-context/memory/types";
+import { readEnabledProjectMemories } from "../../features/magic-context/memory-enabled";
 import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkOutputLimit } from "../../shared/models-dev-cache";
 import { toModelEntry } from "../../shared/resolve-fallbacks";
@@ -113,7 +114,7 @@ export interface HistorianPromptFitArgs {
     lastOrdinal: number;
     sessionCompartments: ReferenceCompartment[];
     /** Memories for the `<project-memory>` block; empty when there is none. */
-    memories: Memory[];
+    memories: Memory[] | (() => Memory[]);
     memoryEnabled: boolean;
     extractionFree?: boolean;
 }
@@ -196,7 +197,11 @@ export function fitHistorianPrompt(args: HistorianPromptFitArgs): HistorianPromp
         args.sessionId,
         args.chunkStart,
     );
-    const memories = orderHistorianMemories(args.memories);
+    const memories = orderHistorianMemories(
+        readEnabledProjectMemories(args.memoryEnabled, () =>
+            typeof args.memories === "function" ? args.memories() : args.memories,
+        ),
+    );
     const render = (refs: number, memoryCount: number, seedCount: number) => ({
         seedExamples: renderSeedExamplesBlock(seeds.slice(0, seedCount)),
         sessionReferences: renderSessionReferencesBlock(references, refs),

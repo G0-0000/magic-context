@@ -744,9 +744,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				directory,
 				allowHomeProject,
 			);
-			const memories = projectPath
-				? getMemoriesByProject(db, projectPath, ["active", "permanent"])
-				: [];
 			const fitModelKey = piModelRefToCanonical(historianModel ?? "");
 			const fitContext = fitModelKey
 				? resolveProducerContextLimit(fitModelKey)
@@ -767,7 +764,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				chunkStart: Math.max(1, offset),
 				lastOrdinal: eligibleEndOrdinal - 1,
 				sessionCompartments: priorCompartments,
-				memories,
+				memories: () =>
+					projectPath
+						? getMemoriesByProject(db, projectPath, ["active", "permanent"])
+						: [],
 				memoryEnabled: memoryEnabled !== false,
 			});
 			if (!promptFit.ok) {
