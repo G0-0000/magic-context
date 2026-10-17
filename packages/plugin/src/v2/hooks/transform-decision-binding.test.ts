@@ -11,6 +11,7 @@ import {
     noteOpenCodeUnbustedPass,
     type PendingTransformDecision,
     recordPendingTransformDecision,
+    writeRustTransformDecision,
 } from "../../features/magic-context/transform-decision-log";
 import {
     clearCtxReduceAvailability,
@@ -53,7 +54,7 @@ function decision(busted: boolean): PendingTransformDecision {
 }
 
 interface Fixture {
-    pass(args: { busted: boolean; prompt?: string }): Promise<void>;
+    pass(args: { busted: boolean; prompt?: string; rust?: boolean }): Promise<void>;
     reply(finish?: string): string;
     rows(): Array<{
         harness: string;
@@ -111,8 +112,10 @@ async function createFixture(): Promise<Fixture> {
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
     const probe = spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db);
-    // Whether the scripted transform stages a busting decision on the next pass.
+    // Whether the scripted transform stages a busting decision on the next pass,
+    // and whether it stages it the way the Rust adapter does.
     let nextBusted = false;
+    let nextRust = false;
     const scriptedTransform = Object.assign(
         async (_input: unknown, output: { messages: MessageLike[] }) => {
             const sessionId = output.messages[0]?.info.sessionID ?? SESSION;
@@ -120,7 +123,15 @@ async function createFixture(): Promise<Fixture> {
             // when a pass starts, then stage a busting decision for binding, or
             // remember a non-busting one in case the system prompt changed.
             clearOpenCodePendingTransformDecision(sessionId, output.messages);
-            if (nextBusted) recordPendingTransformDecision(sessionId, decision(true));
+            // The Rust adapter stages every served pass, deferred ones included.
+            if (nextRust)
+                writeRustTransformDecision({
+                    sessionId,
+                    decision: nextBusted ? "HARD" : "SOFT+",
+                    materializeReason: nextBusted ? "first_render" : null,
+                    inputTokens: 10_000,
+                });
+            else if (nextBusted) recordPendingTransformDecision(sessionId, decision(true));
             else noteOpenCodeUnbustedPass(sessionId, decision(false));
         },
         { getRustReplayParticipant: () => null, disposeRust: () => {} },
@@ -160,8 +171,9 @@ async function createFixture(): Promise<Fixture> {
         )
         .run("msg_user_1", SESSION, ++seq, Date.now(), JSON.stringify({ role: "user" }));
     return {
-        async pass({ busted, prompt = "Host prompt, version one." }) {
+        async pass({ busted, prompt = "Host prompt, version one.", rust = false }) {
             nextBusted = busted;
+            nextRust = rust;
             await hook!({
                 sessionID: SESSION,
                 model: { providerID: "openai", id: "gpt-4.1", limit: { context: 1_000_000 } },
@@ -226,6 +238,24 @@ describe("OpenCode 2 transform decision rows", () => {
         }
         await fixture.pass({ busted: false });
         expect(fixture.rows()).toEqual([]);
+    });
+
+    test("Rust-adapter decisions on deferred passes write no row; its busting pass writes one", async () => {
+        fixture = await createFixture();
+        const replies: string[] = [];
+        for (let step = 0; step < 6; step++) {
+            await fixture.pass({ busted: step === 4, rust: true });
+            replies.push(fixture.reply());
+        }
+        await fixture.pass({ busted: false, rust: true });
+        expect(fixture.rows()).toEqual([
+            {
+                harness: "opencode2",
+                message_id: replies[4]!,
+                decision: "execute",
+                materialize_reason: "first_render",
+            },
+        ]);
     });
 
     test("a tool loop with one bust writes exactly one row, on that request's reply", async () => {
