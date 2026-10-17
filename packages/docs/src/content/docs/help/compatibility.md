@@ -76,7 +76,7 @@ These settings don't make Magic Context disable itself, but they can stop turns 
 
 Secrets in your own messages, and in tool results whose tool call is still in the conversation, don't cause refusals.
 
-**Workaround:** Turn Hide Secrets off for sessions that Magic Context manages. If a session is already stuck, start a new session. A proper fix needs a new extension hook in OMP.
+**Workaround:** Turn Hide Secrets off for sessions that Magic Context manages. If a session is already stuck, start a new session.
 
 ## What "Magic Context disabled itself" looks like
 
