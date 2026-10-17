@@ -117,8 +117,9 @@ describe("dreamer tasks follow the setting of what they serve", () => {
                 await runDueTasksForProject({
                     db,
                     projectIdentity: PROJECT,
-                    // The production composition: the smart-note switch drops its
-                    // task from the list, the scheduler applies both switches.
+                    // Built as production builds it: buildDreamTaskRuntimeConfigs
+                    // drops evaluate-smart-notes when smart_notes.enabled is false,
+                    // and the scheduler applies memory.enabled and smart_notes.enabled.
                     tasks: buildDreamTaskRuntimeConfigs(
                         config.dreamer,
                         "opencode",

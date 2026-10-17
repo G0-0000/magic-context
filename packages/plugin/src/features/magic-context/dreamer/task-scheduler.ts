@@ -114,10 +114,11 @@ export interface RunDueTasksDeps {
 }
 
 /**
- * The caller's tasks that the project's settings let run: each task follows the
- * setting of what it serves (see dreamTaskAllowedBySettings). A task left out
- * here is not seeded, run or advanced, so its rows stay exactly as they are for
- * any other caller sharing the identity.
+ * The caller's tasks that the project's settings allow: projectMemoryEnabled
+ * gates the project-memory tasks and smartNotesEnabled gates
+ * evaluate-smart-notes (see dreamTaskAllowedBySettings). A task left out here
+ * is not seeded, run or advanced, so its schedule rows stay untouched for any
+ * other worktree or host whose caller shares the same project identity.
  */
 function tasksAllowedBySettings(deps: RunDueTasksDeps): readonly DreamTaskRuntimeConfig[] {
     return deps.tasks.filter((config) =>
