@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(192);
+        expect(validation.files.length).toBe(193);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -155,6 +155,7 @@ describe("mode manifest validator", () => {
             "tests/rust-full-sync-frame-cap.test.ts",
             "tests/rust-plugin-stage-cache.test.ts",
             "tests/system-prompt-change-order.test.ts",
+            "tests/zen-primary-surface.test.ts",
         ]);
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
     });
