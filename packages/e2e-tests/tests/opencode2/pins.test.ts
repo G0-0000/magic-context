@@ -6,13 +6,9 @@ import pins from "../../src/opencode2-runner/sha256-pins.json";
 
 test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 	const root = resolve(import.meta.dir, "../../../..");
-	// The SHA-256 pin for `packages/plugin/src/v2/server.ts` changed when startup
-	// began registering Magic Context's package version in
-	// `globalThis[Symbol.for("cortexkit.standalone-plugins")]`, the Map shared by
-	// standalone plugins. The `packages/plugin/src/index.ts` pin changed when a
-	// comment there stopped pointing at a report that moved out of `docs/`, and
-	// again when the retired Fusiform window-overlay reload was removed from v1
-	// startup.
+	// The server entry's version marker is part of host detection and stays pinned.
+	// The v1 entry also registers background-only Zen agents. Native primary-request
+	// tests verify that those registrations do not affect ordinary prompts or tools.
 	for (const [path, expected] of Object.entries(pins)) {
 		let bytes = readFileSync(resolve(root, path), "utf8");
 		if (path === "packages/plugin/src/index.ts") {
