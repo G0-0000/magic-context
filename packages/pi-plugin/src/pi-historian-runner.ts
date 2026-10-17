@@ -751,6 +751,29 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const fitContext = fitModelKey
 				? resolveProducerContextLimit(fitModelKey)
 				: undefined;
+			// Every attempt in the chain (configured fallbacks, then the session
+			// model as the last resort) sends this same prompt, so size it for each
+			// of their windows too, resolved as the dispatch guard resolves them.
+			const fallbackWindows = [
+				...(fallbackModels ?? []).map((entry) =>
+					typeof entry === "string" ? entry : entry.model,
+				),
+				fallbackModelId,
+			]
+				.map((model) => (model ? piModelRefToCanonical(model) : ""))
+				.filter((key) => key.length > 0 && key !== fitModelKey)
+				.map((key) => {
+					const context = resolveProducerContextLimit(key);
+					return {
+						modelKey: key,
+						contextLimitTokens: context,
+						maxOutputTokens: historianProducerReserve(
+							context,
+							maxOutputTokens,
+							deps.resolveHostOutputLimit?.(key),
+						),
+					};
+				});
 			const promptFit = fitHistorianPrompt({
 				window: {
 					modelKey: fitModelKey || undefined,
@@ -761,6 +784,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						deps.resolveHostOutputLimit?.(fitModelKey),
 					),
 				},
+				fallbackWindows,
 				systemPrompt: historianSystemPrompt,
 				requestedChunkTokens: historianChunkTokens,
 				sessionId,

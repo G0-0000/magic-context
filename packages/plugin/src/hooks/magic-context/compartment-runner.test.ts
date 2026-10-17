@@ -41,6 +41,7 @@ import { rebaseSessionCoordinates } from "../../features/magic-context/store-gen
 import { createTagger } from "../../features/magic-context/tagger";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
+import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database, withPrivilegedWriter, withSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
@@ -3665,5 +3666,111 @@ describe("historian prompt sized to the producer window", () => {
             getCompartments(db, sessionId).map((row) => [row.startMessage, row.endMessage]),
         ).toEqual([[1, 2]]);
         expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+    });
+
+    it("sizes the prompt for a fallback whose window is smaller than the primary's", async () => {
+        useTempDataHome("compartment-runner-prompt-fit-fallback-");
+        const sessionId = "ses-prompt-fit-fallback";
+        createOpenCodeDb(
+            sessionId,
+            sevenMessages("fallback", `${"session source token ".repeat(1_500)}SOURCE_END`),
+        );
+        const db = openDatabase();
+        const projectPath = resolveProjectIdentity("/tmp");
+        const memoryCount = 400;
+        for (let index = 0; index < memoryCount; index += 1) {
+            insertMemory(db, {
+                projectPath,
+                category: "ARCHITECTURE",
+                content: `Remembered architecture fact number ${index}: ${"the module keeps a durable ledger of every decision it made ".repeat(4)}`,
+            });
+        }
+        const { client, prompt, create } = sizedClient("fallback");
+        const primary = "test/fixture-historian";
+        const fallback = "small/fallback-historian";
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "test",
+                                models: {
+                                    "fixture-historian": {
+                                        limit: { context: 1_000_000, output: 32_000 },
+                                    },
+                                },
+                            },
+                            {
+                                id: "small",
+                                models: {
+                                    "fallback-historian": {
+                                        limit: { context: 100_000, output: 32_000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+        // The pre-send check the fallback attempt applies to the prompt.
+        const fallbackWindow = resolveHistorianProducerWindow(fallback, undefined);
+        const admitFallback = (user: string) =>
+            producerPromptFailureReason({
+                sourceLocal: estimateTokens(user),
+                systemLocal: estimateTokens(COMPARTMENT_AGENT_SYSTEM_PROMPT),
+                toolsLocal: 0,
+                modelKey: fallback,
+                contextLimitTokens: fallbackWindow.contextLimitTokens,
+                inputLimitTokens: fallbackWindow.inputLimitTokens,
+                maxOutputTokens: fallbackWindow.maxOutputTokens,
+            });
+        // Control: the full memory block alone overflows the fallback.
+        const fullBlock = renderHistorianMemoryBlock(
+            getMemoriesByProject(db, projectPath, ["active", "permanent"]),
+        );
+        expect(admitFallback(`${fullBlock}\n\n${"session source token ".repeat(1_500)}`)).toContain(
+            "producer_prompt_exceeds_window",
+        );
+
+        // Run without the fixture wrapper, which would register every chain model
+        // at one shared window and hide the fallback's smaller one.
+        const holderId = `test-holder-${Math.random()}`;
+        expect(acquireCompartmentLease(db, sessionId, holderId)).not.toBeNull();
+        try {
+            await runCompartmentAgentImpl({
+                client,
+                db,
+                sessionId,
+                historianChunkTokens: 10_000,
+                model: primary,
+                fallbackModels: [fallback],
+                directory: "/tmp",
+                compartmentLeaseHolderId: holderId,
+            });
+        } finally {
+            releaseCompartmentLease(db, sessionId, holderId);
+        }
+
+        expect(create).toHaveBeenCalledTimes(1);
+        const sent = prompt.mock.calls
+            .map(
+                (call) =>
+                    call[0] as { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } },
+            )
+            .filter((input) => input.body?.noReply !== true)
+            .map((input) => input.body?.parts?.map((part) => part.text ?? "").join("\n") ?? "");
+        // The primary answered on the first attempt with a prompt the fallback
+        // would also have accepted.
+        expect(sent).toHaveLength(1);
+        const user = sent[0] ?? "";
+        expect(user).toContain("SOURCE_END");
+        expect(admitFallback(user)).toBeNull();
+        const keptLines = user.split("\n").filter((line) => line.startsWith("- Remembered"));
+        expect(keptLines.length).toBeLessThan(memoryCount);
+        expect(
+            getCompartments(db, sessionId).map((row) => [row.startMessage, row.endMessage]),
+        ).toEqual([[1, 2]]);
     });
 });
