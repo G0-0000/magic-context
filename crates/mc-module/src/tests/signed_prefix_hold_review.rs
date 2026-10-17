@@ -655,20 +655,20 @@ const REVIEW_UNHELD_CASES: [(&str, bool, bool); 6] = [
     (REVIEW_BOUND_ALT, false, false),
 ];
 
-/// Golden digests of `review_unheld_digest`, recorded by running it against `transform.rs`
-/// as of commit dda49e3850, before the signed-prefix hold existed. Matching them shows the
-/// hold leaves the sessions it never covers unchanged.
+/// Pin the intended unheld-session output with distance-based age reclaim.
+/// These snapshots retain current-task tool bodies; signed-prefix hold checks
+/// remain independent of this unheld policy golden.
 const REVIEW_UNHELD_GOLDEN: [&str; 6] = [
-    "28b8002556c8ba93a26feff61c91b4259a43e3e7b3596a1042650d27d6560cce",
-    "780dd9a7ffaea57ac42ee7db12d1d73658bd3f3821a0e8e1c2d9dcb00d0305ef",
-    "65859adc921331c140ab5d612c8d6ddc1b0d024b794c637a67dac69aa31bf8ef",
-    "4368ec96e6c372154e1896b59d56f24c4e5df81d00d755df1b61879e403192fe",
-    "a4a4a9039c74b496ca463759fbd3f3909bd10f922579b5ec20b7efb3bdf8cb60",
-    "ab0023ba63b8690b49f32d9eaa2c74445ba597fbfdcf7cb3847aa5ab455baa3e",
+    "379e07c15ef75bc0e0809bb4c4c9021b767fa988a0cf10d367635cb562e9c6d0",
+    "a06635735bfd78bd1ed09d54c39a0c0e32c645ec6d4e1e6269c828b8358c7bdb",
+    "4baf5c57ddcf064b7f9cd87ca213ae14bd7bf31ed52b6dd00f29bf3a5c80bfa9",
+    "ac945ae6c10a2a023795b58cb3d82e867c9afa864d6d688345fb87d1caa71a69",
+    "e252f0b3697f7fc44ac5429fee0789a5f3f56b7462bec0cb6ad49468b2e22762",
+    "25ef18164f09a5f9e6d5a4a6a89a49f3e4372828a6c60965b4f72de6d4a2c8de",
 ];
 
 #[test]
-fn review_unheld_sessions_match_the_code_before_the_hold() {
+fn review_unheld_distance_policy_golden() {
     let mut actual = Vec::new();
     let mut passes = 0usize;
     for (index, (model, thinking, subagent)) in REVIEW_UNHELD_CASES.into_iter().enumerate() {

@@ -4016,7 +4016,7 @@ describe("two-pass tool reclaim", () => {
         expect(tagStatuses(sessionId).get(1)).toBe("active");
     });
 
-    it("advances the watermark on a force-materialization bust even without execute", async () => {
+    it("does not age the current task on a force-materialization bust without distance", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-reclaim-force-defer";
@@ -4033,7 +4033,7 @@ describe("two-pass tool reclaim", () => {
             }),
         );
 
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(1);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
     });
 });
 
@@ -5724,7 +5724,201 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains pending ops and age reclaim on the same low-usage TTL fold", async () => {
+    it.each([
+        2, 3, 5,
+    ])("OpenCode 1/2 distance bookmark keeps the current task through %i TTL rebuilds and a model switch", async (rebuilds) => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = `ses-distance-idle-${rebuilds}`;
+        materializeBaseline(sessionId);
+        const tools = Array.from({ length: 8 }, (_, index) => makeToolMessage(`tool-${index + 1}`));
+        const messages: MessageLike[] = [
+            {
+                info: { id: "task", role: "user" },
+                parts: [{ type: "text", text: "implement the feature" }],
+            },
+            ...tools,
+        ];
+        const targets = new Map(
+            tools.map((message, index) => {
+                insertTag(db, sessionId, message.info.id, "tool", 4000, index + 1, 0, "bash");
+                return [
+                    index + 1,
+                    {
+                        ...makeDropTarget(message),
+                        mutationParts: [{ message, part: message.parts[0] }],
+                    },
+                ] as const;
+            }),
+        );
+        for (let pass = 0; pass <= rebuilds; pass++) {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    contextUsage: { percentage: 2, inputTokens: 4000 },
+                    usableWindow: 200_000,
+                    m0M1: {
+                        projectPath: FOLD_PROJECT,
+                        projectDirectory: FOLD_PROJECT,
+                        historyBudgetTokens: 98_000,
+                        hardSignals: {
+                            ...BASE_HARD,
+                            cacheExpired: pass < rebuilds,
+                            lastResponseTime: Number.MAX_SAFE_INTEGER,
+                            modelKey: pass === rebuilds ? "other/model" : BASE_HARD.modelKey,
+                        },
+                    },
+                }),
+            );
+            expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
+            expect(
+                getTagsBySession(db, sessionId).filter((tag) => tag.status === "active"),
+            ).toHaveLength(8);
+        }
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                tags: getActiveTagsBySession(db, sessionId),
+                targets,
+                pendingMaterializationSessions: new Set([sessionId]),
+            }),
+        );
+        expect(
+            getTagsBySession(db, sessionId)
+                .filter((tag) => tag.status === "dropped")
+                .map((tag) => tag.tagNumber),
+        ).toEqual([1]);
+    });
+
+    it("OpenCode 1/2 single-user tool loop ages by a quarter-window of newer tokens", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-oc-token-distance";
+        const tools = Array.from({ length: 4 }, (_, index) => makeToolMessage(`loop-${index}`));
+        const targets = new Map<number, TagTarget>();
+        for (const [index, message] of tools.entries()) {
+            (message.parts[0] as { state: { output: string } }).state.output =
+                `unique ${index} ${"payload ".repeat(index === 0 ? 500 : 17_000)}`;
+            insertTag(db, sessionId, message.info.id, "tool", 4000, index + 1, 0, "bash");
+            targets.set(index + 1, {
+                ...makeDropTarget(message),
+                mutationParts: [{ message, part: message.parts[0] }],
+            });
+        }
+        const messages: MessageLike[] = [
+            {
+                info: { id: "task", role: "user" },
+                parts: [{ type: "text", text: "one coding task" }],
+            },
+            ...tools,
+        ];
+        const pass = () =>
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    usableWindow: 200_000,
+                    pendingMaterializationSessions: new Set([sessionId]),
+                }),
+            );
+        await pass();
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(1);
+        expect(getTagsBySession(db, sessionId).map((tag) => tag.status)).toEqual(
+            Array(4).fill("active"),
+        );
+        await pass();
+        expect(getTagsBySession(db, sessionId).map((tag) => tag.status)).toEqual([
+            "dropped",
+            "active",
+            "active",
+            "active",
+        ]);
+    });
+
+    it("OpenCode 1/2 distant outputs and edits survive one free rebuild, then reclaim at low usage", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-distance-edit";
+        materializeBaseline(sessionId);
+        const tools = [
+            makeToolMessage("old-edit"),
+            makeToolMessage("new-edit"),
+            makeToolMessage("old-bash"),
+        ];
+        const tail: MessageLike[] = Array.from({ length: 24 }, (_, index) => ({
+            info: { id: `tail-${index}`, role: index < 3 ? "user" : "assistant" },
+            parts: [
+                {
+                    type: "text",
+                    text:
+                        index < 3
+                            ? "<system-reminder>Background task finished.</system-reminder>"
+                            : `continuation ${index}`,
+                },
+            ],
+        }));
+        const messages = [...tools, ...tail];
+        const targets = new Map<number, TagTarget>();
+        for (const [index, message] of tools.entries()) {
+            const tag = index + 1;
+            if (index < 2)
+                (message.parts[0] as { state: { output: string } }).state.output = "edited";
+            insertTag(
+                db,
+                sessionId,
+                message.info.id,
+                "tool",
+                index < 2 ? 24 : 4000,
+                tag,
+                0,
+                index < 2 ? "edit" : "bash",
+                0,
+                message.info.id,
+                null,
+                { tokenCount: index < 2 ? 100 : 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+            const target = makeDropTarget(message);
+            targets.set(tag, {
+                ...target,
+                mutationParts: [{ message, part: message.parts[0] }],
+                readInput: () => ({ filePath: "/feature.ts", oldString: "a", newString: "b" }),
+                editMarker: target.truncate,
+            });
+        }
+        tail.forEach((message, index) => {
+            insertTag(db, sessionId, message.info.id, "message", 50, index + 4);
+        });
+        const pass = (bust: boolean) =>
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    tags: getActiveTagsBySession(db, sessionId),
+                    targets,
+                    contextUsage: { percentage: 2, inputTokens: 4000 },
+                    usableWindow: 200_000,
+                    pendingMaterializationSessions: new Set(bust ? [sessionId] : []),
+                }),
+            );
+        await pass(true);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
+        expect(
+            getTagsBySession(db, sessionId)
+                .slice(0, 3)
+                .map((tag) => tag.status),
+        ).toEqual(["active", "active", "active"]);
+        const replay = JSON.stringify(messages);
+        await pass(false);
+        expect(JSON.stringify(messages)).toBe(replay);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
+        await pass(true);
+        expect(
+            getTagsBySession(db, sessionId)
+                .slice(0, 3)
+                .map((tag) => tag.status),
+        ).toEqual(["dropped", "active", "dropped"]);
+    });
+
+    it("drains pending ops and previously bookmarked age reclaim on the same low-usage TTL fold", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-reclaim-drain";
@@ -5771,7 +5965,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(statuses.get(1)).toBe("dropped");
         expect(statuses.get(2)).toBe("dropped");
         expect(statuses.get(3)).toBe("active");
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
 
         const deferReplayBytes = JSON.stringify(messages);
         await runPostTransformPhase(

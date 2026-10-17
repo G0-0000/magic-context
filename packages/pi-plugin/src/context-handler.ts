@@ -246,8 +246,9 @@ import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-cont
 import { formatTailHygienePrefixMismatch } from "@magic-context/core/hooks/magic-context/tail-hygiene-walk";
 import { readServedTemporalDecisions } from "@magic-context/core/hooks/magic-context/temporal-served-projection";
 import {
-	advanceToolReclaimWatermarkToCurrentMax,
+	advanceToolReclaimWatermarkByDistance,
 	buildSyntheticToolReclaimOps,
+	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
@@ -9440,6 +9441,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
 		: [];
+	const reclaimDistance = isCacheBustingPass
+		? toolReclaimDistanceEntries(mutationView, targets)
+		: [];
 	const protectedToolTags = protectedToolTagNumbers(
 		getActiveTagsBySession(args.db, args.sessionId),
 		args.protectedTools,
@@ -10113,6 +10117,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				}
 			}
 			const editReclaim = buildEditSupersessionReclaim({
+				watermark: reclaimMeta.toolReclaimWatermark ?? 0,
 				db: args.db,
 				sessionId: args.sessionId,
 				targets: newTargets,
@@ -10269,7 +10274,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 	if (toolReclaimApplicationOpportunity) {
-		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
+		advanceToolReclaimWatermarkByDistance(
+			args.db,
+			args.sessionId,
+			reclaimDistance,
+			args.usableSoft,
+		);
 	}
 	if (autoReclaimTargetCount > 0) {
 		sessionLog(

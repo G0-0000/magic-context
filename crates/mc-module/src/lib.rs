@@ -71,6 +71,7 @@ mod reply_pages;
 mod retained_size;
 mod transport_handler;
 pub use transport_handler::McTransportHandler;
+mod reclaim_distance;
 pub mod route_targets;
 pub mod runner_choices;
 pub mod scheduler;
