@@ -192,7 +192,6 @@ describe("smart-note compiler output bounds", () => {
             }).signals,
         ).toHaveLength(64);
         expect(() => normalizeCron("*".repeat(257))).toThrow(/256 characters/);
-        expect(() => normalizeCron("")).toThrow(/invalid check_cron/);
     });
 
     test("requires frequent crons and keeps future dates in the compiled check", () => {

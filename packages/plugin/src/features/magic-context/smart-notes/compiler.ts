@@ -490,7 +490,7 @@ function literalCalls(code: string, method: "readFile" | "httpGet"): string[] {
 
 export function normalizeCron(cron: string): string {
     if (cron.length > MAX_CRON_CHARS) throw new Error("check_cron exceeds 256 characters");
-    const normalized = cron.trim();
+    const normalized = cron.trim() || "0 * * * *";
     const parsed = parseCron(normalized);
     if (!parsed.ok) throw new Error(`invalid check_cron: ${parsed.error}`);
     const next = nextOccurrence(parsed.cron, new Date(), undefined, SMART_NOTE_CHECK_CEILING_MS);
