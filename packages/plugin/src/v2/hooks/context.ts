@@ -145,7 +145,7 @@ import {
     NativeFoldReplay,
     nativeRowID,
 } from "../fold/native-replay";
-import { FoldOwner, foldDigest } from "../fold/owner";
+import { FoldOwner } from "../fold/owner";
 import { HostFoldPolicy } from "../fold/policy";
 import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
@@ -1386,7 +1386,10 @@ export async function registerContext(context: V2Context) {
                 !!resolveProjectIdentityForSession(directory, config.allow_home_project),
             memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
             hardSignals: {
-                systemHash: foldDigest(JSON.stringify(draft.system)),
+                // Reuse systemPromptHash persisted by the system hook after guidance,
+                // preset and date resolution. Hashing the raw compaction draft instead
+                // would make the next unchanged context pass rebuild the cached head.
+                systemHash: state.systemPromptHash ?? "",
                 toolSetHash: getCurrentToolSetHash(
                     draft.model.providerID,
                     draft.model.id,

@@ -50,7 +50,7 @@ async function fixture(
     overrides: Record<string, unknown> = {},
     initial = registerContext,
 ) {
-    const base = join(tmpdir(), "magic-context/issue-709-review");
+    const base = join(tmpdir(), "magic-context/oc2-fold-system-hash");
     mkdirSync(base, { recursive: true });
     const restoring = process.env.REVIEW709_RESTART_PHASE === "read";
     const root =
@@ -205,6 +205,7 @@ async function fixture(
     }));
     if (source.at(-1)?.role !== "user") source.pop();
     let model = "gpt-4.1";
+    let system = "Review the isolated project.";
     let checkpoint: V2Message | undefined;
     let lastDraft: SessionContext | undefined;
     function persist() {
@@ -245,7 +246,7 @@ async function fixture(
             sessionID: session,
             model: { providerID: "openai", id: model, limit: { context: 1000000 } },
             agent: "build",
-            system: [{ type: "text", text: "Review the isolated project." }],
+            system: [{ type: "text", text: system }],
             tools: { read: { description: "Read a file", input: { type: "object" } } },
             options: {},
             messages: structuredClone(checkpoint ? [checkpoint, ...source.slice(-3)] : source),
@@ -279,6 +280,9 @@ async function fixture(
         meta: () => getOrCreateSessionMeta(db, session),
         switchModel() {
             model = model === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1";
+        },
+        changeSystem() {
+            system += " Verify the new system instruction.";
         },
         async idle() {
             nowClock += 3600000;
@@ -388,6 +392,7 @@ async function fixture(
 
 test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 seeded passes", async () => {
     const changes: Array<{ seed: number; step: number; logs: string[] }> = [];
+    const compactions: Array<{ seed: number; hard: string[] }> = [];
     let passes = 0;
     const coverage: unknown[] = [];
     for (let seed = 709; seed < 729; seed++) {
@@ -412,6 +417,11 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
                     f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]),
                 );
                 const first = await f.pass();
+                if (step === 9)
+                    compactions.push({
+                        seed,
+                        hard: first.logs.filter((line) => /HARD.*executed=true/.test(line)),
+                    });
                 if (previous && ![5, 7, 9].includes(step)) {
                     if (!fresh)
                         expect(first.bytes, `same input seed ${seed} step ${step}`).toBe(
@@ -483,9 +493,10 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
             await f.cleanup();
         }
     }
-    console.log(JSON.stringify({ passes, deferChanges: changes, coverage }));
+    console.log(JSON.stringify({ passes, deferChanges: changes, compactions, coverage }));
     expect(passes).toBe(480);
     expect(changes).toEqual([]);
+    expect(compactions.every((row) => row.hard.length === 0)).toBe(true);
 }, 120000);
 
 test.skipIf(!process.env.REVIEW709_BASELINE_MODULE)(
@@ -685,6 +696,116 @@ test("issue 709 witness: OC2 compaction preserves mural and history render ident
             `FOLD709 ${JSON.stringify({ before, after, correction: correction.logs.filter((line) => /HARD.*executed=true/.test(line)), replayChanged: correction.bytes !== replay.bytes })}`,
         );
         expect(after).toBe(before);
+        expect(correction.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+const foldFeaturesOff = {
+    dreamer: { disable: true, inject_docs: true },
+    memory: {
+        enabled: true,
+        auto_search: { enabled: false },
+        git_commit_indexing: { enabled: false },
+    },
+    temporal_awareness: false,
+    mural: { enabled: false },
+    caveman_text_compression: { enabled: false },
+    history_budget_percentage: 0.15,
+};
+
+test.skipIf(!process.env.OC2_FOLD_BASELINE_MODULE)(
+    "OC2 fold system identity: features-off baseline comparison",
+    async () => {
+        const baseline = (await import(process.env.OC2_FOLD_BASELINE_MODULE!)) as {
+            registerContext: typeof registerContext;
+        };
+        const results = [];
+        let comparisons = 0;
+        for (const seed of [4709, ...Array.from({ length: 20 }, (_, n) => 709 + n)]) {
+            const runs = [];
+            for (const register of [baseline.registerContext, registerContext]) {
+                const f = await fixture(
+                    seed,
+                    {
+                        ...foldFeaturesOff,
+                        memory: { ...foldFeaturesOff.memory, enabled: false },
+                    },
+                    register,
+                );
+                try {
+                    let random = seed;
+                    const bytes: string[] = [];
+                    const hard: string[] = [];
+                    for (let step = 0; step < 12; step++) {
+                        if (step === 2) f.changeExternalFeatures();
+                        if (step === 3) await f.start(register);
+                        if (step === 5) f.switchModel();
+                        if (step === 7) await f.idle();
+                        if (step === 9) await f.fold();
+                        random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+                        if (step > 0 && step < 9 && step !== 7 && random % 3 === 0) f.freshTurn();
+                        const first = await f.pass();
+                        const replay = await f.pass();
+                        if (step === 9)
+                            hard.push(
+                                ...first.logs.filter((line) => /HARD.*executed=true/.test(line)),
+                            );
+                        expect(replay.bytes).toBe(first.bytes);
+                        bytes.push(first.bytes, replay.bytes);
+                        f.completeResponse();
+                    }
+                    runs.push({ bytes, hard });
+                } finally {
+                    await f.cleanup();
+                }
+            }
+            comparisons += runs[0]!.bytes.length;
+            results.push({
+                seed,
+                differences: runs[0]!.bytes.flatMap((bytes, n) =>
+                    bytes === runs[1]!.bytes[n] ? [] : [n],
+                ),
+                baselineHard: runs[0]!.hard,
+                currentHard: runs[1]!.hard,
+            });
+        }
+        console.log(`FOLD_SYSTEM_COMPARISON ${JSON.stringify({ comparisons, results })}`);
+        expect(results.every((row) => row.differences.length === 0)).toBe(true);
+    },
+    120000,
+);
+
+test("OC2 fold system identity: seed 4709 compaction needs no corrective HARD", async () => {
+    const f = await fixture(4709, foldFeaturesOff);
+    try {
+        await f.pass();
+        await f.fold();
+        expect(f.meta().cachedM0SystemHash).toBe(f.meta().systemPromptHash);
+        const after = await f.pass();
+        const replay = await f.pass();
+        expect(after.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.bytes).toBe(after.bytes);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("OC2 fold system identity: real system change after compaction causes exactly one HARD", async () => {
+    const f = await fixture(4709, foldFeaturesOff);
+    try {
+        await f.pass();
+        await f.fold();
+        f.changeSystem();
+        const changed = await f.pass();
+        const replay = await f.pass();
+        const hard = changed.logs.filter((line) => /HARD.*executed=true/.test(line));
+        expect(hard).toHaveLength(1);
+        expect(hard[0]).toContain("reason=system_hash");
+        expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.bytes).toBe(changed.bytes);
     } finally {
         await f.cleanup();
     }
@@ -710,7 +831,7 @@ test.skipIf(!process.env.REVIEW709_RESTART_PHASE)("issue 709 restart child", asy
 });
 
 test("issue 709 review: persisted OC2 bytes survive full process restart", async () => {
-    const base = join(tmpdir(), "magic-context/issue-709-review");
+    const base = join(tmpdir(), "magic-context/oc2-fold-system-hash");
     mkdirSync(base, { recursive: true });
     const root = createTestTempDirFromPath(join(base, "restart-"));
     try {
