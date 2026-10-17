@@ -30,8 +30,9 @@ test("a default or fully enabled config produces no dependency notes", () => {
 test("memory off with a runnable dreamer names the dreamer schedule it stops", () => {
     const notes = notesFor({ dreamer: {}, memory: { enabled: false } });
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toStartWith("memory.enabled is false, so no scheduled dreamer task runs");
-    expect(notes[0]).toContain("only evaluate-smart-notes");
+    expect(notes[0]).toBe(
+        "memory.enabled is false, so these scheduled dreamer tasks do not run for this project, on schedule or through /ctx-dream: map-memories, verify, verify-broad, curate, compress-cues, classify-memories, retrospective, promote-primers, refresh-primers. maintain-docs, evaluate-smart-notes and review-user-memories still run.",
+    );
     // Every task unscheduled: nothing is lost, so nothing is reported.
     const tasks = Object.fromEntries(
         [
@@ -50,6 +51,23 @@ test("memory off with a runnable dreamer names the dreamer schedule it stops", (
         ].map((task) => [task, { schedule: "" }]),
     );
     expect(notesFor({ dreamer: { tasks }, memory: { enabled: false } })).toEqual([]);
+    // Only tasks that do not need project memory scheduled: nothing is lost either.
+    const nonMemory = {
+        ...tasks,
+        "maintain-docs": { schedule: "0 1 * * *" },
+        "evaluate-smart-notes": { schedule: "0 3 * * *" },
+        "review-user-memories": { schedule: "0 3 * * *" },
+    };
+    expect(notesFor({ dreamer: { tasks: nonMemory }, memory: { enabled: false } })).toEqual([]);
+    // One memory task scheduled: the note names just that one.
+    expect(
+        notesFor({
+            dreamer: { tasks: { ...tasks, curate: { schedule: "0 4 * * 0" } } },
+            memory: { enabled: false },
+        }),
+    ).toEqual([
+        "memory.enabled is false, so these scheduled dreamer tasks do not run for this project, on schedule or through /ctx-dream: curate. maintain-docs, evaluate-smart-notes and review-user-memories still run.",
+    ]);
 });
 
 test("a disabled dreamer reports smart notes and the user-memory review schedule", () => {

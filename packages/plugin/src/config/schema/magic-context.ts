@@ -614,7 +614,7 @@ export const DreamTasksSchema = z
         "review-user-memories": ReviewUserMemoriesTaskConfigSchema.default(() =>
             ReviewUserMemoriesTaskConfigSchema.parse(defaultTaskConfig("review-user-memories")),
         ).describe(
-            "Promote recurring user observations into the <user-profile> block. A non-empty schedule also makes the historian collect user observations, but only while the dreamer is runnable (dreamer.disable not true); scheduled runs also need memory.enabled true.",
+            "Promote recurring user observations into the <user-profile> block. A non-empty schedule also makes the historian collect user observations, but only while the dreamer is runnable (dreamer.disable not true); collection and review follow that one gate and do not depend on memory.enabled.",
         ),
         "promote-primers": PromotePrimersTaskConfigSchema.default(() =>
             PromotePrimersTaskConfigSchema.parse(defaultTaskConfig("promote-primers")),
@@ -1188,7 +1188,7 @@ export const MagicContextConfigSchema = z
             "Historian metadata plus independent strict OpenCode, Pi, and OMP execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode, historian.pi, or historian.omp.",
         ),
         dreamer: DreamerConfigSchema.optional().describe(
-            "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block. Scheduled tasks run only while memory.enabled is true. Smart notes and user-observation collection need the dreamer runnable.",
+            "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block. Each task follows the setting it serves: memory tasks need memory.enabled, evaluate-smart-notes needs smart_notes.enabled, review-user-memories needs its schedule, maintain-docs only a runnable dreamer.",
         ),
         smart_notes: z
             .object({
@@ -1517,7 +1517,7 @@ export const MagicContextConfigSchema = z
                     .boolean()
                     .default(true)
                     .describe(
-                        "Enable cross-session project memory (default: true). Also gates the dreamer's schedule: while false, no scheduled dreamer task runs for the project (including retrospective, maintain-docs, evaluate-smart-notes, review-user-memories and the primer tasks), and a manual /ctx-dream runs only evaluate-smart-notes. memory.auto_search and memory.git_commit_indexing do not depend on it. Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
+                        "Enable cross-session project memory (default: true). Also gates the dreamer's project-memory tasks: while false, map-memories, verify, verify-broad, curate, compress-cues, classify-memories, retrospective, promote-primers and refresh-primers neither run on schedule nor through /ctx-dream; maintain-docs, evaluate-smart-notes and review-user-memories still run. memory.auto_search and memory.git_commit_indexing do not depend on it. Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
                     ),
                 injection_budget_tokens: z
                     .number()

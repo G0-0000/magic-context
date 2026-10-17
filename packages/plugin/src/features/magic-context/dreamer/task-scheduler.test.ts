@@ -698,7 +698,9 @@ describe("task-scheduler — runDueTasksForProject", () => {
 });
 
 describe("task-scheduler — runManualDream", () => {
-    it("memory-off refuses even forced dreamer and classifier tasks before any store read", async () => {
+    // Only project-memory tasks are refused with memory off; maintain-docs and the
+    // other tasks that serve different settings stay runnable (task-settings-gate.test.ts).
+    it("memory-off refuses even forced memory and classifier tasks before any store read", async () => {
         const unreadable = {
             prepare() {
                 throw new Error("memory-off store read");
@@ -713,7 +715,7 @@ describe("task-scheduler — runManualDream", () => {
             "curate",
             "classify-memories",
             "map-memories",
-            "maintain-docs",
+            "refresh-primers",
         ] as const) {
             const tasks = [cfg(task, "0 3 * * *")];
             const deps = {

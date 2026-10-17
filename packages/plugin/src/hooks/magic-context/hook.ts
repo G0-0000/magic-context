@@ -975,6 +975,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             tasks: runtimeConfigs,
             executor,
             projectMemoryEnabled: deps.config.memory?.enabled !== false,
+            smartNotesEnabled: deps.config.smart_notes?.enabled,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled task run failed:", error);
         });
@@ -1088,6 +1089,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                           db,
                           projectIdentity: projectPath,
                           projectMemoryEnabled: sampledDream.memory?.enabled,
+                          smartNotesEnabled: deps.config.smart_notes?.enabled,
                           tasks: buildDreamTaskRuntimeConfigs(
                               currentDreamer,
                               "opencode",

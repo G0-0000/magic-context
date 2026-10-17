@@ -1,3 +1,4 @@
+import { PROJECT_MEMORY_DREAM_TASKS } from "../features/magic-context/dreamer/task-registry";
 import { isDreamerRunnable } from "./agent-disable";
 
 /**
@@ -32,9 +33,12 @@ export function configDependencyNotes(config: DependencyNoteConfig): string[] {
     const dreamerDisabled = config.dreamer?.disable === true;
     const memoryOff = config.memory?.enabled === false;
 
-    if (dreamerRunnable && memoryOff && scheduledTasks(config).length > 0) {
+    const memoryTasks = scheduledTasks(config).filter((task) =>
+        (PROJECT_MEMORY_DREAM_TASKS as readonly string[]).includes(task),
+    );
+    if (dreamerRunnable && memoryOff && memoryTasks.length > 0) {
         notes.push(
-            "memory.enabled is false, so no scheduled dreamer task runs for this project, including retrospective, maintain-docs, evaluate-smart-notes, review-user-memories and the primer tasks; a manual /ctx-dream runs only evaluate-smart-notes. User observations the historian collects wait unreviewed.",
+            `memory.enabled is false, so these scheduled dreamer tasks do not run for this project, on schedule or through /ctx-dream: ${memoryTasks.join(", ")}. maintain-docs, evaluate-smart-notes and review-user-memories still run.`,
         );
     }
     if (dreamerDisabled && config.smart_notes?.enabled !== false) {

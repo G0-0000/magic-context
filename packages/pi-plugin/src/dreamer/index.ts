@@ -386,6 +386,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			db: manualOpts.db,
 			projectIdentity: manualOpts.projectIdentity,
 			projectMemoryEnabled: manualOpts.memoryEnabled,
+			smartNotesEnabled: manualOpts.smartNotesEnabled,
 			tasks: manualOpts.modelRegistry
 				? validatePiDreamerModels(
 						buildDreamTaskRuntimeConfigs(

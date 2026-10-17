@@ -104,6 +104,7 @@ export async function runManualDreamNow(args: {
         db: args.db,
         projectIdentity: args.projectIdentity,
         projectMemoryEnabled: args.memoryEnabled,
+        smartNotesEnabled: args.smartNotesEnabled,
         tasks: selection.runnable,
         executor,
         ...(args.task !== undefined ? { task: args.task } : {}),

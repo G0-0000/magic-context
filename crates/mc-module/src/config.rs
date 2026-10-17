@@ -731,6 +731,8 @@ fn merge_tiers_with_warnings(
 ) -> (McModuleConfig, Vec<String>) {
     let mut cfg = McModuleConfig::default();
     let mut warnings = Vec::new();
+    // What the tiers say about the review-user-memories schedule; None if neither does.
+    let mut review_schedule_enabled: Option<bool> = None;
     for (tier, value) in [("user", user), ("project", project)] {
         let Some(value) = value else {
             continue;
@@ -825,7 +827,7 @@ fn merge_tiers_with_warnings(
             cfg.auto_promote = enabled;
         }
         if let Some(enabled) = user_memory_collection_at(user) {
-            cfg.user_memory_collection_enabled = enabled;
+            review_schedule_enabled = Some(enabled);
         }
         if let Some(limit) = positive_usize_at(user, "/historian/context_limit_tokens") {
             cfg.historian_context_limit_tokens = limit;
@@ -882,7 +884,7 @@ fn merge_tiers_with_warnings(
             cfg.auto_promote = enabled;
         }
         if let Some(enabled) = user_memory_collection_at(project) {
-            cfg.user_memory_collection_enabled = enabled;
+            review_schedule_enabled = Some(enabled);
         }
         warn_ignored_project_key(project, "/memory/budget_tokens", &mut warnings);
         warn_ignored_project_key(project, "/memory/user_profile_budget_tokens", &mut warnings);
@@ -924,13 +926,14 @@ fn merge_tiers_with_warnings(
     }
 
     apply_catalog_config(&mut cfg.catalog, user, project);
-    // The dreamer runs review-user-memories, so with `dreamer.disable: true` no
-    // review could ever read collected observations: collect none, whatever the
-    // schedule says. The historian prompt asks for them only while the dreamer
+    // Mirrors the plugin's userObservationCollectionEnabled: the review schedule
+    // (the last tier that says anything wins; with neither, the plugin schema's
+    // default "0 3 * * *" applies, so collection is on) AND a runnable dreamer,
+    // because the dreamer runs review-user-memories and nothing else reads the
+    // observations. The historian prompt asks for them only while the dreamer
     // is runnable, matching the plugin's userObservationsRequested.
-    if dreamer_disabled(user, project) {
-        cfg.user_memory_collection_enabled = false;
-    }
+    cfg.user_memory_collection_enabled =
+        cfg.catalog.dreamer_runnable && review_schedule_enabled.unwrap_or(true);
     cfg.user_observations_requested = cfg.catalog.dreamer_runnable;
     cfg.smart_notes_enabled = user
         .and_then(|value| value.pointer("/smart_notes/enabled"))
@@ -2098,6 +2101,28 @@ mod tests {
             "user_memories": { "enabled": false }
         });
         assert!(!user_memory_collection_at(&legacy_disabled).unwrap());
+    }
+
+    #[test]
+    fn user_memory_collection_matches_the_plugin_for_unset_empty_and_set_schedules() {
+        let raw = include_str!("../testdata/user-memory-collection-parity.json");
+        let parity: Value = serde_json::from_str(raw).expect("parse collection parity cases");
+        let cases = parity["cases"].as_array().expect("cases array");
+        assert_eq!(cases.len(), 7);
+        for case in cases {
+            let label = case["label"].as_str().unwrap_or("?");
+            let cfg = merge_tiers(Some(&case["user"]), None);
+            assert_eq!(
+                cfg.user_memory_collection_enabled,
+                case["collect"].as_bool().unwrap(),
+                "collection for '{label}'"
+            );
+            assert_eq!(
+                cfg.user_observations_requested,
+                case["requested"].as_bool().unwrap(),
+                "request for '{label}'"
+            );
+        }
     }
 
     #[test]
