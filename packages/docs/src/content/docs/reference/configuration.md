@@ -236,6 +236,8 @@ Off-hours maintenance through Dreamer.
 | `dreamer.tasks.refresh-primers.token_budget` | integer (–9007199254740991) | — | Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget. |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true) |
 
+On Pi and Oh My Pi, historian and dreamer models, including `fallback_models` and per-task model overrides, must use provider names that host serves. `opencode/*` models are served only by OpenCode's own provider, so Pi and Oh My Pi drop them at startup and log `dropping Pi model not found: <model>`. If every fallback is an `opencode/*` model, only the primary model is left. To see valid names, run `omp models` on Oh My Pi or `pi --list-models` on Pi. `/ctx-status` warns when a dreamer task or the historian has no usable model left.
+
 ## Advanced
 
 Behavior tuning most installs never need to touch.
