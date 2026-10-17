@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import * as embedding from "../../features/magic-context/memory/embedding";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import {
@@ -21,6 +22,7 @@ import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-conte
 import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
 import { collectTemporalCandidates } from "../../hooks/magic-context/temporal-awareness";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
+import { setHarness } from "../../shared/harness";
 import * as logger from "../../shared/logger";
 import * as models from "../../shared/models-dev-cache";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
@@ -50,7 +52,8 @@ async function fixture(
     overrides: Record<string, unknown> = {},
     initial = registerContext,
 ) {
-    const base = join(tmpdir(), "magic-context/oc2-fold-system-hash");
+    setHarness("opencode2");
+    const base = join(tmpdir(), "magic-context/oc2-render-review");
     mkdirSync(base, { recursive: true });
     const restoring = process.env.REVIEW709_RESTART_PHASE === "read";
     const root =
@@ -80,7 +83,7 @@ async function fixture(
     resetOpenCodeDbPathStateForTesting();
     const raw = new Database(process.env.OPENCODE_DB!);
     raw.exec(
-        "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, fork_boundary TEXT);",
+        "CREATE TABLE IF NOT EXISTS session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, parent_id TEXT, fork_session_id TEXT, fork_boundary TEXT);",
     );
     const db = openDatabase();
     if (!db) throw new Error("isolated review database unavailable");
@@ -196,7 +199,7 @@ async function fixture(
             get: async () => ({ location: { directory: root } }),
         },
     } as unknown as V2Context;
-    const session = `ses709review-${seed}`;
+    let session = `ses709review-${seed}`;
     raw.prepare("INSERT OR IGNORE INTO session_v2(id,directory) VALUES (?,?)").run(session, root);
     const source: V2Message[] = Array.from({ length: 24 + (seed % 8) }, (_, n) => ({
         id: `s${seed}-${n}`,
@@ -241,8 +244,8 @@ async function fixture(
         duties = await register(host);
         if (!hooks.has("context")) throw new Error("real context hook missing");
     }
-    async function pass() {
-        const draft: SessionContext = {
+    function inputDraft(): SessionContext {
+        return {
             sessionID: session,
             model: { providerID: "openai", id: model, limit: { context: 1000000 } },
             agent: "build",
@@ -251,6 +254,9 @@ async function fixture(
             options: {},
             messages: structuredClone(checkpoint ? [checkpoint, ...source.slice(-3)] : source),
         };
+    }
+    async function pass() {
+        const draft = inputDraft();
         const before = logs.mock.calls.length;
         await hooks.get("context")!(draft);
         lastDraft = structuredClone(draft);
@@ -264,22 +270,114 @@ async function fixture(
             logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
         };
     }
-    persist();
+    if (restoring) {
+        const row = raw
+            .prepare(
+                "SELECT id,data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq DESC LIMIT 1",
+            )
+            .get(session) as { id: string; data: string } | undefined;
+        if (row)
+            checkpoint = {
+                id: row.id,
+                role: "user",
+                content: [
+                    {
+                        type: "text",
+                        text: `<summary>\n${JSON.parse(row.data).summary}\n</summary>`,
+                    },
+                ],
+            };
+    } else persist();
     await start(initial);
     return {
         root,
         db,
         raw,
         config,
-        session,
+        get session() {
+            return session;
+        },
         pass,
         start,
         lookup,
         tags: () => getTagsBySession(db, session),
         decisions: () => getAutoSearchHintDecisions(db, session),
         meta: () => getOrCreateSessionMeta(db, session),
+        seedHistory() {
+            appendCompartments(
+                db,
+                session,
+                Array.from({ length: 3 }, (_, n) => ({
+                    sequence: n,
+                    startMessage: n * 4 + 1,
+                    endMessage: n * 4 + 4,
+                    startMessageId: source[n * 4]!.id!,
+                    endMessageId: source[n * 4 + 3]!.id!,
+                    title: `Persisted review history ${n}`,
+                    content: prose.repeat(4),
+                    p1: prose.repeat(4),
+                    p2: prose.repeat(2),
+                    p3: "Reviewed the cache policy.",
+                    p4: "Cache policy reviewed.",
+                    legacy: 0,
+                })),
+            );
+        },
         switchModel() {
             model = model === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1";
+        },
+        fork(ordinaryChild = false) {
+            const parent = session;
+            const rows = raw
+                .prepare("SELECT * FROM session_message WHERE session_id = ? ORDER BY seq")
+                .all(parent) as Array<{
+                id: string;
+                type: string;
+                seq: number;
+                time_created: number;
+                time_updated: number | null;
+                data: string;
+            }>;
+            const boundary = rows.at(-1)!.id;
+            session = `${parent}-fork`;
+            raw.prepare(
+                "INSERT INTO session_v2(id,directory,parent_id,fork_session_id,fork_boundary) VALUES (?,?,?,?,?)",
+            ).run(
+                session,
+                root,
+                ordinaryChild ? parent : null,
+                ordinaryChild ? null : parent,
+                ordinaryChild ? null : JSON.stringify({ type: "through", messageID: boundary }),
+            );
+            const ids = new Map(rows.map((row) => [row.id, `${session}_${row.seq}`]));
+            for (const row of rows)
+                raw.prepare(
+                    "INSERT INTO session_message(id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)",
+                ).run(
+                    ids.get(row.id)!,
+                    session,
+                    row.type,
+                    row.seq,
+                    row.time_created,
+                    row.time_updated,
+                    row.data,
+                );
+            for (const message of source) message.id = ids.get(message.id!)!;
+            if (checkpoint) checkpoint.id = ids.get(checkpoint.id!)!;
+            return new Map(
+                getTagsBySession(db, parent).map((tag) => [
+                    ids.get(tag.messageId) ??
+                        (() => {
+                            const owner = rows.find((row) =>
+                                tag.messageId.startsWith(`${row.id}:`),
+                            );
+                            return owner
+                                ? `${ids.get(owner.id)}${tag.messageId.slice(owner.id.length)}`
+                                : tag.messageId;
+                        })(),
+                    tag.cavemanDepth ?? 0,
+                ]),
+            );
         },
         changeSystem() {
             system += " Verify the new system instruction.";
@@ -322,8 +420,8 @@ async function fixture(
                 row.id,
             );
         },
-        async fold() {
-            const draft = structuredClone(lastDraft!);
+        async fold(beforeContext = false) {
+            const draft = beforeContext ? inputDraft() : structuredClone(lastDraft!);
             await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("compaction hook supplied no summary");
             const seq = source.length;
@@ -398,6 +496,7 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
     for (let seed = 709; seed < 729; seed++) {
         const f = await fixture(seed);
         try {
+            f.seedHistory();
             let random = seed;
             let previous: Awaited<ReturnType<typeof f.pass>> | undefined;
             const next = () => {
@@ -411,18 +510,19 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
                 if (step === 5) f.switchModel();
                 if (step === 9) await f.fold();
                 if (step === 7) await f.idle();
+                const inheritedDepths = step === 11 ? f.fork() : undefined;
                 const fresh = step > 0 && step < 9 && step !== 7 && next() % 3 === 0;
                 if (fresh) f.freshTurn();
-                const depthsBefore = new Map(
-                    f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]),
-                );
+                const depthsBefore =
+                    inheritedDepths ??
+                    new Map(f.tags().map((t) => [t.messageId, t.cavemanDepth ?? 0]));
                 const first = await f.pass();
                 if (step === 9)
                     compactions.push({
                         seed,
                         hard: first.logs.filter((line) => /HARD.*executed=true/.test(line)),
                     });
-                if (previous && ![5, 7, 9].includes(step)) {
+                if (previous && ![5, 7, 9, 11].includes(step)) {
                     if (!fresh)
                         expect(first.bytes, `same input seed ${seed} step ${step}`).toBe(
                             previous.bytes,
@@ -442,13 +542,16 @@ test("issue 709 review: features-on real OC2 hook replays defer bytes over 480 s
                     .filter((t) => (t.cavemanDepth ?? 0) > (depthsBefore.get(t.messageId) ?? 0));
                 if (newCompression.length)
                     expect(
-                        first.logs.some((line) =>
-                            /first_render|ttl_idle|bustsServedPrefix=true/.test(line),
+                        first.logs.some(
+                            (line) =>
+                                /first_render|ttl_idle|bustsServedPrefix=true/.test(line) ||
+                                (step === 11 && line.includes("HARD reason=boot_recovery")),
                         ),
-                        `compression first-apply seed ${seed} step ${step}`,
+                        `compression first-apply seed ${seed} step ${step}: ${JSON.stringify({ newCompression, hard: first.logs.filter((line) => line.includes("HARD")) })}`,
                     ).toBe(true);
                 expect(first.bytes).toContain("Review preference");
                 expect(first.bytes).toContain("Isolated architecture");
+                expect(first.bytes).toContain("Persisted review history");
                 expect(first.bytes).toContain("mediaType");
                 expect(first.bytes).toContain("image/png");
                 expect(first.bytes.includes(`Updated preference ${seed}.`)).toBe(step >= 5);
@@ -822,6 +925,164 @@ test("OC2 fold system identity: real system change after compaction causes exact
         await f.cleanup();
     }
 });
+
+test("render review: first compaction before context initializes durable storage", async () => {
+    const f = await fixture(4910, foldFeaturesOff);
+    try {
+        expect(f.meta().systemPromptHash ?? "").toBe("");
+        await f.fold(true);
+        expect(f.meta().cachedM0SystemHash ?? "").toBe("");
+        const first = await f.pass();
+        const replay = await f.pass();
+        console.log(
+            `FIRST_FOLD ${JSON.stringify({ systemHash: f.meta().systemPromptHash, cachedHash: f.meta().cachedM0SystemHash, logs: first.logs })}`,
+        );
+        expect(replay.bytes).toBe(first.bytes);
+        expect(first.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("render review: absent system identity after storage probe needs no corrective HARD", async () => {
+    const f = await fixture(4913, foldFeaturesOff);
+    try {
+        // The first compaction starts opening durable storage but rejects its own request.
+        // A retry can then render before any system hook has run.
+        await f.fold(true).catch(() => undefined);
+        expect(f.meta().systemPromptHash ?? "").toBe("");
+        await f.fold(true);
+        expect(f.meta().cachedM0SystemHash ?? "").toBe("");
+        const first = await f.pass();
+        const replay = await f.pass();
+        expect(f.meta().cachedM0SystemHash).toBe(f.meta().systemPromptHash);
+        expect(first.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.bytes).toBe(first.bytes);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("render review: resumed, fork and ordinary-child compaction identities settle once", async () => {
+    for (const kind of ["resumed", "fork", "child"]) {
+        const f = await fixture(4920, foldFeaturesOff);
+        try {
+            await f.pass();
+            const originalHash = f.meta().systemPromptHash;
+            if (kind === "resumed") {
+                await f.start();
+                await f.fold(true).catch(() => undefined);
+                expect(f.meta().systemPromptHash).toBe(originalHash);
+            } else {
+                f.fork(kind === "child");
+                expect(f.meta().systemPromptHash ?? "").toBe("");
+            }
+            await f.fold(true);
+            expect(f.meta().cachedM0SystemHash ?? "").toBe(kind === "resumed" ? originalHash! : "");
+            const first = await f.pass();
+            const replay = await f.pass();
+            expect(f.meta().cachedM0SystemHash).toBe(f.meta().systemPromptHash);
+            const hard = first.logs.filter((line) => /HARD.*executed=true/.test(line));
+            // Fork inheritance discards the parent's cached m[0]/m[1] message bytes.
+            // The child must render its own prefix once before it can replay.
+            expect(hard).toHaveLength(kind === "fork" ? 1 : 0);
+            if (kind === "fork") expect(hard[0]).toContain("reason=first_render");
+            expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+            expect(replay.bytes).toBe(first.bytes);
+        } finally {
+            await f.cleanup();
+        }
+    }
+});
+
+test("render review: prompt changed between context hook and fold rebuilds once", async () => {
+    const f = await fixture(4911, foldFeaturesOff);
+    try {
+        await f.pass();
+        const previous = f.meta().systemPromptHash;
+        f.changeSystem();
+        await f.fold(true);
+        expect(f.meta().cachedM0SystemHash).toBe(previous);
+        const first = await f.pass();
+        const replay = await f.pass();
+        expect(f.meta().systemPromptHash).not.toBe(previous);
+        expect(first.logs.filter((line) => /HARD.*executed=true/.test(line))).toHaveLength(1);
+        expect(first.logs.join("\n")).toContain("reason=system_hash");
+        expect(replay.logs.filter((line) => /HARD.*executed=true/.test(line))).toEqual([]);
+        expect(replay.bytes).toBe(first.bytes);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("render review: memory disabled excludes project memory and mural from the main request", async () => {
+    const f = await fixture(4912, {
+        memory: {
+            enabled: false,
+            auto_search: { enabled: true },
+            git_commit_indexing: { enabled: false },
+        },
+    });
+    try {
+        await f.pass();
+        f.freshTurn();
+        const fresh = await f.pass();
+        const replay = await f.pass();
+        expect(replay.bytes).toBe(fresh.bytes);
+        expect(fresh.bytes).not.toContain("Project constraint");
+        expect(fresh.bytes).not.toContain("<memory-mural>");
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test.skipIf(!process.env.RENDER_REVIEW_UPGRADE_PHASE)(
+    "render review: memory-off upgrade requires exactly one rebuild",
+    async () => {
+        const f = await fixture(4914, {
+            ...foldFeaturesOff,
+            memory: { ...foldFeaturesOff.memory, enabled: false },
+        });
+        try {
+            const first = await f.pass();
+            if (process.env.RENDER_REVIEW_UPGRADE_PHASE === "write") {
+                f.completeResponse();
+                const summary = process.env.RENDER_REVIEW_UPGRADE_NO_FOLD ? "" : await f.fold();
+                if (summary) expect(summary).toContain("Project constraint");
+                writeFileSync(
+                    join(f.root, "upgrade-before.json"),
+                    JSON.stringify({
+                        systemHash: f.meta().systemPromptHash,
+                        cachedHash: f.meta().cachedM0SystemHash,
+                        bytes: first.bytes,
+                        foldedProjectMemory: summary.includes("<project-memory>"),
+                    }),
+                );
+            } else {
+                const before = JSON.parse(
+                    readFileSync(join(f.root, "upgrade-before.json"), "utf8"),
+                );
+                const replay = await f.pass();
+                const isRebuild = (line: string) =>
+                    /HARD.*executed=true|HARD reason=boot_recovery/.test(line);
+                const hard = first.logs.filter(isRebuild);
+                console.log(
+                    `MEMORY_OFF_UPGRADE ${JSON.stringify({ previousSystemHash: before.systemHash, systemHash: f.meta().systemPromptHash, previousCachedHash: before.cachedHash, cachedHash: f.meta().cachedM0SystemHash, hard, bytesChanged: before.bytes !== first.bytes, foldedProjectMemory: before.foldedProjectMemory })}`,
+                );
+                expect(before.systemHash).toBe(f.meta().systemPromptHash);
+                expect(hard).toHaveLength(1);
+                expect(replay.logs.filter(isRebuild)).toEqual([]);
+                expect(replay.bytes).toBe(first.bytes);
+                expect(first.bytes).not.toContain("Review preference");
+                expect(first.bytes).not.toContain("Project constraint");
+            }
+        } finally {
+            await f.cleanup();
+        }
+    },
+);
 
 test("OC2 fold memory policy: memory-off summaries omit project memory without a corrective HARD", async () => {
     const counts = [];
