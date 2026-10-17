@@ -21,10 +21,7 @@ test("held-head witness: over-window replay requires a stripped, permitted rebui
 		[
 			"test",
 			"--preload",
-			resolve(
-				import.meta.dir,
-				"__tests__/held-head-retained-tools.preload.ts",
-			),
+			resolve(import.meta.dir, "__tests__/held-head-retained-tools.preload.ts"),
 			resolve(import.meta.dir, "issue-665-hold-review-r2.test.ts"),
 			"-t",
 			"Pi held driver seed 8:",

@@ -248,6 +248,11 @@ for (const [provider, api] of [
 						toolName: "ctx_reduce",
 					},
 				]).flat(),
+				// Age reclaim needs three newer user turns before a quiet old output is eligible.
+				...Array.from({ length: 3 }, (_, i) => [
+					userMessage(`follow-up ${i + 1}`, 150 + i * 2),
+					assistantMessage(`response ${i + 1}`, 151 + i * 2),
+				]).flat(),
 				assistantMessage("answer", 200),
 				userMessage("continue", 201),
 			];

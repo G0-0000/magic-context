@@ -86,6 +86,13 @@ function rawPi(count = 8): any[] {
                 toolName: mode === "healthy" ? "read" : "ctx_reduce",
             },
         ]).flat(),
+        // Age this probe's outputs past the three-turn threshold before injecting a write failure.
+        ...(signed
+            ? Array.from({ length: 3 }, (_, i) => [
+                  u.userMessage(`follow-up ${i + 1}`, 30 + i * 2),
+                  u.assistantMessage(`response ${i + 1}`, 31 + i * 2),
+              ]).flat()
+            : []),
         u.assistantMessage("answered", 100),
         u.userMessage(`continue ${tick}`, signed ? 103 : 101),
     ];
