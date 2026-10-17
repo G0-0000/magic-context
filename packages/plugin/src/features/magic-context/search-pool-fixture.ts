@@ -56,7 +56,7 @@ export function searchPoolFixture(
     };
     db.transaction(() => {
         for (let id = 1; id <= count; id++) add(id);
-    })();
+    }).immediate();
     return {
         db,
         path,

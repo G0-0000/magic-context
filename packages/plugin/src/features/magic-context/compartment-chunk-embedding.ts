@@ -373,11 +373,11 @@ function touchDecodedSearchPoolEntry(entry: DecodedSearchPoolEntry): void {
 function estimateDecodedSearchPoolBytes(rows: readonly StoredCompartmentChunkEmbedding[]): number {
     let bytes = 0;
     for (const row of rows) {
-        // Vectors dominate, but include a conservative allowance for the row
-        // object and UTF-16 metadata so the process-wide budget remains real.
+        // Include row/vector wrappers, endpoint timestamp metadata and UTF-16
+        // strings as well as payload bytes in the process-wide memory budget.
         bytes +=
             row.vector.byteLength +
-            256 +
+            384 +
             2 *
                 (row.sessionId.length +
                     row.title.length +
