@@ -33,6 +33,7 @@ import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/
 import {
     getMagicContextStorageDir,
     getMagicContextStorageResolution,
+    isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import { removeJsoncValue } from "@magic-context/core/shared/jsonc-edit";
 import {
@@ -769,6 +770,13 @@ async function runHealthChecks(options: {
     const storage = getMagicContextStorageResolution();
     const storageDir = storage.path;
     const dbPath = join(storageDir, "context.db");
+    if (isMagicContextStorageOutsideEngram(storageDir)) {
+        add(
+            results,
+            "warn",
+            `Magic Context storage is at ${storageDir}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
+    }
     add(results, "info", `Shared storage: ${storageDir} (source: ${storage.source})`);
     const existedBeforeOpen = existsSync(dbPath);
     if (existedBeforeOpen) add(results, "pass", `Shared context DB exists at ${dbPath}`);

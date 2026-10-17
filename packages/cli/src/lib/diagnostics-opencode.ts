@@ -8,6 +8,7 @@ import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import {
     getMagicContextStorageResolution,
     getProjectMagicContextHistorianDir,
+    isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import {
     assertOpenCodeStoreGeneration,
@@ -866,6 +867,9 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         exists: report.storageDir.exists,
         context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
     };
+    const storageBackupWarning = isMagicContextStorageOutsideEngram(report.storageDir.path)
+        ? `- Warning: Magic Context storage is at ${sanitizeString(report.storageDir.path)}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`
+        : null;
 
     const openCodeInstallations = report.opencodeInstallations ?? [];
     const openCodeInstallationTable =
@@ -944,6 +948,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "```",
         "",
         "### Storage",
+        ...(storageBackupWarning ? [storageBackupWarning] : []),
         "```json",
         JSON.stringify(storage, null, 2),
         "```",

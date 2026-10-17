@@ -281,6 +281,9 @@ describe("Pi doctor", () => {
         expect(output).toContain("PASS Pi 0.74.0 detected");
         expect(output).toContain("PASS npm:@cortexkit/pi-magic-context is registered");
         expect(output).toContain("PASS SQLite integrity_check: ok");
+        expect(output).toContain(
+            `WARN Magic Context storage is at ${join(root, ".local", "share", "cortexkit", "magic-context")}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
         expect(output).toContain("Summary: PASS");
         expect(output).toContain("FAIL 0");
     });
@@ -445,7 +448,7 @@ describe("Pi doctor", () => {
         );
         expect(output).toContain("postinstall likely failed");
         expect(output).toContain("Stale Pi extension cache found");
-        expect(output).toContain("WARN 2");
+        expect(output).toContain("WARN 3");
     });
 
     it("skips unrelated local dev-path packages and broken trees when probing the embedding runtime", async () => {

@@ -7,7 +7,10 @@ import {
     getDreamerTickFailure,
 } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
+import {
+    getMagicContextStorageResolution,
+    isMagicContextStorageOutsideEngram,
+} from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
@@ -310,6 +313,13 @@ async function runHealthChecks(options: {
 
     const storage = getMagicContextStorageResolution();
     const dbPath = join(storage.path, "context.db");
+    if (isMagicContextStorageOutsideEngram(storage.path)) {
+        add(
+            results,
+            "warn",
+            `Magic Context storage is at ${storage.path}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
+    }
     add(results, "info", `Shared storage: ${storage.path} (source: ${storage.source})`);
     if (!existsSync(dbPath)) add(results, "info", `Shared context DB will be created at ${dbPath}`);
     else {
