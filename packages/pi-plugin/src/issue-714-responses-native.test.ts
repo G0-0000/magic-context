@@ -6,10 +6,10 @@ import {
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { fakeContext, userMessage } from "./test-utils.test";
 
-// Issue 714: a Codex session refused every turn at the first assistant row
-// whose stored native payload held reasoning and function_call items next to
-// its message. The shapes below are what OMP 18.10.4, 18.11.1 and 18.11.3
-// persist for a Codex turn and what their Responses encoder puts on the wire.
+// A Codex session refused every turn at the first assistant row whose stored
+// native payload held reasoning and function_call items next to its message.
+// The shapes below are what OMP 18.10.4, 18.11.1 and 18.11.3 persist for a
+// Codex turn and what OMP's Codex Responses encoder puts on the wire for them.
 const session = "issue-714-responses";
 const model = {
 	api: "openai-codex-responses",
@@ -326,10 +326,11 @@ test("issue 714 Codex native replay guard: a cached call the prepared turn lacks
 	expect(h.refusals[0]).toContain("prepared turn structure");
 });
 
-// Shapes the report suspected: another model's thinking and phase. OMP's
-// transformMessages demotes that thinking into the target's <think> wrapper
-// and strips the text signature, so neither reasoning nor phase reaches the
-// wire (transform-messages.ts:1056-1106,1161-1166 in 18.11.3).
+// An assistant turn from another model with thinking and a phase-signed text.
+// OMP's transformMessages demotes that thinking into the target model's
+// <think> wrapper and strips the text signature, so neither a reasoning item
+// nor a phase reaches the wire (transform-messages.ts:1056-1106,1161-1166 in
+// 18.11.3).
 const foreign = {
 	role: "assistant",
 	api: "openai-completions",

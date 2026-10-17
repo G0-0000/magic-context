@@ -812,7 +812,8 @@ try {
 							},
 						),
 					],
-					// This model's own turn as OMP stores it: reasoning, commentary and a call.
+					// A turn from the session's own Codex model, stored the way OMP's Codex
+					// parser stores it: reasoning, commentary and a call as native items.
 					own: [
 						...toolTurn(
 							own,
@@ -847,9 +848,10 @@ try {
 						),
 					],
 				};
-				// Not part of "all": an own turn whose stored cache has no dt flag and
-				// carries cached-only user text, so OMP replaces the preceding input with
-				// it (the issue 692 replacement class). This one must refuse.
+				// Selected only by argv[5] "replacement", never by "all": a turn from the
+				// session's own model whose stored cache has no dt flag and carries user
+				// text that exists only in the cache. OMP then replaces all preceding
+				// input with the cached items, so the request must refuse.
 				const replacement = toolTurn(
 					own,
 					[
