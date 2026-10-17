@@ -11,6 +11,7 @@ import type {
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
+import { needsBlockedRead } from "../shared/hidden-zen-read";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
@@ -585,6 +586,14 @@ export async function createV2HiddenCompletionExecutor(
                 else body.temperature = temperature;
                 request = { ...request, body };
             }
+            // Session permissions determine which genuine definitions the host can
+            // offer. Cross-provider retries must not retain the previous surface.
+            if (
+                needsBlockedRead(run.identity.agent, run.child.model.providerID) !==
+                needsBlockedRead(run.identity.agent, requested.providerID)
+            ) {
+                retire(run, "hidden-run-tool-surface-changed");
+            }
             if (run.retired) {
                 // Fallback retries share the original handle. A terminal provider failure has
                 // already retired its child, so give the retry a fresh carrier instead of
@@ -744,8 +753,28 @@ export async function createV2HiddenCompletionExecutor(
                 const tokens = row.data.tokens;
                 const tokenNumber = (value: unknown): number | undefined =>
                     typeof value === "number" && Number.isFinite(value) ? value : undefined;
-                const reportedInput = tokenNumber(tokens?.input);
-                const reportedOutput = tokenNumber(tokens?.output);
+                // A refused tool still consumes a model step. Count every assistant
+                // row in this attempt, excluding earlier runs on a reused carrier.
+                const steps = withReader(
+                    options.openReader,
+                    (reader) => reader.assistantSince?.(run.child.id, baseline) ?? [row],
+                ).filter((step) => step.seq > baseline && step.seq <= row.seq);
+                const reportedUsage = steps.some(
+                    (step) =>
+                        tokenNumber(step.data.tokens?.input) !== undefined ||
+                        tokenNumber(step.data.tokens?.output) !== undefined,
+                );
+                const usage = steps.reduce(
+                    (total, step) => ({
+                        input: total.input + (tokenNumber(step.data.tokens?.input) ?? 0),
+                        output: total.output + (tokenNumber(step.data.tokens?.output) ?? 0),
+                        cacheRead:
+                            total.cacheRead + (tokenNumber(step.data.tokens?.cache?.read) ?? 0),
+                        cacheWrite:
+                            total.cacheWrite + (tokenNumber(step.data.tokens?.cache?.write) ?? 0),
+                    }),
+                    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                );
                 // A host promise may resolve at the same instant as cancellation.
                 // Never publish a completion after the child has been retired.
                 if (request.signal?.aborted || run.retired || Date.now() >= deadline) {
@@ -766,15 +795,7 @@ export async function createV2HiddenCompletionExecutor(
                     // If either side is numeric, retain the provider's partial usage
                     // and floor omitted components to zero. With no numeric usage,
                     // use the local meter so budget accounting remains finite.
-                    usage:
-                        reportedInput !== undefined || reportedOutput !== undefined
-                            ? {
-                                  input: reportedInput ?? 0,
-                                  output: reportedOutput ?? 0,
-                                  cacheRead: tokenNumber(tokens?.cache?.read) ?? 0,
-                                  cacheWrite: tokenNumber(tokens?.cache?.write) ?? 0,
-                              }
-                            : meter(system, promptText(request), text ?? ""),
+                    usage: reportedUsage ? usage : meter(system, promptText(request), text ?? ""),
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,

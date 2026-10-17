@@ -31,6 +31,7 @@ import {
     getProjectMagicContextHistorianDir,
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
+import { rememberV1HiddenRun } from "../../shared/hidden-zen-read";
 import { isTransientHistorianPromptError } from "../../shared/historian-transient-error";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
 import { getSdkContextLimit, getSdkOutputLimit } from "../../shared/models-dev-cache";
@@ -197,6 +198,7 @@ export function createV1HiddenCompletionExecutor(
                 preferResponseOnMissingData: true,
             });
             const id = typeof created?.id === "string" ? created.id : "";
+            if (id) rememberV1HiddenRun(id, run);
             if (id && run.kind !== "dreamer-task") {
                 historianChildren.add(id);
                 rememberHistorianOutputCap(id, run.maxOutputTokens);
@@ -271,6 +273,7 @@ export function createV1HiddenCompletionExecutor(
         },
         async close(handle, settlement) {
             if (handle?.id) {
+                rememberV1HiddenRun(handle.id, undefined);
                 historianChildren.delete(handle.id);
                 forgetHistorianOutputCap(handle.id);
             }

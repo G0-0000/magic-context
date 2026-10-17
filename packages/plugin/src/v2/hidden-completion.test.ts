@@ -19,6 +19,7 @@ import {
     HIDDEN_DREAMER_AGENT,
     HIDDEN_HISTORIAN_AGENT,
     HiddenChildHook,
+    hiddenToolCallRefusal,
     registerHiddenChildAgents,
 } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
@@ -981,6 +982,8 @@ describe("OpenCode 2 hidden child completion", () => {
         for (const [id, agent] of agents) {
             expect(agent.hidden).toBe(true);
             const tools: Record<string, string[]> = {
+                [HIDDEN_HISTORIAN_AGENT]: ["read"],
+                [HIDDEN_DREAMER_AGENT]: ["read"],
                 [HIDDEN_CURATE_AGENT]: ["ctx_memory"],
                 "dreamer-memory-mapper": ["read", "grep", "glob"],
                 "dreamer-primer-investigator": ["read", "grep", "glob", "ctx_search"],
@@ -1433,4 +1436,158 @@ describe("hidden completion temperature capabilities", () => {
             state.db.close();
         }
     });
+});
+
+test("v2 historian sums all blocked-call steps and excludes previous attempts", async () => {
+    const f = await setup();
+    const identity = {
+        ...run,
+        agent: "historian",
+        kind: "historian" as const,
+        model: "opencode/free",
+    };
+    const handle = await f.executor.open(identity);
+    f.rows.append(handle.id, "earlier run on this carrier");
+    const prompt = f.host.prompt.bind(f.host);
+    let filesystemOpens = 0;
+    let refusal: string | undefined;
+    f.host.prompt = async (input) => {
+        const first = f.rows.append(input.sessionID, "", { finish: "tool_calls" });
+        first.data.tokens = { input: 13, output: 5, cache: { read: 3, write: 2 } };
+        first.data.content = [
+            {
+                type: "tool-call",
+                id: "forced-read",
+                name: "read",
+                input: { path: "/project/sentinel" },
+            },
+        ] as never;
+        refusal = hiddenToolCallRefusal({ sessionID: input.sessionID, tool: "read" }, f.hook);
+        if (refusal === undefined) filesystemOpens += 1;
+        await prompt(input);
+    };
+    try {
+        await f.executor.attempt(
+            handle,
+            request("free", { model: { providerID: "opencode", modelID: "free" } }),
+        );
+        const completion = await f.executor.collect(handle, 50);
+        expect(refusal).toContain("tool use is disabled for this task");
+        expect(filesystemOpens).toBe(0);
+        expect(completion.text).toBe("editor completion");
+        expect(completion.usage).toEqual({ input: 114, output: 16, cacheRead: 10, cacheWrite: 7 });
+        expect(Object.keys(f.requests[0]!.tools)).toEqual(["read"]);
+        expect(f.requests[0]!.system).toEqual([
+            {
+                type: "text",
+                text: "calibrated editor system\n\nSummarize only the supplied conversation and memory context. Do not call tools.",
+            },
+        ]);
+    } finally {
+        await f.executor.close(handle, {
+            promptSettled: true,
+            privacySensitive: false,
+            context: "test",
+            log() {},
+        });
+        f.db.close();
+    }
+});
+
+for (const agent of [
+    "historian",
+    "historian-recomp",
+    "historian-editor",
+    "dreamer-classifier",
+    "dreamer-reviewer",
+    "smart-note-compiler",
+]) {
+    test(`v2 non-Zen ${agent} retains its original prompt and empty tool surface`, async () => {
+        const f = await setup();
+        const handle = await f.executor.open({
+            ...run,
+            agent,
+            kind: agent.startsWith("historian") ? "historian" : "dreamer-task",
+        });
+        try {
+            await f.executor.attempt(handle, request());
+            expect(JSON.stringify(f.requests[0]!.system)).toBe(
+                '[{"type":"text","text":"calibrated editor system"}]',
+            );
+            expect(JSON.stringify(f.requests[0]!.tools)).toBe("{}");
+        } finally {
+            await f.executor.close(handle, {
+                promptSettled: true,
+                privacySensitive: false,
+                context: "test",
+                log() {},
+            });
+            f.db.close();
+        }
+    });
+}
+
+test("v2 does not append the tool instruction when the host supplied no read definition", () => {
+    const hook = new HiddenChildHook(() => {});
+    const identity = {
+        ...run,
+        agent: "historian",
+        kind: "historian" as const,
+        model: "opencode/free",
+    };
+    const marker = "mc:hidden:aaaa:bbbb";
+    hook.registerChild("child", "historian");
+    hook.registerAttempt(marker, {
+        childSessionId: "child",
+        identity,
+        request: request("free"),
+        shaped: false,
+    });
+    const draft: SessionContext = {
+        sessionID: "child",
+        agent: "historian",
+        model: { providerID: "opencode", id: "free" },
+        system: [],
+        tools: {},
+        options: {},
+        messages: [{ role: "user", content: [{ type: "text", text: marker }] }],
+    };
+    hook.apply(draft);
+    expect(draft.system).toEqual([{ type: "text", text: identity.system }]);
+    expect(draft.tools).toEqual({});
+});
+
+test("v2 cross-provider fallback replaces the Zen surface without retaining its instruction", async () => {
+    const f = await setup();
+    const identity = {
+        ...run,
+        agent: "historian",
+        kind: "historian" as const,
+        model: "opencode/free",
+    };
+    const handle = await f.executor.open(identity);
+    try {
+        await f.executor.attempt(
+            handle,
+            request("free", { model: { providerID: "opencode", modelID: "free" } }),
+        );
+        const zenChild = handle.id;
+        expect(f.creates[0]?.permissions).toEqual([
+            { action: "*", resource: "*", effect: "deny" },
+            { action: "read", resource: "*", effect: "allow" },
+        ]);
+        await f.executor.attempt(handle, request("fallback"));
+        expect(handle.id).not.toBe(zenChild);
+        expect(f.creates[1]?.permissions).toEqual([{ action: "*", resource: "*", effect: "deny" }]);
+        expect(f.requests[1]?.tools).toEqual({});
+        expect(f.requests[1]?.system).toEqual([{ type: "text", text: identity.system }]);
+    } finally {
+        await f.executor.close(handle, {
+            promptSettled: true,
+            privacySensitive: false,
+            context: "test",
+            log() {},
+        });
+        f.db.close();
+    }
 });
