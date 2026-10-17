@@ -303,7 +303,7 @@ export async function collectLanes(
 				b.score - a.score || b.support - a.support || a.primerId - b.primerId,
 		)
 		.slice(0, LANE_LIMIT);
-	const chunks = loadCompartmentChunkEmbeddingsForSearch(
+	const chunks = await loadCompartmentChunkEmbeddingsForSearch(
 		db,
 		project.sessionId,
 		project.projectPath,
