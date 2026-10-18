@@ -1950,6 +1950,29 @@ export function finalizeMessageRepresentation(
     return { clearedParts, mergedReasoningParts };
 }
 
+// The legacy renderer embeds history in the first user message rather than m[1].
+// Rebuilding its cache is not evidence that the provider will see different text.
+function legacyPublishedHeadChanged(args: RunPostTransformPhaseArgs): boolean {
+    if (!args.pendingCompartmentInjection || !args.readLastServedMessages) return false;
+    const served = args.readLastServedMessages();
+    // A known first request has no served prefix to preserve. An absent reader,
+    // unlike an empty served snapshot, cannot establish that it is a first render.
+    if (served === null) return true;
+    const previous = served[0] as MessageLike | undefined;
+    if (!Array.isArray(previous?.parts) || !args.pendingCompartmentInjection) return false;
+    const text = previous.parts.find(
+        (part): part is { type: "text"; text: unknown } =>
+            typeof part === "object" &&
+            part !== null &&
+            "type" in part &&
+            part.type === "text" &&
+            "text" in part,
+    )?.text;
+    if (typeof text !== "string") return false;
+    const block = `<session-history>\n${args.pendingCompartmentInjection.block}\n</session-history>`;
+    return text !== block && !text.startsWith(`${block}\n\n`);
+}
+
 export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
@@ -2416,14 +2439,19 @@ export async function runPostTransformPhase(
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
                 getEmergencyInputSample(args.db, args.sessionId) === 0),
-        explicitFlush: isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed),
+        explicitFlush:
+            isExplicitFlush &&
+            hasPendingMaterializationOrigin(
+                args.pendingMaterializationSessions,
+                args.sessionId,
+                "user_flush",
+            ),
         publishedHistory:
-            publishedM1RefreshedThisPass ||
-            (!m0M1EnabledForFold &&
-                (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
-                (args.historyRebuiltThisPass ||
-                    args.rebuiltHistoryFromInitialPrepare ||
-                    (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
+            !prefixPreflightFailed &&
+            (publishedM1RefreshedThisPass ||
+                (!m0M1EnabledForFold &&
+                    (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
+                    legacyPublishedHeadChanged(args))),
     };
     // Warm-cache thinking holds defer every new prefix edit. First render, idle
     // expiry and pressure relief can admit work, but the target guards still
@@ -4797,6 +4825,7 @@ export function checkM0MutationDriftAndSignal(args: {
 import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import {
     clearPendingMaterialization,
+    hasPendingMaterializationOrigin,
     pendingMaterializationOrigin,
     requestPendingMaterialization,
 } from "./pending-materialization";

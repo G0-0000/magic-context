@@ -672,6 +672,7 @@ test("unheld contended preflight replays todo and preserves sticky anchors and t
 		userMessage("new task", 3),
 	];
 	const ids = ["old-user", "old-answer", "next-user"];
+	let systemPrompt = "Original host instructions.";
 	const pass = async (warm = false) => {
 		const messages = structuredClone(warm ? source.slice(0, 1) : source);
 		const ctx = {
@@ -681,6 +682,7 @@ test("unheld contended preflight replays todo and preserves sticky anchors and t
 				warm ? ids.slice(0, 1) : ids,
 				messages,
 			),
+			getSystemPrompt: () => systemPrompt,
 			model: {
 				provider: "anthropic",
 				id: "claude-opus-5-5",
@@ -771,6 +773,7 @@ test("unheld contended preflight replays todo and preserves sticky anchors and t
 		).toEqual([]);
 		restoreInjection();
 		restoreInjection = () => {};
+		systemPrompt = "Changed host instructions.";
 		const released = JSON.stringify(await pass());
 		expect(released).toContain("new todo");
 		expect(released).not.toContain("old-signature");

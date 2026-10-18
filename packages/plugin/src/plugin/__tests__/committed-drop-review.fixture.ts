@@ -11,6 +11,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { saveLkgSlotToDb } from "../../hooks/magic-context/lkg-persist";
 import { captureLkgSlot } from "../../hooks/magic-context/lkg-replay";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
+import { requestPendingMaterialization } from "../../hooks/magic-context/pending-materialization";
 import { createTransform } from "../../hooks/magic-context/transform";
 import { adaptPayload } from "../../v2/hooks/payload";
 import { createMessagesTransformHandler } from "../messages-transform";
@@ -281,7 +282,7 @@ try {
                         "drop",
                     );
                 if (lane === "pi") piHandler!.signalPiPendingMaterialization(sessionId);
-                else pending.add(sessionId);
+                else requestPendingMaterialization(pending, sessionId, "user_flush");
             }
             warm();
             records.push({ wire: await pass(), state: state() });
@@ -312,7 +313,7 @@ try {
         );
         decision = "execute";
         if (lane === "pi") piHandler!.signalPiPendingMaterialization(sessionId);
-        else pending.add(sessionId);
+        else requestPendingMaterialization(pending, sessionId, "user_flush");
         let wire: string | undefined, error: string | undefined;
         try {
             wire = await pass();

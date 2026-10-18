@@ -35,9 +35,10 @@ const fake = createFakePi();
 Object.assign(fake.pi, {getAllTools: () => []});
 registerPiContextHandler(fake.pi, {db, protectedTags:0, injection:{injectionBudgetTokens:10000}, scheduler:{executeThresholdPercentage:80}});
 const raw = [userMessage('old head', 1), assistantMessage('new raw tail that the model saw', 2)];
+let systemPrompt = 'Fixed system.';
 const pass = (messages) => fake.handlers.get('context')({messages: structuredClone(messages)}, {
  ...fakeContext(id, root, messages.map((_, i) => 'entry-' + i), messages),
- getSystemPrompt: () => 'Fixed system.',
+ getSystemPrompt: () => systemPrompt,
  model: {provider:'openai-codex', id:'gpt-5.6-sol', contextWindow:272000, maxTokens:68000}
 });
 const kill = () => process.kill(process.pid, 'SIGKILL');
@@ -80,6 +81,7 @@ ${point === "returned" ? "kill();" : ""}
 locker.exec('ROLLBACK');
 ${point === "committed" ? `fence.setObserver(phase => {console.log('PHASE ' + phase); if(phase === ${JSON.stringify(point)}) kill();});` : ""}
 updateSessionMeta(db, id, {systemPromptHash:'force healthy fold'});
+systemPrompt = 'Changed system for the healthy fold.';
 await pass([...raw, userMessage('next user',3)]);
 await new Promise(resolve => setImmediate(resolve));
 throw new Error('Did not reach selected kill boundary');

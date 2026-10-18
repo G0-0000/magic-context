@@ -43,6 +43,15 @@ export function pendingMaterializationOrigin(sessions: Set<string>, sessionId: s
         : "pending_materialization";
 }
 
+/** Admission uses every recorded cause, not just the first diagnostic label. */
+export function hasPendingMaterializationOrigin(
+    sessions: Set<string>,
+    sessionId: string,
+    origin: PendingMaterializationOrigin,
+): boolean {
+    return sessions.has(sessionId) && causes.get(sessions)?.get(sessionId)?.has(origin) === true;
+}
+
 export function clearPendingMaterialization(sessions: Set<string>, sessionId: string): void {
     sessions.delete(sessionId);
     origins.get(sessions)?.delete(sessionId);
