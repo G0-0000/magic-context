@@ -218,10 +218,12 @@ export function parseMapMemoriesCompletion(
     completion: { messages?: unknown[] },
     expectedIds: ReadonlySet<number>,
 ): ReturnType<typeof validateMapMemoriesManifest> {
-    return validateMapMemoriesManifest(
-        currentManifest(assistantText(completion.messages ?? []) || text),
-        expectedIds,
-    );
+    // A self-contained final reply replaces earlier incremental or rejected text.
+    // A closing fragment still needs the transcript's opening tag and decisions.
+    const source = /<mappings\b/i.test(text)
+        ? text
+        : assistantText(completion.messages ?? []) || text;
+    return validateMapMemoriesManifest(currentManifest(source), expectedIds);
 }
 
 export function validateClientMapMemories(
