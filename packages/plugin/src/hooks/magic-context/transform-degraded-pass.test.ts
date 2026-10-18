@@ -39,6 +39,7 @@ import * as injectCompartments from "./inject-compartments";
 import { __test as fenceInternals, lkgRecoveryFencePath } from "./lkg-recovery-fence";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import * as noteNudger from "./note-nudger";
+import { requestPendingMaterialization } from "./pending-materialization";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
 import { createTransform } from "./transform";
 import * as transformOperations from "./transform-operations";
@@ -715,7 +716,7 @@ describe("a pass that falls back to the launch directory", () => {
             updateSessionMeta(db, sessionId, {
                 systemPromptHash: "directory-lookup-held-hash",
             });
-            flush.add(sessionId);
+            requestPendingMaterialization(flush, sessionId, "user_flush");
         } else {
             updateSessionMeta(db, sessionId, {
                 cacheTtl: "13h",
@@ -800,7 +801,7 @@ describe("a pass that falls back to the launch directory", () => {
 
         // A system prompt change and an explicit flush both ask for a rebuild.
         updateSessionMeta(db, sessionId, { systemPromptHash: "system-after-change" });
-        pendingMaterializationSessions.add(sessionId);
+        requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
 
         // The host lookup fails: the launch directory is another project.
         hostDirectory = undefined;
