@@ -1191,9 +1191,10 @@ export function validateBoundarySnapshot(args: {
     snapshot: ProtectedTailBoundarySnapshot;
     currentContextLimit?: number;
     /**
-     * Message ids at every ordinal in {@link boundarySnapshotIdChecks}, already
-     * read exactly off the serving thread for this validation. Without it the ids
-     * are read here, synchronously.
+     * The current message id at every ordinal {@link boundarySnapshotIdChecks}
+     * lists, read exactly for this validation on a worker thread so the thread
+     * that serves requests does not scan the session. Without it the ids are
+     * read here, synchronously.
      */
     exactIds?: ReadonlyMap<number, string | null>;
 }): BoundarySnapshotValidationResult {

@@ -41,7 +41,11 @@ import { type RawOrdinalWarmupOptions, runSessionWarmupWorker } from "./raw-ordi
 import { hasRawMessageProvider } from "./read-session-chunk";
 import { openCodeDbExists, withReadOnlySessionDb } from "./read-session-db";
 
-/** Transform passes a historian start may wait for one exact read before it gives up. */
+/**
+ * How many transform passes of a session may go by while a historian run waits
+ * for its exact read before the run gives up and leaves the start to a later
+ * pass. A pass is one request the transform prepares for the session.
+ */
 export const EXACT_ORDINAL_READ_DEFER_PASS_CAP = 6;
 
 /** A worker that has not answered by then is treated as unavailable for this attempt. */
@@ -50,7 +54,10 @@ const EXACT_ORDINAL_READ_RESULT_MS = 2 * 60_000;
 export type ExactOrdinalReadNotReadyReason =
     /** The session's passes reached the cap while the read was outstanding. */
     | "pass-cap"
-    /** A read for this session is still running (a released one, or other ordinals). */
+    /**
+     * A read for this session is still running: either one whose waiters the
+     * pass cap already released, or one for a different set of ordinals.
+     */
     | "read-outstanding"
     /** The worker could not start or did not answer. */
     | "worker-failed";

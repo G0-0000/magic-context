@@ -11,7 +11,11 @@ import {
 
 // The sources that record pass degradations, through `passOutcome.record`,
 // `args.passOutcome?.record` or the transform's `failPass`.
-const RECORDING_SOURCES = ["transform.ts", "transform-postprocess-phase.ts"];
+const RECORDING_SOURCES = [
+    "transform.ts",
+    "transform-postprocess-phase.ts",
+    "compartment-trigger-error.ts",
+];
 
 function source(name: string): string {
     return readFileSync(join(import.meta.dir, name), "utf8");

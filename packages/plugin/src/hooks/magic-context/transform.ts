@@ -84,6 +84,7 @@ import {
     checkCompartmentTrigger,
     getProactiveCompartmentTriggerPercentage,
 } from "./compartment-trigger";
+import { recordCompartmentTriggerError } from "./compartment-trigger-error";
 import {
     type CtxReduceAvailabilityVerdict,
     primeCtxReduceSpawnPermission,
@@ -2147,8 +2148,10 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
-        // Counts this pass against a historian start that is waiting for its exact
-        // ordinal read on a worker; it reads nothing and decides nothing here.
+        // A background historian run may be waiting for a worker to read exact
+        // message ordinals for its boundary check. Count this pass against that
+        // wait so the run gives up after a bounded number of passes (see
+        // EXACT_ORDINAL_READ_DEFER_PASS_CAP). Reads nothing and changes no output.
         noteTransformPassForExactOrdinalReads(sessionId);
         // Do not await after snapshotting usage, model limits and protected-tail
         // state: the trigger must use that same decision state. The earlier owner
@@ -2222,8 +2225,7 @@ export function createTransform(deps: TransformDeps) {
                     triggerBoundarySnapshot = triggerResult.boundarySnapshot;
                 }
             } catch (error) {
-                passOutcome.record("compartment-trigger-failure");
-                sessionLog(sessionId, "compartment trigger failed (non-fatal):", error);
+                recordCompartmentTriggerError(passOutcome, sessionId, error);
             }
             logTransformTiming(sessionId, "compartmentTrigger", tTrigger);
         }
