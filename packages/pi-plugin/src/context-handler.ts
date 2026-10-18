@@ -405,6 +405,7 @@ import {
 	estimatePiOutgoingInputTokens,
 	PiDegradedPassError,
 	PiStorageBusyError,
+	piFallbackRefusal,
 } from "./pi-raw-fallback";
 import {
 	notePiPublicationIssue,
@@ -6681,7 +6682,7 @@ export function registerPiContextHandler(
 					serializedOutput = lkgCoordinator.captureAppliedPass({
 						publishServedNumbers: () =>
 							publishPiServedNumbers(options.db, sessionId, [
-								...getPiServedTagNumbers(sessionId),
+								...getPiServedTagNumbers(sessionId, undefined, options.db),
 								...(result.servedTagNumbers ?? []),
 							]),
 						assertCurrentPass: budget.assertOutcome,
@@ -6726,7 +6727,7 @@ export function registerPiContextHandler(
 								.transaction(() => {
 									budget.assertOutcome();
 									publishPiServedNumbers(options.db, sessionId, [
-										...getPiServedTagNumbers(sessionId),
+										...getPiServedTagNumbers(sessionId, undefined, options.db),
 										...(result.servedTagNumbers ?? []),
 									]);
 								})
@@ -6829,7 +6830,7 @@ export function registerPiContextHandler(
 				// Identity safety errors outside optional publication retain their existing
 				// refusal policy. Post-commit mirror failures are handled at the successful-result boundary.
 				if (sessionIdForError) clearPiLkgSessionState(sessionIdForError);
-				throw new PiStorageBusyError({ cause: err });
+				throw piFallbackRefusal("served-identity-unavailable", err);
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
@@ -7051,14 +7052,7 @@ export function registerPiContextHandler(
 			// Without a resolved session there are no persisted decisions to omit
 			// (Pi's runtime manager is missing), so the host's input passes through.
 			if (!lkgCompactionOff && sessionIdForError) {
-				throw new PiStorageBusyError({
-					cause:
-						err instanceof PiDegradedPassError
-							? err
-							: new PiDegradedPassError("context-handler-failed", {
-									cause: err,
-								}),
-				});
+				throw piFallbackRefusal("context-handler-failed", err);
 			}
 			log(
 				`[magic-context][pi] context handler failed (continuing without mutation): ${message}`,

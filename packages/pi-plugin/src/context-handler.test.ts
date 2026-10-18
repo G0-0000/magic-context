@@ -4801,7 +4801,7 @@ describe("registerPiContextHandler", () => {
 
 			await expect(
 				handler(throwingEvent, fakeContext("ses-context") as never),
-			).rejects.toMatchObject({ name: "PiStorageBusyError" });
+			).rejects.toMatchObject({ name: "PiDegradedPassError" });
 			// Refusal is immediate; storage diagnostics are deliberately deferred.
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(getOrCreateSessionMeta(db, "ses-context").lastTransformError).toBe(
@@ -5179,7 +5179,7 @@ describe("registerPiContextHandler", () => {
 			};
 
 			await expect(runPass()).rejects.toMatchObject({
-				name: "PiStorageBusyError",
+				name: "PiDegradedPassError",
 			});
 			expect(getOrCreateSessionMeta(db, sessionId).piStableIdScheme ?? 0).toBe(
 				0,

@@ -36,6 +36,7 @@ import {
 	preparePiDispatch,
 } from "./pi-dispatch-structure";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
+import { PiDegradedPassError } from "./pi-raw-fallback";
 
 const ENTRY_TYPE = "magic-context-turn-refused";
 const RETRY_MESSAGE =
@@ -400,7 +401,9 @@ export function registerPiGuardedContext(
 		const identityConflict = findPiTagIdentityConflict(reason);
 		const message = identityConflict
 			? `${identityConflict.message}. ${budget.diagnostic()}`
-			: `${RETRY_MESSAGE} ${budget.diagnostic()} (${reason instanceof Error ? reason.message : String(reason)})`;
+			: reason instanceof PiDegradedPassError
+				? `${reason.message} ${budget.diagnostic()}`
+				: `${RETRY_MESSAGE} ${budget.diagnostic()} (${reason instanceof Error ? reason.message : String(reason)})`;
 		log("[magic-context][pi] CONTEXT REFUSED", message);
 		try {
 			ctx.ui?.notify(message, "error");
