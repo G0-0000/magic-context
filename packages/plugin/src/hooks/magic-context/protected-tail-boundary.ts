@@ -1162,6 +1162,7 @@ export function validateBoundarySnapshot(args: {
     db: Database;
     snapshot: ProtectedTailBoundarySnapshot;
     currentContextLimit?: number;
+    rawState?: BoundarySnapshotRawState;
 }): BoundarySnapshotValidationResult {
     const { snapshot } = args;
     if (args.currentContextLimit && args.currentContextLimit !== snapshot.contextLimit) {
@@ -1171,13 +1172,16 @@ export function validateBoundarySnapshot(args: {
             detail: `context limit changed from ${snapshot.contextLimit} to ${args.currentContextLimit}`,
         };
     }
-    const currentRawMessageCount = getRawSessionMessageOrdinalCount(snapshot.sessionId);
+    const currentRawMessageCount =
+        args.rawState?.count ?? getRawSessionMessageOrdinalCount(snapshot.sessionId);
     if (snapshot.rawMessageCountAtTrigger > currentRawMessageCount) {
         return { ok: false, reason: "stale_snapshot", detail: "raw message count shrank" };
     }
     const idAt = (ordinal: number): string | null =>
-        readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal).keys().next()
-            .value ?? null;
+        args.rawState
+            ? (args.rawState.ids.get(ordinal) ?? null)
+            : (readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal)
+                  .keys().next().value ?? null);
     const checks: Array<[number, string | null, string]> = [
         [snapshot.offset, snapshot.offsetMessageId, "offset"],
         [snapshot.rawMessageCountAtTrigger, snapshot.rawLastMessageIdAtTrigger, "last"],
@@ -1221,13 +1225,8 @@ export function validateBoundarySnapshot(args: {
             detail: `last compartment moved: offset ${snapshot.offset} -> ${expectedOffset}`,
         };
     }
-    const fingerprintMessages = readRawSessionMessageRange(
-        snapshot.sessionId,
-        snapshot.offset,
-        snapshot.eligibleEndOrdinal - 1,
-    );
-    const fingerprint = computeRawRangeFingerprint(
-        fingerprintMessages,
+    const fingerprint = args.rawState?.fingerprint ?? computeRawRangeFingerprint(
+        readRawSessionMessageRange(snapshot.sessionId, snapshot.offset, snapshot.eligibleEndOrdinal - 1),
         snapshot.offset,
         snapshot.eligibleEndOrdinal,
     );
@@ -1235,6 +1234,35 @@ export function validateBoundarySnapshot(args: {
         return { ok: false, reason: "stale_snapshot", detail: "raw range fingerprint changed" };
     }
     return { ok: true };
+}
+
+/** Exact raw-store evidence owned by one historian start, never cached across passes. */
+export interface BoundarySnapshotRawState {
+    count: number;
+    ids: Map<number, string | null>;
+    fingerprint: string;
+}
+
+export function readBoundarySnapshotRawState(
+    snapshot: ProtectedTailBoundarySnapshot,
+): BoundarySnapshotRawState {
+    const ordinals = [snapshot.offset, snapshot.rawMessageCountAtTrigger];
+    if (snapshot.protectedTailStart <= snapshot.rawMessageCountAtTrigger)
+        ordinals.push(snapshot.protectedTailStart);
+    if (snapshot.eligibleEndOrdinal > snapshot.offset)
+        ordinals.push(snapshot.eligibleEndOrdinal - 1);
+    return {
+        count: getRawSessionMessageOrdinalCount(snapshot.sessionId),
+        ids: new Map(ordinals.map((ordinal) => [ordinal,
+            readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal)
+                .keys().next().value ?? null,
+        ])),
+        fingerprint: computeRawRangeFingerprint(
+            readRawSessionMessageRange(snapshot.sessionId, snapshot.offset, snapshot.eligibleEndOrdinal - 1),
+            snapshot.offset,
+            snapshot.eligibleEndOrdinal,
+        ),
+    };
 }
 
 export function recordHighPressureNoEligibleHead(

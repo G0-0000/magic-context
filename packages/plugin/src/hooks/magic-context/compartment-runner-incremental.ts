@@ -82,7 +82,6 @@ import {
 import { producerSourceLocalBudget } from "./derive-budgets";
 import {
     describeHistorianPromptTrim,
-    fitHistorianPrompt,
     resolveHistorianProducerWindow,
 } from "./historian-prompt-fit";
 import {
@@ -94,7 +93,6 @@ import { clearInjectionCache } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import {
-    fitAtomicHistorianSourceToProducerWindow,
     producerInputTokenLimit,
     producerWindowFailureReason,
 } from "./producer-window-guard";
@@ -103,7 +101,6 @@ import {
     describeBoundaryDiagnostics,
     hasRunnableCompartmentWindow,
     recordHighPressureNoEligibleHead,
-    resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
@@ -114,11 +111,10 @@ import {
     prepareRawSessionOrdinals,
     readRawSessionMessageOrdinalById,
     readRawSessionMessageRange,
-    readSessionChunk,
 } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
-import { estimateTokens } from "./read-session-formatting";
-import { isStrictGapHealingMessage } from "./read-session-raw";
+import { isStrictGapHealingMessage, RawOrdinalsNotReady } from "./read-session-raw";
+import { readHistorianStart, refreshHistorianBoundary } from "./historian-start-read";
 import { sendStatusNotification } from "./send-session-notification";
 
 const inconsistentProducerWindows = new Set<string>();
@@ -319,23 +315,6 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         await sendStatusNotification(client, sessionId, message, getNotificationParams?.() ?? {});
     };
 
-    const truncateHistorianInputIfNeeded = (text: string, budget: number): string => {
-        if (estimateTokens(text) <= budget) return text;
-        let lo = 0;
-        let hi = text.length;
-        let best = 0;
-        const marker = "\n[… tokens truncated by Magic Context to fit the historian window …]";
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (estimateTokens(text.slice(0, mid) + marker) <= budget) {
-                best = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        return text.slice(0, best) + marker;
-    };
 
     const rollbackDrainReservation = (): void => {
         if (drainReservation) {
@@ -347,8 +326,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
-        if (!ordinalsReady)
-            throw new Error("Session ordinals are warming; retry the historian shortly.");
+        if (!ordinalsReady) throw new RawOrdinalsNotReady();
         const openCodeDbResolution = resolveOpenCodeDbPath();
         if (!openCodeDbPathExists(openCodeDbResolution) && !hasRawMessageProvider(sessionId)) {
             telemetry.status = "noop";
@@ -451,11 +429,43 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
+        const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
+        const producerWindow = resolveHistorianProducerWindow(
+            producerModel, deps.historianMaxOutputTokens, deps.historianContextLimit,
+        );
+        const producerContext = producerWindow.contextLimitTokens;
+        const producerLimits = { input: producerWindow.inputLimitTokens };
+        const producerReserve = producerWindow.maxOutputTokens;
+        const projectPath = resolveProjectIdentity(directory ?? process.cwd());
+        const fallbackWindows = [
+            ...(deps.fallbackModels ?? []).map((entry) => toModelEntry(entry)?.model),
+            deps.fallbackModelId,
+        ].filter((key): key is string => typeof key === "string" && key !== producerModel)
+            .map((key) => resolveHistorianProducerWindow(key, deps.historianMaxOutputTokens));
+        const prepareStart = async (snapshot: NonNullable<typeof boundarySnapshot>) => {
+            const result = await readHistorianStart(sessionId, {
+                kind: "start", snapshot, offset,
+                expandTools: deps.historianExpandTools,
+                fit: {
+                    window: producerWindow, fallbackWindows,
+                    systemPrompt: withContentLanguageDirective(COMPARTMENT_AGENT_SYSTEM_PROMPT, deps.language),
+                    requestedChunkTokens: historianChunkTokens,
+                    sessionId, chunkStart: Math.max(1, offset), lastOrdinal: snapshot.eligibleEndOrdinal - 1,
+                    sessionCompartments: priorCompartments,
+                    memories: deps.memoryEnabled === false ? [] : getMemoriesByProject(db, projectPath, ["active", "permanent"]),
+                    memoryEnabled: deps.memoryEnabled !== false,
+                },
+            });
+            if (result.kind !== "start") throw new RawOrdinalsNotReady();
+            return result;
+        };
+        let preparedStart = await prepareStart(boundarySnapshot);
         let validation =
             boundarySnapshot.rawRangeFingerprint.length > 0
                 ? validateBoundarySnapshot({
                       db,
                       snapshot: boundarySnapshot,
+                      rawState: preparedStart.rawState,
                       currentContextLimit:
                           deps.currentContextLimit ?? boundarySnapshot.contextLimit,
                   })
@@ -476,7 +486,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         if (!validation.ok && validation.reason === "stale_snapshot") {
             const refreshed = deps.refreshBoundarySnapshot
                 ? deps.refreshBoundarySnapshot(boundarySnapshot, validation)
-                : resolveOpenCodeProtectedTailBoundary({
+                : await refreshHistorianBoundary({
                       db,
                       sessionId,
                       mode: "incremental-runner",
@@ -495,7 +505,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                     `historian: refreshed stale protected-tail snapshot at run time (was: ${validation.detail ?? "stale"}) — eligible head ${refreshed.offset}-${refreshed.eligibleEndOrdinal - 1}`,
                 );
                 boundarySnapshot = refreshed;
-                validation = { ok: true };
+                preparedStart = await prepareStart(refreshed);
+                validation = validateBoundarySnapshot({ db, snapshot: refreshed, rawState: preparedStart.rawState, currentContextLimit: deps.currentContextLimit ?? refreshed.contextLimit });
             }
         }
         if (!validation.ok) {
@@ -541,43 +552,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
 
-        // Size the prompt to the producer model before reserving drain budget or
-        // reading the chunk: the fixed prompt parts and the output reserve come off
-        // the window first, and the chunk gets what is left.
-        const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
-        const producerWindow = resolveHistorianProducerWindow(
-            producerModel,
-            deps.historianMaxOutputTokens,
-            deps.historianContextLimit,
-        );
-        const producerContext = producerWindow.contextLimitTokens;
-        const producerLimits = { input: producerWindow.inputLimitTokens };
-        const producerReserve = producerWindow.maxOutputTokens;
-        const projectPath = resolveProjectIdentity(directory ?? process.cwd());
-        // Every attempt in the chain (configured fallbacks, then the session
-        // model as the last resort) sends this same prompt, so size it for each
-        // of their windows too, resolved as their pre-send check resolves them.
-        const fallbackWindows = [
-            ...(deps.fallbackModels ?? []).map((entry) => toModelEntry(entry)?.model),
-            deps.fallbackModelId,
-        ]
-            .filter((key): key is string => typeof key === "string" && key !== producerModel)
-            .map((key) => resolveHistorianProducerWindow(key, deps.historianMaxOutputTokens));
-        const promptFit = fitHistorianPrompt({
-            window: producerWindow,
-            fallbackWindows,
-            systemPrompt: withContentLanguageDirective(
-                COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                deps.language,
-            ),
-            requestedChunkTokens: historianChunkTokens,
-            sessionId,
-            chunkStart: Math.max(1, offset),
-            lastOrdinal: eligibleEndOrdinal - 1,
-            sessionCompartments: priorCompartments,
-            memories: () => getMemoriesByProject(db, projectPath, ["active", "permanent"]),
-            memoryEnabled: deps.memoryEnabled !== false,
-        });
+        const promptFit = preparedStart.promptFit;
         if (!promptFit.ok) {
             telemetry.failureReason = promptFit.reason;
             if (getHistorianFailureState(db, sessionId).lastError === promptFit.reason) {
@@ -635,9 +610,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         drainReservation = reserve.reservation;
 
-        const chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal, {
-            expandTools: deps.historianExpandTools,
-        });
+        const chunk = preparedStart.chunk;
+        if (!chunk) throw new RawOrdinalsNotReady();
         const forceKeepLastCompartmentForChunk =
             deps.forceKeepLastCompartment === true && !chunk.hasMore;
         telemetry.chunkStartOrdinal = chunk.startIndex;
@@ -667,20 +641,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
-        const fittedAtomicSource = chunk.oversizeAtomicUnit
-            ? fitAtomicHistorianSourceToProducerWindow({
-                  text: chunk.text,
-                  resultBoundaries: chunk.toolResultBoundaries,
-                  contextLimitTokens: producerContext,
-                  inputLimitTokens: producerLimits.input,
-                  maxOutputTokens: producerReserve,
-                  maxSourceTokens: promptFit.roomTokens,
-              })
-            : null;
-        const chunkText = chunk.oversizeAtomicUnit
-            ? (fittedAtomicSource?.text ?? chunk.text)
-            : truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
-        const producerSourceTokens = estimateTokens(chunkText);
+        const source = preparedStart.source;
+        if (!source) throw new RawOrdinalsNotReady();
+        const fittedAtomicSource = source.atomic;
+        const chunkText = source.text;
+        const producerSourceTokens = source.tokens;
         if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
             sessionLog(
                 sessionId,
@@ -744,12 +709,8 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
 
-        // Past every synchronous no-op early-return and immediately before the
-        // first `await` (client.session.get below): we are now committed to a
-        // real historian pass. Signal the caller so startCompartmentAgent keeps
-        // the active-run registration; a synchronous no-op above never reaches
-        // here, so its lingering registration is cleared instead of blocking the
-        // same transform pass's pending-op drain.
+        // Preparation has completed without blocking the transform. From here a
+        // real historian pass owns the active-run registration until it settles.
         deps.onHistorianRunStarted?.();
 
         // v2 bounded reference model (replaces the unbounded existing_state dump):
@@ -1423,6 +1384,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             `historian publish completed: compartments=${persistedCompartments.length} range=${offset}-${lastCompartmentEnd}`,
         );
     } catch (error: unknown) {
+        if (error instanceof RawOrdinalsNotReady && !publishCommitted) {
+            telemetry.status = "noop";
+            telemetry.failureReason = null;
+            retainDrainReservationForRetryThrottle = false;
+            return;
+        }
         const desc = describeError(error);
         if (publishCommitted) {
             // The publication is durable and was signaled right after COMMIT. Counting this

@@ -133,6 +133,8 @@ let activeAbsoluteCountCache: Map<string, number> | null = null;
  * scope.
  */
 export interface RawMessageProvider {
+    /** File-backed hosts can reproduce their exact reader on a historian worker. */
+    historianReadSource?: () => { path: string; generation: "v1" | "v2" };
     readMessages(): RawMessage[];
     readMessagePage?: (
         afterOrdinal: number,
@@ -176,6 +178,7 @@ export interface RawMessageProvider {
  * the all-history conversion read is intentionally absent from this interface.
  */
 export interface BoundedRawMessageProvider {
+    historianReadSource?: RawMessageProvider["historianReadSource"];
     readMessagePage(
         afterOrdinal: number,
         limit: number,
@@ -211,6 +214,10 @@ export function resolveHostServedBoundaryId(sessionId: string, messageId: string
 /** Whether this session has an explicit non-OpenCode raw-history source. */
 export function hasRawMessageProvider(sessionId: string): boolean {
     return sessionProviders.has(sessionId);
+}
+
+export function getHistorianReadSource(sessionId: string): { path: string; generation: "v1" | "v2" } | null {
+    return sessionProviders.get(sessionId)?.provider.historianReadSource?.() ?? null;
 }
 
 /**

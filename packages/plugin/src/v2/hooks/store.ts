@@ -99,6 +99,7 @@ export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number):
 }
 
 export interface V2RawMessageReader {
+    historianReadSource?: BoundedRawMessageProvider["historianReadSource"];
     readPage(
         sessionID: string,
         afterOrdinal: number,
@@ -228,6 +229,11 @@ export function* readV2RawMessagePagesForConversion(
 export function createV2RawMessageReader(openReader: () => V2StoreReader): V2RawMessageReader {
     const servedBoundaryCache = new Map<string, string | null>();
     return {
+        historianReadSource: () => {
+            const reader = openReader();
+            try { return { path: reader.sourcePath, generation: "v2" }; }
+            finally { reader.close(); }
+        },
         readPage: (
             sessionID: string,
             afterOrdinal: number,
@@ -349,6 +355,7 @@ export function createV2RawMessageProvider(
     sessionID: string,
 ): BoundedRawMessageProvider {
     return {
+        historianReadSource: reader.historianReadSource,
         readMessagePage: (afterOrdinal, limit, finalWatermark, after) =>
             reader.readPage(sessionID, afterOrdinal, limit, finalWatermark, after),
         readMessageById: (messageID) => reader.findById(sessionID, messageID),
