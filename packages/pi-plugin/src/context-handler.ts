@@ -5738,6 +5738,7 @@ export function registerPiContextHandler(
 						historian,
 						isFirstContextPassForSession,
 						activeTags: result.activeTags,
+						eligiblePendingDropTagIds: result.eligiblePendingDropTagIds,
 						rawMessageProvider,
 						ordinalAlignment: ordinalAlignment(),
 						taggerFloor,
@@ -6520,6 +6521,7 @@ export function registerPiContextHandler(
 										startGuard: budget.assert,
 										isFirstContextPassForSession: false,
 										activeTags: result.activeTags,
+										eligiblePendingDropTagIds: result.eligiblePendingDropTagIds,
 										rawMessageProvider,
 										ordinalAlignment: ordinalAlignment(),
 										taggerFloor,
@@ -7613,6 +7615,7 @@ function maybeFireHistorian(args: {
 	historian: PiHistorianOptions;
 	isFirstContextPassForSession?: boolean;
 	activeTags?: ReturnType<typeof getActiveTagsBySession>;
+	eligiblePendingDropTagIds?: ReadonlySet<number>;
 	rawMessageProvider?: {
 		readMessages: () => ReturnType<typeof readPiSessionMessages>;
 		readMessagePage?: (
@@ -8003,6 +8006,7 @@ function maybeFireHistorian(args: {
 				explicitFlush: hasPendingMaterialization(sessionId),
 				publishedHistory: args.publishedHistoryRide,
 			},
+			args.eligiblePendingDropTagIds,
 		);
 
 		if (!trigger.shouldFire) {
@@ -8303,6 +8307,7 @@ interface RunPipelineResult {
 	emergency: boolean;
 	bustedThisPass: boolean;
 	agentDropsAppliedThisPass: boolean;
+	eligiblePendingDropTagIds?: ReadonlySet<number>;
 	/**
 	 * This pass edited bytes before newer thinking in some way other than the
 	 * oldest-prefix thinking clear of a prefix-bound model, or cannot say what
@@ -8597,6 +8602,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let materializationSatisfiedThisPass = false;
 	let pendingOpsAppliedThisPass = false;
 	let pendingOpsDidMutate = false;
+	let eligiblePendingDropTagIds: ReadonlySet<number> | undefined;
 	let heuristicOrReasoningDidMutate = false;
 	// An edit this pass made before newer thinking other than the oldest-prefix
 	// thinking clear of a prefix-bound model; see RunPipelineResult.
@@ -9699,6 +9705,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				[],
 				new Set(),
 				(reduction) => droppedTokenReductions.push(reduction),
+				undefined,
+				(eligible) => {
+					eligiblePendingDropTagIds = eligible;
+				},
 			);
 			if (pendingOpsDidMutate) {
 				droppedCount += pendingOps.length;
@@ -11183,6 +11193,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		emergency,
 		bustedThisPass,
 		agentDropsAppliedThisPass: pendingOpsDidMutate,
+		eligiblePendingDropTagIds,
 		prefixEditBesidesReasoningTrim:
 			!!args.recoveryRebuildReason ||
 			prefixEditBesidesReasoningTrim ||

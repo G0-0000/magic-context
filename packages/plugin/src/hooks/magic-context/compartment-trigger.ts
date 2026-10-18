@@ -223,6 +223,7 @@ function estimateProjectedPostDropPercentage(
     clearedReasoningThroughTag: number | undefined,
     canClearReasoning: boolean,
     liveBudgetCutoff?: number,
+    eligiblePendingDropTagIds?: ReadonlySet<number>,
 ): number | null {
     // Denominator must include both text/tool bytes and reasoning bytes to match the numerator
     const totalActiveBytes = activeTags.reduce(
@@ -235,7 +236,9 @@ function estimateProjectedPostDropPercentage(
 
     // 1. Pending user-queued drops (from ctx_reduce) — include both text and reasoning bytes
     //    because dropping a message tag also clears its associated reasoning parts
-    const pendingDrops = getPendingOps(db, sessionId).filter((op) => op.operation === "drop");
+    const pendingDrops = getPendingOps(db, sessionId).filter(
+        (op) => op.operation === "drop" && eligiblePendingDropTagIds?.has(op.tagId) === true,
+    );
     const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
     if (pendingDrops.length > 0) {
         droppableBytes += activeTags
@@ -472,6 +475,7 @@ export function checkCompartmentTrigger(
     taggerFloorOverride?: number,
     reasoningProjection?: ReasoningProjectionCapability,
     reclaimRide?: ReclaimRideSignals,
+    eligiblePendingDropTagIds?: ReadonlySet<number>,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         sessionLog(
@@ -673,6 +677,7 @@ export function checkCompartmentTrigger(
         sessionMeta.clearedReasoningThroughTag,
         canClearReasoning,
         reasoningProjection?.budgetCutoff,
+        eligiblePendingDropTagIds,
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
     // Queued drops need an existing cache-busting event to apply. A future history
