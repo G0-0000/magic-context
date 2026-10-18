@@ -66,6 +66,10 @@ const GATED_VERSION: u8 = 3;
 /// only records that a run finished, not why. `structured-output/v1` adds the
 /// run's frozen output schema to `RunStarted` and a structured result record
 /// at the run's end, neither of which this reader uses.
+/// `provider-text-state/v1` adds a `text_with_state` assistant content block
+/// and a render-config flag; this reader never reads message content, so it
+/// needs no handling here. A future transcript view must render that block's
+/// `text` like a `text` block.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -84,6 +88,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "step-transforms/v1",
     "input-token-cap/v1",
     "structured-output/v1",
+    "provider-text-state/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1808,6 +1813,7 @@ pub(crate) mod tests {
             "step-transforms/v1",
             "input-token-cap/v1",
             "structured-output/v1",
+            "provider-text-state/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
