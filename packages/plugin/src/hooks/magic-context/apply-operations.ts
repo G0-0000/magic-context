@@ -8,6 +8,7 @@ import {
     updateTagDropMode,
     updateTagStatus,
 } from "../../features/magic-context/storage";
+import { markTagDropped } from "../../features/magic-context/storage-tags";
 import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
@@ -483,8 +484,7 @@ export function applyPendingOperations(
                     try {
                         db.transaction(() => {
                             startedAt = performance.now();
-                            if (mode) updateTagDropMode(db, sessionId, pendingOp.tagId, mode);
-                            updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
+                            markTagDropped(db, sessionId, pendingOp.tagId, mode);
                             if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                         }).immediate();
                     } finally {

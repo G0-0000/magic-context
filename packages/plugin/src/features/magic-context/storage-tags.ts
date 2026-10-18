@@ -1635,6 +1635,29 @@ export function updateTagStatus(
     getUpdateTagStatusStatement(db).run(status, sessionId, tagId);
 }
 
+const droppedTagStatements = new WeakMap<Database, PreparedStatement>();
+
+/** Persist the complete drop decision with one tag update, before changing wire bytes. */
+export function markTagDropped(
+    db: Database,
+    sessionId: string,
+    tagId: number,
+    mode?: TagEntry["dropMode"],
+): void {
+    if (!mode) {
+        updateTagStatus(db, sessionId, tagId, "dropped");
+        return;
+    }
+    let statement = droppedTagStatements.get(db);
+    if (!statement) {
+        statement = db.prepare(
+            "UPDATE tags SET status = ?, drop_mode = ? WHERE session_id = ? AND tag_number = ?",
+        );
+        droppedTagStatements.set(db, statement);
+    }
+    statement.run("dropped", mode, sessionId, tagId);
+}
+
 export interface InertWhitespaceAssistantTag {
     tagNumber: number;
     contentId: string;
@@ -3221,9 +3244,12 @@ export function getNewestToolTagNumbers(db: Database, sessionId: string, limit: 
     if (limit <= 0) return [];
     let statement = newestToolTagNumberStatements.get(db);
     if (!statement) {
+        // A type-first index makes SQLite sort every historical tool row before
+        // LIMIT. Disqualify that predicate from index selection so the ordered
+        // (session_id, tag_number) walk can stop as soon as the window is full.
         statement = db.prepare(
             `SELECT tag_number FROM tags
-              WHERE session_id = ? AND type = 'tool'
+              WHERE session_id = ? AND +type = 'tool'
                 AND typeof(message_id) = 'text'
                 AND typeof(status) = 'text'
                 AND typeof(byte_size) IN ('integer', 'real')
