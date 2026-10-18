@@ -4361,6 +4361,15 @@ export function registerPiContextHandler(
 					projectDirectory,
 					options.allowHomeProject,
 				) ?? "";
+			// Queue history embedding before optional work can exhaust the context
+			// budget. The callback yields before storage work, outside the foreground writer scope.
+			withoutSqliteTransformPass(() =>
+				options.maybeAutoEmbedSession?.(
+					sessionId,
+					projectDirectory,
+					projectIdentity,
+				),
+			);
 			logTransformTiming(
 				sessionId,
 				"findSessionId",
@@ -6229,14 +6238,6 @@ export function registerPiContextHandler(
 				sessionId,
 				sessionMeta.lastTransformError,
 			);
-			if (budget.remainingWork() > PI_CONTEXT_BUDGET.completionReserveMs)
-				withoutSqliteTransformPass(() =>
-					options.maybeAutoEmbedSession?.(
-						sessionId,
-						projectDirectory,
-						projectIdentity,
-					),
-				);
 			logTransformTiming(sessionId, "postPipelineTotal", postPipelineStart);
 			const transformElapsedMs = performance.now() - transformStartTime;
 			recordPiTransformTiming({
