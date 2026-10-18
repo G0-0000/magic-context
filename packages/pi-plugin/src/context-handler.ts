@@ -314,6 +314,7 @@ import {
 	clearPiHistoryBoundaryRepairSession,
 	repairPiHistoryBoundary,
 } from "./history-boundary-repair-pi";
+import { readHostSystemPrompt } from "./host-system-prompt";
 import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
@@ -800,10 +801,9 @@ const systemPromptRefreshSessions = new Set<string>();
 const pendingMaterializationSessions = new Set<string>();
 const deferredHistoryRefreshSessions = new Set<string>();
 const deferredMaterializationSessions = new Set<string>();
-// Remember the last served system prompt independently of cached synthetic
-// history messages. Sessions with injection disabled have no history render
-// cache; update the system hash only when returning a served result.
-const lastServedSystemHashBySession = new Map<string, string | null>();
+// Fingerprint the effective host prompt, not injection metadata: later extensions
+// can replace the prompt after before_agent_start. Only successful returns advance it.
+const lastServedSystemHashBySession = new Map<string, string>();
 
 export function signalPiSystemHashChange(
 	sessionId: string,
@@ -4291,7 +4291,7 @@ export function registerPiContextHandler(
 		let rawMessageCount = 0;
 		let rawFallbackLimit: number | undefined;
 		let sessionIdForError: string | undefined;
-		let systemHashForPass: string | null | undefined;
+		let systemHashForPass: string | undefined;
 		const recordServedSystemHash = () => {
 			if (budget.sideTurn || !sessionIdForError) return;
 			if (systemHashForPass === undefined)
@@ -4329,6 +4329,19 @@ export function registerPiContextHandler(
 				return;
 			}
 			sessionIdForError = sessionId;
+			// Context runs after every before_agent_start handler. Measure the final
+			// host prompt before storage admission, so an early validated LKG replay
+			// also records the system bytes served alongside the replayed messages.
+			try {
+				const effectiveSystem = readHostSystemPrompt(ctx);
+				if (effectiveSystem !== undefined)
+					systemHashForPass = crypto
+						.createHash("sha256")
+						.update(effectiveSystem)
+						.digest("hex");
+			} catch {
+				// A failed getter cannot prove that the provider's cached system bytes changed.
+			}
 			// Resolve a DB-independent wall before the first storage operation can fail.
 			let piUsage:
 				| ReturnType<NonNullable<ExtensionContext["getContextUsage"]>>
@@ -4984,7 +4997,6 @@ export function registerPiContextHandler(
 			}
 
 			let sessionMeta = sessionMetaForUsage;
-			systemHashForPass = sessionMeta.systemPromptHash ?? null;
 			const modelKey = liveModelBySession.get(sessionId);
 			const providerId =
 				typeof ctx.model?.provider === "string"
@@ -5488,6 +5500,7 @@ export function registerPiContextHandler(
 				projectIdentity,
 				projectDirectory,
 				sessionMeta,
+				effectiveSystemHash: systemHashForPass,
 				messages: event.messages,
 				lkgEntryIds: event.messages.map((message) =>
 					lkgInputIdByRef.get(message),
@@ -8100,6 +8113,7 @@ interface RunPipelineArgs {
 	projectIdentity: string;
 	projectDirectory: string;
 	sessionMeta: ReturnType<typeof getOrCreateSessionMeta>;
+	effectiveSystemHash?: string;
 	messages: Parameters<typeof createPiTranscript>[0];
 	lkgEntryIds?: readonly (string | undefined)[];
 	/** Smart-drops (experimental, default off): also reclaim tool output that a
@@ -8754,6 +8768,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			: args.stableIdSchemeCutover === true &&
 				args.readLastServedMessages?.() === null;
 	let foldExecutedThisPass = false;
+	const effectiveSystemChangedThisPass =
+		args.effectiveSystemHash !== undefined &&
+		lastServedSystemHashBySession.has(args.sessionId) &&
+		lastServedSystemHashBySession.get(args.sessionId) !==
+			args.effectiveSystemHash;
 	// The one bust permission an executed fold grants: true only when the fold
 	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
 	// lane that rides a fold consults it: legacy skeleton conversion, pending-op
@@ -8833,7 +8852,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				foldBustsServedPrefixThisPass =
 					!protectedSignedPrefix &&
 					foldBustsServedPrefix(
-						foldDueDecision.reason,
+						// Pi's fold reason uses upstream metadata. Effective system
+						// changes are measured separately at the context boundary.
+						foldDueDecision.reason === "system_hash" &&
+							!effectiveSystemChangedThisPass
+							? undefined
+							: foldDueDecision.reason,
 						{
 							m0Bytes: persistedM0BeforeFold.cachedM0Bytes ?? null,
 							m1Bytes: persistedM0BeforeFold.cachedM1Bytes ?? null,
@@ -9045,11 +9069,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const heldIdleExpiryRebuild =
 		protectedSignedPrefix && piHardSignals?.cacheExpired === true;
 	const systemPrefixChangedThisPass =
-		piM0State === undefined &&
-		!prefixPreflightContended &&
-		lastServedSystemHashBySession.has(args.sessionId) &&
-		lastServedSystemHashBySession.get(args.sessionId) !==
-			(args.sessionMeta.systemPromptHash ?? null);
+		!prefixPreflightContended && effectiveSystemChangedThisPass;
 	// Deferred render requests and native marker retries do not prove that the
 	// served system/m[0]/m[1] prefix changed. Only a user flush may deliberately
 	// admit drops when that prefix is unchanged.
@@ -10656,17 +10676,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		db: args.db,
 		sessionId: args.sessionId,
 		messages: args.messages,
-		// Pi splices placeholder-only messages rather than neutralizing them in
-		// place. Subagent execute alone must not discover new splices that collapse
-		// a freshly dropped turn: tiny shells wait for a history refresh (or the
-		// stable-id cutover below). Frozen discoveries still replay every pass.
-		isCacheBusting: args.isCacheBusting && prefixMutationAllowed,
+		// Removing an entire placeholder message changes the cached request prefix.
+		// Discover new removals only during an admitted rewrite with a history
+		// refresh; replay previously persisted removals on every pass. Subagent
+		// execute alone must not collapse a freshly dropped turn's placeholders.
+		isCacheBusting: args.isCacheBusting && isCacheBustingPass,
 		stableIdByRef: postCommitStableIdByRef,
-		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
-		// previously-stripped placeholders get re-keyed under the new scheme this
-		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
-		forceDiscovery:
-			args.stableIdSchemeCutover === true && prefixMutationAllowed,
+		// A stable message-ID scheme change also needs rediscovery to re-key saved
+		// removals, but it must still wait for permission to rewrite the prefix.
+		forceDiscovery: args.stableIdSchemeCutover === true && isCacheBustingPass,
 		// Frozen ids whose message owns a tool call are forgotten only on a pass
 		// that already changes the served prefix, so the stored set never changes
 		// on a pass meant to replay the previous bytes.

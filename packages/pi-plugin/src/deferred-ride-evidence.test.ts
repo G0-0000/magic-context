@@ -134,6 +134,7 @@ export function rideHarness(inject = true) {
 					messages,
 				),
 				model,
+				getSystemPrompt: () => systemPrompt,
 				getContextUsage: () => ({
 					tokens: percent * 1000,
 					percent,
