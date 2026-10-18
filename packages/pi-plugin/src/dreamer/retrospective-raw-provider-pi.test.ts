@@ -208,17 +208,27 @@ describe("PiRetrospectiveRawProvider", () => {
 				},
 				{
 					type: "message",
-					message: { role: "assistant", timestamp: 150, content: "private response" },
+					message: {
+						role: "assistant",
+						timestamp: 150,
+						content: "private response",
+					},
 				},
 				{
 					type: "message",
-					message: { role: "user", timestamp: 200, content: "please correct that" },
+					message: {
+						role: "user",
+						timestamp: 200,
+						content: "please correct that",
+					},
 				},
 			],
 		});
 
 		await provider.listProjectSessions("identity");
-		expect((await provider.readUserMessagesSince("s1", 0, 10)).messages).toEqual([
+		expect(
+			(await provider.readUserMessagesSince("s1", 0, 10)).messages,
+		).toEqual([
 			{
 				sessionId: "s1",
 				ordinal: 2,

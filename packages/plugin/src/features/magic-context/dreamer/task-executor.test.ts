@@ -2298,7 +2298,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         };
         const client = {
             session: {
-                list: mock(async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
                 prompt: mock(async () => ({})),
             },
@@ -2374,7 +2376,9 @@ describe("createDreamTaskExecutor — retrospective", () => {
         let gatePrompt = "";
         const client = {
             session: {
-                list: mock(async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] })),
+                list: mock(async () => ({
+                    data: [{ id: "ses-parent", title: "ordinary session" }],
+                })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
                 prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     gatePrompt = args.body?.parts?.[0]?.text ?? "";

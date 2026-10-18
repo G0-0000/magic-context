@@ -1534,10 +1534,7 @@ async function runRetrospectiveTask(
     // Hosts retain this source-history fact without exposing assistant text.
     const postWatermarkOrdinals = new Set(
         userMessages
-            .filter(
-                (message) =>
-                    message.ts > watermarkMs && message.followsAssistantReply === true,
-            )
+            .filter((message) => message.ts > watermarkMs && message.followsAssistantReply === true)
             .map((message) => message.ordinal),
     );
     if (postWatermarkOrdinals.size === 0) {
