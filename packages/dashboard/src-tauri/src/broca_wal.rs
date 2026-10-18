@@ -69,7 +69,9 @@ const GATED_VERSION: u8 = 3;
 /// `provider-text-state/v1` adds a `text_with_state` assistant content block
 /// and a render-config flag; this reader never reads message content, so it
 /// needs no handling here. A future transcript view must render that block's
-/// `text` like a `text` block.
+/// `text` like a `text` block. `openrouter-reasoning/v1` marks frames whose
+/// assistant content carries OpenRouter reasoning state as a reasoning block;
+/// usage, steps and timestamps are unchanged.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -89,6 +91,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "input-token-cap/v1",
     "structured-output/v1",
     "provider-text-state/v1",
+    "openrouter-reasoning/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1814,6 +1817,7 @@ pub(crate) mod tests {
             "input-token-cap/v1",
             "structured-output/v1",
             "provider-text-state/v1",
+            "openrouter-reasoning/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
