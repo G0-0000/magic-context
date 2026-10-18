@@ -659,7 +659,12 @@ export class V2StoreReader {
             maxChars: number;
             truncationMarker: string;
         },
-    ): Array<{ seq: number; time_created: number; text: string }> {
+    ): Array<{
+        seq: number;
+        time_created: number;
+        text: string;
+        follows_assistant_reply: number;
+    }> {
         const { boundaryMs, before, limit, maxChars, truncationMarker } = options;
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
             throw new Error("Invalid page limit");
@@ -669,11 +674,12 @@ export class V2StoreReader {
         const head = Math.floor((maxChars - truncationMarker.length) / 2);
         const tail = maxChars - truncationMarker.length - head;
         return this.prepare(`WITH users AS (
-            SELECT seq, time_created, data FROM session_message
-            WHERE session_id = ? AND type = 'user' AND time_created ${before ? "<=" : ">"} ?
+            SELECT session_id, seq, time_created, data FROM session_message
+            WHERE session_id = ? AND type = 'user' AND time_created ${before ? "<=" : ">"}
+                ?
             ORDER BY time_created ${direction}, seq ${direction} LIMIT ?
         ), texts AS (
-            SELECT seq, time_created, CASE
+            SELECT session_id, seq, time_created, CASE
                 WHEN json_extract(data, '$.synthetic') = 1 OR json_extract(data, '$.ignored') = 1 THEN ''
                 WHEN json_type(data, '$.text') = 'text' THEN json_extract(data, '$.text')
                 ELSE COALESCE((SELECT group_concat(json_extract(value, '$.text'), char(10))
@@ -683,7 +689,19 @@ export class V2StoreReader {
                       AND COALESCE(json_extract(value, '$.ignored'), 0) <> 1), '') END AS text
             FROM users WHERE json_valid(data)
         ) SELECT seq, time_created, CASE WHEN length(text) > ?
-            THEN substr(text, 1, ?) || ? || substr(text, -?) ELSE text END AS text
+            THEN substr(text, 1, ?) || ? || substr(text, -?) ELSE text END AS text,
+            EXISTS (
+                SELECT 1 FROM session_message assistant_reply
+                 WHERE assistant_reply.session_id = texts.session_id
+                   AND assistant_reply.type = 'assistant'
+                   AND assistant_reply.seq < texts.seq
+                   AND EXISTS (
+                       SELECT 1 FROM session_message prior_user
+                        WHERE prior_user.session_id = texts.session_id
+                          AND prior_user.type = 'user'
+                          AND prior_user.seq < assistant_reply.seq
+                   )
+            ) AS follows_assistant_reply
           FROM texts ORDER BY time_created ${direction}, seq ${direction}`).all(
             sessionID,
             boundaryMs,
@@ -696,6 +714,7 @@ export class V2StoreReader {
             seq: number;
             time_created: number;
             text: string;
+            follows_assistant_reply: number;
         }>;
     }
 

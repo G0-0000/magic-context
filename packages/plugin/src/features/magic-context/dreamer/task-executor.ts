@@ -1148,6 +1148,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 });
                 if (retro.skipReason) return skip(retro.skipReason);
                 recordRun("completed", null, {
+                    progress: retro.noOpReason,
                     memoryChanges: computeMemoryDelta(memoryBefore),
                     backlogAfter:
                         retro.retrospectiveWatermarkMs == null
@@ -1160,6 +1161,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 // runs) so the next run only scans newer messages.
                 return {
                     status: "completed",
+                    ...(retro.noOpReason ? { detail: retro.noOpReason } : {}),
                     schedulePatch:
                         retro.retrospectiveWatermarkMs != null || retro.taskStateJson !== undefined
                             ? {
@@ -1458,6 +1460,7 @@ async function runRetrospectiveTask(
     retrospectiveWatermarkMs: number | null;
     taskStateJson?: string;
     skipReason?: string;
+    noOpReason?: string;
 }> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
     const { deps, deadline, parent, onBudgetUpdate } = helpers;
@@ -1495,29 +1498,52 @@ async function runRetrospectiveTask(
         : undefined;
     const completedWindow = (
         retrospectiveWatermarkMs: number | null,
-    ): { retrospectiveWatermarkMs: number | null; taskStateJson?: string } => ({
+        noOpReason?: string,
+    ): {
+        retrospectiveWatermarkMs: number | null;
+        taskStateJson?: string;
+        noOpReason?: string;
+    } => ({
         retrospectiveWatermarkMs,
         ...(clearedTaskStateJson ? { taskStateJson: clearedTaskStateJson } : {}),
+        ...(noOpReason ? { noOpReason } : {}),
     });
     const messages = withGlobalOrdinals(scan.messages);
     const userMessages = messages.filter(
         (message) => message.role === "user" && message.text.trim().length > 0,
     );
     if (userMessages.length === 0) {
-        log("[dreamer] retrospective: no user messages in window");
-        return completedWindow(scan.maxScannedTs);
+        const noOpReason = "no reply-following user lines";
+        log(`[dreamer] retrospective: ${noOpReason}`);
+        return completedWindow(scan.maxScannedTs, noOpReason);
     }
 
     // Only POST-watermark user lines are genuinely new; the rest are the overlap
     // re-read. If nothing is new, the window was already handled last run.
-    const postWatermarkOrdinals = new Set(
+    const newUserOrdinals = new Set(
         userMessages
             .filter((message) => message.ts > watermarkMs)
             .map((message) => message.ordinal),
     );
-    if (postWatermarkOrdinals.size === 0) {
+    if (newUserOrdinals.size === 0) {
         log("[dreamer] retrospective: only overlap lines, nothing new");
-        return completedWindow(scan.maxScannedTs);
+        return completedWindow(scan.maxScannedTs, "only overlap lines, nothing new");
+    }
+
+    // First user messages cannot show a correction to an assistant response.
+    // Hosts retain this source-history fact without exposing assistant text.
+    const postWatermarkOrdinals = new Set(
+        userMessages
+            .filter(
+                (message) =>
+                    message.ts > watermarkMs && message.followsAssistantReply === true,
+            )
+            .map((message) => message.ordinal),
+    );
+    if (postWatermarkOrdinals.size === 0) {
+        const noOpReason = "no reply-following user lines";
+        log(`[dreamer] retrospective: ${noOpReason}`);
+        return completedWindow(scan.maxScannedTs, noOpReason);
     }
 
     const abortController = new AbortController();
