@@ -2946,6 +2946,7 @@ async function embedCompartmentChunkBatch(
     db: Database,
     projectIdentity: string,
     batchSize: number,
+    signal?: AbortSignal,
 ): Promise<number> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
     if (!snapshot?.historyEnabled || snapshot.chunkModelId === "off") return 0;
@@ -2967,6 +2968,7 @@ async function embedCompartmentChunkBatch(
         projectIdentity,
         snapshot.chunkModelId,
         candidates,
+        signal,
     );
     return embedded;
 }
@@ -3211,6 +3213,11 @@ async function drainCompartmentChunkBacklogForProject(
 
     let total = 0;
     let leaseLost = false;
+    const drainAbort = new AbortController();
+    // Leave rate-limited rows for the next sweep instead of holding this lease
+    // beyond its wall-clock budget while waiting for a provider cooldown.
+    const deadlineTimer = setTimeout(() => drainAbort.abort(), Math.max(0, deadline - Date.now()));
+    (deadlineTimer as { unref?: () => void }).unref?.();
     const renewal = inRootAsyncContext(() =>
         setInterval(() => {
             try {
@@ -3224,6 +3231,7 @@ async function drainCompartmentChunkBacklogForProject(
     try {
         while (
             !leaseLost &&
+            !drainAbort.signal.aborted &&
             !isEmbeddingHostBusy() &&
             Date.now() < deadline &&
             total < CHUNK_DRAIN_MAX_PER_SWEEP
@@ -3232,6 +3240,7 @@ async function drainCompartmentChunkBacklogForProject(
                 db,
                 projectIdentity,
                 CHUNK_DRAIN_BATCH_SIZE,
+                drainAbort.signal,
             );
             if (!renewGitSweepLease(db, projectIdentity, holderId)) leaseLost = true;
             if (leaseLost || embedded === 0) break;
@@ -3239,6 +3248,7 @@ async function drainCompartmentChunkBacklogForProject(
             if (embedded < CHUNK_DRAIN_BATCH_SIZE) break;
         }
     } finally {
+        clearTimeout(deadlineTimer);
         clearInterval(renewal);
         releaseGitSweepLease(db, projectIdentity, holderId);
     }
