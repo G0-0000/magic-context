@@ -34,6 +34,7 @@ import {
 	startPiTagSnapshotWorker,
 } from "./tag-snapshot-worker-client-pi";
 import {
+	assistantMessage,
 	createFakePi,
 	createTestDb,
 	fakeContext,
@@ -48,7 +49,7 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-function harness() {
+function harness(messages = [userMessage("Deterministic first prompt.", 1)]) {
 	__setPiHarnessKindForTesting("omp");
 	const root = createTestTempDirFromPath(
 		join(tmpdir(), "pi-handler-hydration-"),
@@ -69,9 +70,13 @@ function harness() {
 		},
 	});
 	registerPiContextHandler(fake.pi as never, { db, protectedTags: 0 });
-	const messages = [userMessage("Deterministic first prompt.", 1)];
 	const ctx = Object.assign(
-		fakeContext(sessionId, root, ["entry-1"], messages),
+		fakeContext(
+			sessionId,
+			root,
+			messages.map((_, index) => `entry-${index + 1}`),
+			messages,
+		),
 		{
 			abort: () => {
 				blocked = true;
@@ -92,7 +97,14 @@ function harness() {
 	const call = async () => {
 		blocked = false;
 		fake.handlers.get("agent_start")?.({} as never, ctx as never);
-		const result = await handler({ messages: structuredClone(messages) }, ctx);
+		const raw = structuredClone(messages);
+		ctx.sessionManager.getBranch = () =>
+			raw.map((message, index) => ({
+				type: "message",
+				id: `entry-${index + 1}`,
+				message,
+			}));
+		const result = await handler({ messages: raw }, ctx);
 		const fence = fake.handlers.get("before_provider_request");
 		if (!fence) throw new Error("real provider dispatch fence missing");
 		fence(
@@ -129,6 +141,7 @@ function harness() {
 		call,
 		slowWorker,
 		refusals,
+		messages,
 		track: (job: ReturnType<typeof startPiTagSnapshotWorker>) => {
 			jobs.push(job);
 			return job;
@@ -444,13 +457,30 @@ it("fallback permutations preserve adoption and literal served bytes", async () 
 		[3, 1, 2],
 		[2, 3, 1],
 	]) {
-		const h = harness();
-		for (let n = 1; n <= 3; n++)
+		const h = harness([
+			userMessage("First adoption target.", 1),
+			assistantMessage("Second adoption target.", 2),
+			userMessage("Third adoption target.", 3),
+		]);
+		const fingerprints = __test.buildEntryFingerprintMap(
+			h.messages,
+			(_message, index) => `entry-${index + 1}`,
+		);
+		for (let n = 1; n <= 3; n++) {
+			const fingerprint = fingerprints.get(`entry-${n}`);
+			expect(fingerprint).toBeDefined();
 			h.db
 				.prepare(
-					"INSERT INTO tags(id,session_id,tag_number,message_id,type,status,byte_size) VALUES (?, ?, ?, ?, 'message', 'active', 13)",
+					"INSERT INTO tags(id,session_id,tag_number,message_id,type,status,byte_size,entry_fingerprint) VALUES (?, ?, ?, ?, 'message', 'active', 13, ?)",
 				)
-				.run(n, h.sessionId, n, `pi-msg-${n - 1}`);
+				.run(
+					n,
+					h.sessionId,
+					n,
+					`pi-msg-${n + 8}-${n}-${n === 2 ? "assistant" : "user"}:p0`,
+					fingerprint,
+				);
+		}
 		__setPiTagSnapshotWorkerForTests(h.db, (request, cached) => {
 			const job = h.track(startPiTagSnapshotWorker(request, { cached }));
 			return {
@@ -474,10 +504,30 @@ it("fallback permutations preserve adoption and literal served bytes", async () 
 		try {
 			const result = await h.call();
 			expect(h.dispatches).toBe(1);
+			const tags = getTagsBySession(h.db, h.sessionId);
+			// Require tag numbers 1–3 to move from pi-msg-* onto entry-*:p0.
+			// The semantic text-key lane also creates three current rows; counting
+			// six rows alone would pass even if none of the legacy ids changed.
+			expect(tags).toHaveLength(6);
+			expect(
+				tags
+					.filter((tag) => tag.tagNumber <= 3)
+					.map((tag) => ({
+						tagNumber: tag.tagNumber,
+						messageId: tag.messageId,
+					})),
+			).toEqual([
+				{ tagNumber: 1, messageId: "entry-1:p0" },
+				{ tagNumber: 2, messageId: "entry-2:p0" },
+				{ tagNumber: 3, messageId: "entry-3:p0" },
+			]);
+			expect(tags.every((tag) => tag.messageId.startsWith("entry-"))).toBe(
+				true,
+			);
 			records.push({
 				bytes: JSON.stringify(result?.messages),
 				adoption,
-				tags: getTagsBySession(h.db, h.sessionId),
+				tags,
 			});
 		} finally {
 			restore();
