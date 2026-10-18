@@ -34,10 +34,7 @@ try {
             ? new Database(input.path)
             : new Database(input.path, { readonly: true });
     db.exec("PRAGMA busy_timeout = 250");
-    if (input.historian) {
-        const { readHistorianStartOnWorker } = await import("./historian-start-read-worker");
-        reply = { kind: "historian", result: await readHistorianStartOnWorker(db, input.sessionId, input.historian, input.historianGeneration) };
-    } else if (input.orphanSweep) {
+    if (input.orphanSweep) {
         const [
             { setHarness },
             { sweepOrphanedOpenCodeMessageIndexes },

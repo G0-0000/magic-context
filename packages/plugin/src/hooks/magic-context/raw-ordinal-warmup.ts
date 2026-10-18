@@ -16,8 +16,6 @@
  * same session until FAILURE_BACKOFF_MS has passed.
  */
 import { Worker } from "node:worker_threads";
-import { setTimeout, clearTimeout } from "node:timers";
-import type { HistorianReadTask, HistorianReadResult } from "./historian-start-read";
 import type {
     MessageHistoryOrphanSweepOptions,
     MessageHistoryOrphanSweepResult,
@@ -55,8 +53,6 @@ export interface RawOrdinalWarmupInput {
     indexCoordination?: SharedArrayBuffer;
     indexOwner?: number;
     orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
-    historian?: HistorianReadTask;
-    historianGeneration?: "v1" | "v2";
 }
 
 export type RawOrdinalWarmupReply =
@@ -66,7 +62,6 @@ export type RawOrdinalWarmupReply =
     | { kind: "tag-delta"; delta: TagOwnerDelta }
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { kind: "orphan-sweep"; result: MessageHistoryOrphanSweepResult }
-    | { kind: "historian"; result: HistorianReadResult }
     | { kind: "error"; error: string };
 
 /**
@@ -156,8 +151,7 @@ export function runSessionWarmupWorker(
                 | { summary: TagOwnerSummary }
                 | { delta: TagOwnerDelta }
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
-                 | { orphanSweep: MessageHistoryOrphanSweepResult }
-                 | { historian: HistorianReadResult }
+                | { orphanSweep: MessageHistoryOrphanSweepResult }
                 | { failure: RawOrdinalWarmupFailureReason; detail: string },
         ) => {
             if (settled) return;
@@ -204,7 +198,6 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "indexed")
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
             else if (reply.kind === "orphan-sweep") finish({ orphanSweep: reply.result });
-            else if (reply.kind === "historian") finish({ historian: reply.result });
             else finish({ failure: "worker-error", detail: reply.error });
         });
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
@@ -306,7 +299,6 @@ type WorkerResult =
     | { delta: TagOwnerDelta }
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { orphanSweep: MessageHistoryOrphanSweepResult }
-    | { historian: HistorianReadResult }
     | { failure: RawOrdinalWarmupFailureReason; detail: string };
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */

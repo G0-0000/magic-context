@@ -116,7 +116,6 @@ import {
     estimateMessageTokens,
 } from "./final-wire-token-estimate";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
-import { noteHistorianStartPass } from "./historian-start-read";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
     capturePrefixTrimSourceOrder,
@@ -168,7 +167,7 @@ import {
 } from "./protected-tail-boundary";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
-import { RawOrdinalsNotReady, extractInMemoryMessageViews } from "./read-session-raw";
+import { extractInMemoryMessageViews } from "./read-session-raw";
 import {
     projectOpencodeReasoningBudgetCutoff,
     resolveKeepReasoningTokens,
@@ -2147,7 +2146,6 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
-        noteHistorianStartPass(sessionId);
         // Do not await after snapshotting usage, model limits and protected-tail
         // state: the trigger must use that same decision state. The earlier owner
         // preparation waited at most 250ms. Recheck its digest here; if a peer
@@ -2220,10 +2218,8 @@ export function createTransform(deps: TransformDeps) {
                     triggerBoundarySnapshot = triggerResult.boundarySnapshot;
                 }
             } catch (error) {
-                if (!(error instanceof RawOrdinalsNotReady)) {
-                    passOutcome.record("compartment-trigger-failure");
-                    sessionLog(sessionId, "compartment trigger failed (non-fatal):", error);
-                }
+                passOutcome.record("compartment-trigger-failure");
+                sessionLog(sessionId, "compartment trigger failed (non-fatal):", error);
             }
             logTransformTiming(sessionId, "compartmentTrigger", tTrigger);
         }

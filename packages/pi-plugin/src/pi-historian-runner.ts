@@ -37,7 +37,6 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
-import { RawOrdinalsNotReady } from "@magic-context/core/hooks/magic-context/read-session-raw";
 import * as crypto from "node:crypto";
 import { withContentLanguageDirective } from "@magic-context/core/agents/language-directive";
 import { embedAndStoreCompartmentChunks } from "@magic-context/core/features/magic-context/compartment-embedding";
@@ -698,7 +697,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						validation = { ok: true };
 					}
 				} catch (error) {
-					if (error instanceof RawOrdinalsNotReady) throw error;
 					const desc = describeError(error);
 					sessionLog(
 						sessionId,
@@ -1786,12 +1784,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 		});
 	} catch (error) {
-		if (error instanceof RawOrdinalsNotReady) {
-			telemetry.status = "noop";
-			telemetry.failureReason = null;
-			retainDrainReservationForRetryThrottle = false;
-			return;
-		}
 		const desc = describeError(error);
 		telemetry.failureReason = PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(
 			desc.message,

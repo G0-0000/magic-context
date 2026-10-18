@@ -24,7 +24,7 @@ import type {
     HiddenCompartmentRunnerDeps,
 } from "./compartment-runner-types";
 import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
-import { getHistorianReadSource, hasRawMessageProvider, primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
+import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
 
 export interface ActiveCompartmentRun {
     promise: Promise<void>;
@@ -197,9 +197,7 @@ function startBackgroundCompartmentAgent(
             withRawSessionMessageCache(() => {
                 const snapshot = deps.boundarySnapshot;
                 try {
-                    // File-backed historian preparation reads its own fresh worker
-                    // snapshot. Priming here would repeat the scan on the host.
-                    if (hasRawMessageProvider(deps.sessionId) && !getHistorianReadSource(deps.sessionId)) primeTailRawMessageCache({
+                    primeTailRawMessageCache({
                         sessionId: deps.sessionId,
                         lastCompartmentEnd:
                             snapshot?.lastCompartmentEndMessageId !== undefined
@@ -217,7 +215,7 @@ function startBackgroundCompartmentAgent(
                         error,
                     );
                 }
-                if (prepareBoundary && !snapshot) {
+                if (prepareBoundary) {
                     const boundary = prepareBoundary();
                     if (!boundary) {
                         updateSessionMeta(deps.db, deps.sessionId, {

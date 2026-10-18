@@ -385,8 +385,6 @@ export class V2StoreReaderPool {
 
 /** Opens an existing store read-only; missing/corrupt stores propagate errors, never an empty history. */
 export class V2StoreReader {
-    get sourcePath(): string { return this.path; }
-    withReadSnapshot<T>(read: () => T): T { return this.db.transaction(read)(); }
     private readonly db: Database;
     private readonly connection: ReaderConnection;
     private closed = false;
