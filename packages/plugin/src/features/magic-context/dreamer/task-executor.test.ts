@@ -2272,6 +2272,144 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("probe-only opening user line skips the gate and completes with an explicit no-op", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-probe-only";
+        const provider = {
+            listProjectSessions: mock(() => [{ sessionId: "probe" }]),
+            readUserMessagesSince: mock(() => ({
+                messages: [
+                    {
+                        sessionId: "probe",
+                        ordinal: 1,
+                        role: "user" as const,
+                        text: "Reply with the single word: ok",
+                        ts: 200,
+                    },
+                ],
+                truncated: false,
+            })),
+            readUserMessagesBefore: mock(() => []),
+        };
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] })),
+                create: mock(async () => ({ data: { id: "retro-child" } })),
+                prompt: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+        });
+
+        const result = await executor(
+            {
+                task: "retrospective",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                retrospectiveRecencyDays: 100_000,
+            },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-retro-probe-only",
+                leaseKey: leaseKeyFor("retrospective", project),
+            },
+        );
+
+        expect(result).toEqual({
+            status: "completed",
+            detail: "no reply-following user lines",
+            schedulePatch: { retrospectiveWatermarkMs: 200 },
+        });
+        expect(client.session.create).not.toHaveBeenCalled();
+        expect(client.session.prompt).not.toHaveBeenCalled();
+        const recordedTask = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
+            status?: string;
+            progress?: string;
+        };
+        expect(recordedTask.status).toBe("completed");
+        expect(recordedTask.progress).toBe("no reply-following user lines");
+    });
+
+    test("a new first message remains context when another session has a reply-following line", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-cross-session";
+        const rows = [
+            {
+                sessionId: "probe",
+                ordinal: 1,
+                role: "user" as const,
+                text: "Reply with the single word: ok",
+                ts: 200,
+            },
+            {
+                sessionId: "conversation",
+                ordinal: 3,
+                role: "user" as const,
+                text: "Please correct the earlier response.",
+                followsAssistantReply: true,
+                ts: 210,
+            },
+        ];
+        const provider = {
+            listProjectSessions: mock(() => [
+                { sessionId: "probe" },
+                { sessionId: "conversation" },
+            ]),
+            readUserMessagesSince: mock((sessionId: string) => ({
+                messages: rows.filter((row) => row.sessionId === sessionId),
+                truncated: false,
+            })),
+            readUserMessagesBefore: mock(() => []),
+        };
+        let gatePrompt = "";
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] })),
+                create: mock(async () => ({ data: { id: "retro-child" } })),
+                prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
+                    gatePrompt = args.body?.parts?.[0]?.text ?? "";
+                    return {};
+                }),
+                messages: mock(async () => ({ data: assistantMessages("n") })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+        });
+
+        const result = await executor(
+            {
+                task: "retrospective",
+                schedule: "0 5 * * *",
+                timeoutMinutes: 20,
+                retrospectiveRecencyDays: 100_000,
+            },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-retro-cross-session",
+                leaseKey: leaseKeyFor("retrospective", project),
+            },
+        );
+
+        expect(result).toEqual({
+            status: "completed",
+            schedulePatch: { retrospectiveWatermarkMs: 210 },
+        });
+        expect(client.session.prompt).toHaveBeenCalledTimes(1);
+        expect(gatePrompt).toContain("Reply with the single word: ok");
+        expect(gatePrompt).toContain("Please correct the earlier response.");
+    });
+
     test("two size rejections persist recovery and make the third source window disjoint", async () => {
         db = freshDb();
         const project = "/repo/retrospective-overflow";
@@ -2281,6 +2419,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
             ordinal: index + 1,
             role: "user" as const,
             text: `line-${index + 1} ${"diagnostic payload ".repeat(80)}`,
+            followsAssistantReply: true,
             ts: start + index * 10,
         }));
         db.prepare(
@@ -2418,6 +2557,14 @@ describe("createDreamTaskExecutor — retrospective", () => {
                         ordinal: 1,
                         role: "user" as const,
                         text: "Please add a focused migration test for the new config key.",
+                        ts: 190,
+                    },
+                    {
+                        sessionId: "s1",
+                        ordinal: 3,
+                        role: "user" as const,
+                        text: "Please correct the migration test to cover the new config key.",
+                        followsAssistantReply: true,
                         ts: 200,
                     },
                 ],
@@ -2426,14 +2573,16 @@ describe("createDreamTaskExecutor — retrospective", () => {
             readUserMessagesBefore: mock(() => []),
         };
         let prompts = 0;
+        let gatePrompt = "";
         const client = {
             session: {
                 list: mock(async () => ({
                     data: [{ id: "ses-parent", title: "ordinary session" }],
                 })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
-                prompt: mock(async () => {
+                prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
                     prompts += 1;
+                    gatePrompt = args.body?.parts?.[0]?.text ?? "";
                     return {};
                 }),
                 // Gate turn → verdict "n" (no friction). The deepen turn never runs.
@@ -2471,6 +2620,8 @@ describe("createDreamTaskExecutor — retrospective", () => {
         });
         expect(client.session.create).toHaveBeenCalled();
         expect(prompts).toBe(1); // gate only — no deepen turn
+        expect(gatePrompt).toContain("Please add a focused migration test");
+        expect(gatePrompt).toContain("Please correct the migration test");
         const { delete: deleteSession } = client.session;
         expect(deleteSession).toHaveBeenCalledWith({
             path: { id: "retro-child" },
@@ -2505,6 +2656,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
                         ordinal: 3,
                         role: "user" as const,
                         text: "Please verify provider executed tools on wire before saying they work.",
+                        followsAssistantReply: true,
                         ts: 220,
                     },
                 ],
@@ -2613,6 +2765,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
                         ordinal: 1,
                         role: "user" as const,
                         text: "Please stop assuming CLI commands work without checking the actual output.",
+                        followsAssistantReply: true,
                         ts: 200,
                     },
                     {
@@ -2620,6 +2773,7 @@ describe("createDreamTaskExecutor — retrospective", () => {
                         ordinal: 2,
                         role: "user" as const,
                         text: "Please stop assuming CLI commands work without checking actual output.",
+                        followsAssistantReply: true,
                         ts: 220,
                     },
                 ],
