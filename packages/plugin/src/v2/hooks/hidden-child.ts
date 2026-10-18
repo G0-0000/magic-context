@@ -3,9 +3,11 @@ import {
     DREAMER_AGENT,
     DREAMER_DOCS_AGENT,
     DREAMER_MEMORY_MAPPER_AGENT,
+    DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
     DREAMER_PRIMER_INVESTIGATOR_AGENT,
     DREAMER_RETROSPECTIVE_AGENT,
 } from "../../agents/dreamer";
+import { DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS } from "../../agents/permissions";
 import {
     createDreamTokenBudget,
     TOKEN_BUDGET_FINALIZE_MESSAGE,
@@ -28,13 +30,12 @@ export const HIDDEN_HISTORIAN_AGENT = "historian";
 export const HIDDEN_DREAMER_AGENT = "dreamer-classifier";
 export const HIDDEN_CURATE_AGENT = DREAMER_AGENT;
 
-const READ_TOOLS = ["read", "grep", "glob"] as const;
 const AGENT_TOOLS: Record<string, readonly string[]> = {
     [HIDDEN_HISTORIAN_AGENT]: [],
     [HIDDEN_DREAMER_AGENT]: [],
     [HIDDEN_CURATE_AGENT]: ["ctx_memory"],
-    [DREAMER_MEMORY_MAPPER_AGENT]: READ_TOOLS,
-    [DREAMER_PRIMER_INVESTIGATOR_AGENT]: [...READ_TOOLS, "ctx_search"],
+    [DREAMER_MEMORY_MAPPER_AGENT]: DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
+    [DREAMER_PRIMER_INVESTIGATOR_AGENT]: DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS,
     [DREAMER_RETROSPECTIVE_AGENT]: ["ctx_search"],
 };
 const AGENT_STEPS: Record<string, number> = {

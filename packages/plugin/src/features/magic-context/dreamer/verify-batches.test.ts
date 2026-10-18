@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Database } from "../../../shared/sqlite";
@@ -524,3 +524,145 @@ for (const host of ["hidden", "sdk"] as const) {
         }
     });
 }
+
+test("fixed navigation fixture measures exact replay bytes for whole reads versus outline and zoom", async () => {
+    async function measure(strategy: "whole-file" | "navigation") {
+        const f = fixture(20);
+        const padding = `${"// unrelated implementation detail".padEnd(54, ".")}\n`;
+        const source = `${padding.repeat(65)}export const currentFact = 1;\n${padding.repeat(65)}`;
+        writeFileSync(path.join(f.directory, "src/fact.ts"), source);
+        const traces: Array<{
+            systemBytes: number;
+            userBytes: number;
+            toolCalls: string[];
+            promptBytes: number[];
+            promptTokens: number;
+        }> = [];
+        let system = "";
+        let text = "";
+        let batchTokens = 0;
+        const schemas = ["read", "aft_outline", "aft_zoom"].map((name) => ({
+            name,
+            description: "Read-only fixture source inspection",
+            input: { path: "string", symbol: "string?" },
+        }));
+        try {
+            const result = await runVerify({
+                ...f.args,
+                hiddenCompletionExecutor: {
+                    capabilities: { tools: true },
+                    open: async (spec) => {
+                        system = spec.system;
+                        return { id: `${strategy}-${traces.length}` };
+                    },
+                    attempt: async (_handle, request) => {
+                        const prompt = request.body.parts[0].text;
+                        const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) =>
+                            Number(match[1]),
+                        );
+                        const messages: Array<Record<string, unknown>> = [
+                            { role: "system", content: system },
+                            { role: "user", content: prompt },
+                        ];
+                        const trace = {
+                            systemBytes: Buffer.byteLength(system),
+                            userBytes: Buffer.byteLength(prompt),
+                            toolCalls: [] as string[],
+                            promptBytes: [] as number[],
+                            promptTokens: 0,
+                        };
+                        batchTokens = 0;
+                        const charge = () => {
+                            const wire = JSON.stringify({
+                                model: "fixture/navigation",
+                                tools: schemas,
+                                messages,
+                            });
+                            const bytes = Buffer.byteLength(wire);
+                            trace.promptBytes.push(bytes);
+                            // Synthetic accounting only: one token per four UTF-8 bytes, rounded per request.
+                            batchTokens += Math.ceil(bytes / 4);
+                        };
+                        const call = (tool: string, content: string) => {
+                            charge();
+                            const id = `call-${trace.toolCalls.length}`;
+                            trace.toolCalls.push(tool);
+                            messages.push({
+                                role: "assistant",
+                                tool_calls: [
+                                    {
+                                        id,
+                                        name: tool,
+                                        arguments: { path: "src/fact.ts", symbol: "currentFact" },
+                                    },
+                                ],
+                            });
+                            messages.push({ role: "tool", tool_call_id: id, content });
+                        };
+                        const contents = readFileSync(
+                            path.join(f.directory, "src/fact.ts"),
+                            "utf8",
+                        );
+                        const lines = contents.split("\n");
+                        const line = lines.findIndex((value) =>
+                            value.startsWith("export const currentFact"),
+                        );
+                        if (strategy === "whole-file") call("read", contents);
+                        else {
+                            call(
+                                "aft_outline",
+                                `src/fact.ts: currentFact [variable] line ${line + 1}`,
+                            );
+                            call("aft_zoom", `${line + 1}: ${lines[line]}`);
+                            expect(lines[line]).toBe("export const currentFact = 1;");
+                        }
+                        charge();
+                        trace.promptTokens = batchTokens;
+                        traces.push(trace);
+                        text = `<verify>${ids.map((id) => `<verified id="${id}" files="src/fact.ts"/>`).join("")}</verify>`;
+                    },
+                    collect: async () => ({
+                        text,
+                        messages: [message(text, batchTokens)],
+                        usage: { input: batchTokens, output: 10 },
+                    }),
+                    close: async () => {},
+                } as never,
+            });
+            expect(result).toMatchObject({ verified: 20, complete: true, batches: 4 });
+            return {
+                traces,
+                sourceBytes: Buffer.byteLength(source),
+                totalBytes: traces.reduce(
+                    (sum, trace) => sum + trace.promptBytes.reduce((a, b) => a + b, 0),
+                    0,
+                ),
+                tokens: traces.reduce((sum, trace) => sum + trace.promptTokens, 0),
+                verified: result.verified,
+            };
+        } finally {
+            f.db.close();
+        }
+    }
+    const whole = await measure("whole-file");
+    const navigation = await measure("navigation");
+    expect(whole.traces.map((trace) => trace.toolCalls)).toEqual(
+        Array.from({ length: 4 }, () => ["read"]),
+    );
+    expect(navigation.traces.map((trace) => trace.toolCalls)).toEqual(
+        Array.from({ length: 4 }, () => ["aft_outline", "aft_zoom"]),
+    );
+    expect(navigation.traces.map((trace) => [trace.systemBytes, trace.userBytes])).toEqual(
+        whole.traces.map((trace) => [trace.systemBytes, trace.userBytes]),
+    );
+    expect(whole.totalBytes).toBe(69_970);
+    expect(navigation.totalBytes).toBe(62_699);
+    expect(whole.tokens).toBe(17_496);
+    expect(navigation.tokens).toBe(15_679);
+    expect(whole.traces.map((trace) => trace.systemBytes)).toEqual([3_448, 3_448, 3_448, 3_448]);
+    expect(whole.traces.map((trace) => trace.userBytes)).toEqual([1_002, 1_003, 1_012, 1_012]);
+    expect(navigation.tokens).toBeLessThan(whole.tokens);
+    console.log(
+        `NAVIGATION FIXTURE: ${JSON.stringify({ whole, navigation, tokensPerVerdict: { whole: whole.tokens / whole.verified, navigation: navigation.tokens / navigation.verified } })}`,
+    );
+});
