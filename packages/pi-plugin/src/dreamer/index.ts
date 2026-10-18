@@ -664,9 +664,8 @@ function createPiDreamerClient(
 				const isVerification =
 					budgetTask === "verify" || budgetTask === "verify-broad";
 				const hasMemoryDecisions =
-					(budgetTask === "map-memories" ||
-						(isVerification &&
-							result.meta?.failureClass !== ZEN_FREE_TIER_FAILURE)) &&
+					(budgetTask === "map-memories" || isVerification) &&
+					result.meta?.failureClass !== ZEN_FREE_TIER_FAILURE &&
 					Array.isArray(mappingMessages);
 				if (hasMemoryDecisions) {
 					// Retain decisions before raising a step/timeout error; the shared
@@ -692,7 +691,6 @@ function createPiDreamerClient(
 						);
 					// Pi may retain only tool turns while its runner keeps the final text separately.
 					if (
-						isVerification &&
 						result.ok &&
 						result.assistantText?.trim() &&
 						!dreamSession.messages.some((message) =>

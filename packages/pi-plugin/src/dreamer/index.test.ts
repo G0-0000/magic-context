@@ -19,6 +19,7 @@ import { leaseKeyFor } from "@magic-context/core/features/magic-context/dreamer/
 import { insertMemory } from "@magic-context/core/features/magic-context/memory";
 import {
 	getMemoryVerifications,
+	getUnmappedMemoryIds,
 	recordMemoryVerifications,
 } from "@magic-context/core/features/magic-context/memory/storage-memory-verifications";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
@@ -28,6 +29,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
+import { extractLatestAssistantText } from "@magic-context/core/shared/assistant-message-extractor";
 import * as logger from "@magic-context/core/shared/logger";
 import { createPromptAsyncTransport } from "@magic-context/core/shared/prompt-async-transport";
 import { Database } from "@magic-context/core/shared/sqlite";
@@ -2301,9 +2303,136 @@ for (const task of ["verify", "verify-broad"] as const) {
 	}
 }
 
-test("Pi verify never preserves a classified Zen free-tier refusal as output", async () => {
+for (const task of ["verify", "map-memories"] as const)
+	test(`Pi ${task} never preserves a classified Zen free-tier refusal as output`, async () => {
+		db = createDb();
+		let captured: CapturedDreamClient | null = null;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			captured = registration.client as unknown as CapturedDreamClient;
+			return mock(() => {});
+		});
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: async () => ({
+						ok: false,
+						reason: "provider_error",
+						error:
+							"FreeTierError: OpenCode's free tier can only be used from within OpenCode",
+						assistantText:
+							task === "map-memories"
+								? '<mappings><memory id="1" independent="true"/></mappings>'
+								: '<verify><verified id="1" files="src/fact.ts"/></verify>',
+						meta: {
+							failureClass: ZEN_FREE_TIER_FAILURE,
+							mappingMessages: [
+								{
+									role: "assistant",
+									content: [
+										{
+											type: "toolCall",
+											id: "refused-tool",
+											name: "read",
+											arguments: {},
+										},
+									],
+								},
+							],
+						},
+					}),
+				}) as never,
+		);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: `git:pi-${task}-free-tier`,
+			}),
+		);
+		const client = requireCapturedClient(captured);
+		const child = (await client.session.create({
+			body: { title: `magic-context-dream-${task}` },
+		})) as { id: string };
+		await expect(
+			client.session.prompt({
+				path: { id: child.id },
+				body: { parts: [{ text: "fixture" }] },
+			}),
+		).rejects.toThrow("FreeTierError");
+		expect(await client.session.messages({ path: { id: child.id } })).toEqual({
+			data: [],
+		});
+	});
+
+function mappingToolHistory(whitespace = false) {
+	return Array.from({ length: 8 }, (_, index) => ({
+		role: "assistant",
+		content: [
+			{
+				type: "toolCall",
+				id: `mapping-read-${index}`,
+				name: "read",
+				arguments: {},
+			},
+			...(whitespace ? [{ type: "text", text: " \n\t " }] : []),
+		],
+	}));
+}
+
+for (const whitespace of [false, true]) {
+	test(`Pi mapping host maps eight ${whitespace ? "whitespace-only" : "tool-only"} turns with separate runner text`, async () => {
+		db = createDb();
+		const identity = `git:pi-mapping-separate-${whitespace ? "whitespace" : "tools"}`;
+		const memory = insertMemory(db, {
+			projectPath: identity,
+			category: "ARCHITECTURE",
+			content: "A standalone fixture fact.",
+		});
+		const text = `<mappings><memory id="${memory.id}" independent="true"/></mappings>`;
+		let attempts = 0;
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: async () => {
+						attempts++;
+						return {
+							ok: true,
+							assistantText: text,
+							meta: { mappingMessages: mappingToolHistory(whitespace) },
+						};
+					},
+				}) as never,
+		);
+		const opts = dreamerOptions({
+			database: db,
+			projectIdentity: identity,
+			projectDir: process.cwd(),
+		});
+		expect(getUnmappedMemoryIds(db, [memory.id])).toEqual([memory.id]);
+		registerPiDreamerProject(opts);
+		const result = await runPiDreamForProject(
+			identity,
+			"map-memories",
+			opts.registrationOwner,
+		);
+		expect(result.failed).toEqual([]);
+		expect(result.ran).toContain("map-memories");
+		expect(attempts).toBe(1);
+		expect(getUnmappedMemoryIds(db, [memory.id])).toEqual([]);
+		expect(
+			getMemoryVerifications(db, [memory.id]).get(memory.id)?.hasSentinel,
+		).toBe(true);
+	});
+}
+
+test("Pi mapping keeps meaningful streamed text ahead of separate runner text", async () => {
 	db = createDb();
 	let captured: CapturedDreamClient | null = null;
+	const streamedText =
+		'<mappings><memory id="1" independent="true"/></mappings>';
+	const runnerText = '<mappings><memory id="2" independent="true"/></mappings>';
+	const streamed = mappingToolHistory();
+	streamed[0].content.push({ type: "text", text: streamedText });
 	__test.setStartDreamScheduleTimerFactory(async (registration) => {
 		captured = registration.client as unknown as CapturedDreamClient;
 		return mock(() => {});
@@ -2312,48 +2441,35 @@ test("Pi verify never preserves a classified Zen free-tier refusal as output", a
 		() =>
 			({
 				run: async () => ({
-					ok: false,
-					reason: "provider_error",
-					error:
-						"FreeTierError: OpenCode's free tier can only be used from within OpenCode",
-					assistantText:
-						'<verify><verified id="1" files="src/fact.ts"/></verify>',
-					meta: {
-						failureClass: ZEN_FREE_TIER_FAILURE,
-						mappingMessages: [
-							{
-								role: "assistant",
-								content: [
-									{
-										type: "toolCall",
-										id: "refused-tool",
-										name: "read",
-										arguments: {},
-									},
-								],
-							},
-						],
-					},
+					ok: true,
+					assistantText: runnerText,
+					meta: { mappingMessages: streamed },
 				}),
 			}) as never,
 	);
 	registerPiDreamerProject(
 		dreamerOptions({
 			database: db,
-			projectIdentity: "git:pi-verify-free-tier",
+			projectIdentity: "git:pi-mapping-stream-priority",
 		}),
 	);
 	const client = requireCapturedClient(captured);
 	const child = (await client.session.create({
-		body: { title: "magic-context-dream-verify" },
+		body: { title: "magic-context-dream-map-memories" },
 	})) as { id: string };
-	await expect(
-		client.session.prompt({
-			path: { id: child.id },
-			body: { parts: [{ text: "fixture" }] },
-		}),
-	).rejects.toThrow("FreeTierError");
-	expect(await client.session.messages({ path: { id: child.id } })).toEqual({
-		data: [],
+	await client.session.prompt({
+		path: { id: child.id },
+		body: { parts: [{ text: "fixture" }] },
 	});
+	const messages = (
+		(await client.session.messages({ path: { id: child.id } })) as {
+			data: unknown[];
+		}
+	).data;
+	const text = messages
+		.map((message) => extractLatestAssistantText([message]) ?? "")
+		.join("\n");
+	expect(messages).toHaveLength(8);
+	expect(text.trim()).toBe(streamedText);
+	expect(text).not.toContain(runnerText);
 });
