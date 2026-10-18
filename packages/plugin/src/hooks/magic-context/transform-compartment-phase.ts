@@ -315,6 +315,18 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         activeRun: ActiveCompartmentRun,
         reason: string,
     ): Promise<"completed" | "timed_out"> {
+        // Let a just-completed run settle before deciding whether its exhausted
+        // foreground budget should leave this pass on the background-only path.
+        await Promise.resolve();
+        if (activeRun.inlineJoinTimedOutBudgetMs !== undefined && !activeRun.settled) {
+            historianJoinTimedOut = true;
+            historianJoinBudgetMs = activeRun.inlineJoinTimedOutBudgetMs;
+            sessionLog(
+                args.sessionId,
+                "transform: compartment inline join budget already exhausted for this run — not waiting again",
+            );
+            return "timed_out";
+        }
         sessionLog(args.sessionId, reason);
         const timeoutMs = resolveHistorianInlineJoinBudget(args.historianTimeoutMs);
         historianJoinBudgetMs = timeoutMs;
@@ -329,6 +341,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             if (timer !== undefined) clearTimeout(timer);
         }
         if (result === "timeout") {
+            activeRun.inlineJoinTimedOutBudgetMs = timeoutMs;
             historianJoinTimedOut = true;
             sessionLog(
                 args.sessionId,
