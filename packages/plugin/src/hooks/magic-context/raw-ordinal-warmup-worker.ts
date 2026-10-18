@@ -15,7 +15,7 @@ const input = workerData as RawOrdinalWarmupInput;
 port.postMessage({ kind: "accepted" } satisfies RawOrdinalWarmupReply);
 const [
     { Database, registerSqliteDiagnosticSink },
-    { scanRawSessionSummaryRows },
+    { readRawSessionMessageIdsAtOrdinalsFromDb, scanRawSessionSummaryRows },
     { getHarness, setHarness },
     { log },
 ] = await Promise.all([
@@ -34,7 +34,16 @@ try {
             ? new Database(input.path)
             : new Database(input.path, { readonly: true });
     db.exec("PRAGMA busy_timeout = 250");
-    if (input.orphanSweep) {
+    if (input.exactOrdinalIds) {
+        reply = {
+            kind: "exact-ordinal-ids",
+            ids: readRawSessionMessageIdsAtOrdinalsFromDb(
+                db,
+                input.sessionId,
+                input.exactOrdinalIds,
+            ),
+        };
+    } else if (input.orphanSweep) {
         const [
             { setHarness },
             { sweepOrphanedOpenCodeMessageIndexes },

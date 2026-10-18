@@ -53,6 +53,8 @@ export interface RawOrdinalWarmupInput {
     indexCoordination?: SharedArrayBuffer;
     indexOwner?: number;
     orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
+    /** Ordinals whose message ids the worker reads exactly (see raw-exact-ordinal-read.ts). */
+    exactOrdinalIds?: number[];
 }
 
 export type RawOrdinalWarmupReply =
@@ -62,6 +64,7 @@ export type RawOrdinalWarmupReply =
     | { kind: "tag-delta"; delta: TagOwnerDelta }
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { kind: "orphan-sweep"; result: MessageHistoryOrphanSweepResult }
+    | { kind: "exact-ordinal-ids"; ids: Array<[number, string | null]> }
     | { kind: "error"; error: string };
 
 /**
@@ -152,6 +155,7 @@ export function runSessionWarmupWorker(
                 | { delta: TagOwnerDelta }
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
                 | { orphanSweep: MessageHistoryOrphanSweepResult }
+                | { exactOrdinalIds: Array<[number, string | null]> }
                 | { failure: RawOrdinalWarmupFailureReason; detail: string },
         ) => {
             if (settled) return;
@@ -198,6 +202,7 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "indexed")
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
             else if (reply.kind === "orphan-sweep") finish({ orphanSweep: reply.result });
+            else if (reply.kind === "exact-ordinal-ids") finish({ exactOrdinalIds: reply.ids });
             else finish({ failure: "worker-error", detail: reply.error });
         });
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
@@ -299,6 +304,7 @@ type WorkerResult =
     | { delta: TagOwnerDelta }
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { orphanSweep: MessageHistoryOrphanSweepResult }
+    | { exactOrdinalIds: Array<[number, string | null]> }
     | { failure: RawOrdinalWarmupFailureReason; detail: string };
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */

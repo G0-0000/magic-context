@@ -522,6 +522,28 @@ export function readRawSessionMessageIdOrdinalsForRangeFromDb(
     return result;
 }
 
+/**
+ * The message id at each requested ordinal, by the same exact single-ordinal read
+ * as `readRawSessionMessageIdOrdinalsForRangeFromDb(db, sessionId, n, n)`, all
+ * from one read snapshot. Null means no message, or a malformed row, holds that
+ * ordinal. Each read evaluates every preceding message's JSON, so on a long
+ * session this belongs on a worker thread, never on the serving thread.
+ */
+export function readRawSessionMessageIdsAtOrdinalsFromDb(
+    db: Database,
+    sessionId: string,
+    ordinals: readonly number[],
+): Array<[number, string | null]> {
+    return withReadSnapshot(db, () =>
+        ordinals.map((ordinal): [number, string | null] => [
+            ordinal,
+            readRawSessionMessageIdOrdinalsForRangeFromDb(db, sessionId, ordinal, ordinal)
+                .keys()
+                .next().value ?? null,
+        ]),
+    );
+}
+
 /** Read a keyset page used to incrementally maintain shadow message ordinals. */
 export function readRawSessionMessageOrdinalPageFromDb(
     db: Database,

@@ -165,6 +165,7 @@ import {
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import { noteTransformPassForExactOrdinalReads } from "./raw-exact-ordinal-read";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
@@ -2146,6 +2147,9 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
+        // Counts this pass against a historian start that is waiting for its exact
+        // ordinal read on a worker; it reads nothing and decides nothing here.
+        noteTransformPassForExactOrdinalReads(sessionId);
         // Do not await after snapshotting usage, model limits and protected-tail
         // state: the trigger must use that same decision state. The earlier owner
         // preparation waited at most 250ms. Recheck its digest here; if a peer
