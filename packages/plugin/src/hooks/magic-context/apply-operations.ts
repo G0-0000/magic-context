@@ -266,22 +266,29 @@ export function prepareLegacyToolSkeletonConversions(
     targets: ReadonlyMap<number, TagTarget>,
     options: { keepFullDrop?: (callId: string | null) => boolean } = {},
 ) {
-    const readRows = (connection: ContextDatabase) =>
-        connection
-            .prepare(
-                `SELECT tag_number AS tagNumber, drop_mode AS dropMode, message_id AS callId
-               FROM tags
-              WHERE session_id = ? AND type = 'tool' AND status = 'dropped'
-                AND drop_mode IN ('truncated', 'full')
-              ORDER BY tag_number`,
-            )
-            .all(sessionId) as Array<{
-            tagNumber: number;
-            dropMode: string;
-            callId: string | null;
-        }>;
+    // Only calls on the wire can change. Point lookups use the session/tag
+    // unique index instead of reading every historical dropped tool twice.
+    const candidates = [...targets.keys()].sort((a, b) => a - b);
+    const readRows = (connection: ContextDatabase) => {
+        if (candidates.length === 0) return [];
+        const statement = connection.prepare(
+            `SELECT tag_number AS tagNumber, drop_mode AS dropMode, message_id AS callId
+             FROM tags WHERE session_id = ? AND tag_number = ?
+               AND type = 'tool' AND status = 'dropped'
+               AND drop_mode IN ('truncated', 'full')`,
+        );
+        return candidates.flatMap((tagNumber) => {
+            const row = statement.get(sessionId, tagNumber) as
+                | {
+                      tagNumber: number;
+                      dropMode: string;
+                      callId: string | null;
+                  }
+                | undefined;
+            return row ? [row] : [];
+        });
+    };
     const rows = readRows(db);
-    const identity = JSON.stringify(rows);
     const converted = new Map<number, ConvertedToolDropMode>();
     for (const row of rows) {
         const target = targets.get(row.tagNumber);
@@ -303,8 +310,18 @@ export function prepareLegacyToolSkeletonConversions(
     }
     return {
         converted,
-        isCurrent: (connection: ContextDatabase) =>
-            JSON.stringify(readRows(connection)) === identity,
+        isCurrent: (connection: ContextDatabase) => {
+            const current = readRows(connection);
+            return (
+                current.length === rows.length &&
+                current.every(
+                    (row, index) =>
+                        row.tagNumber === rows[index].tagNumber &&
+                        row.dropMode === rows[index].dropMode &&
+                        row.callId === rows[index].callId,
+                )
+            );
+        },
         persist: (connection: ContextDatabase) => {
             for (const [tagNumber, mode] of converted)
                 updateTagDropMode(connection, sessionId, tagNumber, mode);
