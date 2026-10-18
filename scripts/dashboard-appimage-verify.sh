@@ -31,7 +31,9 @@ trap 'rm -rf "$work"' EXIT
 appdir="$work/squashfs-root"
 
 # 1. No bundled libwayland.
-mapfile -t bundled < <(cd "$appdir" && find . -name 'libwayland-*' | sort)
+# Files and links only: the bundled Debian packages also leave copyright folders
+# such as usr/share/doc/libwayland-client0, which hold no library.
+mapfile -t bundled < <(cd "$appdir" && find . -name 'libwayland-*' \( -type f -o -type l \) | sort)
 if [[ ${#bundled[@]} -gt 0 ]]; then
   echo "FAIL: the AppImage bundles libwayland:" >&2
   printf '  %s\n' "${bundled[@]#./}" >&2
