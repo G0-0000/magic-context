@@ -41,6 +41,7 @@ import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import {
     getMagicContextStorageDir,
     getMagicContextStorageResolution,
+    isMagicContextStorageOutsideEngram,
 } from "@magic-context/core/shared/data-path";
 import { parseJsoncRecovering } from "@magic-context/core/shared/jsonc-parser";
 import {
@@ -1101,6 +1102,13 @@ export async function runDoctor(
         failCount++;
         issues++;
     };
+
+    const storageDir = getMagicContextStorageDir();
+    if (isMagicContextStorageOutsideEngram(storageDir)) {
+        warn(
+            `Magic Context storage is at ${storageDir}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
+    }
 
     const authorityDbPath = join(getMagicContextStorageDir(), "context.db");
     let authorityDb: ReturnType<typeof openExistingContextDatabase> = null;

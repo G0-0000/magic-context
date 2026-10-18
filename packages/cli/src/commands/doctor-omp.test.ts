@@ -106,6 +106,9 @@ describe("OMP doctor", () => {
 
         expect(code).toBe(0);
         expect(prompts.messages.join("\n")).toContain("OMP 17.1.7 detected");
+        expect(prompts.messages.join("\n")).toContain(
+            `warn:WARN Magic Context storage is at ${join(root, ".local", "share", "cortexkit", "magic-context")}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
     });
 

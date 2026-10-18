@@ -256,6 +256,7 @@ export class IssuePrivacy {
             "plugin",
             "manifest",
             "Shared storage",
+            "Magic Context storage",
             "context DB",
             "SQLite integrity_check",
             "Background maintenance",

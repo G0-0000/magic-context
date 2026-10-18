@@ -68,7 +68,7 @@ describe("doctor --issue --report dispatch", () => {
 });
 
 describe("OpenCode doctor --issue --report", () => {
-    function fakeReport(root: string): DiagnosticReport {
+    function fakeReport(root: string, opencodeVersion = "1.0.0"): DiagnosticReport {
         const logPath = join(root, "opencode.log");
         writeFileSync(logPath, "INFO started\n");
         return {
@@ -78,7 +78,7 @@ describe("OpenCode doctor --issue --report", () => {
             nodeVersion: "v24.0.0",
             pluginVersion: "0.39.0",
             opencodeInstalled: true,
-            opencodeVersion: "1.0.0",
+            opencodeVersion,
             opencodeInstallKind: "cli",
             opencodeInstallations: [],
             configPaths: {
@@ -128,6 +128,34 @@ describe("OpenCode doctor --issue --report", () => {
         const written = join(root, "out", "diagnostics.md");
         expect(existsSync(written)).toBe(true);
         expect(readFileSync(written, "utf-8")).toContain("## Diagnostics");
+    });
+
+    it("shows the sanitized backup warning for OpenCode 1 and OpenCode 2", async () => {
+        const root = tempRoot();
+        const originalHome = process.env.HOME;
+        process.env.HOME = root;
+        restores.push(() => {
+            if (originalHome === undefined) delete process.env.HOME;
+            else process.env.HOME = originalHome;
+        });
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        restores.push(() => process.chdir(originalCwd));
+
+        for (const version of ["1.0.0", "2.0.0"]) {
+            const reportPath = join(root, `opencode-${version}-diagnostics.md`);
+            const code = await openCodeDoctor.runIssueFlow(
+                { reportPath },
+                { collectDiagnostics: async () => fakeReport(root, version) },
+            );
+
+            expect(code).toBe(0);
+            const body = readFileSync(reportPath, "utf-8");
+            expect(body).toContain(
+                "Magic Context storage is at ~/project-1/<path>, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.",
+            );
+            expect(body).not.toContain(root);
+        }
     });
 });
 
@@ -264,6 +292,8 @@ describe("OMP doctor --issue --report", () => {
         expect(body).toContain(`OS: ${process.platform} ${process.arch}`);
         expect(body).toContain(`Runtime: Node.js ${process.version}`);
         expect(body).toContain("## OMP diagnostics");
+        expect(body).toContain("Magic Context storage ~/project-1/<path>");
+        expect(body).not.toContain(root);
         expect(body).toContain("## Recent errors (last 20, sanitized)");
         expect(body).toContain("refused: <text omitted>");
         expect(body).not.toContain("protected source");

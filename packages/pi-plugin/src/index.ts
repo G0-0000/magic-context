@@ -109,7 +109,11 @@ import {
 	claimConfigParseFailuresOnce,
 	formatConfigParseNotice,
 } from "@magic-context/core/shared/config-diagnostics";
-import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
+import {
+	claimStorageBackupWarningCheck,
+	getMagicContextStorageDir,
+	isMagicContextStorageOutsideEngram,
+} from "@magic-context/core/shared/data-path";
 import { setEmbeddingSessionBusy } from "@magic-context/core/shared/embedding-activity";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
@@ -1206,6 +1210,15 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		databaseExitHookRegistered = true;
 	}
 	const storageDir = getMagicContextStorageDir();
+	if (
+		claimStorageBackupWarningCheck() &&
+		isMagicContextStorageOutsideEngram(storageDir)
+	) {
+		warn(
+			`Magic Context storage is at ${storageDir}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+		);
+		flushLogger();
+	}
 	const dbPath = join(storageDir, "context.db");
 	let openFailureCause: string | null = null;
 	const openStorage = async (): Promise<ContextDatabase | null> => {

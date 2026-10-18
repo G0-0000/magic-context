@@ -83,7 +83,11 @@ import {
     detectConflicts,
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
-import { getMagicContextStorageDir } from "./shared/data-path";
+import {
+    claimStorageBackupWarningCheck,
+    getMagicContextStorageDir,
+    isMagicContextStorageOutsideEngram,
+} from "./shared/data-path";
 import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setHarness } from "./shared/harness";
 import { shapeV1HiddenMessage } from "./shared/hidden-zen-read";
@@ -113,6 +117,16 @@ import { setup } from "./v2/server";
 
 const BOOT_SERVER_DEADLINE_MS = 15_000;
 const RESOLVED_CONFIG_TIMEOUT_MS = 2_000;
+
+function warnStorageBackupOnce(storageDir: string): void {
+    if (!claimStorageBackupWarningCheck()) return;
+    if (isMagicContextStorageOutsideEngram(storageDir)) {
+        log(
+            `[magic-context] Magic Context storage is at ${storageDir}, outside the folder Engram backs up (~/.local/share/cortexkit/magic-context). It is not included in CortexKit backups.`,
+        );
+        flushLogger();
+    }
+}
 
 registerStandalonePluginMarker(packageMetadata.version);
 
@@ -534,6 +548,7 @@ const server: Plugin = async (ctx) => {
     // `enabled` block lets the auto-update checker still coordinate even
     // when the rest of the runtime is disabled by config or conflicts.
     const storageDir = getMagicContextStorageDir();
+    warnStorageBackupOnce(storageDir);
 
     // Per-instance process-resident handles, hoisted to function scope so the
     // server.instance.disposed cleanup (wired into the event handler below, which
