@@ -478,10 +478,15 @@ import {
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
 import {
+	assertPiTagSnapshotReady,
+	cancelPiTagSnapshotSession,
+	ensurePiTagSnapshotReady,
 	getPiActiveTagSnapshotView,
 	getPiTagSnapshotView,
+	prewarmPiTagSnapshot,
 	readPiFallbackTagRows,
 } from "./tag-snapshot-pi";
+import { PiTagHydrationError } from "./tag-snapshot-worker-client-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
 	clearPiTailHygieneContentMemo,
@@ -4368,6 +4373,15 @@ export function registerPiContextHandler(
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
 			lkgOptions = options;
+			if (!options.compactionOff) {
+				budget.stage = "tag snapshot hydration";
+				const hydration = ensurePiTagSnapshotReady(
+					options.db,
+					sessionId,
+					budget,
+				);
+				if (hydration) await guardAwait(hydration);
+			}
 			const deliveryModelKey = resolvePiContextModelKey(ctx);
 			if (!budget.sideTurn && deliveryModelKey) {
 				const parentId = ctx.sessionManager.getLeafId?.();
@@ -4543,6 +4557,8 @@ export function registerPiContextHandler(
 						jitter: true,
 						beforeRetry: (error) => {
 							assertCurrentPass();
+							if (!lkgCompactionOff)
+								assertPiTagSnapshotReady(options.db, sessionId);
 							if (checkedReplay) return;
 							checkedReplay = true;
 							const state = loadPiHistorianStateSnapshot(options.db, sessionId);
@@ -5644,6 +5660,8 @@ export function registerPiContextHandler(
 					);
 				},
 			};
+			if (!options.compactionOff)
+				assertPiTagSnapshotReady(options.db, sessionId);
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
 			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -6823,6 +6841,15 @@ export function registerPiContextHandler(
 			// Cancellation must not enter recovery or queue a failed-turn diagnostic,
 			// including on hosts that report AbortError without exposing a signal.
 			if (budget.isCancelled(err)) throw err;
+			if (err instanceof PiTagHydrationError) {
+				budget.failureReason = err.message;
+				if (sessionIdForError) {
+					try {
+						prewarmPiTagSnapshot(lkgOptions.db, sessionIdForError);
+					} catch {}
+				}
+				throw err;
+			}
 			budget.assertOutcome();
 			budget.stage = "recovery";
 			if (err instanceof PiServedIdentityError) {
@@ -6833,6 +6860,7 @@ export function registerPiContextHandler(
 			}
 			if (err instanceof PiLkgAdmissionReplay && sessionIdForError) {
 				budget.assertOutcome();
+				assertPiTagSnapshotReady(lkgOptions.db, sessionIdForError);
 				// A queued tag-number repair uses its durable database row to keep
 				// replaying the saved request until a rebuild may change old bytes.
 				// It is not a failure to get SQLite's writer. Only replay caused by
@@ -6936,7 +6964,8 @@ export function registerPiContextHandler(
 									}),
 							},
 						);
-						const drops = getTagsBySession(
+						assertPiTagSnapshotReady(lkgOptions.db, sessionIdForError);
+						const drops = getPiTagSnapshotView(
 							lkgOptions.db,
 							sessionIdForError,
 						).filter((tag) => tag.status === "dropped");
@@ -7016,6 +7045,7 @@ export function registerPiContextHandler(
 						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); refusing unreduced ${rawMessageCount}-message input`,
 					);
 				} catch (replayError) {
+					if (replayError instanceof PiTagHydrationError) throw replayError;
 					budget.assertOutcome();
 					if (replayError instanceof DegradedPassRefusalError)
 						throw replayError;
@@ -11764,6 +11794,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	cancelPiTagSnapshotSession(sessionId);
 	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);
 	clearPiUpperReclaimSession(sessionId);

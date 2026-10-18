@@ -2,7 +2,6 @@ import { expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serialize } from "node:v8";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
@@ -12,6 +11,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
+import {
+	decodePiHydrationOperation,
+	encodePiHydrationOperation,
+} from "./tag-snapshot-codec-pi";
 import {
 	createPiTagSnapshotCandidate,
 	getPiTagSnapshotView,
@@ -348,9 +351,11 @@ it("worker rejects memory overflow crashes and unsupported schemas without a can
 			"INSERT INTO schema_migrations (version, description, applied_at) VALUES (999, 'unsupported', 0)",
 		);
 		const unsupported = startPiTagSnapshotWorker(requestFor(path));
-		await expect(unsupported.result).rejects.toThrow(
-			"newer than this build supports",
-		);
+		await expect(unsupported.result).rejects.toMatchObject({
+			name: "FailClosedBlockingError",
+			code: "FAIL_CLOSED_BLOCKING",
+			reason: { kind: "schema_fence", persistedVersion: 999 },
+		});
 		await unsupported.released;
 	} finally {
 		close();
@@ -406,13 +411,14 @@ it("packet consumer rejects missing duplicate disordered wrong-lifetime and prem
 		}),
 	).rejects.toThrow("generation mismatch");
 	const malformed = createPiHydrationPacketConsumer(request);
-	const bytes = serialize({ type: "row", value: {} });
+	const bytes = encodePiHydrationOperation({ type: "row", value: {} as never });
 	await expect(
 		malformed.consume({
 			...base,
 			type: "packet",
 			stream: "tags",
 			bytes: new Uint8Array(bytes).buffer,
+			byteLength: bytes.length,
 			rows: 1,
 		}),
 	).rejects.toThrow("frame");
@@ -504,4 +510,79 @@ it("hydration accepts an unchanged generation", async () => {
 	} finally {
 		close();
 	}
+});
+
+it("packet codec preserves every SQLite scalar and mapper own field", () => {
+	const row = {
+		id: 1,
+		tag_number: -0,
+		type: undefined,
+		message_id: "\ud800💾",
+		tool_owner_message_id: Infinity,
+		entry_fingerprint: new Uint8Array([0, 128, 255]),
+		extra: NaN,
+	};
+	const operation = { type: "row" as const, value: row as never };
+	const decoded = decodePiHydrationOperation(
+		encodePiHydrationOperation(operation),
+	);
+	expect(decoded).toEqual(operation);
+	expect(Object.keys((decoded as typeof operation).value)).toEqual(
+		Object.keys(row),
+	);
+	expect(
+		Object.is(
+			(decoded as unknown as { value: typeof row }).value.tag_number,
+			-0,
+		),
+	).toBe(true);
+});
+
+it("hydration discards late packets after connection reopen", async () => {
+	const old = requestFor("unused.db");
+	const current = {
+		...old,
+		connectionEpoch: old.connectionEpoch + 1,
+		sessionEpoch: old.sessionEpoch + 1,
+	};
+	const consumer = createPiHydrationPacketConsumer(current);
+	await expect(
+		consumer.consume({
+			...old,
+			type: "end",
+			stream: "tags",
+			rows: 0,
+			sequence: 0,
+			generation: { revision: "0", durable: 0 },
+		}),
+	).rejects.toThrow("lifetime mismatch");
+});
+
+it("hydration accepts packets for the current lifetime", async () => {
+	const request = requestFor("unused.db");
+	const consumer = createPiHydrationPacketConsumer(request);
+	const envelope = { ...request, generation: { revision: "0", durable: 0 } };
+	await consumer.consume({
+		...envelope,
+		type: "end",
+		stream: "tags",
+		rows: 0,
+		sequence: 0,
+	});
+	await consumer.consume({
+		...envelope,
+		type: "end",
+		stream: "fallback",
+		rows: 0,
+		sequence: 1,
+	});
+	const candidate = await consumer.consume({
+		...envelope,
+		type: "done",
+		sequence: 2,
+		maxReadTransactionMs: 0,
+		packetBytes: 0,
+		packetCount: 0,
+	});
+	expect(candidate?.tags).toEqual([]);
 });

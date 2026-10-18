@@ -1,7 +1,8 @@
 import { setImmediate as yieldImmediate } from "node:timers/promises";
-import { deserialize } from "node:v8";
 import { Worker } from "node:worker_threads";
+import { createFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
 import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";
+import { decodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	createPiTagSnapshotCandidate,
 	type PiFallbackTagRow,
@@ -21,7 +22,11 @@ export interface PiHydrationRequest {
 	sessionEpoch: number;
 	jobId: number;
 	/** Internal fixture controls; production callers leave these unset. */
-	test?: { pageDelayMs?: number; crash?: "before-end" | "after-end" };
+	test?: {
+		openDelayMs?: number;
+		pageDelayMs?: number;
+		crash?: "before-end" | "after-end";
+	};
 }
 
 export type PiHydrationStream = "tags" | "fallback";
@@ -37,6 +42,7 @@ export type PiHydrationMessage = {
 			type: "packet";
 			stream: PiHydrationStream;
 			bytes: ArrayBuffer;
+			byteLength: number;
 			rows: number;
 	  }
 	| { type: "end"; stream: PiHydrationStream; rows: number }
@@ -46,7 +52,13 @@ export type PiHydrationMessage = {
 			packetCount: number;
 			packetBytes: number;
 	  }
-	| { type: "failed"; reason: string; code: "failed" | "stale" | "schema" }
+	| {
+			type: "failed";
+			reason: string;
+			code: "failed" | "stale" | "schema" | "open";
+			persistedVersion?: number;
+			supportedVersion?: number;
+	  }
 );
 
 export type PiHydrationOperation =
@@ -118,6 +130,20 @@ export function createPiHydrationPacketConsumer(
 				return fail("packet sequence or lifetime mismatch");
 			if (message.type === "failed") {
 				rejected = true;
+				if (message.code === "open")
+					throw createFailClosedBlockingError({
+						kind: "storage_failure",
+						cause: `Pi tag hydration: ${message.reason}`,
+					});
+				if (message.code === "schema")
+					throw createFailClosedBlockingError(
+						{
+							kind: "schema_fence",
+							persistedVersion: message.persistedVersion ?? 0,
+							supportedVersion: message.supportedVersion ?? 0,
+						},
+						{ cause: new PiTagHydrationError(message.reason, "schema") },
+					);
 				throw new PiTagHydrationError(message.reason, message.code);
 			}
 			if (
@@ -149,6 +175,8 @@ export function createPiHydrationPacketConsumer(
 			if (
 				!(message.bytes instanceof ArrayBuffer) ||
 				message.bytes.byteLength > 65_536 ||
+				message.byteLength <= 0 ||
+				message.byteLength > message.bytes.byteLength ||
 				message.rows > 256
 			)
 				return fail("packet exceeds credit limits");
@@ -162,7 +190,7 @@ export function createPiHydrationPacketConsumer(
 				packetRows++;
 			};
 			try {
-				const bytes = new Uint8Array(message.bytes);
+				const bytes = new Uint8Array(message.bytes, 0, message.byteLength);
 				const view = new DataView(message.bytes);
 				for (let offset = 0; offset < bytes.length; ) {
 					if (offset + 4 > bytes.length) return fail("truncated frame length");
@@ -170,9 +198,9 @@ export function createPiHydrationPacketConsumer(
 					offset += 4;
 					if (length === 0 || offset + length > bytes.length)
 						return fail("truncated frame");
-					const operation = deserialize(
+					const operation = decodePiHydrationOperation(
 						bytes.subarray(offset, offset + length),
-					) as PiHydrationOperation;
+					);
 					offset += length;
 					if (operation.type === "row") {
 						if (fragment) return fail("whole row inside fragments");
@@ -288,6 +316,7 @@ export function startPiTagSnapshotWorker(
 	);
 	let exited = false;
 	let settled = false;
+	let consumption = Promise.resolve();
 	let complete:
 		| {
 				candidate: PiTagSnapshotCandidate;
@@ -305,7 +334,7 @@ export function startPiTagSnapshotWorker(
 	const result = new Promise<NonNullable<typeof complete>>(
 		(resolve, reject) => {
 			rejectResult = reject;
-			worker.on("message", async (message: PiHydrationMessage) => {
+			const consumeMessage = async (message: PiHydrationMessage) => {
 				if (settled) return;
 				try {
 					const candidate = await consumer.consume(message);
@@ -323,15 +352,33 @@ export function startPiTagSnapshotWorker(
 						};
 					} else {
 						await options.beforeAck?.(message);
-						if (!settled)
-							worker.postMessage({ type: "ack", sequence: message.sequence });
+						if (!settled) {
+							// Transfer message.bytes back with the ACK so the worker can
+							// refill it instead of allocating a new buffer on every packet.
+							const bytes =
+								message.type === "packet" ? message.bytes : undefined;
+							worker.postMessage(
+								{ type: "ack", sequence: message.sequence, bytes },
+								bytes ? [bytes] : [],
+							);
+						}
 					}
 				} catch (error) {
 					abort(error instanceof Error ? error : new Error(String(error)));
 				}
+			};
+			worker.on("message", (message: PiHydrationMessage) => {
+				consumption = consumeMessage(message);
 			});
 			worker.once("error", (error) => abort(error));
-			worker.once("exit", (code) => {
+			worker.once("exit", async (code) => {
+				// Node may drain the final message during exit notification. Wait
+				// for its async consumer before deciding whether completion arrived.
+				await consumption;
+				// A finished worker must not retain the consumer's candidate arrays,
+				// decoded packets or the old snapshot captured for identity reuse.
+				worker.removeAllListeners("message");
+				worker.removeAllListeners("error");
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
@@ -350,7 +397,7 @@ export function startPiTagSnapshotWorker(
 		settled = true;
 		clearTimeout(timer);
 		rejectResult(error);
-		if (!exited) void worker.terminate();
+		if (!exited) void worker.terminate().catch(() => {});
 	}
 	const timer = inRootAsyncContext(() =>
 		setTimeout(
@@ -360,5 +407,8 @@ export function startPiTagSnapshotWorker(
 	);
 	timer.unref();
 	worker.unref();
+	// A prewarm can be cancelled before its owner joins the result. Observe
+	// that background rejection immediately; awaiting result still rejects.
+	void result.catch(() => {});
 	return { result, released, cancel: abort };
 }
