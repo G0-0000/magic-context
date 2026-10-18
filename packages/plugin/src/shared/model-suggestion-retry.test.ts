@@ -40,6 +40,18 @@ function createArgs(model?: { providerID: string; modelID: string }) {
 }
 
 describe("promptSyncWithModelSuggestionRetry", () => {
+    test("synchronous prompt completion retains await semantics with cancellation", async () => {
+        const prompt = mock(() => undefined);
+        const abort = mock(async () => ({}));
+
+        await promptSyncWithModelSuggestionRetry(createClient(prompt, abort), createArgs(), {
+            signal: new AbortController().signal,
+        });
+
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(abort).not.toHaveBeenCalled();
+    });
+
     test("primary succeeds, no fallback iteration", async () => {
         const prompt = mock(async () => ({}));
         const client = createClient(prompt);

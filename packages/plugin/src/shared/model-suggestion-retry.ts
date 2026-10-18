@@ -250,6 +250,8 @@ function externalAbortMessage(signal: AbortSignal): string {
 
 /** A carrier may ignore cancellation; stop waiting without trusting it to reject. */
 export function raceWithSignal<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+    // Match await's handling of synchronous completion as well as promises.
+    work = Promise.resolve(work);
     if (!signal) return work;
     return new Promise<T>((resolve, reject) => {
         const abort = () => reject(new Error(externalAbortMessage(signal)));

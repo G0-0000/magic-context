@@ -88,7 +88,8 @@ import {
 export const VERIFY_BATCH_SIZE = 5;
 // Completed nightly runs spent 22,103,259 prompt tokens for 295 banked verdicts
 // (~74,926 each). Round up to 100k per input, with no spare allocation for a short batch.
-// IDs in one child share this envelope; provider usage is not attributable per ID.
+// All memories checked in one verifier child session share its batch token budget;
+// provider usage reports cannot attribute tokens to individual memories.
 export const VERIFY_TOKENS_PER_MEMORY = 100_000;
 export const VERIFY_RUN_TOKEN_BUDGET = 2_500_000;
 export const VERIFY_RUN_SLICE_MS = 240_000;

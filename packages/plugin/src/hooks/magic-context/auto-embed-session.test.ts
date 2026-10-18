@@ -348,7 +348,8 @@ it("passive sweep catches never-embedded chunks even in an inactive session", as
 it("passive sweep replaces old-model vectors after an active context pass", async () => {
     const { db, pass, register, coverage } = fixture(2);
     register("voyage-new");
-    // An existing drain owns admission while this pass records session activity.
+    // Simulate an embedding run already in progress so pass() records activity
+    // without starting another run before the passive sweep below.
     embedRunStateBySession.set(active, new AbortController());
     pass();
     embedRunStateBySession.delete(active);
