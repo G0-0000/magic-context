@@ -985,8 +985,23 @@ describe("OpenCode 2 hidden child completion", () => {
                 [HIDDEN_HISTORIAN_AGENT]: ["read"],
                 [HIDDEN_DREAMER_AGENT]: ["read"],
                 [HIDDEN_CURATE_AGENT]: ["ctx_memory"],
-                "dreamer-memory-mapper": ["read", "grep", "glob"],
-                "dreamer-primer-investigator": ["read", "grep", "glob", "ctx_search"],
+                "dreamer-memory-mapper": [
+                    "read",
+                    "grep",
+                    "glob",
+                    "aft_outline",
+                    "aft_zoom",
+                    "aft_search",
+                ],
+                "dreamer-primer-investigator": [
+                    "read",
+                    "grep",
+                    "glob",
+                    "aft_outline",
+                    "aft_zoom",
+                    "aft_search",
+                    "ctx_search",
+                ],
                 "dreamer-retrospective": ["ctx_search"],
             };
             expect(agent.permissions).toEqual([

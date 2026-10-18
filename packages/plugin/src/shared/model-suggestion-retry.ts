@@ -248,6 +248,21 @@ function externalAbortMessage(signal: AbortSignal): string {
     return `prompt aborted by external signal${reason instanceof Error && /^lease_(?:lost|expired):/.test(reason.message) ? `: ${reason.message}` : ""}`;
 }
 
+/** A carrier may ignore cancellation; stop waiting without trusting it to reject. */
+export function raceWithSignal<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return work;
+    return new Promise<T>((resolve, reject) => {
+        const abort = () => reject(new Error(externalAbortMessage(signal)));
+        if (signal.aborted) {
+            work.catch(() => {});
+            abort();
+            return;
+        }
+        signal.addEventListener("abort", abort, { once: true });
+        work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+}
+
 async function promptWithTimeout(
     client: Client,
     args: PromptArgs,
@@ -273,10 +288,13 @@ async function promptWithTimeout(
 
     try {
         const request = { ...args, signal: controller.signal };
-        if (transport) await transport(request);
+        if (transport) await raceWithSignal(transport(request), controller.signal);
         else {
             if (!client) throw new Error("Hidden completion transport is unavailable");
-            await client.session.prompt(request as Parameters<typeof client.session.prompt>[0]);
+            await raceWithSignal<unknown>(
+                client.session.prompt(request as Parameters<typeof client.session.prompt>[0]),
+                controller.signal,
+            );
         }
     } catch (error) {
         if (signal?.aborted) {
@@ -676,7 +694,7 @@ async function attemptAndValidate<TOutput, TValidated>(
 
     let output: TOutput;
     try {
-        output = await options.fetchOutput(args, attempt);
+        output = await raceWithSignal(options.fetchOutput(args, attempt), options.signal);
     } catch (error) {
         throw {
             error,

@@ -112,6 +112,9 @@ export interface MapMemoriesArgs {
 }
 
 export interface MapMemoriesResult {
+    failure?: unknown;
+    failureStage?: "child-start" | "prompt" | "apply";
+    deferred?: boolean;
     mapped: number;
     independent: number;
     /** Batches whose mappings were durably committed, not merely attempted. */
@@ -134,6 +137,8 @@ interface MapBatchOutcome {
     requeue?: MapMemoryInput[];
     /** Interrupted batches may still bank closed per-memory decisions. */
     failure?: {
+        error?: unknown;
+        stage?: "child-start" | "prompt" | "apply";
         class: MapBatchFailureClass;
         elapsedMs: number;
     };
@@ -328,7 +333,10 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
     const inputs = allInputs.filter((memory) => !isDeferred(memory, retries));
     result.remaining = allInputs.length;
     result.complete = result.remaining === 0;
-    if (inputs.length === 0) return result;
+    if (inputs.length === 0) {
+        if (allInputs.length > 0) result.deferred = true;
+        return result;
+    }
 
     const batches: Array<{ inputs: MapMemoryInput[]; isOmissionRetry: boolean }> = [];
     for (let i = 0; i < inputs.length; i += MAP_BATCH_SIZE) {
@@ -367,6 +375,10 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
             const batch = batches[i];
             if (!batch) break;
             const outcome = await mapOneBatch(args, batch.inputs, sliceMs, abortController.signal);
+            if (outcome.failure) {
+                result.failure = outcome.failure.error;
+                result.failureStage = outcome.failure.stage;
+            }
             const committed = outcome.mapped + outcome.independent;
             runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
                 const committedIds = new Set(outcome.committedIds);
@@ -460,6 +472,7 @@ async function mapOneBatch(
     const startedAt = Date.now();
     let budgetFinalized = false;
     let failedCompletion: HiddenCompletion | undefined;
+    let stage: "child-start" | "prompt" | "apply" = "child-start";
     const onBudgetUpdate: NonNullable<MapMemoriesArgs["onBudgetUpdate"]> = (state) => {
         budgetFinalized ||= state.finalizeFired;
         args.onBudgetUpdate?.(state);
@@ -484,6 +497,9 @@ async function mapOneBatch(
                 fallbackModels: args.fallbackModels,
                 timeoutMs: sliceMs,
                 signal,
+                onOpened: () => {
+                    stage = "prompt";
+                },
                 onFailureOutput: (completion) => {
                     failedCompletion = completion;
                 },
@@ -497,6 +513,7 @@ async function mapOneBatch(
                 status: "completed",
                 messages: run.completion.messages ?? [],
             });
+            stage = "apply";
             const outcome = await applyParsedBatchMappings(
                 args,
                 batch,
@@ -536,6 +553,7 @@ async function mapOneBatch(
         );
         agentSessionId = typeof created?.id === "string" ? created.id : null;
         if (!agentSessionId) throw new Error("Could not create map-memories session.");
+        stage = "prompt";
 
         const run = await shared.promptSyncWithValidatedOutputRetry(
             client,
@@ -585,6 +603,7 @@ async function mapOneBatch(
         promptSettled = true;
 
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
+        stage = "apply";
         const outcome = await applyParsedBatchMappings(
             args,
             batch,
@@ -635,6 +654,8 @@ async function mapOneBatch(
         return {
             ...outcome,
             failure: {
+                error,
+                stage,
                 class: isTimeoutClassError(error) ? "timeout" : "other",
                 elapsedMs: Date.now() - startedAt,
             },
