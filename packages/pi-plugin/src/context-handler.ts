@@ -5967,8 +5967,7 @@ export function registerPiContextHandler(
 					bindingEntryIdByRef.get(message),
 			).map((entryId) => entryId ?? undefined);
 			const thinkingBindingRecoveryApplied =
-				bindingStripOrder === "end" &&
-				(!result.signedPrefixRewritten || !result.prefixBustPermitted)
+				bindingStripOrder === "end"
 					? applyPiThinkingBindingRecovery({
 							db: options.db,
 							sessionId,
@@ -5977,6 +5976,11 @@ export function registerPiContextHandler(
 							provider: lkgProviderKey ?? undefined,
 							model: ctx.model?.id,
 							endOfPassOrder: true,
+							// A rebuild already records any new omissions it needs, but
+							// must also replay saved omissions on every model. The proactive
+							// stripper below does nothing for non-prefix-bound models.
+							replayOnly:
+								result.signedPrefixRewritten && result.prefixBustPermitted,
 						})
 					: startOfPassBindingRecovery;
 			if (
@@ -9342,8 +9346,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// permission arrives, before applying drops, so it cannot hide saved changes
 	// that later requests will replay from the database.
 	const recoveryNormalized =
-		!!args.recoveryPrefix &&
-		(isCacheBustingPass || identityRebuild);
+		!!args.recoveryPrefix && (isCacheBustingPass || identityRebuild);
 	const taggingView =
 		args.recoveryPrefix && !recoveryNormalized
 			? mutationView.filter(
