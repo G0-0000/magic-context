@@ -69,6 +69,16 @@ function message(text: string, input = 0) {
     };
 }
 
+function toolOnlyHistory(whitespace = false) {
+    return Array.from({ length: 8 }, (_, index) => ({
+        info: { role: "assistant", id: `tool-${index}`, finish: "tool-calls" },
+        parts: [
+            { type: "tool", state: { status: "completed" } },
+            ...(whitespace ? [{ type: "text", text: " \n\t " }] : []),
+        ],
+    }));
+}
+
 test("verify allocates at most 100k prompt tokens per input including a short batch", () => {
     expect(VERIFY_TOKENS_PER_MEMORY).toBe(100_000);
     expect(verifyBatchTokenBudget(5, 2_500_000)).toBe(500_000);
@@ -404,3 +414,113 @@ test("verify run slice is shared across batches, not renewed after progress", as
         f.db.close();
     }
 });
+
+for (const forceBroad of [false, true]) {
+    for (const whitespace of [false, true]) {
+        test(`${forceBroad ? "verify-broad" : "verify"} hidden host falls back from ${whitespace ? "whitespace-only" : "tool-only"} history to completion text`, async () => {
+            const f = fixture(1);
+            let attempts = 0;
+            const text = `<verify><verified id="${f.ids[0]}" files="src/fact.ts"/></verify>`;
+            try {
+                const result = await runVerify({
+                    ...f.args,
+                    forceBroad,
+                    hiddenCompletionExecutor: {
+                        capabilities: { tools: true },
+                        open: async () => ({ id: "separate-text-child" }),
+                        attempt: async () => {
+                            attempts++;
+                        },
+                        collect: async () => ({
+                            text,
+                            messages: toolOnlyHistory(whitespace),
+                            usage: { input: 100, output: 10 },
+                        }),
+                        close: async () => {},
+                    } as never,
+                });
+                expect(result).toMatchObject({ verified: 1, remaining: 0, complete: true });
+                expect(attempts).toBe(1);
+                expect(
+                    getMemoryVerifications(f.db, f.ids).get(f.ids[0])?.verifiedAt,
+                ).toBeGreaterThan(1_000);
+            } finally {
+                f.db.close();
+            }
+        });
+    }
+}
+
+test("verify interrupted hidden host recovers completion text behind tool-only history", async () => {
+    const f = fixture(2);
+    const text = `<verify><verified id="${f.ids[0]}" files="src/fact.ts"/>`;
+    try {
+        const result = await runVerify({
+            ...f.args,
+            hiddenCompletionExecutor: {
+                capabilities: { tools: true },
+                open: async () => ({ id: "interrupted-separate-text" }),
+                attempt: async () => {
+                    throw new DreamTokenBudgetExceeded("interrupted-separate-text", 200_000);
+                },
+                collect: async () => ({
+                    text,
+                    messages: toolOnlyHistory(),
+                    usage: { input: 200_000, output: 10 },
+                }),
+                close: async () => {},
+            } as never,
+        });
+        expect(result).toMatchObject({
+            verified: 1,
+            remaining: 1,
+            complete: false,
+            stopReason: "token-budget",
+        });
+        const stored = getMemoryVerifications(f.db, f.ids);
+        expect(stored.get(f.ids[0])?.verifiedAt).toBeGreaterThan(1_000);
+        expect(stored.get(f.ids[1])?.verifiedAt).toBe(1_000);
+    } finally {
+        f.db.close();
+    }
+});
+
+for (const host of ["hidden", "sdk"] as const) {
+    test(`verify ${host} host reports no output when only whitespace remains`, async () => {
+        const f = fixture(1);
+        const messages = toolOnlyHistory(true);
+        const transport =
+            host === "hidden"
+                ? {
+                      hiddenCompletionExecutor: {
+                          capabilities: { tools: true },
+                          open: async () => ({ id: "empty-hidden" }),
+                          attempt: async () => {},
+                          collect: async () => ({
+                              text: " \n\t ",
+                              messages,
+                              usage: { input: 10, output: 0 },
+                          }),
+                          close: async () => {},
+                      },
+                  }
+                : {
+                      client: {
+                          session: {
+                              create: async () => ({ data: { id: "empty-sdk" } }),
+                              prompt: async () => ({}),
+                              messages: async () => ({ data: messages }),
+                              delete: async () => ({}),
+                          },
+                      },
+                  };
+        try {
+            await expect(
+                runVerify({ ...f.args, parentSessionId: "fixture-parent", ...transport } as never),
+            ).rejects.toThrow("verify returned no output");
+            expect(getMemoryVerifications(f.db, f.ids).get(f.ids[0])?.verifiedAt).toBe(1_000);
+        } finally {
+            f.db.close();
+        }
+    });
+}

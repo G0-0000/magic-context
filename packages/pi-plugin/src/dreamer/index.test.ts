@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -17,7 +17,10 @@ import { getDreamRuns } from "@magic-context/core/features/magic-context/dreamer
 import { getTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { leaseKeyFor } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory";
-import { getMemoryVerifications } from "@magic-context/core/features/magic-context/memory/storage-memory-verifications";
+import {
+	getMemoryVerifications,
+	recordMemoryVerifications,
+} from "@magic-context/core/features/magic-context/memory/storage-memory-verifications";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import {
 	closeDatabase,
@@ -31,6 +34,7 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { __setPiHarnessKindForTesting } from "../pi-harness-kind";
+import { ZEN_FREE_TIER_FAILURE } from "../pi-zen-free-tier";
 import { PiSubagentRunner } from "../subagent-runner";
 import {
 	__test,
@@ -2221,4 +2225,135 @@ test("Pi verify facade preserves complete verdicts before a budget interruption"
 	expect(
 		JSON.stringify(await client.session.messages({ path: { id: child.id } })),
 	).toContain('<verify><verified id=\\"1\\"');
+});
+
+for (const task of ["verify", "verify-broad"] as const) {
+	for (const whitespace of [false, true]) {
+		test(`Pi ${task} host verifies runner text behind ${whitespace ? "whitespace-only" : "tool-only"} streamed messages`, async () => {
+			db = createDb();
+			const directory = createTestTempDirFromPath(
+				join(tmpdir(), "mc-pi-verify-separate-text-"),
+			);
+			const identity = `git:pi-${task}-${whitespace ? "whitespace" : "tools"}`;
+			mkdirSync(join(directory, "src"));
+			writeFileSync(
+				join(directory, "src/fact.ts"),
+				"export const backingFact = 1;\n",
+			);
+			const memory = insertMemory(db, {
+				projectPath: identity,
+				category: "ARCHITECTURE",
+				content: "backingFact is exported by src/fact.ts.",
+			});
+			recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
+			const text = `<verify><verified id="${memory.id}" files="src/fact.ts"/></verify>`;
+			let attempts = 0;
+			__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+			__test.setPiSubagentRunnerFactory(
+				() =>
+					({
+						run: async () => {
+							attempts++;
+							return {
+								ok: true,
+								assistantText: text,
+								meta: {
+									mappingMessages: Array.from({ length: 8 }, (_, i) => ({
+										role: "assistant",
+										content: [
+											{
+												type: "toolCall",
+												id: `read-${i}`,
+												name: "read",
+												arguments: {},
+											},
+											...(whitespace ? [{ type: "text", text: " \n\t " }] : []),
+										],
+									})),
+								},
+							};
+						},
+					}) as never,
+			);
+			const opts = dreamerOptions({
+				database: db,
+				projectIdentity: identity,
+				projectDir: directory,
+			});
+			try {
+				registerPiDreamerProject(opts);
+				const result = await runPiDreamForProject(
+					identity,
+					task,
+					opts.registrationOwner,
+				);
+				expect(result.failed).toEqual([]);
+				expect(result.ran).toContain(task);
+				expect(attempts).toBe(1);
+				expect(
+					getMemoryVerifications(db, [memory.id]).get(memory.id)?.verifiedAt,
+				).toBeGreaterThan(1_000);
+			} finally {
+				unregisterPiDreamerProject(identity, opts.registrationOwner);
+				rmSync(directory, { recursive: true, force: true });
+			}
+		});
+	}
+}
+
+test("Pi verify never preserves a classified Zen free-tier refusal as output", async () => {
+	db = createDb();
+	let captured: CapturedDreamClient | null = null;
+	__test.setStartDreamScheduleTimerFactory(async (registration) => {
+		captured = registration.client as unknown as CapturedDreamClient;
+		return mock(() => {});
+	});
+	__test.setPiSubagentRunnerFactory(
+		() =>
+			({
+				run: async () => ({
+					ok: false,
+					reason: "provider_error",
+					error:
+						"FreeTierError: OpenCode's free tier can only be used from within OpenCode",
+					assistantText:
+						'<verify><verified id="1" files="src/fact.ts"/></verify>',
+					meta: {
+						failureClass: ZEN_FREE_TIER_FAILURE,
+						mappingMessages: [
+							{
+								role: "assistant",
+								content: [
+									{
+										type: "toolCall",
+										id: "refused-tool",
+										name: "read",
+										arguments: {},
+									},
+								],
+							},
+						],
+					},
+				}),
+			}) as never,
+	);
+	registerPiDreamerProject(
+		dreamerOptions({
+			database: db,
+			projectIdentity: "git:pi-verify-free-tier",
+		}),
+	);
+	const client = requireCapturedClient(captured);
+	const child = (await client.session.create({
+		body: { title: "magic-context-dream-verify" },
+	})) as { id: string };
+	await expect(
+		client.session.prompt({
+			path: { id: child.id },
+			body: { parts: [{ text: "fixture" }] },
+		}),
+	).rejects.toThrow("FreeTierError");
+	expect(await client.session.messages({ path: { id: child.id } })).toEqual({
+		data: [],
+	});
 });

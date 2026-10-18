@@ -23,6 +23,7 @@ import {
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
+import { extractLatestAssistantText } from "@magic-context/core/shared/assistant-message-extractor";
 import { log } from "@magic-context/core/shared/logger";
 import type { ModelHarness } from "@magic-context/core/shared/model-resolution";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
@@ -30,6 +31,7 @@ import type { CompletedSubagentToolCall } from "@magic-context/core/shared/subag
 import { HiddenAgentStepLimit } from "@magic-context/core/v2/hooks/hidden-child";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { isPiModelRegistered } from "../model-chain-health";
+import { ZEN_FREE_TIER_FAILURE } from "../pi-zen-free-tier";
 import { PiSubagentRunner } from "../subagent-runner";
 import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
@@ -659,10 +661,12 @@ function createPiDreamerClient(
 				}
 				assertRegistrationOwnerActive();
 				const mappingMessages = result.meta?.mappingMessages;
+				const isVerification =
+					budgetTask === "verify" || budgetTask === "verify-broad";
 				const hasMemoryDecisions =
 					(budgetTask === "map-memories" ||
-						budgetTask === "verify" ||
-						budgetTask === "verify-broad") &&
+						(isVerification &&
+							result.meta?.failureClass !== ZEN_FREE_TIER_FAILURE)) &&
 					Array.isArray(mappingMessages);
 				if (hasMemoryDecisions) {
 					// Retain decisions before raising a step/timeout error; the shared
@@ -686,6 +690,21 @@ function createPiDreamerClient(
 									: [],
 							),
 						);
+					// Pi may retain only tool turns while its runner keeps the final text separately.
+					if (
+						isVerification &&
+						result.ok &&
+						result.assistantText?.trim() &&
+						!dreamSession.messages.some((message) =>
+							extractLatestAssistantText([message])?.trim(),
+						)
+					) {
+						dreamSession.messages.push(
+							makeMessage("assistant", [
+								{ type: "text", text: result.assistantText },
+							]),
+						);
+					}
 				}
 				if (!result.ok) {
 					if (result.reason === "token_budget") {

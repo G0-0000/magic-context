@@ -97,7 +97,7 @@ export function verifyBatchTokenBudget(size: number, configured?: number): numbe
     return Math.min(configured ?? Number.MAX_SAFE_INTEGER, size * VERIFY_TOKENS_PER_MEMORY);
 }
 
-function verifyAssistantText(messages: unknown[]): string {
+function verifyAssistantText(messages: unknown[]): string | null {
     const text = messages
         .filter(
             (m) =>
@@ -116,6 +116,7 @@ function verifyAssistantText(messages: unknown[]): string {
                     : ""),
         )
         .join("\n");
+    if (!text.trim()) return null;
     const start = text.lastIndexOf("<verify>");
     return start >= 0 ? text.slice(start) : text;
 }
@@ -465,8 +466,12 @@ async function verifyOneBatch(
                         text,
                     );
                     if (providerFailure) throw providerFailure;
+                    const manifest =
+                        verifyAssistantText(completion.messages ?? []) ??
+                        (text.trim() ? text : null);
+                    if (!manifest) throw new Error("verify returned no output");
                     return validateVerifyManifest(
-                        verifyAssistantText(completion.messages ?? []) || text,
+                        manifest,
                         new Set(batch.map((memory) => memory.id)),
                     );
                 },
@@ -608,7 +613,7 @@ async function verifyOneBatch(
             promptFailure?.failureClass === "provider_timeout" ||
             shared.isPromptTimeoutError(error);
         if (interrupted) {
-            const text = verifyAssistantText(messages) || failedCompletion?.text || "";
+            const text = verifyAssistantText(messages) ?? failedCompletion?.text ?? "";
             const recovered = parsePartialVerifyManifest(text, new Set(batch.map((m) => m.id)));
             const counts = await applyParsedVerifyManifest(
                 args,
