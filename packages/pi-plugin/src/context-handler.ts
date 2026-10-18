@@ -9336,12 +9336,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		...message,
 		parts: message.parts,
 	}));
-	// Storage recovery already sent these messages without §N§ reduction handles.
-	// Adding handles would invalidate the provider's cached bytes, so they wait
-	// for a prefix-busting fold or the declared tag-identity rebuild of that prefix.
+	// Storage recovery sent these messages without the §N§ message-number markers.
+	// Adding markers changes cached bytes, so wait for permission to rewrite the
+	// request or repair its tag identities. Release the recovery copy when that
+	// permission arrives, before applying drops, so it cannot hide saved changes
+	// that later requests will replay from the database.
 	const recoveryNormalized =
 		!!args.recoveryPrefix &&
-		(foldBustsServedPrefixThisPass || firstRenderBust || identityRebuild);
+		(isCacheBustingPass || identityRebuild);
 	const taggingView =
 		args.recoveryPrefix && !recoveryNormalized
 			? mutationView.filter(
