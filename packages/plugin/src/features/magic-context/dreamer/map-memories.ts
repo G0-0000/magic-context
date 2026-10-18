@@ -183,8 +183,8 @@ function isDeferred(memory: MapMemoryInput, retries: Record<string, MappingRetry
     return !!retry && retry.content === contentKey(memory) && retry.deferUntil > Date.now();
 }
 
-function assistantText(messages: unknown[]): string {
-    return messages
+function assistantText(messages: unknown[]): string | null {
+    const joined = messages
         .filter(
             (message) =>
                 isRecord(message) &&
@@ -203,6 +203,7 @@ function assistantText(messages: unknown[]): string {
                     : ""),
         )
         .join("\n");
+    return joined.trim() ? joined : null;
 }
 
 function currentManifest(text: string): string {
@@ -210,6 +211,31 @@ function currentManifest(text: string): string {
     // in the same session. Validate that document, not the earlier rejected one.
     const start = text.lastIndexOf("<mappings>");
     return start < 0 ? text : text.slice(start);
+}
+
+export function parseMapMemoriesCompletion(
+    text: string,
+    completion: { messages?: unknown[] },
+    expectedIds: ReadonlySet<number>,
+): ReturnType<typeof validateMapMemoriesManifest> {
+    return validateMapMemoriesManifest(
+        currentManifest(assistantText(completion.messages ?? []) || text),
+        expectedIds,
+    );
+}
+
+export function validateClientMapMemories(
+    messages: unknown[],
+    expectedIds: ReadonlySet<number>,
+): ReturnType<typeof validateMapMemoriesManifest> {
+    if (hasLengthCappedOutput(messages)) {
+        throw new Error("map-memories returned length-capped output");
+    }
+    const raw = assistantText(messages);
+    if (raw == null) {
+        throw new Error("map-memories returned no output");
+    }
+    return validateMapMemoriesManifest(currentManifest(raw), expectedIds);
 }
 
 function logBatchUsage(messages: unknown[], committed: number, startedAt: number): void {
@@ -488,8 +514,9 @@ async function mapOneBatch(
                     failedCompletion = completion;
                 },
                 parse: (text, completion) =>
-                    validateMapMemoriesManifest(
-                        currentManifest(assistantText(completion.messages ?? []) || text),
+                    parseMapMemoriesCompletion(
+                        text,
+                        completion,
                         new Set(batch.map((memory) => memory.id)),
                     ),
             });
@@ -569,17 +596,8 @@ async function mapOneBatch(
                         preferResponseOnMissingData: true,
                     });
                 },
-                validateOutput: (messages) => {
-                    if (hasLengthCappedOutput(messages)) {
-                        throw new Error("map-memories returned length-capped output");
-                    }
-                    const text = currentManifest(assistantText(messages));
-                    if (!text) throw new Error("map-memories returned no output");
-                    return validateMapMemoriesManifest(
-                        text,
-                        new Set(batch.map((memory) => memory.id)),
-                    );
-                },
+                validateOutput: (messages) =>
+                    validateClientMapMemories(messages, new Set(batch.map((memory) => memory.id))),
             },
         );
         promptSettled = true;
