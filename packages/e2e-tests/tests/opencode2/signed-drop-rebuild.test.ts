@@ -175,9 +175,18 @@ test("OC2 signed tool loop holds queued drops on a plain real-user pass until ct
 				.filter((part) => part.type === "thinking"),
 		).toEqual(Array.from({ length: 8 }, (_, n) => thinking(n + 1)));
 		expect(pending()).toContainEqual({ tag_id: tag });
-		expect(readPluginLog(host.env).slice(logOffset)).toContain(
-			"pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false",
-		);
+		// The plugin buffers log writes for up to half a second, so poll the part of
+		// the log written after this turn began instead of reading it once. An earlier
+		// pass of the tool loop can log the same line, so only the new part counts.
+		const holdLine =
+			"pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false";
+		let sinceTurn = "";
+		for (const deadline = Date.now() + 5_000; ; ) {
+			sinceTurn = readPluginLog(host.env).slice(logOffset);
+			if (sinceTurn.includes(holdLine) || Date.now() >= deadline) break;
+			await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+		}
+		expect(sinceTurn).toContain(holdLine);
 		// The public flush command grants the same permission as a genuine rebuild.
 		await client.session.command({
 			sessionID: session.id,
