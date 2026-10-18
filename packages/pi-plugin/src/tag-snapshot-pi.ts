@@ -382,6 +382,9 @@ export function createPiTagSnapshotCandidate(
 		if (estimatedBytes > byteLimit) reject("candidate memory limit exceeded");
 	};
 	return {
+		get estimatedBytes() {
+			return estimatedBytes;
+		},
 		appendTag(row: SnapshotTag) {
 			if (failed || tagsEnded) reject("tag packet after end or failure");
 			const previous = tags.at(-1);

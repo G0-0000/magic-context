@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serialize } from "node:v8";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
@@ -22,15 +23,22 @@ import {
 	readPiTagSnapshotRevision,
 	samePiTagSnapshotToken,
 } from "./tag-snapshot-pi";
+import {
+	createPiHydrationPacketConsumer,
+	type PiHydrationMessage,
+	type PiHydrationRequest,
+	startPiTagSnapshotWorker,
+} from "./tag-snapshot-worker-client-pi";
 
-function fixture() {
+function fixture(journalMode?: "WAL" | "DELETE") {
 	const root = createTestTempDirFromPath(join(tmpdir(), "pi-tag-hydration-"));
 	const path = join(root, "context.db");
 	const db = new Database(path);
 	initializeDatabase(db);
 	runMigrations(db);
+	if (journalMode) db.exec(`PRAGMA journal_mode = ${journalMode}`);
 	const foreign = new Database(path);
-	initializeDatabase(foreign);
+	if (journalMode !== "DELETE") initializeDatabase(foreign);
 	return {
 		db,
 		foreign,
@@ -222,6 +230,277 @@ it("candidate authority includes rollback-safe revisions, incarnation and destin
 		expect(
 			samePiTagSnapshotToken(token, { ...token, foreignRevision: after[1] }),
 		).toBe(false);
+	} finally {
+		close();
+	}
+});
+
+function requestFor(path: string): PiHydrationRequest {
+	return {
+		path,
+		sessionId: "s",
+		connectionEpoch: 1,
+		sessionEpoch: 1,
+		jobId: 1,
+	};
+}
+
+it("worker hydrates full active and fallback projections with bounded credited packets", async () => {
+	const { db, path, close } = fixture();
+	try {
+		seed(db);
+		const longName = "宽😀".repeat(30_000);
+		db.prepare("UPDATE tags SET tool_name = ? WHERE tag_number = 2").run(
+			longName,
+		);
+		const job = startPiTagSnapshotWorker(requestFor(path));
+		const result = await job.result;
+		await job.released;
+		expect(result.candidate.tags).toEqual(getTagsBySession(db, "s"));
+		expect(result.candidate.tags[0]?.toolName).toBe(longName);
+		expect(result.candidate.active).toEqual(
+			result.candidate.tags.filter((tag) => tag.status === "active"),
+		);
+		expect(result.candidate.fallback.map((tag) => tag.tag_number)).toEqual([
+			2, 8,
+		]);
+		expect(result.telemetry.packetCount).toBeGreaterThan(2);
+		expect(result.telemetry.maxReadTransactionMs).toBeGreaterThan(0);
+	} finally {
+		close();
+	}
+});
+
+it("worker releases read transactions before slow acknowledgments in WAL and rollback journal modes", async () => {
+	for (const mode of ["WAL", "DELETE"] as const) {
+		const { db, foreign, path, close } = fixture(mode);
+		try {
+			seed(db);
+			foreign.exec("PRAGMA busy_timeout = 10");
+			let writes = 0;
+			const job = startPiTagSnapshotWorker(requestFor(path), {
+				beforeAck: async () => {
+					if (writes++ === 0) {
+						foreign.exec(
+							"UPDATE tags SET status = 'dropped' WHERE tag_number = 8",
+						);
+						await new Promise((resolve) => setTimeout(resolve, 20));
+					}
+				},
+			});
+			await expect(job.result).rejects.toThrow("changed");
+			await job.released;
+			expect(writes).toBeGreaterThan(0);
+			expect(
+				getTagsBySession(db, "s").find((tag) => tag.tagNumber === 8)?.status,
+			).toBe("dropped");
+		} finally {
+			close();
+		}
+	}
+});
+
+it("worker rejects raw commits between streams even when shared revision and durable version stay equal", async () => {
+	const { db, path, close } = fixture();
+	const raw = new Database(path);
+	try {
+		seed(db);
+		let changed = false;
+		const job = startPiTagSnapshotWorker(requestFor(path), {
+			beforeAck: async () => {
+				if (!changed) {
+					changed = true;
+					raw.exec("UPDATE tags SET byte_size = 999 WHERE tag_number = 8");
+				}
+			},
+		});
+		await expect(job.result).rejects.toThrow("changed");
+		await job.released;
+		expect(
+			getTagsBySession(db, "s").find((tag) => tag.tagNumber === 8)?.byteSize,
+		).toBe(999);
+	} finally {
+		raw.close();
+		close();
+	}
+});
+
+it("worker rejects memory overflow crashes and unsupported schemas without a candidate", async () => {
+	const { db, path, close } = fixture();
+	try {
+		seed(db);
+		for (const crash of ["before-end", "after-end"] as const) {
+			const job = startPiTagSnapshotWorker({
+				...requestFor(path),
+				test: { crash },
+			});
+			await expect(job.result).rejects.toThrow(
+				crash === "before-end" ? "injected" : "exited",
+			);
+			await job.released;
+		}
+		const oversize = startPiTagSnapshotWorker(requestFor(path), {
+			byteLimit: 193,
+		});
+		await expect(oversize.result).rejects.toThrow("memory limit");
+		await oversize.released;
+		db.exec(
+			"INSERT INTO schema_migrations (version, description, applied_at) VALUES (999, 'unsupported', 0)",
+		);
+		const unsupported = startPiTagSnapshotWorker(requestFor(path));
+		await expect(unsupported.result).rejects.toThrow(
+			"newer than this build supports",
+		);
+		await unsupported.released;
+	} finally {
+		close();
+	}
+});
+
+it("packet consumer rejects missing duplicate disordered wrong-lifetime and premature completion packets", async () => {
+	const request = requestFor("unused.db");
+	const base = {
+		...request,
+		generation: { revision: "0", durable: 0 },
+		sequence: 0,
+	};
+	const end: PiHydrationMessage = {
+		...base,
+		type: "end",
+		stream: "tags",
+		rows: 0,
+	};
+	for (const mutation of [
+		{ sequence: 1 },
+		{ connectionEpoch: 2 },
+		{ sessionEpoch: 2 },
+		{ sessionId: "other" },
+		{ jobId: 2 },
+	]) {
+		const consumer = createPiHydrationPacketConsumer(request);
+		await expect(consumer.consume({ ...end, ...mutation })).rejects.toThrow(
+			"mismatch",
+		);
+	}
+	const duplicate = createPiHydrationPacketConsumer(request);
+	await duplicate.consume(end);
+	await expect(duplicate.consume(end)).rejects.toThrow("mismatch");
+	const premature = createPiHydrationPacketConsumer(request);
+	await expect(
+		premature.consume({
+			...base,
+			type: "done",
+			maxReadTransactionMs: 0,
+			packetBytes: 0,
+			packetCount: 0,
+		}),
+	).rejects.toThrow("before both streams");
+	const changed = createPiHydrationPacketConsumer(request);
+	await changed.consume(end);
+	await expect(
+		changed.consume({
+			...end,
+			sequence: 1,
+			stream: "fallback",
+			generation: { revision: "new:1", durable: 0 },
+		}),
+	).rejects.toThrow("generation mismatch");
+	const malformed = createPiHydrationPacketConsumer(request);
+	const bytes = serialize({ type: "row", value: {} });
+	await expect(
+		malformed.consume({
+			...base,
+			type: "packet",
+			stream: "tags",
+			bytes: new Uint8Array(bytes).buffer,
+			rows: 1,
+		}),
+	).rejects.toThrow("frame");
+});
+
+it("worker advances raw keysets across rejected legacy rows and rollback leaves one complete generation", async () => {
+	const { db, path, close } = fixture();
+	try {
+		const insert = db.prepare(
+			"INSERT INTO tags (session_id, tag_number, message_id, type, status, byte_size) VALUES ('s', ?, ?, 'message', 'active', ?)",
+		);
+		db.transaction(() => {
+			for (let n = 1; n <= 300; n++)
+				insert.run(n, `entry-${n}`, n < 290 ? "invalid" : 10);
+		})();
+		let rolledBack = false;
+		const job = startPiTagSnapshotWorker(requestFor(path), {
+			beforeAck: async () => {
+				if (!rolledBack) {
+					rolledBack = true;
+					db.exec("BEGIN; UPDATE tags SET byte_size = 99; ROLLBACK");
+				}
+			},
+		});
+		const { candidate } = await job.result;
+		await job.released;
+		expect(candidate.tags).toEqual(getTagsBySession(db, "s"));
+		expect(candidate.tags).toHaveLength(11);
+	} finally {
+		close();
+	}
+});
+
+it("worker deadline and cancellation wait for release and never return a candidate", async () => {
+	const { path, close } = fixture();
+	try {
+		const timedOut = startPiTagSnapshotWorker(
+			{ ...requestFor(path), test: { pageDelayMs: 500 } },
+			{ deadlineMs: 10 },
+		);
+		await expect(timedOut.result).rejects.toThrow("job deadline");
+		await timedOut.released;
+		const cancelled = startPiTagSnapshotWorker({
+			...requestFor(path),
+			test: { pageDelayMs: 500 },
+		});
+		cancelled.cancel();
+		await expect(cancelled.result).rejects.toThrow("cancelled");
+		await cancelled.released;
+	} finally {
+		close();
+	}
+});
+
+it("hydration rejects a foreign drop between streams", async () => {
+	const { db, foreign, path, close } = fixture();
+	try {
+		seed(db);
+		let committed = false;
+		const job = startPiTagSnapshotWorker(requestFor(path), {
+			beforeAck: async (message) => {
+				if (message.type === "end" && message.stream === "tags") {
+					foreign.exec(
+						"UPDATE tags SET status = 'dropped' WHERE tag_number = 8",
+					);
+					committed = true;
+				}
+			},
+		});
+		await expect(job.result).rejects.toThrow("changed");
+		await job.released;
+		expect(committed).toBe(true);
+		expect(
+			getTagsBySession(foreign, "s").find((tag) => tag.tagNumber === 8)?.status,
+		).toBe("dropped");
+	} finally {
+		close();
+	}
+});
+
+it("hydration accepts an unchanged generation", async () => {
+	const { db, path, close } = fixture();
+	try {
+		seed(db);
+		const job = startPiTagSnapshotWorker(requestFor(path));
+		const { candidate } = await job.result;
+		await job.released;
+		expect(candidate.tags).toEqual(getTagsBySession(db, "s"));
 	} finally {
 		close();
 	}
