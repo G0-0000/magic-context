@@ -2353,16 +2353,6 @@ export async function runPostTransformPhase(
             `m[0] HARD fold decision: reason=${m0MaterializeReason ?? foldDueDecision.reason ?? (foldExecutedThisPass ? "drift" : "soft_refresh")} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
     }
-    if (args.normalizeRecoveryTail && (foldBustsServedPrefixThisPass || firstRenderBust)) {
-        args.normalizeRecoveryTail();
-        args.tags = getTagsBySession(args.db, args.sessionId);
-        newTargets = protectNewTagMutations(
-            args.messages,
-            args.targets,
-            retainedThinking,
-            args.thinkingBindingRecoveryEnabledForModel === true,
-        );
-    }
     // Fold decision, cached-prefix capture and the m[1] soft refresh run above;
     // time precomputation and commit together so setup has no untimed stretch.
     logTransformTiming(
@@ -2486,6 +2476,19 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    // Keep recovery bytes until the shared permission allows a cache rewrite
+    // (for example, a user flush or pressure relief). Normalize before applying
+    // drops so the saved drop state and the request sent to the provider agree.
+    if (args.normalizeRecoveryTail && isCacheBustingPass) {
+        args.normalizeRecoveryTail();
+        args.tags = getTagsBySession(args.db, args.sessionId);
+        newTargets = protectNewTagMutations(
+            args.messages,
+            args.targets,
+            retainedThinking,
+            args.thinkingBindingRecoveryEnabledForModel === true,
+        );
+    }
     const reclaimDistance = isCacheBustingPass
         ? toolReclaimDistanceEntries(args.messages, args.targets)
         : [];
