@@ -557,7 +557,11 @@ async function main(): Promise<void> {
 			.subarray(logStart)
 			.toString("utf8")
 			.split("\n")
-			.filter((line) => line.includes(`[${fixture.sessionId}] transform:`));
+			.filter(
+				(line) =>
+					line.includes(`[${fixture.sessionId}] transform:`) &&
+					/decision=(execute|defer)\b/.test(line),
+			);
 		if (decisionLines.length !== reports.length)
 			throw new Error(
 				`Expected ${reports.length} transform decisions, read ${decisionLines.length}`,
