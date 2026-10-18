@@ -84,6 +84,7 @@ import {
     checkCompartmentTrigger,
     getProactiveCompartmentTriggerPercentage,
 } from "./compartment-trigger";
+import { recordCompartmentTriggerError } from "./compartment-trigger-error";
 import {
     type CtxReduceAvailabilityVerdict,
     primeCtxReduceSpawnPermission,
@@ -165,6 +166,7 @@ import {
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import { noteTransformPassForExactOrdinalReads } from "./raw-exact-ordinal-read";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
@@ -2152,6 +2154,11 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const ownerRatio = sessionDecisionCalibration(db, sessionId).proseRatio;
+        // A background historian run may be waiting for a worker to read exact
+        // message ordinals for its boundary check. Count this pass against that
+        // wait so the run gives up after a bounded number of passes (see
+        // EXACT_ORDINAL_READ_DEFER_PASS_CAP). Reads nothing and changes no output.
+        noteTransformPassForExactOrdinalReads(sessionId);
         // Do not await after snapshotting usage, model limits and protected-tail
         // state: the trigger must use that same decision state. The earlier owner
         // preparation waited at most 250ms. Recheck its digest here; if a peer
@@ -2224,8 +2231,7 @@ export function createTransform(deps: TransformDeps) {
                     triggerBoundarySnapshot = triggerResult.boundarySnapshot;
                 }
             } catch (error) {
-                passOutcome.record("compartment-trigger-failure");
-                sessionLog(sessionId, "compartment trigger failed (non-fatal):", error);
+                recordCompartmentTriggerError(passOutcome, sessionId, error);
             }
             logTransformTiming(sessionId, "compartmentTrigger", tTrigger);
         }

@@ -468,6 +468,25 @@ export function countRawSessionMessageOrdinalsFromDb(db: Database, sessionId: st
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+let exactOrdinalScansOnThisThread = 0;
+
+/**
+ * @internal Calls in this thread to the two readers whose cost grows with the
+ * whole session: {@link readRawSessionMessageIdOrdinalsFromDb} and
+ * {@link readRawSessionMessageIdOrdinalsForRangeFromDb}. A worker thread loads
+ * its own copy of this module, so reads it runs are not counted here; a test
+ * can use that to prove a read happened on a worker and not on the serving
+ * thread.
+ */
+export function getExactOrdinalScansOnThisThreadForTest(): number {
+    return exactOrdinalScansOnThisThread;
+}
+
+/** @internal */
+export function resetExactOrdinalScansOnThisThreadForTest(): void {
+    exactOrdinalScansOnThisThread = 0;
+}
+
 /**
  * Read the canonical raw-message ordinal space without loading or parsing part rows.
  * Keep the ordering, summary predicate, and malformed-message behavior identical to
@@ -477,6 +496,7 @@ export function readRawSessionMessageIdOrdinalsFromDb(
     db: Database,
     sessionId: string,
 ): Map<string, number> {
+    exactOrdinalScansOnThisThread += 1;
     const messageRows = db
         .prepare(
             "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
@@ -504,6 +524,7 @@ export function readRawSessionMessageIdOrdinalsForRangeFromDb(
     const from = Math.max(1, Math.floor(fromOrdinal));
     const to = Math.floor(toOrdinal);
     if (to < from) return new Map();
+    exactOrdinalScansOnThisThread += 1;
     const rows = db
         .prepare(`
         SELECT id, data FROM message WHERE session_id = ?
@@ -520,6 +541,28 @@ export function readRawSessionMessageIdOrdinalsForRangeFromDb(
         if (parseJsonRecord(row.data)) result.set(row.id, from + index);
     }
     return result;
+}
+
+/**
+ * The message id at each requested ordinal, by the same exact single-ordinal read
+ * as `readRawSessionMessageIdOrdinalsForRangeFromDb(db, sessionId, n, n)`, all
+ * from one read snapshot. Null means no message, or a malformed row, holds that
+ * ordinal. Each read evaluates every preceding message's JSON, so on a long
+ * session this belongs on a worker thread, never on the serving thread.
+ */
+export function readRawSessionMessageIdsAtOrdinalsFromDb(
+    db: Database,
+    sessionId: string,
+    ordinals: readonly number[],
+): Array<[number, string | null]> {
+    return withReadSnapshot(db, () =>
+        ordinals.map((ordinal): [number, string | null] => [
+            ordinal,
+            readRawSessionMessageIdOrdinalsForRangeFromDb(db, sessionId, ordinal, ordinal)
+                .keys()
+                .next().value ?? null,
+        ]),
+    );
 }
 
 /** Read a keyset page used to incrementally maintain shadow message ordinals. */

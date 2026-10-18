@@ -1158,26 +1158,13 @@ export function hasRunnableCompartmentWindow(snapshot: ProtectedTailBoundarySnap
     return snapshot.eligibleEndOrdinal > snapshot.offset;
 }
 
-export function validateBoundarySnapshot(args: {
-    db: Database;
-    snapshot: ProtectedTailBoundarySnapshot;
-    currentContextLimit?: number;
-}): BoundarySnapshotValidationResult {
-    const { snapshot } = args;
-    if (args.currentContextLimit && args.currentContextLimit !== snapshot.contextLimit) {
-        return {
-            ok: false,
-            reason: "model_or_limit_changed",
-            detail: `context limit changed from ${snapshot.contextLimit} to ${args.currentContextLimit}`,
-        };
-    }
-    const currentRawMessageCount = getRawSessionMessageOrdinalCount(snapshot.sessionId);
-    if (snapshot.rawMessageCountAtTrigger > currentRawMessageCount) {
-        return { ok: false, reason: "stale_snapshot", detail: "raw message count shrank" };
-    }
-    const idAt = (ordinal: number): string | null =>
-        readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal).keys().next()
-            .value ?? null;
+/**
+ * The ordinals whose message ids {@link validateBoundarySnapshot} compares with
+ * the snapshot, with the snapshot's expected id and a label for the log.
+ */
+export function boundarySnapshotIdChecks(
+    snapshot: ProtectedTailBoundarySnapshot,
+): Array<[number, string | null, string]> {
     const checks: Array<[number, string | null, string]> = [
         [snapshot.offset, snapshot.offsetMessageId, "offset"],
         [snapshot.rawMessageCountAtTrigger, snapshot.rawLastMessageIdAtTrigger, "last"],
@@ -1196,7 +1183,46 @@ export function validateBoundarySnapshot(args: {
             "eligibleEnd",
         ]);
     }
-    for (const [ordinal, expected, label] of checks) {
+    return checks;
+}
+
+export function validateBoundarySnapshot(args: {
+    db: Database;
+    snapshot: ProtectedTailBoundarySnapshot;
+    currentContextLimit?: number;
+    /**
+     * The current message id at every ordinal {@link boundarySnapshotIdChecks}
+     * lists, read exactly for this validation on a worker thread so the thread
+     * that serves requests does not scan the session. Without it the ids are
+     * read here, synchronously.
+     */
+    exactIds?: ReadonlyMap<number, string | null>;
+}): BoundarySnapshotValidationResult {
+    const { snapshot, exactIds } = args;
+    if (args.currentContextLimit && args.currentContextLimit !== snapshot.contextLimit) {
+        return {
+            ok: false,
+            reason: "model_or_limit_changed",
+            detail: `context limit changed from ${snapshot.contextLimit} to ${args.currentContextLimit}`,
+        };
+    }
+    const currentRawMessageCount = getRawSessionMessageOrdinalCount(snapshot.sessionId);
+    if (snapshot.rawMessageCountAtTrigger > currentRawMessageCount) {
+        return { ok: false, reason: "stale_snapshot", detail: "raw message count shrank" };
+    }
+    const idAt = (ordinal: number): string | null => {
+        if (!exactIds)
+            return (
+                readRawSessionMessageIdOrdinalsForRange(snapshot.sessionId, ordinal, ordinal)
+                    .keys()
+                    .next().value ?? null
+            );
+        const id = exactIds.get(ordinal);
+        if (id === undefined)
+            throw new Error(`boundary validation was given no exact id for ordinal ${ordinal}`);
+        return id;
+    };
+    for (const [ordinal, expected, label] of boundarySnapshotIdChecks(snapshot)) {
         if (expected !== idAt(ordinal)) {
             return {
                 ok: false,

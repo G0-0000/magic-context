@@ -99,14 +99,15 @@ import {
     producerWindowFailureReason,
 } from "./producer-window-guard";
 import {
+    type BoundarySnapshotValidationResult,
     createDefaultBoundarySnapshotForTests,
     describeBoundaryDiagnostics,
     hasRunnableCompartmentWindow,
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
-    validateBoundarySnapshot,
 } from "./protected-tail-boundary";
+import { validateBoundarySnapshotOffThread } from "./raw-exact-ordinal-read";
 import {
     getRawSessionTagKeysThrough,
     hasRawMessageProvider,
@@ -118,7 +119,7 @@ import {
 } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import { isStrictGapHealingMessage } from "./read-session-raw";
+import { isStrictGapHealingMessage, RawOrdinalsNotReady } from "./read-session-raw";
 import { sendStatusNotification } from "./send-session-notification";
 
 const inconsistentProducerWindows = new Set<string>();
@@ -344,11 +345,27 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
     };
 
+    // Exact ordinals that are not ready yet are a normal answer, not a historian
+    // failure: this start is skipped without a failure count, notice or backoff,
+    // and the next transform pass that fires the trigger starts it again.
+    let historianRunStarted = false;
+    const deferUntilOrdinalsReady = (reason: string): void => {
+        sessionLog(
+            sessionId,
+            `historian deferred: exact ordinals not ready (${reason}); a later pass starts it again`,
+        );
+        telemetry.status = "noop";
+        telemetry.failureReason = `ordinals_not_ready: ${reason}`;
+        rollbackDrainReservation();
+    };
+
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
-        if (!ordinalsReady)
-            throw new Error("Session ordinals are warming; retry the historian shortly.");
+        if (!ordinalsReady) {
+            deferUntilOrdinalsReady("ordinal warm-up still running");
+            return;
+        }
         const openCodeDbResolution = resolveOpenCodeDbPath();
         if (!openCodeDbPathExists(openCodeDbResolution) && !hasRawMessageProvider(sessionId)) {
             telemetry.status = "noop";
@@ -451,15 +468,22 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
-        let validation =
-            boundarySnapshot.rawRangeFingerprint.length > 0
-                ? validateBoundarySnapshot({
-                      db,
-                      snapshot: boundarySnapshot,
-                      currentContextLimit:
-                          deps.currentContextLimit ?? boundarySnapshot.contextLimit,
-                  })
-                : { ok: true };
+        let validation: BoundarySnapshotValidationResult = { ok: true };
+        if (boundarySnapshot.rawRangeFingerprint.length > 0) {
+            // The exact id reads scan the session up to each checked ordinal, so
+            // they run on a worker; this run waits for them without blocking the
+            // thread that serves every session.
+            const checked = await validateBoundarySnapshotOffThread({
+                db,
+                snapshot: boundarySnapshot,
+                currentContextLimit: deps.currentContextLimit ?? boundarySnapshot.contextLimit,
+            });
+            if (checked.kind === "not-ready") {
+                deferUntilOrdinalsReady(`boundary validation ${checked.reason}`);
+                return;
+            }
+            validation = checked.result;
+        }
         // In an active session the protected tail's newest message changes every
         // turn (a fresh user/assistant message lands), so a snapshot captured at
         // trigger time goes stale on the "last ordinal id" check by the time the
@@ -751,6 +775,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // the active-run registration; a synchronous no-op above never reaches
         // here, so its lingering registration is cleared instead of blocking the
         // same transform pass's pending-op drain.
+        historianRunStarted = true;
         deps.onHistorianRunStarted?.();
 
         // v2 bounded reference model (replaces the unbounded existing_state dump):
@@ -1425,6 +1450,12 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             `historian publish completed: compartments=${persistedCompartments.length} range=${offset}-${lastCompartmentEnd}`,
         );
     } catch (error: unknown) {
+        if (error instanceof RawOrdinalsNotReady && !historianRunStarted) {
+            // A bounded read (count, fingerprint or chunk) found its ordinal
+            // ranks still warming. Nothing was sent to the historian yet.
+            deferUntilOrdinalsReady("bounded read refused");
+            return;
+        }
         const desc = describeError(error);
         if (publishCommitted) {
             // The publication is durable and was signaled right after COMMIT. Counting this
