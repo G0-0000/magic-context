@@ -47,7 +47,11 @@ for (const mode of ["manual", "scheduled"] as const) {
             for (let index = 0; index < 5; index++) {
                 const session = await client.session.create({ title: `real-user-${index}`, location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
                 sessions.push(session.id);
-                await client.session.prompt({ sessionID: session.id, text: `RETROSPECTIVE_REAL_USER_${index}: Please explain this project rule.` });
+                await client.session.prompt({ sessionID: session.id, text: `RETROSPECTIVE_OPENING_${index}: Please explain this project rule.` });
+                await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20000) });
+                // The friction gate only reviews a user line that answers an assistant
+                // reply, so each session needs a follow-up after its opening message.
+                await client.session.prompt({ sessionID: session.id, text: `RETROSPECTIVE_REAL_USER_${index}: That rule is wrong, please correct it.` });
                 await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(20000) });
             }
             contextDb = new Database(join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
