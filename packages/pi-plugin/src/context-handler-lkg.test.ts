@@ -122,10 +122,11 @@ describe("Pi context handler LKG replay", () => {
 					scheduler: { executeThresholdPercentage: 80 },
 				});
 				const handler = fake.handlers.get("context") as PiHandler;
+				let systemPrompt = "Complete system prompt.";
 				const pass = (raw: unknown[], ids: string[]) => {
 					const ctx = fakeContext(sessionId, dir, ids, raw as never);
 					Object.assign(ctx, {
-						getSystemPrompt: () => "Complete system prompt.",
+						getSystemPrompt: () => systemPrompt,
 						model: {
 							provider: "openai-codex",
 							id: "gpt-5.6-sol",
@@ -226,6 +227,7 @@ describe("Pi context handler LKG replay", () => {
 						),
 					).toBe(JSON.stringify(repeated?.messages));
 				updateSessionMeta(db, sessionId, { systemPromptHash: "sys-v2" });
+				systemPrompt = "Changed complete system prompt.";
 				const foldRaw = [
 					...structuredClone(raw),
 					userMessage("new turn", 5),
@@ -275,6 +277,7 @@ describe("Pi context handler LKG replay", () => {
 				if (!toolTag) throw new Error("Expected normalized tool target");
 				queuePendingOp(db, sessionId, toolTag.tagNumber, "drop", 1);
 				updateSessionMeta(db, sessionId, { systemPromptHash: "sys-v3" });
+				systemPrompt = "Third complete system prompt.";
 				await pass(structuredClone(foldRaw), foldIds);
 				expect(
 					getTagsBySession(db, sessionId).find(

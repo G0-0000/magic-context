@@ -76,6 +76,7 @@ import { createToolExecuteAfterHook } from "./hook-handlers";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
+import { requestPendingMaterialization } from "./pending-materialization";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import { clearMessageTokensCache, createTransform } from "./transform";
 
@@ -113,6 +114,12 @@ type TestMessage = {
     };
     parts: TestPart[];
 };
+
+function userFlushSessions(sessionId: string): Set<string> {
+    const sessions = new Set<string>();
+    requestPendingMaterialization(sessions, sessionId, "user_flush");
+    return sessions;
+}
 
 const tempDirs: string[] = [];
 
@@ -1758,7 +1765,7 @@ describe("createTransform", () => {
         // postprocess `isExplicitFlush`) — that's what gates heuristic
         // execution and `isCacheBustingPass`.
         const flushedHistory = new Set<string>(["ses-compartment-dropped-carrier"]);
-        const flushedMaterialization = new Set<string>(["ses-compartment-dropped-carrier"]);
+        const flushedMaterialization = userFlushSessions("ses-compartment-dropped-carrier");
         replaceAllCompartments(db, "ses-compartment-dropped-carrier", [
             {
                 sequence: 0,
@@ -2224,7 +2231,7 @@ describe("createTransform", () => {
             ]),
             db: openDatabase(),
             historyRefreshSessions: new Set<string>(),
-            pendingMaterializationSessions: new Set<string>([sessionId]),
+            pendingMaterializationSessions: userFlushSessions(sessionId),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTokens: 0,
@@ -2321,9 +2328,9 @@ describe("createTransform", () => {
             });
         }
         queuePendingOp(db, "ses-1", 1, "drop");
-        pendingMaterializationSessions.add("ses-1");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-1", "user_flush");
         queuePendingOp(db, "ses-1", 2, "drop");
-        pendingMaterializationSessions.add("ses-1");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-1", "user_flush");
         shouldExecute.mockImplementation(() => "execute");
 
         const secondPass: TestMessage[] = [
@@ -2407,7 +2414,7 @@ describe("createTransform", () => {
         // Three-set refactor: flush simulation now seeds the persistent
         // pending-materialization signal (read by postprocess as
         // isExplicitFlush) plus history-refresh (consumed by transform).
-        pendingMaterializationSessions.add("ses-1");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-1", "user_flush");
         historyRefreshSessions.add("ses-1");
 
         const secondPass: TestMessage[] = [
@@ -2705,7 +2712,7 @@ describe("createTransform", () => {
 
         await transform({}, { messages: firstPass });
         queuePendingOp(db, "ses-sub-drop", 2, "drop", Date.now());
-        pendingMaterializationSessions.add("ses-sub-drop");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-sub-drop", "user_flush");
 
         const secondPass: TestMessage[] = [
             {
@@ -2994,7 +3001,7 @@ describe("createTransform", () => {
         );
         expect(firstTag?.tagNumber).toBe(1);
         queuePendingOp(db, sessionId, 1, "drop");
-        pendingMaterializationSessions.add(sessionId);
+        requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
 
         decision = "execute";
         await transform({}, { messages });
@@ -3027,7 +3034,7 @@ describe("createTransform", () => {
             ]),
             db,
             historyRefreshSessions: new Set<string>(),
-            pendingMaterializationSessions: new Set<string>(["ses-primary-once"]),
+            pendingMaterializationSessions: userFlushSessions("ses-primary-once"),
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
             protectedTokens: 0,
@@ -3180,7 +3187,7 @@ describe("createTransform", () => {
 
         const db = openDatabase();
         queuePendingOp(db, "ses-multi", 1, "drop");
-        pendingMaterializationSessions.add("ses-multi");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-multi", "user_flush");
 
         const secondPass: TestMessage[] = [
             {
@@ -3246,7 +3253,7 @@ describe("createTransform", () => {
         const db = openDatabase();
         const assistantTextTag = 2;
         queuePendingOp(db, "ses-think", assistantTextTag, "drop");
-        pendingMaterializationSessions.add("ses-think");
+        requestPendingMaterialization(pendingMaterializationSessions, "ses-think", "user_flush");
         shouldExecute.mockImplementation(() => "execute");
 
         const secondPass: TestMessage[] = [
@@ -4798,7 +4805,7 @@ describe("live transform protected-token window", () => {
             ]),
             db,
             historyRefreshSessions: new Set<string>(),
-            pendingMaterializationSessions: new Set([options.sessionId]),
+            pendingMaterializationSessions: userFlushSessions(options.sessionId),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTokens: options.protectedTokens,
@@ -5159,7 +5166,7 @@ for (const { modelID, prefixBound } of [
                 hasUsageTokens: true,
             });
             // A primary applies queued drops on a cache-busting pass; request one.
-            pendingMaterializationSessions.add(sessionId);
+            requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
             const executed = await pass();
             // Either way, the active turn's thinking reaches the provider unchanged.
             expect(activeThinking(executed)).toBe(activeThinking(baseline));
@@ -5194,7 +5201,7 @@ for (const { modelID, prefixBound } of [
                 info: { id: "prompt-3", role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "third task" }],
             });
-            pendingMaterializationSessions.add(sessionId);
+            requestPendingMaterialization(pendingMaterializationSessions, sessionId, "user_flush");
             const released = await pass();
             expect(JSON.stringify(released)).not.toContain("OLD-SPENT");
             expect(JSON.stringify(released)).not.toContain("ACTIVE-SPENT");
@@ -5407,7 +5414,7 @@ it("a flush in a held signed turn is parked through execute and defer passes and
                 .filter((tag) => tag.status === "active"),
         ).toHaveLength(33);
         expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(false);
-        flush.add(sessionId);
+        requestPendingMaterialization(flush, sessionId, "user_flush");
         updateSessionMeta(db, sessionId, { systemPromptHash: "after" });
         expect(JSON.stringify(await serve())).toBe(baseline);
         expect(getPendingOps(db, sessionId)).toHaveLength(33);
@@ -5780,7 +5787,11 @@ describe("sticky nudge request-byte stability", () => {
                 lastResponseTime: Date.now() - 2 * 60 * 60 * 1000,
                 cacheTtl: "5m",
             });
-            f.pendingMaterializationSessions.add("rewritten-head-note");
+            requestPendingMaterialization(
+                f.pendingMaterializationSessions,
+                "rewritten-head-note",
+                "user_flush",
+            );
             f.force();
             const rewritten = await f.serve();
             expect(JSON.stringify(rewritten[0])).toContain(

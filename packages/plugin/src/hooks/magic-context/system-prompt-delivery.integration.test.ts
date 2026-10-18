@@ -30,6 +30,7 @@ import {
     clearLkgMeasuredRequest,
     noteLkgProviderResponse,
 } from "./lkg-measured-request";
+import { requestPendingMaterialization } from "./pending-materialization";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./system-date-refresh";
@@ -532,7 +533,11 @@ it("TypeScript: already_delivered_system_change_does_not_hard_after_signed_head_
         expect(head(wake.messages)).toBe(head(before.messages));
         expect(getPendingOps(f.db, f.sessionId)).toHaveLength(1);
         expect(f.deps.deferredMaterializationSessions!.has(f.sessionId)).toBe(true);
-        f.deps.pendingMaterializationSessions.add(f.sessionId);
+        requestPendingMaterialization(
+            f.deps.pendingMaterializationSessions,
+            f.sessionId,
+            "user_flush",
+        );
         await f.serve("changed instruction");
         expect(getPendingOps(f.db, f.sessionId)).toHaveLength(0);
         const flushed = await f.serve("changed instruction");
