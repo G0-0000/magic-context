@@ -24,8 +24,10 @@ import {
     MAP_BATCH_FLOOR_MS,
     type MapMemoriesArgs,
     mapMemories,
+    parseMapMemoriesCompletion,
     selectMapMemoryInputs,
     shouldRequeueIndependentMapping,
+    validateClientMapMemories,
 } from "./map-memories";
 
 const tempDirs: string[] = [];
@@ -1439,4 +1441,91 @@ test("non-budget mapping rejects a 10/52 manifest without writes", async () => {
     } finally {
         closeQuietly(db);
     }
+});
+
+describe("map-memories whitespace-only output (regression: whitespace must not defeat validation)", () => {
+    const VALID = `<mappings><memory id="1" independent="true"/><memory id="2" files="src/fact.ts"/></mappings>`;
+    const IDS = new Set([1, 2]);
+    const wsMsg = {
+        info: { role: "assistant" },
+        parts: [{ type: "text", text: "\n\n\n\n\n\n\n" }],
+    };
+    const manifestMsg = { info: { role: "assistant" }, parts: [{ type: "text", text: VALID }] };
+    const toolMsg = {
+        info: { role: "assistant" },
+        parts: [{ type: "tool", tool: "grep", state: { status: "completed", input: {} } }],
+    };
+    const ids = (parsed: { id: number }[]) => parsed.map((entry) => entry.id);
+
+    // Hidden completion path (parse: assistantText(completion.messages) || text).
+    test("falls back to completion.text when messages are whitespace-only (the fix)", () => {
+        expect(ids(parseMapMemoriesCompletion(VALID, { messages: [wsMsg] }, IDS))).toEqual([1, 2]);
+    });
+    test("falls back to completion.text when messages are empty", () => {
+        expect(ids(parseMapMemoriesCompletion(VALID, { messages: [] }, IDS))).toEqual([1, 2]);
+    });
+    test("falls back to completion.text for tool-loop messages that carry no text part", () => {
+        expect(ids(parseMapMemoriesCompletion(VALID, { messages: [toolMsg] }, IDS))).toEqual([
+            1, 2,
+        ]);
+    });
+    test("prefers a real manifest carried by messages over completion.text (priority preserved)", () => {
+        const fromMessages = `<mappings><memory id="3" independent="true"/></mappings>`;
+        const parsed = parseMapMemoriesCompletion(
+            "ignored-text",
+            {
+                messages: [
+                    { info: { role: "assistant" }, parts: [{ type: "text", text: fromMessages }] },
+                ],
+            },
+            new Set([3]),
+        );
+        expect(ids(parsed)).toEqual([3]);
+    });
+    test("still rejects when neither messages nor completion.text carry a manifest", () => {
+        expect(() => parseMapMemoriesCompletion("", { messages: [wsMsg] }, IDS)).toThrow();
+    });
+
+    // Client path (validateOutput: assistantText(messages), no completion.text fallback).
+    test("rejects whitespace-only output as 'no output' rather than 'missing complete root' (the fix)", () => {
+        expect(() => validateClientMapMemories([wsMsg], IDS)).toThrow(
+            "map-memories returned no output",
+        );
+    });
+    test("rejects empty output as 'no output'", () => {
+        expect(() => validateClientMapMemories([], IDS)).toThrow("map-memories returned no output");
+    });
+    test("rejects tool-only output as 'no output' (client path has no fallback)", () => {
+        expect(() => validateClientMapMemories([toolMsg], IDS)).toThrow(
+            "map-memories returned no output",
+        );
+    });
+    test("accepts a valid manifest from messages", () => {
+        expect(ids(validateClientMapMemories([manifestMsg], IDS))).toEqual([1, 2]);
+    });
+    test("falls back to completion.text when completion carries no messages field (undefined, not [])", () => {
+        expect(ids(parseMapMemoriesCompletion(VALID, {}, IDS))).toEqual([1, 2]);
+    });
+    test("concatenates multiple text parts and still validates the manifest (un-trimmed join preserved)", () => {
+        const mixed = {
+            info: { role: "assistant" },
+            parts: [
+                { type: "text", text: "\n\n" },
+                { type: "text", text: VALID },
+            ],
+        };
+        expect(ids(parseMapMemoriesCompletion("ignored", { messages: [mixed] }, IDS))).toEqual([
+            1, 2,
+        ]);
+    });
+    test("client path rejects length-capped output before parsing (preserved guard)", () => {
+        const capped = {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: VALID }],
+            lengthCapped: true,
+        };
+        expect(() => validateClientMapMemories([capped], IDS)).toThrow(
+            "map-memories returned length-capped output",
+        );
+    });
 });

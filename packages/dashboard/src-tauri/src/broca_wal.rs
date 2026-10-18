@@ -71,7 +71,10 @@ const GATED_VERSION: u8 = 3;
 /// needs no handling here. A future transcript view must render that block's
 /// `text` like a `text` block. `openrouter-reasoning/v1` marks frames whose
 /// assistant content carries OpenRouter reasoning state as a reasoning block;
-/// usage, steps and timestamps are unchanged.
+/// usage, steps and timestamps are unchanged. `structured-output-downgrade/v1`
+/// marks a frame recording that a run's structured output fell back to
+/// non-strict after the provider refused a strict schema; it carries no
+/// messages, usage or timestamps.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -92,6 +95,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "structured-output/v1",
     "provider-text-state/v1",
     "openrouter-reasoning/v1",
+    "structured-output-downgrade/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1792,7 +1796,7 @@ pub(crate) mod tests {
         assert!(runs[0].finished);
     }
 
-    /// Every feature name Broca 0.3.214 writes (`KNOWN_FEATURES` in
+    /// Every feature name Broca writes (`KNOWN_FEATURES` in
     /// broca-wal's framing.rs), spelled out rather than taken from this reader's own list,
     /// so a name Broca adds and this reader lacks shows up here instead of
     /// silently truncating sessions.
@@ -1818,6 +1822,7 @@ pub(crate) mod tests {
             "structured-output/v1",
             "provider-text-state/v1",
             "openrouter-reasoning/v1",
+            "structured-output-downgrade/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
