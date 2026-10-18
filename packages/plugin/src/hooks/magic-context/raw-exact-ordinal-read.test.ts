@@ -42,7 +42,11 @@ import {
 } from "./read-session-chunk";
 import { closeReadOnlySessionDb, withReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import { readRawSessionMessageIdOrdinalsForRangeFromDb } from "./read-session-raw";
+import {
+    getExactOrdinalScansOnThisThreadForTest,
+    readRawSessionMessageIdOrdinalsForRangeFromDb,
+    resetExactOrdinalScansOnThisThreadForTest,
+} from "./read-session-raw";
 import { computeRawRangeFingerprint } from "./read-session-true-raw-tokens";
 
 const previousOpenCodeDb = process.env.OPENCODE_DB;
@@ -381,36 +385,55 @@ function longSessionStore(path: string, count: number): Database {
     return raw;
 }
 
-it("historian boundary validation blocks the serving thread under 50 ms on a long session", async () => {
+/**
+ * Historian boundary validation must not scan the session's ordinals on the
+ * serving thread: those scans read every earlier message and froze the server
+ * for seconds on long sessions. The scans are counted per thread (a worker has
+ * its own copy of the counting module), so a zero here means every scan the
+ * validation needed ran on the worker. The wall-clock block is measured only
+ * under MC_PERF_GATE=1, on a long session, because timing bounds flake under
+ * CI load; the counter is the guard.
+ */
+it("historian boundary validation runs no exact ordinal scan on the serving thread", async () => {
+    const perfGate = process.env.MC_PERF_GATE === "1";
     const f = fixture();
     const path = join(f.dir, "opencode.db");
-    const count = 120_000;
+    const count = perfGate ? 120_000 : 2_000;
     const raw = longSessionStore(path, count);
     const db = contextStore(join(f.dir, "context.db"));
     try {
         await serveFromStoreFile(path);
         const offset = count - 150;
         storePriorCompartment(db, offset);
+        // Building the snapshot reads exact ids synchronously on this thread, so
+        // this also shows the counter sees serving-thread scans.
+        resetExactOrdinalScansOnThisThreadForTest();
         const snapshot = snapshotAt(offset);
+        expect(getExactOrdinalScansOnThisThreadForTest()).toBeGreaterThan(0);
         // The token counter loads its encoder on first use, once per process;
         // a serving process has long done that, so keep it out of the measure.
         estimateTokens("load the token encoder");
         let reachedProducer = false;
+        let scansBeforeProducer = -1;
         const client = {
             session: {
                 get: () => {
                     reachedProducer = true;
+                    scansBeforeProducer = getExactOrdinalScansOnThisThreadForTest();
                     throw new Error("stop before creating a historian child session");
                 },
             },
         } as unknown as HiddenCompartmentRunnerDeps["client"];
         let maxBlockMs = 0;
         let last = performance.now();
-        const heartbeat = setInterval(() => {
-            const now = performance.now();
-            maxBlockMs = Math.max(maxBlockMs, now - last);
-            last = now;
-        }, 1);
+        const heartbeat = perfGate
+            ? setInterval(() => {
+                  const now = performance.now();
+                  maxBlockMs = Math.max(maxBlockMs, now - last);
+                  last = now;
+              }, 1)
+            : null;
+        resetExactOrdinalScansOnThisThreadForTest();
         try {
             await runCompartmentAgent({
                 client,
@@ -424,13 +447,17 @@ it("historian boundary validation blocks the serving thread under 50 ms on a lon
             });
             maxBlockMs = Math.max(maxBlockMs, performance.now() - last);
         } finally {
-            clearInterval(heartbeat);
+            if (heartbeat) clearInterval(heartbeat);
         }
-        // Validation passed and the run went on to the producer.
+        // Validation passed and the run went on to the producer, with the ids
+        // it checked coming from exactly one worker read.
         expect(reachedProducer).toBe(true);
         expect(getExactOrdinalReadsStartedForTest()).toBe(1);
-        console.log(JSON.stringify({ messages: count, maxBlockMs }));
-        expect(maxBlockMs).toBeLessThan(50);
+        expect(scansBeforeProducer).toBe(0);
+        if (perfGate) {
+            console.log(JSON.stringify({ messages: count, maxBlockMs }));
+            expect(maxBlockMs).toBeLessThan(50);
+        }
     } finally {
         db.close();
         raw.close();
