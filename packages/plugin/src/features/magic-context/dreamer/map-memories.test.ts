@@ -291,6 +291,8 @@ describe("mapMemories disposition", () => {
                 remaining: 61,
                 complete: false,
                 stopReason: "timeout-circuit-breaker",
+                failure: expect.any(Error),
+                failureStage: "prompt",
             });
         } finally {
             closeQuietly(db);
@@ -520,6 +522,8 @@ describe("mapMemories disposition", () => {
             // for backoff rather than immediately blocking the next scheduled run.
             expect(retryPrompt).toEqual([second.id]);
             expect(firstResult).toEqual({
+                failure: expect.any(Error),
+                failureStage: "prompt",
                 mapped: 0,
                 independent: 1,
                 batches: 1,

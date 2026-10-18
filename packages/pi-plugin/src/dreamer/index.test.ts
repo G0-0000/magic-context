@@ -26,6 +26,7 @@ import {
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import * as logger from "@magic-context/core/shared/logger";
+import { createPromptAsyncTransport } from "@magic-context/core/shared/prompt-async-transport";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
@@ -2115,4 +2116,109 @@ describe("Pi dreamer wiring", () => {
 
 		expect(timerCleanup).toHaveBeenCalledTimes(1);
 	});
+});
+
+test("Pi facade honors a shared batch envelope across failed and successful attempts", async () => {
+	db = createDb();
+	let captured: CapturedDreamClient | null = null;
+	const budgets: number[] = [];
+	__test.setStartDreamScheduleTimerFactory(async (registration) => {
+		captured = registration.client as unknown as CapturedDreamClient;
+		return mock(() => {});
+	});
+	__test.setPiSubagentRunnerFactory(
+		() =>
+			({
+				run: async (args: { tokenBudget: number }) => {
+					budgets.push(args.tokenBudget);
+					const spent = budgets.length === 1 ? 100_000 : 400_000;
+					return {
+						ok: budgets.length !== 1,
+						reason: "provider_error",
+						error: "fixture refusal",
+						assistantText: "<verify/>",
+						meta: {
+							tokenBudget: {
+								budget: args.tokenBudget,
+								spent,
+								finalizeFired: false,
+								hardStopped: false,
+								refusedCalls: 0,
+							},
+						},
+					};
+				},
+			}) as never,
+	);
+	registerPiDreamerProject(
+		dreamerOptions({ database: db, projectIdentity: "git:pi-batch-budget" }),
+	);
+	const client = requireCapturedClient(captured);
+	const child = (await client.session.create({
+		body: { title: "magic-context-dream-verify" },
+	})) as { id: string };
+	const observed: number[] = [];
+	const transport = createPromptAsyncTransport(client as never, child.id, {
+		tokenBudget: 500_000,
+		onBudgetUpdate: (s) => observed.push(s.spent),
+	});
+	expect(transport).toBeDefined();
+	if (!transport) throw new Error("missing synchronous transport");
+	const request = {
+		path: { id: child.id },
+		body: { parts: [{ text: "fixture" }] },
+	} as never;
+	await expect(transport(request)).rejects.toThrow("fixture refusal");
+	await transport(request);
+	await expect(transport(request)).rejects.toThrow("token_budget");
+	expect(budgets).toEqual([500_000, 400_000]);
+	expect(observed).toEqual([100_000, 500_000]);
+});
+
+test("Pi verify facade preserves complete verdicts before a budget interruption", async () => {
+	db = createDb();
+	let captured: CapturedDreamClient | null = null;
+	__test.setStartDreamScheduleTimerFactory(async (registration) => {
+		captured = registration.client as unknown as CapturedDreamClient;
+		return mock(() => {});
+	});
+	__test.setPiSubagentRunnerFactory(
+		() =>
+			({
+				run: async () => ({
+					ok: false,
+					reason: "token_budget",
+					meta: {
+						tokenBudget: { spent: 500_000 },
+						mappingMessages: [
+							{
+								role: "assistant",
+								content: [
+									{
+										type: "text",
+										text: '<verify><verified id="1" files="src/fact.ts"/>',
+									},
+								],
+							},
+						],
+					},
+				}),
+			}) as never,
+	);
+	registerPiDreamerProject(
+		dreamerOptions({ database: db, projectIdentity: "git:pi-verify-partial" }),
+	);
+	const client = requireCapturedClient(captured);
+	const child = (await client.session.create({
+		body: { title: "magic-context-dream-verify" },
+	})) as { id: string };
+	await expect(
+		client.session.prompt({
+			path: { id: child.id },
+			body: { parts: [{ text: "fixture" }] },
+		}),
+	).rejects.toThrow("token_budget");
+	expect(
+		JSON.stringify(await client.session.messages({ path: { id: child.id } })),
+	).toContain('<verify><verified id=\\"1\\"');
 });

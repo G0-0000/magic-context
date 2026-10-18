@@ -100,6 +100,7 @@ interface SessionMessagesArgs {
 }
 
 interface SessionPromptArgs extends SessionMessagesArgs {
+	tokenBudget?: number;
 	body?: unknown;
 	signal?: AbortSignal | null;
 }
@@ -622,6 +623,7 @@ function createPiDreamerClient(
 				accountingSubagent: "dreamer",
 				accountingTask: accountingTaskFromTitle(dreamSession.title),
 				tokenBudget: (() => {
+					if (args.tokenBudget !== undefined) return args.tokenBudget;
 					const task = accountingTaskFromTitle(dreamSession.title);
 					if (!task) return undefined;
 					return buildDreamTaskRuntimeConfigs(
@@ -636,7 +638,16 @@ function createPiDreamerClient(
 				const budget = result.meta?.tokenBudget as
 					| DreamTokenBudgetState
 					| undefined;
-				if (budget) childBudgetStates.set(sessionId, budget);
+				if (budget) {
+					const prior = childBudgetStates.get(sessionId);
+					childBudgetStates.set(sessionId, {
+						...budget,
+						budget: prior?.budget ?? budget.budget,
+						spent: (prior?.spent ?? 0) + budget.spent,
+						finalizeFired:
+							(prior?.finalizeFired ?? false) || budget.finalizeFired,
+					});
+				}
 				const budgetTask = accountingTaskFromTitle(dreamSession.title);
 				if (budgetTask && budget && typeof budget.spent === "number") {
 					const prior = budgetStates.get(budgetTask);
@@ -648,9 +659,14 @@ function createPiDreamerClient(
 				}
 				assertRegistrationOwnerActive();
 				const mappingMessages = result.meta?.mappingMessages;
-				if (budgetTask === "map-memories" && Array.isArray(mappingMessages)) {
+				const hasMemoryDecisions =
+					(budgetTask === "map-memories" ||
+						budgetTask === "verify" ||
+						budgetTask === "verify-broad") &&
+					Array.isArray(mappingMessages);
+				if (hasMemoryDecisions) {
 					// Retain decisions before raising a step/timeout error; the shared
-					// mapper reads this session to bank closed memory elements.
+					// mapper/verifier reads this session to bank closed decisions.
 					dreamSession.messages = mappingMessages
 						.filter(isRecord)
 						.filter((message) => message.role === "assistant")
@@ -695,7 +711,7 @@ function createPiDreamerClient(
 					}
 					throw error;
 				}
-				if (!(budgetTask === "map-memories" && Array.isArray(mappingMessages)))
+				if (!hasMemoryDecisions)
 					dreamSession.messages = [
 						makeMessage("user", [{ type: "text", text: userMessage }]),
 						makeMessage("assistant", [
