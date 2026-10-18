@@ -800,6 +800,10 @@ const systemPromptRefreshSessions = new Set<string>();
 const pendingMaterializationSessions = new Set<string>();
 const deferredHistoryRefreshSessions = new Set<string>();
 const deferredMaterializationSessions = new Set<string>();
+// Remember the last served system prompt independently of cached synthetic
+// history messages. Sessions with injection disabled have no history render
+// cache; update the system hash only when returning a served result.
+const lastServedSystemHashBySession = new Map<string, string | null>();
 
 export function signalPiSystemHashChange(
 	sessionId: string,
@@ -4287,6 +4291,14 @@ export function registerPiContextHandler(
 		let rawMessageCount = 0;
 		let rawFallbackLimit: number | undefined;
 		let sessionIdForError: string | undefined;
+		let systemHashForPass: string | null | undefined;
+		const recordServedSystemHash = () => {
+			if (budget.sideTurn || !sessionIdForError) return;
+			if (systemHashForPass === undefined)
+				lastServedSystemHashBySession.delete(sessionIdForError);
+			else
+				lastServedSystemHashBySession.set(sessionIdForError, systemHashForPass);
+		};
 		let lkgPassSnapshot: PiLkgPassSnapshot | undefined;
 		let lkgCompactionOff = baseOptions.compactionOff === true;
 		let lkgOptions = baseOptions;
@@ -4972,6 +4984,7 @@ export function registerPiContextHandler(
 			}
 
 			let sessionMeta = sessionMetaForUsage;
+			systemHashForPass = sessionMeta.systemPromptHash ?? null;
 			const modelKey = liveModelBySession.get(sessionId);
 			const providerId =
 				typeof ctx.model?.provider === "string"
@@ -5532,6 +5545,11 @@ export function registerPiContextHandler(
 					inputTokens: usageInputTokens,
 				},
 				isCacheBusting,
+				userFlushOrigin: hasPendingMaterializationOrigin(
+					pendingMaterializationSessions,
+					sessionId,
+					"user_flush",
+				),
 				reasoningClearing: {
 					keepReasoningTokens: resolveKeepReasoningTokens(
 						options.heuristics?.keepReasoningTokens,
@@ -6782,6 +6800,7 @@ export function registerPiContextHandler(
 				recordPiHeldSystemHead(sessionId, (ownsHistory) =>
 					deferPiDeliveredSystemRefresh(sessionId, ownsHistory),
 				);
+			recordServedSystemHash();
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -6813,6 +6832,7 @@ export function registerPiContextHandler(
 					});
 				budget.assertOutcome();
 				budget.recovery = err.recovery;
+				recordServedSystemHash();
 				return { messages: err.messages } as {
 					messages: typeof event.messages;
 				};
@@ -6971,6 +6991,7 @@ export function registerPiContextHandler(
 							});
 						budget.assertOutcome();
 						budget.recovery = "fitting LKG replay";
+						recordServedSystemHash();
 						return { messages: replay.messages } as unknown as {
 							messages: typeof event.messages;
 						};
@@ -8180,6 +8201,8 @@ interface RunPipelineArgs {
 	 * historyRefreshSessions set.
 	 */
 	isCacheBusting: boolean;
+	/** Preserve command authorization through retries of this context invocation only. */
+	userFlushOrigin?: boolean;
 	/**
 	 * Reasoning-clearing config. When provided, typed PiThinkingContent
 	 * blocks for messages older than `clearReasoningAge` from the newest
@@ -8720,12 +8743,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				injectionPassSnapshot,
 			)
 		: { value: false, reason: null };
+	// Without history injection, first-time real entry tagging still builds a
+	// fresh prefix. A later marker retry has a served snapshot and cannot use it.
 	const firstRenderBust =
-		piM0State !== undefined &&
-		!(
-			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
-			injectionPassSnapshot.cachedRow.cached_m1_bytes
-		);
+		piM0State !== undefined
+			? !(
+					injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
+					injectionPassSnapshot.cachedRow.cached_m1_bytes
+				)
+			: args.stableIdSchemeCutover === true &&
+				args.readLastServedMessages?.() === null;
 	let foldExecutedThisPass = false;
 	// The one bust permission an executed fold grants: true only when the fold
 	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
@@ -9017,11 +9044,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// the existing history rebuild, explicit flush and pressure-relief rules.
 	const heldIdleExpiryRebuild =
 		protectedSignedPrefix && piHardSignals?.cacheExpired === true;
+	const systemPrefixChangedThisPass =
+		piM0State === undefined &&
+		!prefixPreflightContended &&
+		lastServedSystemHashBySession.has(args.sessionId) &&
+		lastServedSystemHashBySession.get(args.sessionId) !==
+			(args.sessionMeta.systemPromptHash ?? null);
+	// Deferred render requests and native marker retries do not prove that the
+	// served system/m[0]/m[1] prefix changed. Only a user flush may deliberately
+	// admit drops when that prefix is unchanged.
 	const rideSignals = {
 		subagentExecute:
 			args.sessionMeta.isSubagent && args.schedulerDecision === "execute",
 		hardFold:
 			foldBustsServedPrefixThisPass ||
+			systemPrefixChangedThisPass ||
 			firstRenderBust ||
 			heldIdleExpiryRebuild ||
 			isCacheBustingPass,
@@ -9030,13 +9067,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			(args.contextUsage.percentage >= 95 ||
 				getEmergencyInputSample(args.db, args.sessionId) === 0),
 		explicitFlush:
-			hasPendingMaterializeSignal ||
-			(deferredMaterializeEligible && !prefixPreflightContended),
-		publishedHistory:
-			!prefixPreflightContended &&
-			(args.isCacheBusting ||
-				publishedM1RefreshedThisPass ||
-				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
+			!protectedSignedPrefix &&
+			(args.userFlushOrigin === true ||
+				hasPendingMaterializationOrigin(
+					pendingMaterializationSessions,
+					args.sessionId,
+					"user_flush",
+				)),
+		publishedHistory: !prefixPreflightContended && publishedM1RefreshedThisPass,
 	};
 	// Warm-cache thinking holds defer every new prefix edit. First render, idle
 	// expiry and pressure relief can admit work, but target guards still forbid
@@ -9066,6 +9104,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.heuristics !== undefined &&
 		isCacheBustingPass &&
 		(rideSignals.publishedHistory ||
+			systemPrefixChangedThisPass ||
+			rideSignals.explicitFlush ||
 			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
 			deferredMaterializeEligible ||
@@ -9866,6 +9906,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			const tHeuristic = performance.now();
 			const independentMutationBeforeHeuristics =
 				pendingOpsDidMutate ||
+				systemPrefixChangedThisPass ||
 				foldBustsServedPrefixThisPass ||
 				identityRebuild ||
 				firstRenderBust ||
@@ -9890,6 +9931,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						getEmergencyInputSample(args.db, args.sessionId) === 0
 					: args.sessionMeta.isSubagent || !routinePressureAlreadyApplied) ||
 				hasPendingMaterializeSignal ||
+				rideSignals.explicitFlush ||
 				deferredMaterialize ||
 				independentMutationBeforeHeuristics;
 			heuristicsResult = applyPiHeuristicCleanup(
@@ -10658,26 +10700,36 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		tDroppedPlaceholders,
 	);
 
-	// Drain predicate intentionally has two Pi-specific terms beyond OpenCode's
-	// `historyWasConsumedThisPass && deferredHistoryWasPendingAtPassStart &&
-	// !suppress`:
-	//   • `materializationSatisfiedThisPass` — Pi's m[0]/m[1] materialization is
-	//     a separate signal from history consumption; the deferred-history
-	//     one-shot must not drain until materialization actually landed this pass,
-	//     or the next pass would rebuild against a half-applied snapshot.
-	//   • `|| hasPendingMaterializeSignal` — Pi rebuilds a fresh AgentMessage[]
-	//     per `context` event (no persistent transform array), so a pending
-	//     materialize signal that arrived mid-pass is an equally valid drain
-	//     trigger as a pass-start-pending refresh.
-	// Net effect is signal-equivalent to OpenCode's model for the same
-	// scheduler/materialization input (Oracle Round 8 peek-then-drain).
+	// Once synthetic history messages m[0]/m[1] are served, their deferred render
+	// requests are complete even if no drop was admitted. The durable Pi compaction
+	// marker records unfinished native journal work and is retried independently.
 	const deferredHistoryDrainEligible =
-		historyWasConsumedThisPass &&
-		materializationSatisfiedThisPass &&
-		(deferredHistoryWasPendingAtPassStart || hasPendingMaterializeSignal) &&
+		((canConsumeDeferredLate && !firstRenderBust) ||
+			(historyWasConsumedThisPass &&
+				materializationSatisfiedThisPass &&
+				(deferredHistoryWasPendingAtPassStart ||
+					hasPendingMaterializeSignal))) &&
+		prefixMutationAllowed &&
+		injectionResult !== null &&
+		injectionResult.contentionExhausted !== true &&
+		!prefixPreflightContended &&
 		!suppressDeferredHistoryDrain &&
 		!casLost;
-	let preserveDeferredMaterializationForMarkerDrain = false;
+	const consumePublicationRender = () => {
+		// A marker-only retry must not consume a publication that arrived after
+		// this pass captured its rendering inputs.
+		if (!deferredHistoryWasPendingAtPassStart || !historyWasConsumedThisPass)
+			return;
+		consumeDeferredHistoryRefresh(args.sessionId);
+		if (
+			!publishedWorkDrainAllowed ||
+			(pendingOpsAppliedThisPass &&
+				(!shouldRunHeuristics || heuristicsExecuted))
+		)
+			deferredMaterializationConsumedThisPass =
+				consumeDeferredMaterialization(args.sessionId) ||
+				deferredMaterializationConsumedThisPass;
+	};
 	let pendingForDrain: PendingPiCompactionMarker | null = null;
 	if (
 		!deferredHistoryDrainEligible &&
@@ -10715,19 +10767,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (!pending) {
 				if (injectionResult?.contentionExhausted === true) {
 					suppressDeferredHistoryDrain = true;
-					preserveDeferredMaterializationForMarkerDrain = true;
 					sessionLog(
 						args.sessionId,
 						"Pi deferred-history drain skipped: m[0]/m[1] used a contention fallback; preserving deferred signals",
 					);
 				} else {
-					consumeDeferredHistoryRefresh(args.sessionId);
+					consumePublicationRender();
 				}
 			} else if (
 				!pendingPiMarkerCoveredByRenderedBoundary(pending, injectionResult)
 			) {
 				suppressDeferredHistoryDrain = true;
-				preserveDeferredMaterializationForMarkerDrain = true;
 				const boundary = injectionResult?.renderedBoundary;
 				const m1Coverage = injectionResult?.m1RenderedCoverage;
 				logPiCompactionMarkerDrainGateOnce(
@@ -10746,8 +10796,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				!args.readBranchEntries ||
 				!foldingSystemState
 			) {
+				consumePublicationRender();
 				suppressDeferredHistoryDrain = true;
-				preserveDeferredMaterializationForMarkerDrain = true;
 				if (!args.appendCompaction)
 					logPiCompactionMarkerDrainGateOnce(
 						args.sessionId,
@@ -10767,6 +10817,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						"folding-system-state-unavailable",
 					);
 			} else {
+				consumePublicationRender();
 				args.assertCurrentPass?.();
 				const outcome = applyDeferredPiCompactionMarker(
 					{
@@ -10805,7 +10856,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						}
 					} else {
 						suppressDeferredHistoryDrain = true;
-						preserveDeferredMaterializationForMarkerDrain = true;
 						if (adoption.kind === "divergent") {
 							// appendCompaction has already persisted this entry. Pi exposes no
 							// retraction API, and 0.86 session-manager.js:187-190 re-emits
@@ -10840,7 +10890,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				}
 				if (outcome.kind === "waiting-for-entry") {
 					suppressDeferredHistoryDrain = true;
-					preserveDeferredMaterializationForMarkerDrain = true;
 				} else if (outcome.kind === "retryable-failure") {
 					// The compaction marker manager logged the retryable failure's gate
 					// classification without error text.
@@ -10875,11 +10924,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 	if (
-		preserveDeferredMaterializationForMarkerDrain &&
+		(prefixPreflightContended ||
+			injectionResult?.contentionExhausted === true) &&
 		deferredMaterializationConsumedThisPass
-	) {
+	)
 		signalPiDeferredMaterialization(args.sessionId);
-	}
 
 	logTransformTiming(
 		args.sessionId,
@@ -11694,6 +11743,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	lastServedSystemHashBySession.delete(sessionId);
 	clearPiHistoryBoundaryRepairSession(sessionId);
 	clearPiUpperReclaimSession(sessionId);
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
@@ -11786,6 +11836,7 @@ function runPersistedReplayStage<T>(
 import type { PendingMaterializationOrigin } from "@magic-context/core/hooks/magic-context/pending-materialization";
 import {
 	clearPendingMaterialization,
+	hasPendingMaterializationOrigin,
 	pendingMaterializationOrigin,
 	requestPendingMaterialization,
 } from "@magic-context/core/hooks/magic-context/pending-materialization";

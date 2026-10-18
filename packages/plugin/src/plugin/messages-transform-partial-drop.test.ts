@@ -11,6 +11,7 @@ import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-r
 import { saveLkgSlotToDb } from "../hooks/magic-context/lkg-persist";
 import { captureLkgSlot } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot } from "../hooks/magic-context/lkg-slot";
+import { requestPendingMaterialization } from "../hooks/magic-context/pending-materialization";
 import { createTransform } from "../hooks/magic-context/transform";
 import { adaptPayload } from "../v2/hooks/payload";
 import { createMessagesTransformHandler } from "./messages-transform";
@@ -130,7 +131,7 @@ for (const lane of ["oc1", "oc2"] as const) {
                     `CREATE TEMP TRIGGER partial_drop_abort BEFORE UPDATE OF status ON tags WHEN NEW.tag_number=${tags[position - 1]!.tagNumber} AND NEW.session_id='${sessionId}' AND NEW.status='dropped' BEGIN SELECT RAISE(ABORT,'partial lkg fault'); END`,
                 );
                 decision = "execute";
-                pending.add(sessionId);
+                requestPendingMaterialization(pending, sessionId, "user_flush");
                 const recovered = await pass();
                 expect(replays).toBe(1);
                 expect(
