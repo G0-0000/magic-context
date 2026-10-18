@@ -1519,6 +1519,65 @@ describe("runCompartmentAgent", () => {
         ).toEqual([{ harness: "opencode" }]);
     });
 
+    it("asks the historian to skip user observations only when the dreamer is not runnable", async () => {
+        const directive = "<user_observation_extraction>disabled</user_observation_extraction>";
+        for (const userObservationsRequested of [undefined, true, false]) {
+            useTempDataHome("compartment-runner-observations-");
+            const sessionId = `ses-observations-${String(userObservationsRequested)}`;
+            createOpenCodeDb(sessionId, [
+                { id: "m-1", role: "user", text: "First" },
+                { id: "m-2", role: "assistant", text: "Second" },
+                { id: "m-3", role: "user", text: "protected 1" },
+                { id: "m-4", role: "user", text: "protected 2" },
+                { id: "m-5", role: "user", text: "protected 3" },
+                { id: "m-6", role: "user", text: "protected 4" },
+                { id: "m-7", role: "user", text: "protected 5" },
+            ]);
+            const db = openDatabase();
+            updateSessionMeta(db, sessionId, { timesExecuteThresholdReached: 3 });
+            const promptSession = mock(
+                async (_input: { body: { agent: string; parts: Array<{ text: string }> } }) => ({}),
+            );
+            const client = {
+                session: {
+                    get: mock(async () => ({ data: { directory: "/tmp/parent" } })),
+                    create: mock(async () => ({ data: { id: "ses-agent" } })),
+                    prompt: promptSession,
+                    messages: mock(async () => ({
+                        data: [
+                            {
+                                info: { role: "assistant", time: { created: 1 } },
+                                parts: [
+                                    {
+                                        type: "text",
+                                        text: `<compartment start="1" end="2" title="Setup"><p1>Summary content</p1></compartment>`,
+                                    },
+                                ],
+                            },
+                        ],
+                    })),
+                    delete: mock(async () => ({})),
+                },
+            } as unknown as PluginContext["client"];
+            await runCompartmentAgentWithLease({
+                client,
+                db,
+                sessionId,
+                historianChunkTokens: 10_000,
+                directory: "/tmp",
+                userObservationsRequested,
+            });
+            const sent = promptSession.mock.calls
+                .flatMap((call) => call[0]?.body.parts ?? [])
+                .map((part) => part.text)
+                .join("\n");
+            expect(sent).toContain("<new_messages>");
+            if (userObservationsRequested === false) expect(sent).toContain(directive);
+            else expect(sent).not.toContain(directive);
+            closeDatabase();
+        }
+    });
+
     it("keeps both chunk-edge compartments when emergency recovery is armed", async () => {
         useTempDataHome("compartment-runner-emergency-discard-last-");
         const sessionId = "ses-emergency-discard-last";

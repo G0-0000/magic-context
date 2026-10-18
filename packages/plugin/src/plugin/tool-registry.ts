@@ -1,6 +1,10 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { MagicContextPluginConfig } from "../config";
-import { isCompactionEnabled, isDreamerRunnable } from "../config/agent-disable";
+import {
+    isCompactionEnabled,
+    isDreamerRunnable,
+    isSmartNoteSurfaceAvailable,
+} from "../config/agent-disable";
 import { resolveProjectIdentityForSession } from "../features/magic-context/memory/project-identity";
 import { getProtectionWindowForSession } from "../features/magic-context/protection-window";
 import {
@@ -206,12 +210,16 @@ export function createToolRegistry(args: {
     const registration = promptSurfaceRuntime.resolveRegistration(
         args.registrationPromptSurface ?? pluginConfig.prompt_surface,
     );
+    // Smart notes need both smart_notes.enabled and a runnable dreamer, which
+    // evaluates their conditions; without either, ctx_note is surfaced without
+    // its surface_condition argument and smart-note text.
+    const smartNotesAvailable = isSmartNoteSurfaceAvailable(pluginConfig);
     const surfacedTools = Object.fromEntries(
         Object.entries(allTools).map(([toolId, definition]) => {
             const parameterDescriptions = parameterDescriptionsFor(
                 toolId,
                 registration.preset,
-                pluginConfig.smart_notes?.enabled,
+                smartNotesAvailable,
             );
             const argsWithPresetDescriptions = parameterDescriptions
                 ? Object.fromEntries(
@@ -233,7 +241,7 @@ export function createToolRegistry(args: {
                     ...definition,
                     args: argsWithPresetDescriptions,
                     description:
-                        toolId === "ctx_note" && pluginConfig.smart_notes?.enabled === false
+                        toolId === "ctx_note" && !smartNotesAvailable
                             ? withoutSmartNoteText(
                                   registration.preset === "light"
                                       ? CTX_NOTE_LIGHT_DESCRIPTION

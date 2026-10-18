@@ -124,19 +124,24 @@ export function registerMagicContextTools(
 	const registration = promptSurfaceRuntime.resolveRegistration(
 		opts.promptSurface,
 	);
+	// Smart notes need smart_notes.enabled and a runnable dreamer, which evaluates
+	// their conditions. Either one off drops ctx_note's smart-note text; an
+	// omitted flag (as in subagent entries) counts as on.
+	const smartNotesAvailable =
+		opts.smartNotesEnabled !== false && opts.dreamerEnabled !== false;
 	const surfaceTool = <T extends ToolDefinition>(definition: T): T => {
 		const parameters = structuredClone(definition.parameters);
 		applyJsonSchemaParameterDescriptions(
 			definition.name,
 			parameters,
 			registration.preset,
-			opts.smartNotesEnabled,
+			smartNotesAvailable ? opts.smartNotesEnabled : false,
 		);
 		return throwReturnedToolErrors({
 			...definition,
 			parameters,
 			description:
-				definition.name === "ctx_note" && opts.smartNotesEnabled === false
+				definition.name === "ctx_note" && !smartNotesAvailable
 					? withoutSmartNoteText(
 							registration.preset === "light"
 								? CTX_NOTE_LIGHT_DESCRIPTION
@@ -190,7 +195,7 @@ export function registerMagicContextTools(
 			surfaceTool(
 				createCtxNoteTool({
 					db: opts.db,
-					dreamerEnabled: opts.dreamerEnabled ?? false,
+					dreamerEnabled: opts.dreamerEnabled,
 					smartNotesEnabled: opts.smartNotesEnabled,
 					resolveDreamerEnabled: opts.resolveDreamerEnabled,
 					resolveProjectIdentity,

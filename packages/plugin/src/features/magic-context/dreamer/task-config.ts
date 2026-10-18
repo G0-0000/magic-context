@@ -1,3 +1,4 @@
+import { isDreamerRunnable } from "../../../config/agent-disable";
 import type { DreamerConfig } from "../../../config/schema/magic-context";
 import { type ModelHarness, resolveDreamerTaskModel } from "../../../shared/model-resolution";
 import {
@@ -61,14 +62,38 @@ export function buildDreamTaskRuntimeConfigs(
 }
 
 /**
- * The collection privacy gate (Option C): user-behavior observation candidates
- * are stored during historian runs ONLY when the user has scheduled the
- * review-user-memories task (schedule != ""). Replaces the v1
- * `user_memories.enabled` flag, which both gated collection AND review.
+ * The user-memory privacy gate: the review-user-memories task is scheduled
+ * (schedule != ""). Replaces the v1 `user_memories.enabled` flag,
+ * which both gated collection AND review. The `<user-profile>` system-prompt
+ * block keys on this alone; historian collection uses
+ * `userObservationCollectionEnabled`, which also needs a runnable dreamer.
  */
 export function userMemoryCollectionEnabled(dreamer: DreamerConfig | undefined): boolean {
     const schedule = dreamer?.tasks?.["review-user-memories"]?.schedule;
     return typeof schedule === "string" && schedule.trim() !== "";
+}
+
+/**
+ * Whether historian runs store user-behavior observations as review
+ * candidates: the review-user-memories task is scheduled AND the dreamer that
+ * runs it is runnable. With the dreamer disabled the default schedule is still
+ * non-empty, so the schedule check alone kept storing candidates that no
+ * review would ever read.
+ */
+export function userObservationCollectionEnabled(dreamer: DreamerConfig | undefined): boolean {
+    return userObservationsRequested(dreamer) && userMemoryCollectionEnabled(dreamer);
+}
+
+/**
+ * Whether the historian is asked for `<user_observations>` at all. It is false
+ * only when the dreamer is not runnable (no dreamer block, or
+ * `dreamer.disable: true`): then no review-user-memories run can ever read the
+ * observations, so the historian's per-run prompt tells it to skip them. With a
+ * runnable dreamer the prompt is unchanged even when the review task is
+ * unscheduled; observations are then parsed and discarded, as before.
+ */
+export function userObservationsRequested(dreamer: DreamerConfig | undefined): boolean {
+    return isDreamerRunnable({ dreamer });
 }
 
 /** The promotion threshold for user-memory review (collection + review share it). */

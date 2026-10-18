@@ -141,7 +141,11 @@ test("v2 wires injectDocs", () => expect(deps.injectDocs).toBe(false));
 test("v2 wires ensureProjectRegistered", () =>
     expect(deps.ensureProjectRegistered).toBe(ensureProjectRegisteredFromOpenCodeDirectory));
 test("v2 wires historyBudgetPercentage", () => expect(deps.historyBudgetPercentage).toBe(0.23));
-test("v2 wires experimentalUserMemories", () => expect(deps.experimentalUserMemories).toBe(true));
+// This config disables the dreamer, so review-user-memories can never run and
+// the historian neither stores user observations nor is asked for them.
+test("v2 wires experimentalUserMemories", () => expect(deps.experimentalUserMemories).toBe(false));
+test("v2 wires userObservationsRequested", () =>
+    expect(deps.userObservationsRequested).toBe(false));
 test("v2 wires experimentalTemporalAwareness", () =>
     expect(deps.experimentalTemporalAwareness).toBe(true));
 test("v2 wires muralEnabled", () => expect(deps.muralEnabled).toBe(true));
@@ -159,3 +163,9 @@ test("v2 wires project identity", () =>
     expect(deps.projectPath).toBe(resolveProjectIdentityForSession(dir, true)));
 test("v2 omits caveman when compaction is off", () =>
     expect(createV2TransformFeatureDeps(config, true, dir).cavemanTextCompression).toBeUndefined());
+test("v2 collects and requests user observations with a runnable dreamer", () => {
+    const runnable = MagicContextConfigSchema.parse({ dreamer: {} });
+    const features = createV2TransformFeatureDeps(runnable, false, dir);
+    expect(features.experimentalUserMemories).toBe(true);
+    expect(features.userObservationsRequested).toBe(true);
+});

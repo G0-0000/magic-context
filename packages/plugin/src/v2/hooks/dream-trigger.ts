@@ -57,7 +57,7 @@ export function startDreamTrigger(
         sample?: () => { config: DreamerConfig; mural?: { enabled: boolean } };
         executor: HiddenCompletionExecutor;
         projectIdentity: () => string;
-        /** The project's `memory.enabled`; `false` keeps the identity unscheduled. */
+        /** The project's `memory.enabled`; `false` leaves its project-memory tasks unscheduled. */
         projectMemoryEnabled?: boolean;
         language?: string;
         mural?: { enabled: boolean };
@@ -118,6 +118,7 @@ export function startDreamTrigger(
                         db,
                         projectIdentity: args.projectIdentity(),
                         projectMemoryEnabled: args.projectMemoryEnabled,
+                        smartNotesEnabled: args.smartNotesEnabled,
                         tasks: runnable,
                         executor: createDreamTaskExecutor({
                             hiddenCompletionExecutor: args.executor,

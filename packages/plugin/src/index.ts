@@ -9,6 +9,7 @@ import { withContentLanguageDirective } from "./agents/language-directive";
 import { denyTaskRoutingToCallerAgents } from "./agents/permissions";
 import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled, isDreamerRunnable } from "./config/agent-disable";
+import { logConfigDependencyNotesOnce } from "./config/dependency-notes";
 import { createDreamerOutputCapSampler } from "./config/live-child-output-cap";
 import { dreamerRunConfig, historianRunConfig, pluginConfigReader } from "./config/live-run-config";
 import { migrateMagicContextConfigLocations } from "./config/migrate-config-location";
@@ -236,6 +237,10 @@ const server: Plugin = async (ctx) => {
                 }
             }, 3000);
     }
+
+    // Settings that are on but inert because another section turns off what
+    // they rely on (for example smart notes with the dreamer disabled).
+    logConfigDependencyNotesOnce(pluginConfig, log);
 
     const openCodeDbResolution = resolveOpenCodeDbPath();
     if (

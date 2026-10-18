@@ -255,6 +255,7 @@ async function runOneWrapupIteration(args: {
         // the scheduled review-user-memories task enables collection. Dropping the
         // flag here silently suppressed observations that the module lane persists.
         experimentalUserMemories: ctx.userMemoriesEnabled,
+        userObservationsRequested: ctx.userObservationsRequested,
         ensureProjectRegistered: ctx.ensureProjectRegistered,
         getNotificationParams: () => ctx.getNotificationParams(sessionId),
         preserveInjectionCacheUntilConsumed: true,

@@ -68,6 +68,8 @@ export interface RegisterCtxWrapupDeps {
 	memoryEnabled: boolean;
 	autoPromote: boolean;
 	userMemoriesEnabled?: boolean;
+	/** False when the dreamer is not runnable; the historian then skips user observations. */
+	userObservationsRequested?: boolean;
 	executeThresholdPercentage?:
 		| number
 		| { default: number; [modelKey: string]: number };
@@ -498,6 +500,7 @@ export async function runPiWrapup(
 						memoryEnabled: deps.memoryEnabled,
 						autoPromote: deps.autoPromote,
 						userMemoriesEnabled: deps.userMemoriesEnabled,
+						userObservationsRequested: deps.userObservationsRequested,
 						language: deps.language,
 						compartmentLeaseHolderId: leaseHolder,
 						readBranchEntries: () => readPiWrapupBranchEntries(ctx),
