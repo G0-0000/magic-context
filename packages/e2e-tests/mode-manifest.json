@@ -22,9 +22,17 @@
             "path": "tests/latest-turn-thinking.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Real OpenCode 1.18.x task child and primary long tool loop at execute and force against a provider-side thinking oracle; negative controls reject edited, removed and reordered latest-turn blocks, queued drops release only after a real user turn, accepted legacy strips replay unchanged, a provider rejection restores the original thinking once, and host PID lsof proves throwaway containment. OpenCode 2, Pi and Rust have caller and module unit gates.",
+            "rationale": "Real OpenCode 1 task child and primary long tool loop at execute and force against a provider-side thinking oracle; negative controls reject edited, removed and reordered latest-turn blocks, a plain real user turn preserves the primary signed prefix and queued drop until explicit flush, accepted legacy strips replay unchanged, a provider rejection restores the original thinking once, and host PID lsof proves throwaway containment.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/opencode2/signed-drop-rebuild.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real pinned OpenCode 2 signed-thinking tool loop at 76 percent queues a drop, preserves every historical request byte and signed block on the next plain real user turn with a named hold reason, then drains only on explicit ctx-flush. Host PID lsof proves throwaway-store containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE", "OC2-S1"],
+            "hosts": ["opencode2"]
         },
         {
             "path": "tests/pi-historian-runtime.test.ts",
