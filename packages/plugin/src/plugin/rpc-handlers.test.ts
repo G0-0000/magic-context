@@ -568,6 +568,22 @@ describe("sidebar snapshot RPC failures", () => {
     test("paused sidebar logs once per directory and reason without stacks", () => {
         const directory = createTestTempDirFromPath(join(tmpdir(), "sidebar-paused-"));
         execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        // A repository with commits: one with none is recognized from its files and gets its
+        // directory identity without asking git, so a failing git could not pause it.
+        execFileSync(
+            "git",
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "first",
+            ],
+            { cwd: directory, windowsHide: true },
+        );
         const db = createTestDb();
         const logged = spyOn(logger, "log").mockImplementation(() => {});
         try {
