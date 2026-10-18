@@ -115,11 +115,11 @@ export function createPiTagSnapshotReader(db: Database) {
 	const unwatch = db.prepare("DELETE FROM pi_tag_watch WHERE session_id = ?");
 	const cache = new Map<string, SnapshotEntry>();
 	const fallbackRows = db.prepare(
-		`SELECT ${FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ? AND ${FALLBACK_ROW_PREDICATE}`,
+		`SELECT ${PI_FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ? AND ${PI_FALLBACK_ROW_PREDICATE}`,
 	);
 	const fallbackRowsByNumbers = db.prepare(
-		`SELECT ${FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ?
-		 AND tag_number IN (SELECT value FROM json_each(?)) AND ${FALLBACK_ROW_PREDICATE}`,
+		`SELECT ${PI_FALLBACK_ROW_COLUMNS} FROM tags WHERE session_id = ?
+		 AND tag_number IN (SELECT value FROM json_each(?)) AND ${PI_FALLBACK_ROW_PREDICATE}`,
 	);
 	/** Bring the cached entry up to date, or return null inside a transaction. */
 	const sync = (sessionId: string): SnapshotEntry | null => {
@@ -244,7 +244,8 @@ export function createPiTagSnapshotReader(db: Database) {
 	return read;
 }
 
-type SnapshotTag = ReturnType<typeof getTagsBySession>[number];
+export type PiSnapshotTag = ReturnType<typeof getTagsBySession>[number];
+type SnapshotTag = PiSnapshotTag;
 
 /**
  * A tag row that names an unsettled Pi id: a message tag stored under a
@@ -265,9 +266,9 @@ export interface PiFallbackTagRow {
 // exist reads these cached rows instead of querying the table. Matching stays
 // in SQL's own LIKE (ASCII case-insensitive), so the cached set is exactly the
 // set a direct table query would return.
-const FALLBACK_ROW_COLUMNS =
+export const PI_FALLBACK_ROW_COLUMNS =
 	"id, tag_number, type, message_id, tool_owner_message_id, entry_fingerprint";
-const FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE 'pi-msg-%')
+export const PI_FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE 'pi-msg-%')
 	OR (type = 'tool' AND tool_owner_message_id LIKE 'pi-msg-%'))`;
 
 interface SnapshotEntry {
@@ -300,6 +301,153 @@ function sameRow(
 ): boolean {
 	for (const key of keys) if (!Object.is(left[key], right[key])) return false;
 	return true;
+}
+
+export interface PiTagSnapshotCandidate {
+	tags: SnapshotTag[];
+	active: SnapshotTag[];
+	fallback: PiFallbackTagRow[];
+	estimatedBytes: number;
+}
+
+/**
+ * Evidence required to publish a job into its original connection/session.
+ * SQLite data_version values are connection-local: compare the owner's launch
+ * and publication samples, never the owner's number with the worker's number.
+ */
+export interface PiTagSnapshotToken {
+	connectionEpoch: number;
+	sessionEpoch: number;
+	jobId: number;
+	sessionId: string;
+	localRevision: string;
+	foreignRevision: string;
+	durableVersion: number;
+	ownVersion: number;
+	dataVersion: number;
+}
+
+export function samePiTagSnapshotToken(
+	left: PiTagSnapshotToken,
+	right: PiTagSnapshotToken,
+): boolean {
+	return (
+		left.connectionEpoch === right.connectionEpoch &&
+		left.sessionEpoch === right.sessionEpoch &&
+		left.jobId === right.jobId &&
+		left.sessionId === right.sessionId &&
+		left.localRevision === right.localRevision &&
+		left.foreignRevision === right.foreignRevision &&
+		left.durableVersion === right.durableVersion &&
+		left.ownVersion === right.ownVersion &&
+		left.dataVersion === right.dataVersion
+	);
+}
+
+// Includes row slots, array references and string headers as well as UTF-16
+// payloads. This is candidate admission, not a bound on process RSS or GC cost.
+function candidateRowBytes(row: object, overhead: number): number {
+	let bytes = overhead;
+	for (const value of Object.values(row)) {
+		if (typeof value === "string") bytes += 24 + value.length * 2;
+		else if (value instanceof Uint8Array) bytes += 24 + value.byteLength;
+	}
+	return bytes;
+}
+
+/**
+ * Private streaming assembly: only finish exposes the arrays, after both
+ * streams end. Work and identity reuse happen per row, never at publication.
+ * The caller supplies scheduling between rows; this helper never reads SQLite.
+ */
+export function createPiTagSnapshotCandidate(
+	cached: readonly SnapshotTag[] = [],
+	byteLimit = 128 * 1024 * 1024,
+) {
+	const tags: SnapshotTag[] = [];
+	const active: SnapshotTag[] = [];
+	const fallback: PiFallbackTagRow[] = [];
+	let estimatedBytes = 192;
+	let oldIndex = 0;
+	let keys: (keyof SnapshotTag)[] | undefined;
+	let tagsEnded = false;
+	let fallbackEnded = false;
+	let failed = false;
+	const reject = (reason: string): never => {
+		failed = true;
+		throw new Error(`Pi tag hydration: ${reason}`);
+	};
+	const admit = (row: object, overhead: number) => {
+		estimatedBytes += candidateRowBytes(row, overhead);
+		if (estimatedBytes > byteLimit) reject("candidate memory limit exceeded");
+	};
+	return {
+		appendTag(row: SnapshotTag) {
+			if (failed || tagsEnded) reject("tag packet after end or failure");
+			const previous = tags.at(-1);
+			if (
+				previous &&
+				(previous.tagNumber > row.tagNumber ||
+					(previous.tagNumber === row.tagNumber &&
+						(previous.id ?? 0) >= (row.id ?? 0)))
+			)
+				reject("noncanonical tag order");
+			admit(row, 384);
+			keys ??= Object.keys(row) as (keyof SnapshotTag)[];
+			while (oldIndex < cached.length) {
+				const old = cached[oldIndex];
+				if (
+					!old ||
+					old.tagNumber > row.tagNumber ||
+					(old.tagNumber === row.tagNumber && (old.id ?? 0) >= (row.id ?? 0))
+				)
+					break;
+				oldIndex += 1;
+			}
+			const old = cached[oldIndex];
+			const selected =
+				old && old.id === row.id && sameRow(old, row, keys) ? old : row;
+			Object.freeze(selected);
+			tags.push(selected);
+			if (isActive(selected)) active.push(selected);
+		},
+		appendFallback(row: PiFallbackTagRow) {
+			if (failed || fallbackEnded)
+				reject("fallback packet after end or failure");
+			admit(row, 192);
+			fallback.push(Object.freeze(row));
+		},
+		end(stream: "tags" | "fallback") {
+			if (failed) reject("end after failure");
+			if (stream === "tags") {
+				if (tagsEnded) reject("duplicate tag end");
+				tagsEnded = true;
+			} else {
+				if (fallbackEnded) reject("duplicate fallback end");
+				fallbackEnded = true;
+			}
+		},
+		finish(): PiTagSnapshotCandidate {
+			if (failed || !tagsEnded || !fallbackEnded)
+				throw new Error("Pi tag hydration: incomplete candidate");
+			return { tags, active, fallback, estimatedBytes };
+		},
+	};
+}
+
+export type PiTagSnapshotCandidateLoader = (
+	assembly: ReturnType<typeof createPiTagSnapshotCandidate>,
+) => Promise<void>;
+
+/** Internal injection seam for transport and deterministic candidate tests. */
+export async function loadPiTagSnapshotCandidate(
+	loader: PiTagSnapshotCandidateLoader,
+	cached: readonly SnapshotTag[] = [],
+	byteLimit?: number,
+): Promise<PiTagSnapshotCandidate> {
+	const assembly = createPiTagSnapshotCandidate(cached, byteLimit);
+	await loader(assembly);
+	return assembly.finish();
 }
 
 /**
