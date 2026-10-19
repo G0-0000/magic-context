@@ -156,7 +156,11 @@ import { restoreRow } from "../fold/restore";
 import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
-import { createLateHiddenExecutor, createV2HiddenCompletionExecutor } from "../hidden-completion";
+import {
+    createLateHiddenExecutor,
+    createV2HiddenCompletionExecutor,
+    type V2HiddenCompletionExecutor,
+} from "../hidden-completion";
 import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
 import {
     clearSyntheticCandidates,
@@ -211,6 +215,12 @@ class V2LkgAdmissionReplay extends Error {}
 
 // The event stream can trail the terminal store row by a scheduler tick; keep failure surfacing fast.
 const HIDDEN_SESSION_ERROR_GRACE_MS = 50;
+/**
+ * How long the disposer waits for cancelled hidden runs to release the store
+ * reader pool. Short, because OpenCode holds every session's new turns while a
+ * plugin reloads.
+ */
+const STORE_POOL_DISPOSE_WAIT_MS = 1_000;
 
 export function isBlockingV2TransformError(error: unknown): boolean {
     return (
@@ -865,6 +875,7 @@ export async function registerContext(context: V2Context) {
                 modelCatalog: () => Promise.resolve(context.model.list()),
                 historianTemperature: () => config.historian?.temperature,
                 openReader: openStoreReader,
+                holdStore: () => readerPool.hold(),
             },
         );
     };
@@ -909,7 +920,7 @@ export async function registerContext(context: V2Context) {
         return trigger;
     };
     // Both stay undefined after a refused start until recoverHiddenWork wires them.
-    let hiddenCompletionExecutor: HiddenCompletionExecutor | undefined =
+    let hiddenCompletionExecutor: V2HiddenCompletionExecutor | undefined =
         db &&
         isDatabasePersisted(db) &&
         resolveProjectIdentityForSession(directory, config.allow_home_project)
@@ -2480,6 +2491,15 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            // OpenCode 2 runs this disposer before it removes this instance's hooks
+            // (scope finalizers run in reverse registration order, and the disposer
+            // is added after setup has registered them), and loads the replacing
+            // instance only afterwards. Cancelling hidden runs first interrupts their
+            // children while this instance still shapes their turns, so no step of
+            // them reaches the new instance, which has no record of their prompts.
+            // The disposer cannot wait for those runs to finish instead: the host
+            // holds every new session drain until the reload completes.
+            await hiddenCompletionExecutor?.dispose();
             rpcStopped = true;
             rpcServer.stop();
             transform?.disposeRust();
@@ -2492,7 +2512,13 @@ export async function registerContext(context: V2Context) {
             for (const release of rawProviders.values()) release();
             rawProviders.clear();
             restoredRows.clear();
-            readerPool.close();
+            // A cancelled run still holds the pool until its caller closes it. Wait
+            // briefly so that usually completes here; otherwise the pool closes when
+            // the last hold is released, and the reload is not kept waiting for it.
+            if (!(await readerPool.closeWhenIdle(STORE_POOL_DISPOSE_WAIT_MS)))
+                log(
+                    `[magic-context] v2 store reader pool still held by ${readerPool.holdCount()} hidden run(s) at dispose; it closes when they finish`,
+                );
             clearSyntheticCandidates(context);
         },
     };

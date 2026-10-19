@@ -327,10 +327,19 @@ function closeConnection(connection: ReaderConnection): void {
 
 /** Boot-scoped read-only handles. Each lease still closes in the caller's finally block.
  * Statements, not results, are cached: WAL updates are visible on the next query.
- * A replaced/missing file cannot reuse the old inode, and disposal releases all handles. */
+ * A replaced/missing file cannot reuse the old inode, and disposal releases all handles.
+ *
+ * Work that opens readers over a long time (a hidden run polls the store for its whole
+ * lifetime) takes a `hold()`. Closing the pool while a hold is outstanding only marks it
+ * closing: readers can still be opened, and the pool closes when the last hold is
+ * released. Without that, disposing the plugin instance mid-run made the run's next poll
+ * fail with "Store reader pool is closed". */
 export class V2StoreReaderPool {
     private readonly connections = new Map<string, ReaderConnection>();
     private closed = false;
+    private closing = false;
+    private holds = 0;
+    private readonly idleWaiters = new Set<() => void>();
 
     constructor(private readonly capacity = 4) {
         if (!Number.isSafeInteger(capacity) || capacity < 1)
@@ -375,11 +384,69 @@ export class V2StoreReaderPool {
         if (connection.leases === 0) closeConnection(connection);
     }
 
+    /**
+     * Keep the pool open until the returned release is called. Refused once the pool is
+     * closing or closed, so a close always finishes once the existing holders are done.
+     */
+    hold(): () => void {
+        if (this.closed || this.closing) throw new Error("Store reader pool is closed");
+        this.holds++;
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            this.holds--;
+            if (this.holds === 0 && this.closing) this.finishClose();
+        };
+    }
+
+    /** True once every handle is closed and no further reader can be opened. */
+    isClosed(): boolean {
+        return this.closed;
+    }
+
+    /** Number of outstanding holds. */
+    holdCount(): number {
+        return this.holds;
+    }
+
+    /** Close now when nothing holds the pool; otherwise close after the last hold is released. */
     close(): void {
+        if (this.closed || this.closing) return;
+        this.closing = true;
+        if (this.holds === 0) this.finishClose();
+    }
+
+    /**
+     * `close()`, then wait at most `timeoutMs` for the pool to actually close. Resolves
+     * true when it closed within the wait. On false the pool is still closing and will
+     * close when its last hold is released; the caller is not kept waiting for that.
+     */
+    async closeWhenIdle(timeoutMs: number): Promise<boolean> {
+        this.close();
+        if (this.closed) return true;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let waiter: (() => void) | undefined;
+        try {
+            await new Promise<void>((resolve) => {
+                waiter = resolve;
+                this.idleWaiters.add(resolve);
+                timer = setTimeout(resolve, Math.max(0, timeoutMs));
+            });
+        } finally {
+            if (timer) clearTimeout(timer);
+            if (waiter) this.idleWaiters.delete(waiter);
+        }
+        return this.closed;
+    }
+
+    private finishClose(): void {
         if (this.closed) return;
         this.closed = true;
         for (const connection of this.connections.values()) this.retire(connection);
         this.connections.clear();
+        for (const resolve of this.idleWaiters) resolve();
+        this.idleWaiters.clear();
     }
 }
 
