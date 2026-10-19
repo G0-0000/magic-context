@@ -1,4 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -6,6 +9,7 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
 	addMergedReasoningStrippedIds,
 	appendNoteNudgeAnchor,
@@ -18,7 +22,9 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { buildSyntheticTodoPart } from "@magic-context/core/hooks/magic-context/todo-view";
+import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import * as autoSearch from "./auto-search-pi";
 import {
 	__test,
@@ -307,9 +313,21 @@ for (const lane of [
 	"history",
 	"synthetic todo",
 	"thinking strip",
+	"tag hydration",
+	"tag hydration fold",
 ] as const) {
-	test(`Pi 66% signed-prefix hold denies ${lane} until the next user`, async () => {
-		const db = createTestDb();
+	const testName =
+		lane === "tag hydration"
+			? "hydration completion preserves a held signed prefix and queued drops"
+			: lane === "tag hydration fold"
+				? "a genuine fold still drains eligible pending drops"
+				: `Pi 66% signed-prefix hold denies ${lane} until the next user`;
+	test(testName, async () => {
+		const root =
+			lane === "tag hydration"
+				? createTestTempDirFromPath(join(tmpdir(), "pi-held-hydration-"))
+				: undefined;
+		const db = createTestDb(root ? join(root, "context.db") : ":memory:");
 		const sessionId = `pi-execute-prefix-hold-${lane}`;
 		getOrCreateSessionMeta(db, sessionId);
 		updateSessionMeta(db, sessionId, {
@@ -426,6 +444,19 @@ for (const lane of [
 					),
 				).toBe(true);
 			tokens = 66_000;
+			if (root) {
+				const foreign = new Database(join(root, "context.db"));
+				try {
+					initializeDatabase(foreign);
+					foreign
+						.prepare(
+							"UPDATE tags SET byte_size = byte_size WHERE session_id = ?",
+						)
+						.run(sessionId);
+				} finally {
+					foreign.close();
+				}
+			}
 			shells.mockClear();
 			for (let n = 0; n < 2; n++) {
 				let gates: unknown;
@@ -486,6 +517,7 @@ for (const lane of [
 			shells.mockRestore();
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
+			if (root) rmSync(root, { recursive: true, force: true });
 		}
 	});
 }

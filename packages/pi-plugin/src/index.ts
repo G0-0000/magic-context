@@ -255,6 +255,10 @@ import {
 	acknowledgePiPendingSystemPromptResponses,
 	acknowledgePiSystemPromptResponse,
 } from "./system-prompt-delivery-pi";
+import {
+	drainPiTagSnapshotSession,
+	prewarmPiTagSnapshot,
+} from "./tag-snapshot-pi";
 import { withTimeout } from "./timeout";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./tools";
 import {
@@ -1975,6 +1979,7 @@ async function startPiMagicContextRuntime(
 		{
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
 		},
 	);
 	pi.on("session_start", async (event, ctx) => {
@@ -2010,6 +2015,7 @@ async function startPiMagicContextRuntime(
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
+			onInherited: (sessionId) => prewarmPiTagSnapshot(db, sessionId),
 		});
 		const sessionId = resolveSessionId(ctx);
 		if (
@@ -2029,6 +2035,7 @@ async function startPiMagicContextRuntime(
 				modelKey: canonicalPiModelKey(model.provider, model.id),
 			});
 		}
+		if (sessionId) prewarmPiTagSnapshot(db, sessionId);
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -3154,6 +3161,12 @@ async function startPiMagicContextRuntime(
 				// this, sessions accumulate state across `session_shutdown`
 				// in long-lived Pi processes that re-init the extension.
 				clearContextHandlerSession(sessionId);
+				// A cancelled prewarm is still owned by this runtime until its
+				// result settles and worker exits, within the existing shutdown cap.
+				await withTimeout(
+					drainPiTagSnapshotSession(sessionId),
+					SHUTDOWN_DRAIN_MS,
+				);
 			}
 		} catch {
 			// best-effort cleanup
@@ -3212,6 +3225,12 @@ async function startPiMagicContextRuntime(
 		const outgoingSessionId = switchOutgoingSessionId;
 		switchOutgoingSessionId = undefined;
 		try {
+			const incomingSessionId = readSessionId(ctx);
+			if (
+				incomingSessionId &&
+				(_event as { reason?: unknown })?.reason !== "fork"
+			)
+				prewarmPiTagSnapshot(db, incomingSessionId);
 			if (!outgoingSessionId || outgoingSessionId === readSessionId(ctx))
 				return;
 			clearPiSystemPromptSession(outgoingSessionId);
