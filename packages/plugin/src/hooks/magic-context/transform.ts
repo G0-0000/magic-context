@@ -157,6 +157,10 @@ import {
     type PassDegradationKind,
     type PassDegradationSite,
 } from "./pass-outcome";
+import {
+    createPendingDropEligibilityCache,
+    pendingDropEligibilityKey,
+} from "./pending-drop-eligibility";
 import { requestPendingMaterialization } from "./pending-materialization";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -752,6 +756,7 @@ export function createTransform(deps: TransformDeps) {
               })
             : undefined;
     let entryReuse: { reused: number; retained: number; retainedBytes: number } | undefined;
+    const pendingDropEligibility = createPendingDropEligibilityCache();
     const projectEntry = createLkgEntryProjector({
         onReuse: (stats) => {
             entryReuse = stats;
@@ -2166,6 +2171,22 @@ export function createTransform(deps: TransformDeps) {
         void prewarmTagOwners(db, sessionId, ownerRatio);
         const tagOwnersReady = isTagOwnerSummaryReady(db, sessionId, ownerRatio);
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
+        let dropProjectionEmergency = contextUsageEarly.percentage >= 95;
+        // The historian decision runs before tagMessages builds mutation targets.
+        // Reuse the previous applyPendingOperations eligibility only for identical
+        // host input bytes, persisted thinking omissions and protection settings.
+        const dropProjectionKey = () =>
+            pendingDropEligibilityKey(db, sessionId, lkgInput, {
+                currentTurnId,
+                model: modelForBudget,
+                protectedTokens: deps.protectedTokens,
+                protectedTokenTierOverrides: deps.protectedTokenTierOverrides,
+                protectedTools: deps.protectedTools,
+                keepReasoningTokens: deps.keepReasoningTokens,
+                usableSoft: windowGeometry?.usableSoft ?? boundaryContextLimit,
+                emergency: dropProjectionEmergency,
+                clearedReasoningThroughTag: sessionMeta?.clearedReasoningThroughTag,
+            });
         if (
             fullFeatureMode &&
             !compactionOff &&
@@ -2220,6 +2241,7 @@ export function createTransform(deps: TransformDeps) {
                         explicitFlush: deps.pendingMaterializationSessions.has(sessionId),
                         publishedHistory: isCacheBusting,
                     },
+                    pendingDropEligibility.read(sessionId, dropProjectionKey()),
                 );
                 if (triggerResult.shouldFire) {
                     sessionLog(
@@ -2839,6 +2861,8 @@ export function createTransform(deps: TransformDeps) {
         const protectedCutoff = protectionWindow.cutoff;
 
         const tPostProcess = performance.now();
+        dropProjectionEmergency =
+            thinkingFitRetries.has(sessionId) || contextUsage.percentage >= 95;
         const postTransformResult = await runPostTransformPhase({
             opencode2: deps.storeGeneration === "v2",
             normalizeRecoveryTail,
@@ -2915,6 +2939,8 @@ export function createTransform(deps: TransformDeps) {
                 currentModelKeyForBoundary,
             ),
             protectedTagIds,
+            onPendingDropEligibility: (eligible) =>
+                pendingDropEligibility.record(sessionId, dropProjectionKey(), eligible),
             protectedTagNumbers,
             protectedCutoff,
             protectedCount: protectionWindow.status.protectedCount,

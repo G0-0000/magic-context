@@ -4746,7 +4746,10 @@ describe("registerPiContextHandler", () => {
 					});
 					for (let tag = 1; tag <= 15; tag++)
 						queuePendingOp(db, sessionId, tag, "drop");
-					const rideDecision = (explicitFlush: boolean) =>
+					const rideDecision = (
+						explicitFlush: boolean,
+						eligible?: ReadonlySet<number>,
+					) =>
 						checkCompartmentTrigger(
 							db,
 							sessionId,
@@ -4768,12 +4771,27 @@ describe("registerPiContextHandler", () => {
 								explicitFlush,
 								publishedHistory: false,
 							},
+							eligible,
 						);
 					expect(rideDecision(false)).toMatchObject({
 						shouldFire: true,
 						reason: "projected_headroom",
 					});
-					expect(rideDecision(true)).toEqual({ shouldFire: false });
+					// A ride permits an attempt, not a claim that the queued targets can change.
+					expect(rideDecision(true)).toMatchObject({
+						shouldFire: true,
+						reason: "projected_headroom",
+					});
+					expect(rideDecision(true, new Set())).toMatchObject({
+						shouldFire: true,
+						reason: "projected_headroom",
+					});
+					expect(
+						rideDecision(
+							true,
+							new Set(Array.from({ length: 15 }, (_, index) => index + 1)),
+						),
+					).toEqual({ shouldFire: false });
 				},
 			);
 		} finally {

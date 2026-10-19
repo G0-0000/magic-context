@@ -13,6 +13,7 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
+import { capturePendingDropEligibility, pendingDropVeto } from "./pending-drop-eligibility";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
@@ -381,6 +382,8 @@ export function applyPendingOperations(
     onTagReduced?: (reduction: DroppedTokenReduction) => void,
     /** Reports why selected operations did or did not change the visible payload. */
     onBatchComplete?: (diagnostics: PendingOperationBatchDiagnostics) => void,
+    /** Supplies a read-only apply view for a later historian trigger. */
+    onEligibilitySnapshot?: (eligible: ReadonlySet<number>) => void,
 ): boolean {
     let didMutateMessage = false;
     let diagnostics: PendingOperationBatchDiagnostics | undefined;
@@ -395,6 +398,7 @@ export function applyPendingOperations(
         }).immediate();
         {
             const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
+            onEligibilitySnapshot?.(capturePendingDropEligibility(targets, protectedTagIds));
             // Load only the rows this batch reads: the operations' own tags. A
             // full getTagsBySession load (every tag the session ever had, about
             // 100k rows on a long session) ran here while this transaction held
@@ -451,14 +455,10 @@ export function applyPendingOperations(
                     continue;
                 }
 
-                if (protectedTagIds.has(pendingOp.tagId)) {
-                    reject("protected");
-                    continue;
-                }
-
                 const target = targets.get(pendingOp.tagId);
-                if (target?.thinkingDropProtected) {
-                    reject("active_thinking");
+                const veto = pendingDropVeto(pendingOp.tagId, target, protectedTagIds);
+                if (veto) {
+                    reject(veto);
                     continue;
                 }
                 const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";

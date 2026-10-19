@@ -1646,6 +1646,7 @@ interface RunPostTransformPhaseArgs {
     clearReasoningAge?: number;
     /** Canonical token-window membership consumed by pending-operation application. */
     protectedTagIds: ReadonlySet<number>;
+    onPendingDropEligibility?: (eligible: ReadonlySet<number>) => void;
     /** Canonical token-window membership in tag-number space. */
     protectedTagNumbers: ReadonlySet<number>;
     /** Canonical token-window cutoff in tag-number space. */
@@ -2790,6 +2791,8 @@ export async function runPostTransformPhase(
                 [],
                 new Set(),
                 (reduction) => droppedTokenReductions.push(reduction),
+                undefined,
+                args.onPendingDropEligibility,
             );
             if (pendingOpsDidMutate) {
                 droppedCount += pendingOps.length;
