@@ -74,7 +74,9 @@ const GATED_VERSION: u8 = 3;
 /// usage, steps and timestamps are unchanged. `structured-output-downgrade/v1`
 /// marks a frame recording that a run's structured output fell back to
 /// non-strict after the provider refused a strict schema; it carries no
-/// messages, usage or timestamps.
+/// messages, usage or timestamps. `delivery-order/v1` records how an ordered
+/// send was accepted, delivered (as a steer, or as text appended to a tool
+/// result) or ended unsent; usage, steps and timestamps are unchanged.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -96,6 +98,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "provider-text-state/v1",
     "openrouter-reasoning/v1",
     "structured-output-downgrade/v1",
+    "delivery-order/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1823,6 +1826,7 @@ pub(crate) mod tests {
             "provider-text-state/v1",
             "openrouter-reasoning/v1",
             "structured-output-downgrade/v1",
+            "delivery-order/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
