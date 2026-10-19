@@ -302,9 +302,7 @@ for (const [provider, api] of [
 				}
 				const count = faultPosition < 0 ? 3 : faultPosition;
 				if (faultPosition >= 0) {
-					await expect(pass(6)).rejects.toThrow(
-						"Magic Context storage is busy",
-					);
+					await expect(pass(6)).rejects.toThrow("stale review fault");
 					expect(
 						getTagsBySession(db, session)
 							.filter((t) => t.type === "tool")
