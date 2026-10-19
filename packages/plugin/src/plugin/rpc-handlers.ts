@@ -204,6 +204,15 @@ export interface RustSessionStatus {
     dreamer?: {
         runner?: ModuleRunnerStatus;
     };
+    /** Present while an armed `pending_rewrite` has the module serving this session raw. */
+    raw_passthrough?: {
+        reason?: string;
+        retained_boundary_id?: string;
+        coverage_ordinal?: number | null;
+        armed_at_ms?: number;
+        last_present_at_ms?: number | null;
+        absent_request_count?: number;
+    } | null;
 }
 
 /** The module's account of which completion runner a session used, and why. */
@@ -222,6 +231,20 @@ function runnerStatusFromModule(status: ModuleRunnerStatus | undefined): RunnerS
         source: status.source,
         harness: typeof status.harness === "string" ? status.harness : "",
         observed: status.observed === "last_completion" ? "last_completion" : "resolved_for_route",
+    };
+}
+
+/** The module's raw pass-through report, in the status payload's shape; null when absent. */
+export function rawPassthroughFromModule(
+    status: RustSessionStatus["raw_passthrough"],
+): StatusDetail["rawPassthrough"] {
+    if (!status || typeof status !== "object") return null;
+    return {
+        retainedBoundaryId:
+            typeof status.retained_boundary_id === "string" ? status.retained_boundary_id : "",
+        coverageOrdinal:
+            typeof status.coverage_ordinal === "number" ? status.coverage_ordinal : null,
+        armedAtMs: typeof status.armed_at_ms === "number" ? status.armed_at_ms : null,
     };
 }
 const rustStatusInFlight = new Map<string, Promise<RustSessionStatus | undefined>>();
@@ -853,6 +876,7 @@ export function buildStatusDetail(
         historianRefusal,
         historianRunner: runnerStatusFromModule(moduleHistorian?.runner),
         dreamerRunner: runnerStatusFromModule(moduleStatus?.dreamer?.runner),
+        rawPassthrough: rawPassthroughFromModule(moduleStatus?.raw_passthrough),
         isSubagent: false,
         pendingOps: [],
         contextLimit: 0,

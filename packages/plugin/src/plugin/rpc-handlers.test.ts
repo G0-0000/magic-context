@@ -827,6 +827,51 @@ describe("buildStatusDetail — completion runner provenance", () => {
     });
 });
 
+describe("buildStatusDetail — raw pass-through", () => {
+    test("carries the module's raw pass-through report and none for a managed session", () => {
+        const db = createTestDb();
+        try {
+            const raw = buildStatusDetail(
+                db,
+                "ses-raw-passthrough",
+                process.cwd(),
+                undefined,
+                { transform_mode: "rust" },
+                undefined,
+                undefined,
+                {
+                    raw_passthrough: {
+                        reason: "retained_boundary_absent",
+                        retained_boundary_id: "msg_old#3",
+                        coverage_ordinal: 14069,
+                        armed_at_ms: 1_700_000_000_000,
+                        last_present_at_ms: null,
+                        absent_request_count: 1,
+                    },
+                },
+            );
+            expect(raw.rawPassthrough).toEqual({
+                retainedBoundaryId: "msg_old#3",
+                coverageOrdinal: 14069,
+                armedAtMs: 1_700_000_000_000,
+            });
+            const managed = buildStatusDetail(
+                db,
+                "ses-managed",
+                process.cwd(),
+                undefined,
+                { transform_mode: "rust" },
+                undefined,
+                undefined,
+                { raw_passthrough: null },
+            );
+            expect(managed.rawPassthrough).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — memory importance histogram", () => {
     test("returns the exact active distribution and unclassified denominator", () => {
         const db = createTestDb();

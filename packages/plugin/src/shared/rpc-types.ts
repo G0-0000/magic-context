@@ -250,6 +250,16 @@ export interface StatusDetail extends SidebarSnapshot {
     };
     /** A durable host marker whose live module status no longer reports module ownership. */
     memoryAuthorityMismatch?: boolean;
+    /**
+     * Set while the Rust module serves this session raw because its history boundary is
+     * missing from the request (an armed `pending_rewrite`): no history compression, no
+     * cleanup, and the prompt grows with every turn. Rust mode only.
+     */
+    rawPassthrough?: {
+        retainedBoundaryId: string;
+        coverageOrdinal: number | null;
+        armedAtMs: number | null;
+    } | null;
     /** User-owned model profile selected for this project, or null for the base config. */
     activeProfile: string | null;
     configGeneration?: number;

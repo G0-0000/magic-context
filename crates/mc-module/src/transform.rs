@@ -684,12 +684,18 @@ pub struct TrimMismatch {
 pub enum BoundaryState {
     LivePresent,
     DeclaredTrimValidated,
+    /// The boundary is an older compartment end hidden by the host's own compaction
+    /// marker; the array is this session's continuation from the marker row on.
+    BehindHostMarker,
     Absent,
 }
 
 impl BoundaryState {
     fn is_present(&self) -> bool {
-        matches!(self, Self::LivePresent | Self::DeclaredTrimValidated)
+        matches!(
+            self,
+            Self::LivePresent | Self::DeclaredTrimValidated | Self::BehindHostMarker
+        )
     }
 }
 
@@ -1020,6 +1026,13 @@ pub struct TransformRequest {
     pub constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     pub compaction_observed: bool,
+    /// OpenCode message id of the row the host's persisted compaction marker sits on.
+    /// OpenCode sends nothing older than that row. When the module's boundary is an older
+    /// compartment end, the boundary can never come back into the array, and this id is
+    /// what lets the module tell that host trim apart from foreign traffic (see
+    /// `host_marker_trim`). Absent on older hosts and on hosts without such a marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_marker_message_id: Option<String>,
 }
 
 fn default_wire_version() -> u32 {
@@ -1249,6 +1262,8 @@ struct TransformRequestWire {
     constituents: Vec<(String, String, u64)>,
     #[serde(default)]
     compaction_observed: bool,
+    #[serde(default)]
+    compaction_marker_message_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for TransformRequest {
@@ -1341,6 +1356,9 @@ impl<'de> Deserialize<'de> for TransformRequest {
             new_epoch: wire.new_epoch,
             constituents: wire.constituents,
             compaction_observed: wire.compaction_observed,
+            compaction_marker_message_id: wire
+                .compaction_marker_message_id
+                .filter(|id| !id.is_empty()),
         })
     }
 }
@@ -4659,10 +4677,22 @@ fn apply_once(
     // trim record that matches durable coverage and the first untrimmed message. A failed
     // trim record is treated as Absent so the existing reconciliation error paths still run.
     let coverage_resolve_started_at = Instant::now();
-    let (boundary_state, trim_mismatch) =
+    let (boundary_state, trim_mismatch, host_marker_trim) =
         resolve_boundary_state(store, req, &loaded.core, &loaded.meta, &live)?;
     timings.coverage_resolve += elapsed_ms(coverage_resolve_started_at);
     let boundary_present = boundary_state.is_present();
+    // The trim that makes an absent boundary available to the fold: the host's own
+    // declaration, or the one derived from its compaction marker.
+    let boundary_trim = host_marker_trim.or_else(|| req.declared_trim.clone());
+    if boundary_state == BoundaryState::BehindHostMarker && loaded.meta.pending_rewrite.is_some() {
+        tracing::warn!(
+            "mc-module: boundary {:?} (coverage ordinal {:?}) is behind the host compaction marker row {:?} for {}; leaving raw pass-through and resuming managed passes from the marker",
+            loaded.core.boundary_id,
+            loaded.meta.coverage_ordinal,
+            req.compaction_marker_message_id,
+            req.session_id
+        );
+    }
     let boundary_token = if boundary_present {
         loaded.core.boundary_id.clone()
     } else {
@@ -6462,7 +6492,7 @@ fn apply_once(
                             minted,
                             &live,
                             &boundary_state,
-                            req.declared_trim.as_ref(),
+                            boundary_trim.as_ref(),
                         )
                     {
                         if loaded.core.reconcile_pending {
@@ -6552,7 +6582,7 @@ fn apply_once(
                                         reminted,
                                         &live,
                                         &boundary_state,
-                                        req.declared_trim.as_ref(),
+                                        boundary_trim.as_ref(),
                                     )
                                 {
                                     return Err(TransformError::BoundaryNotPresent(format!(
@@ -6843,7 +6873,7 @@ fn apply_once(
                                 minted,
                                 &live,
                                 &boundary_state,
-                                req.declared_trim.as_ref(),
+                                boundary_trim.as_ref(),
                             )
                         {
                             return Err(TransformError::BoundaryNotPresent(format!(
@@ -7009,7 +7039,7 @@ fn apply_once(
                                 id,
                                 &live,
                                 &boundary_state,
-                                req.declared_trim.as_ref(),
+                                boundary_trim.as_ref(),
                             )
                         {
                             return Err(TransformError::BoundaryNotPresent(format!(
@@ -10536,8 +10566,10 @@ fn boundary_available(
     declared: Option<&DeclaredTrim>,
 ) -> bool {
     live.iter().any(|block| block.id() == id)
-        || matches!(boundary_state, BoundaryState::DeclaredTrimValidated)
-            && declared.is_some_and(|declared| declared.flat_boundary_id == id)
+        || matches!(
+            boundary_state,
+            BoundaryState::DeclaredTrimValidated | BoundaryState::BehindHostMarker
+        ) && declared.is_some_and(|declared| declared.flat_boundary_id == id)
 }
 
 fn resolve_boundary_state(
@@ -10546,16 +10578,19 @@ fn resolve_boundary_state(
     core: &CoreState,
     meta: &ModuleMeta,
     live: &[&FlatBlock],
-) -> Result<(BoundaryState, Option<TrimMismatch>), TransformError> {
+) -> Result<(BoundaryState, Option<TrimMismatch>, Option<DeclaredTrim>), TransformError> {
     if !core.boundary_id.is_empty() && live.iter().any(|block| block.id() == core.boundary_id) {
         if let Some(expected_ordinal) = meta.coverage_ordinal {
             validate_live_boundary_ordinal(core.boundary_id.as_str(), expected_ordinal, live)?;
         }
-        return Ok((BoundaryState::LivePresent, None));
+        return Ok((BoundaryState::LivePresent, None, None));
     }
 
     let Some(declared) = req.declared_trim.as_ref() else {
-        return Ok((BoundaryState::Absent, None));
+        if let Some(trim) = host_marker_trim(store, req, core, meta)? {
+            return Ok((BoundaryState::BehindHostMarker, None, Some(trim)));
+        }
+        return Ok((BoundaryState::Absent, None, None));
     };
 
     if declared.flat_boundary_id != core.boundary_id {
@@ -10568,6 +10603,7 @@ fn resolve_boundary_state(
                     declared.flat_boundary_id, core.boundary_id
                 ),
             )),
+            None,
         ));
     }
 
@@ -10581,6 +10617,7 @@ fn resolve_boundary_state(
                     declared.boundary_absolute_ordinal, meta.coverage_ordinal
                 ),
             )),
+            None,
         ));
     }
 
@@ -10609,6 +10646,7 @@ fn resolve_boundary_state(
                         declared.boundary_absolute_ordinal
                     ),
                 )),
+                None,
             ));
         }
         None => {
@@ -10618,6 +10656,7 @@ fn resolve_boundary_state(
                     "tail_compartment",
                     "declared trim had no durable tail compartment".to_string(),
                 )),
+                None,
             ));
         }
     }
@@ -10638,10 +10677,70 @@ fn resolve_boundary_state(
                     first_live_non_system, declared.next_absolute_ordinal
                 ),
             )),
+            None,
         ));
     }
 
-    Ok((BoundaryState::DeclaredTrimValidated, None))
+    Ok((BoundaryState::DeclaredTrimValidated, None, None))
+}
+
+/// Recognize a module boundary that the host's own compaction marker has trimmed away.
+///
+/// OpenCode sends nothing older than the row its persisted compaction marker sits on. A
+/// session whose compartments end before that row (for example after a migration kept a
+/// history that ends before the marker) has a boundary that can never come back into the
+/// array, and without this check every pass is served raw forever. The trim is accepted
+/// only when it is provably this session's own continuation:
+/// - the host names the marker row, and the array's first non-system message is that row;
+/// - every such live message is newer than the module's coverage;
+/// - the module's boundary is the end of a stored compartment at that coverage ordinal.
+///
+/// The result is a trim declaration with the same meaning as a host-declared one: the
+/// prefix renders the compartments and every live message after the gap is kept. The
+/// messages between the boundary and the marker row are not in the array, so no summary
+/// can be made of them here; the historian carries on from the marker row.
+fn host_marker_trim(
+    store: &McStore,
+    req: &TransformRequest,
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> Result<Option<DeclaredTrim>, TransformError> {
+    let Some(marker_mid) = req.compaction_marker_message_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(coverage) = meta.coverage_ordinal else {
+        return Ok(None);
+    };
+    let Some((boundary_mid, _)) = split_block_id(&core.boundary_id) else {
+        return Ok(None);
+    };
+    let Some(first) = req
+        .messages
+        .iter()
+        .filter(|message| !message.ck.meta.synthetic && message.ck.role != "system")
+        .min_by_key(|message| message.ordinal)
+    else {
+        return Ok(None);
+    };
+    if first.mid != marker_mid || first.ordinal <= coverage {
+        return Ok(None);
+    }
+    let anchored = store
+        .load_compartments(&req.session_id)?
+        .iter()
+        .any(|compartment| {
+            compartment.end_message_id == core.boundary_id
+                && u64::try_from(compartment.end_message) == Ok(coverage)
+        });
+    if !anchored {
+        return Ok(None);
+    }
+    Ok(Some(DeclaredTrim {
+        flat_boundary_id: core.boundary_id.clone(),
+        boundary_bare_message_id: boundary_mid.to_string(),
+        boundary_absolute_ordinal: coverage,
+        next_absolute_ordinal: first.ordinal,
+    }))
 }
 
 fn trim_mismatch(predicate: &'static str, detail: String) -> TrimMismatch {
@@ -20970,6 +21069,7 @@ pub(crate) mod tests {
             new_epoch: 0,
             constituents: Vec::new(),
             compaction_observed: false,
+            compaction_marker_message_id: None,
         }
     }
 
@@ -32850,6 +32950,208 @@ pub(crate) mod tests {
         assert!(!loaded.meta.pending_rewrite_ambiguous);
         assert_eq!(loaded.meta.revert_epoch, 0);
         assert_eq!(s.load_compartments("ses").unwrap().len(), 1);
+    }
+
+    /// The module's boundary state after a state-sync seed of `boundary`, the way a host
+    /// seeds a session whose cache row a single-store migration reset.
+    fn seed_module_boundary(s: &McStore, session: &str, boundary: &str) {
+        s.apply_authority_state_sync(ModuleStateSyncRequest {
+            resolved_compartment_boundaries: &[],
+            session_id: session,
+            project_path: "git:proj",
+            shadow_generation: 0,
+            expected_shadow_seq: 0,
+            seed_boundary_id: Some(boundary),
+            drop_seeds: &[],
+            drop_seed_skipped: 0,
+            strip_seeds: &[],
+            strip_seed_skipped: 0,
+            reasoning_cleared_through_tag: None,
+            last_todo_state: None,
+            pending_agent_drops: &[],
+            pending_agent_drops_skipped: 0,
+            user_hint_seeds: &[],
+            auto_search_hint_skipped: 0,
+            note_nudge_anchors: None,
+            todo_synthetic_anchor: None,
+            todo_synthetic_anchor_present: false,
+            emergency_latches: None,
+            pending_compaction_marker: None,
+            deferred_execute_state: None,
+            channel2_nudge_state: None,
+            acked_watermarks: Value::Null,
+        })
+        .unwrap();
+    }
+
+    /// A scaled-down copy of a session whose kept history ends before the host's
+    /// compaction marker: compartments cover ordinals 1..=5 (boundary `m5#0`), the
+    /// marker sits on `m9`, so OpenCode's array is `m9..=m12` and never holds `m5`.
+    fn behind_marker_fixture(session: &str) -> (tempfile::TempDir, McStore, TransformRequest) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments(session, &[comp(1, 1, 5, "m5", "S-OLD")])
+            .unwrap();
+        seed_module_boundary(&s, session, "m5#0");
+        let live = (9..=12u64)
+            .map(|ordinal| {
+                item(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    &format!("after marker {ordinal}"),
+                )
+            })
+            .collect();
+        (dir, s, req(session, "cfg0", live))
+    }
+
+    #[test]
+    fn pending_rewrite_recovers_when_the_boundary_is_behind_the_host_compaction_marker() {
+        let session = "behind-marker";
+        let (dir, s, mut request) = behind_marker_fixture(session);
+        let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+
+        // An older host names no marker row: the pass is served raw and pending_rewrite
+        // arms, which is the stored state of a session stuck in raw pass-through.
+        let raw = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(raw.response.action, "PASSTHROUGH");
+        assert_eq!(raw.boundary_state, BoundaryState::Absent);
+        assert!(s.load(session).unwrap().meta.pending_rewrite.is_some());
+        let repeat = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(repeat.response.action, "PASSTHROUGH");
+
+        // The host names its marker row and the array starts there: one rebuilding pass
+        // brings the session back under management.
+        request.compaction_marker_message_id = Some("m9".to_string());
+        let recovered = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(recovered.boundary_state, BoundaryState::BehindHostMarker);
+        assert_eq!(recovered.response.action, "HARD");
+        assert_eq!(
+            tail_ids(&recovered.response),
+            vec!["m9", "m10", "m11", "m12"]
+        );
+        assert!(
+            m0_bytes(&recovered.response).contains("S-OLD"),
+            "the kept compartments render in the prefix again"
+        );
+        let loaded = s.load(session).unwrap();
+        assert!(loaded.meta.pending_rewrite.is_none());
+        assert!(!loaded.meta.bootstrap_seed_fold_pending);
+        assert_eq!(loaded.core.boundary_id, "m5#0");
+        assert_eq!(loaded.meta.coverage_ordinal, Some(5));
+
+        // Defer passes replay the rebuilt bytes exactly.
+        let recovered_bytes = serde_json::to_value(recovered.response.messages()).unwrap();
+        for _ in 0..2 {
+            let defer = transform_with_projection(&s, &request, &ctx).unwrap();
+            assert_eq!(defer.boundary_state, BoundaryState::BehindHostMarker);
+            assert_eq!(defer.response.action, "SOFT+");
+            assert_eq!(
+                serde_json::to_value(defer.response.messages()).unwrap(),
+                recovered_bytes
+            );
+        }
+        assert!(s.load(session).unwrap().meta.pending_rewrite.is_none());
+
+        // The historian resumes from the marker row. Its compartment lands after the gap,
+        // the next rebuild folds it, and the boundary is back in the array.
+        let mut compartments = s.load_compartments(session).unwrap();
+        compartments.push(comp(2, 9, 10, "m10", "S-NEW"));
+        s.replace_compartments(session, &compartments).unwrap();
+        let published = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(published.boundary_state, BoundaryState::BehindHostMarker);
+        assert_ne!(published.response.action, "PASSTHROUGH");
+        request.render_config = "cfg1".to_string();
+        let folded = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(folded.response.action, "HARD");
+        assert_eq!(folded.response.boundary_id, "m10#0");
+        assert_eq!(tail_ids(&folded.response), vec!["m11", "m12"]);
+        let after_fold = transform_with_projection(&s, &request, &ctx).unwrap();
+        assert_eq!(after_fold.boundary_state, BoundaryState::LivePresent);
+        assert_eq!(after_fold.response.action, "SOFT+");
+    }
+
+    #[test]
+    fn compaction_marker_row_that_does_not_lead_the_array_keeps_pending_rewrite() {
+        // The marker must name the array's first message and that message must be newer
+        // than the module's coverage; anything else is not provably the host's own trim.
+        type MarkerCase = (&'static str, Box<dyn Fn(&mut TransformRequest)>);
+        let cases: Vec<MarkerCase> = vec![
+            (
+                "marker on a later row",
+                Box::new(|request| {
+                    request.compaction_marker_message_id = Some("m10".to_string());
+                }),
+            ),
+            (
+                "array older than coverage",
+                Box::new(|request| {
+                    request.messages = vec![item("foreign", 3, "other conversation")];
+                    request.compaction_marker_message_id = Some("foreign".to_string());
+                }),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let (dir, s, mut request) = behind_marker_fixture("marker-mismatch");
+            let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+            mutate(&mut request);
+            let result = transform_with_projection(&s, &request, &ctx).unwrap();
+            assert_eq!(result.response.action, "PASSTHROUGH", "{name}");
+            assert_eq!(result.boundary_state, BoundaryState::Absent, "{name}");
+            assert!(
+                s.load("marker-mismatch")
+                    .unwrap()
+                    .meta
+                    .pending_rewrite
+                    .is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_marker_row_leaves_a_present_boundary_session_unchanged() {
+        let run_session = |marker: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments("present", &[comp(1, 1, 5, "m5", "S0")])
+                .unwrap();
+            seed_module_boundary(&s, "present", "m5#0");
+            let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 1);
+            let mut outputs = Vec::new();
+            for tail_end in [7u64, 7, 8] {
+                let live = (5..=tail_end)
+                    .map(|ordinal| {
+                        item(&format!("m{ordinal}"), ordinal, &format!("turn {ordinal}"))
+                    })
+                    .collect();
+                let mut request = req("present", "cfg0", live);
+                request.compaction_marker_message_id = marker.map(str::to_string);
+                let result = transform_with_projection(&s, &request, &ctx).unwrap();
+                assert_eq!(result.boundary_state, BoundaryState::LivePresent);
+                outputs.push((
+                    result.response.action.clone(),
+                    serde_json::to_value(result.response.messages()).unwrap(),
+                ));
+            }
+            let loaded = s.load("present").unwrap();
+            (
+                outputs,
+                loaded.core.boundary_id,
+                loaded.meta.coverage_ordinal,
+            )
+        };
+        let without = run_session(None);
+        let with_marker = run_session(Some("m5"));
+        assert_eq!(without, with_marker);
+        assert_eq!(
+            without
+                .0
+                .iter()
+                .map(|(action, _)| action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["HARD", "SOFT+", "SOFT+"]
+        );
     }
 
     #[test]

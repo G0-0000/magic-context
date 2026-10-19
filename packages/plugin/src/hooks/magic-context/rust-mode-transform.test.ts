@@ -1954,6 +1954,31 @@ describe("Rust mode authority adapter", () => {
         expect(body).not.toHaveProperty("mid_turn");
     });
 
+    it("names the persisted compaction marker row on the transform wire only when one exists", () => {
+        // The module accepts a boundary older than the array only when the array starts
+        // at the row the host's own compaction marker sits on, so the wire names it.
+        const base = {
+            input: [],
+            nativeMessages: [],
+            passInputs: {},
+            usage: {},
+            modelKey: null,
+            providerId: null,
+        };
+        const named = __rustModeTransformTest.buildTransformBody({
+            ...base,
+            sessionId: "marker-row-wire",
+            compactionMarkerMessageId: "msg_marker",
+        });
+        expect(named.compaction_marker_message_id).toBe("msg_marker");
+        const none = __rustModeTransformTest.buildTransformBody({
+            ...base,
+            sessionId: "marker-row-absent",
+            compactionMarkerMessageId: null,
+        });
+        expect(none).not.toHaveProperty("compaction_marker_message_id");
+    });
+
     it("omits geometry without changing the legacy transform shape", () => {
         const body = __rustModeTransformTest.buildTransformBody({
             sessionId: "legacy-geometry-wire",
