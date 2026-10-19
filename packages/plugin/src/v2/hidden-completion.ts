@@ -157,12 +157,15 @@ function toolResultText(result: unknown): string | undefined {
 }
 
 /**
- * Rebuild the child's tool calls in the host message shape the dreamer validators read
+ * Rebuild the child's assistant text and tool calls in the host message shape the dreamer validators read
  * (`state.status`, `state.input`, `state.output`), matching what the OpenCode 1 transport
  * returns. Curate counts an operation as applied only from its result text, so the text
  * has to survive this conversion.
  */
-export function toolLoopMessages(attempt: HiddenChildAttempt): unknown[] {
+export function toolLoopMessages(
+    attempt: HiddenChildAttempt,
+    rows?: readonly StoreRow<"assistant">[],
+): unknown[] {
     const messages = attempt.observedMessages ?? [];
     const results = new Map<string, { status: string; output?: string }>();
     for (const message of messages) {
@@ -183,9 +186,43 @@ export function toolLoopMessages(attempt: HiddenChildAttempt): unknown[] {
             });
         }
     }
-    return messages.flatMap((message) => {
+    // Persisted rows include the final reply, which never passes through the next
+    // context hook. Keep earlier text too: a manifest can span investigation steps.
+    const transcript = rows
+        ? rows.map((row) => ({ role: "assistant", content: row.data.content ?? [] }))
+        : messages;
+    return transcript.flatMap((message) => {
         if (message.role !== "assistant") return [];
-        const parts = message.content.flatMap((part) => {
+        const parts = message.content.flatMap<Record<string, unknown>>((part) => {
+            if (part.type === "text" && typeof part.text === "string")
+                return [{ type: "text", text: part.text }];
+            if (
+                part.type === "tool" &&
+                typeof part.name === "string" &&
+                typeof part.state === "object" &&
+                part.state !== null
+            ) {
+                const state = part.state as {
+                    status?: unknown;
+                    input?: unknown;
+                    content?: unknown;
+                };
+                const output =
+                    state.status === "completed"
+                        ? toolResultText({ value: state.content })
+                        : undefined;
+                return [
+                    {
+                        type: "tool",
+                        tool: part.name,
+                        state: {
+                            status: state.status,
+                            input: state.input,
+                            ...(output === undefined ? {} : { output }),
+                        },
+                    },
+                ];
+            }
             if (
                 part.type !== "tool-call" ||
                 typeof part.id !== "string" ||
@@ -442,9 +479,11 @@ export async function createV2HiddenCompletionExecutor(
             ) as { variants?: unknown } | undefined;
             if (!entry) return model;
             if (
-                entry.variants &&
-                typeof entry.variants === "object" &&
-                Object.hasOwn(entry.variants, model.variant)
+                Array.isArray(entry.variants)
+                    ? entry.variants.some((variant) => variant?.id === model.variant)
+                    : entry.variants &&
+                      typeof entry.variants === "object" &&
+                      Object.hasOwn(entry.variants, model.variant)
             )
                 return model;
             const key = `${model.providerID}/${model.modelID}:${model.variant}`;
@@ -789,7 +828,7 @@ export async function createV2HiddenCompletionExecutor(
                     text,
                     tokenLog: runTokenLog(tokens, run.identity.maxOutputTokens, row.data.finish),
                     ...(hiddenToolLoop(run.identity)
-                        ? { messages: toolLoopMessages(attempt) }
+                        ? { messages: toolLoopMessages(attempt, steps) }
                         : {}),
                     reasoning: text ? null : assistantReasoning(row),
                     // If either side is numeric, retain the provider's partial usage

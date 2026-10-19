@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { parseMapMemoriesCompletion } from "../features/magic-context/dreamer/map-memories";
 import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
 import {
     HiddenCompletionRefusal,
@@ -1079,6 +1080,86 @@ describe("OpenCode 2 hidden child completion", () => {
             state.db.close();
         }
     });
+
+    test.each([
+        "bare array",
+        "data envelope",
+    ])("uses catalog variant ids from a %s at creation and model switch", async (shape) => {
+        const logs: string[] = [];
+        const state = await setup("array-variants", {
+            logs,
+            modelCatalog: async () => {
+                const data = [
+                    {
+                        id: "cheap",
+                        providerID: "mock",
+                        variants: [
+                            { id: "high", settings: {} },
+                            { id: "medium", settings: {} },
+                        ],
+                    },
+                ];
+                return shape === "bare array" ? data : { data };
+            },
+        });
+        try {
+            const handle = await state.executor.open({
+                ...dreamerRun,
+                model: { model: "mock/cheap", qualifier: "high" },
+            });
+            expect(state.creates[0]?.model.variant).toBe("high");
+            await state.executor.attempt(handle, request("cheap", { variant: "medium" }));
+            expect(state.switches.at(-1)?.model.variant).toBe("medium");
+            await state.executor.attempt(handle, request("cheap", { variant: "not-offered" }));
+            expect(state.switches.at(-1)?.model.variant).toBeUndefined();
+            expect(logs.filter((line) => line.includes("variant '"))).toEqual([
+                expect.stringContaining("variant 'not-offered' not offered"),
+            ]);
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+});
+
+test("OC2 mapper retains the persisted incremental transcript and final reply without reasoning", async () => {
+    const state = await setup();
+    const final = '<memory id="1" files="src/fact.ts"/>\n</mappings>';
+    const prefix = '<mappings>\n<memory id="2" independent="true"/>\n';
+    state.host.prompt = async ({ sessionID, text }) => {
+        state.hook.apply({
+            sessionID,
+            agent: "dreamer-memory-mapper",
+            model: { providerID: "mock", id: "cheap" },
+            system: [],
+            tools: {},
+            options: {},
+            messages: [{ role: "user", content: [{ type: "text", text }] }],
+        });
+        const first = state.rows.append(sessionID, prefix, { finish: "tool-calls" });
+        first.data.content?.push({
+            type: "reasoning",
+            text: "private <mappings>reasoning</mappings>",
+        });
+        state.rows.append(sessionID, final);
+    };
+    try {
+        const handle = await state.executor.open({ ...dreamerRun, agent: "dreamer-memory-mapper" });
+        await state.executor.attempt(handle, request());
+        const completion = await state.executor.collect(handle, 50);
+        expect(completion.text).toBe(final);
+        expect(completion.messages).toEqual([
+            { info: { role: "assistant" }, parts: [{ type: "text", text: prefix }] },
+            { info: { role: "assistant" }, parts: [{ type: "text", text: final }] },
+        ]);
+        expect(parseMapMemoriesCompletion(final, completion, new Set([1, 2]))).toEqual([
+            { id: 2, files: [], independent: true },
+            { id: 1, files: ["src/fact.ts"], independent: false },
+        ]);
+        await close(state.executor, handle, true);
+    } finally {
+        state.db.close();
+    }
 });
 
 test("hidden tool-loop hard-stops at soft prompt budget when the host has no pre-tool hook", async () => {
@@ -1114,14 +1195,38 @@ test("hidden tool-loop hard-stops at soft prompt budget when the host has no pre
 });
 
 describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
-    // These tool results use the shapes `v2/fold/restore.ts` builds when it restores a
-    // child's transcript into provider messages, which is what toolLoopMessages reads.
+    // The wire fallback uses the shapes `v2/fold/restore.ts` builds when it restores
+    // a child's transcript into provider messages. Persisted tool parts differ.
     const call = (id: string, action: string) => ({
         role: "assistant",
         content: [{ type: "tool-call", id, name: "ctx_memory", input: { action, ids: [1] } }],
     });
     const transcript = (results: unknown[]) =>
         toolLoopMessages({ observedMessages: results } as never);
+
+    test.each([
+        "completed",
+        "error",
+    ])("preserves a persisted %s tool result for curate validation", (status) => {
+        const rows = new Rows();
+        const row = rows.append("child", "");
+        row.data.content = [
+            {
+                type: "tool",
+                id: "c1",
+                name: "ctx_memory",
+                state: {
+                    status,
+                    input: { action: "archive", ids: [1] },
+                    content: [{ type: "text", text: "Archived memory [ID: 1]." }],
+                },
+            },
+        ];
+        expect(inspectCurateMemoryOperations(toolLoopMessages({} as never, [row]))).toEqual({
+            totalCalls: 1,
+            completedActions: status === "completed" ? ["archive"] : [],
+        });
+    });
 
     test("counts an applied operation from a single text result", () => {
         const messages = transcript([
