@@ -77,6 +77,9 @@ const GATED_VERSION: u8 = 3;
 /// messages, usage or timestamps. `delivery-order/v1` records how an ordered
 /// send was accepted, delivered (as a steer, or as text appended to a tool
 /// result) or ended unsent; usage, steps and timestamps are unchanged.
+/// `runner-tags/v1` adds `tags` and `origin` members to records that carry
+/// message parts, and may set `render_tags` in the frozen render config; it
+/// changes no text, usage, step or timestamp.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -99,6 +102,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "openrouter-reasoning/v1",
     "structured-output-downgrade/v1",
     "delivery-order/v1",
+    "runner-tags/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1827,6 +1831,7 @@ pub(crate) mod tests {
             "openrouter-reasoning/v1",
             "structured-output-downgrade/v1",
             "delivery-order/v1",
+            "runner-tags/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
