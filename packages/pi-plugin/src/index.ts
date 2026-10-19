@@ -238,6 +238,7 @@ import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { bindStaleBuildNotice } from "./stale-build-notice";
 import { registerStatusLine, updateStatusLine } from "./status-line";
+import { registerStreamTagPrefixStrip } from "./stream-tag-prefix-strip";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { registerPiSubagentHostTools } from "./subagent-host-tools";
 import {
@@ -2888,6 +2889,14 @@ async function startPiMagicContextRuntime(
 	// (we re-strip and re-inject on the next transform pass), but the
 	// stored text is what Pi's UI renders — without this scrub, users
 	// see internal tag IDs at the start of every assistant turn.
+	//
+	// The same prefix also reaches clients earlier, as streamed `text_delta`
+	// events (Pi JSON/RPC mode). The stream rewrite hides it there; see
+	// stream-tag-prefix-strip.ts for why it is Pi-only. Oh My Pi notifies
+	// its stream listeners before extension handlers run, so it cannot work there.
+	if (PI_HARNESS_KIND !== "omp") {
+		registerStreamTagPrefixStrip(pi, () => !compactionOff);
+	}
 	pi.on("message_end", async (event, ctx) => {
 		try {
 			const leafId = ctx.sessionManager.getLeafId();
