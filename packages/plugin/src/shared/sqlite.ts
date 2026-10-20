@@ -41,6 +41,7 @@
 
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { statSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 // Type import only — runtime is loaded dynamically below. @types/better-sqlite3
 // has the richest definitions and is a structural superset of the API surface
@@ -243,6 +244,7 @@ export async function loadSqliteModule(
 const detectedRuntime = detectSqliteRuntime();
 const isBun = detectedRuntime === "Bun";
 const sqliteModule = await loadSqliteModule(detectedRuntime);
+const immutableSqliteModule = isBun ? await loadSqliteModule("Node.js") : sqliteModule;
 
 // Different export shapes between the two backends:
 //   - bun:sqlite  → named export `Database` (has its own .transaction, accepts
@@ -252,6 +254,9 @@ const sqliteModule = await loadSqliteModule(detectedRuntime);
 const DatabaseImpl: typeof BetterSqlite3 = isBun
     ? (sqliteModule.Database as typeof BetterSqlite3)
     : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
+const ImmutableDatabaseImpl: typeof BetterSqlite3 = isBun
+    ? buildNodeSqliteDatabaseClass(immutableSqliteModule.DatabaseSync)
+    : DatabaseImpl;
 
 interface TrackedSqliteConnection {
     sequence: number;
@@ -606,6 +611,15 @@ const TrackedDatabase = new Proxy(DatabaseImpl, {
     },
 }) as typeof BetterSqlite3;
 
+const TrackedImmutableDatabase = new Proxy(ImmutableDatabaseImpl, {
+    construct(target, args) {
+        const db = inRootAsyncContext(
+            () => Reflect.construct(target, args, target) as BetterSqlite3.Database,
+        );
+        return trackSqliteConnection(db, args[0], args[1]);
+    },
+}) as typeof BetterSqlite3;
+
 /**
  * Wrap node:sqlite's `DatabaseSync` so it presents the better-sqlite3/bun
  * surface the rest of the codebase calls:
@@ -654,6 +668,14 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
 }
 
 export const Database: typeof BetterSqlite3 = TrackedDatabase;
+
+/** Open a closed SQLite file without asking SQLite to create missing WAL sidecars. */
+export function openImmutableDatabase(path: string): BetterSqlite3.Database {
+    // Immutable mode avoids creating missing WAL sidecars; callers must first rule out writers.
+    const uri = pathToFileURL(path);
+    uri.searchParams.set("immutable", "1");
+    return new TrackedImmutableDatabase(uri.href, { readonly: true });
+}
 
 /** The constructor path, without querying SQLite on the prompt thread. */
 export function getSqliteDatabasePath(db: Database): string | null {

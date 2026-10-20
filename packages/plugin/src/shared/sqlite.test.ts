@@ -1,12 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     Database,
     detectSqliteRuntime,
     getSqliteMemoryStats,
     loadSqliteModule,
+    openImmutableDatabase,
     SqliteRuntimeUnavailableError,
 } from "./sqlite";
+import { createTestTempDir } from "./test-temp-dir";
 
 describe("SQLite runtime selector", () => {
     it("suppresses only the node:sqlite experimental warning in a real Node process", () => {
@@ -78,6 +83,36 @@ describe("SQLite runtime selector", () => {
             db.close();
         }
         expect(getSqliteMemoryStats().connectionCount).toBe(before);
+    });
+
+    it("reads a checkpointed WAL database without creating sidecars or changing bytes", () => {
+        const { dir: directory, cleanup } = createTestTempDir(
+            "mc-plugin-test-xdg-pid-",
+            "immutable-sqlite-",
+        );
+        const path = join(directory, "context.db");
+        try {
+            const writer = new Database(path);
+            writer.exec(
+                "PRAGMA journal_mode=WAL; CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (42); PRAGMA wal_checkpoint(TRUNCATE)",
+            );
+            writer.close();
+            expect(existsSync(`${path}-wal`)).toBe(false);
+            expect(existsSync(`${path}-shm`)).toBe(false);
+
+            const before = createHash("sha256").update(readFileSync(path)).digest("hex");
+            const reader = openImmutableDatabase(path);
+            try {
+                expect(reader.prepare("SELECT value FROM sample").get()).toEqual({ value: 42 });
+            } finally {
+                reader.close();
+            }
+            expect(createHash("sha256").update(readFileSync(path)).digest("hex")).toBe(before);
+            expect(existsSync(`${path}-wal`)).toBe(false);
+            expect(existsSync(`${path}-shm`)).toBe(false);
+        } finally {
+            cleanup();
+        }
     });
 
     it("wraps a missing node:sqlite module with the detected runtime and cause", async () => {
