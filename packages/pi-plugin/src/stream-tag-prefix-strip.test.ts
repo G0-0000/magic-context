@@ -176,7 +176,8 @@ describe("rewriteMessageUpdateEvent", () => {
 		const raw = "§123§ Hello §9§ world";
 		const { stream } = streamed(["§123§ ", "Hello ", "§9§ world"]);
 		expect(stream.output.content[0].text).toBe(raw);
-		// The existing message_end strip still produces exactly today's result.
+		// stripTagPrefixFromAssistantMessage (the message_end strip) still gives
+		// the same saved text as when no stream rewrite ran.
 		const finalMessage = { role: "assistant", content: stream.output.content };
 		stripTagPrefixFromAssistantMessage(finalMessage);
 		expect(finalMessage.content[0].text).toBe(stripPersistedAssistantText(raw));
