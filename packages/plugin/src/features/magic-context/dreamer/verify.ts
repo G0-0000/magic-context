@@ -148,7 +148,7 @@ const IDENTICAL_PROVIDER_FAILURE_BATCH_LIMIT = 2;
 export const VERIFY_BATCH_FLOOR_MS = 30_000;
 
 /**
- * A slice is a ceiling, not a per-model minimum that grows with the run deadline.
+ * Cap each batch at VERIFY_RUN_SLICE_MS, even when the run has more time left.
  * `remainingMs` is measured to the hard stop (run deadline plus in-flight grace).
  */
 export function computeVerifyBatchSliceMs(remainingMs: number, _batchesRemaining: number): number {
@@ -202,8 +202,8 @@ export interface VerifyResult extends VerifyVerdictCounts {
     broadCycleStartAt?: number;
     /**
      * Why a run stopped before draining its scope. "deadline": the run deadline
-     * passed before the next batch could start, or the remaining budget could not
-     * give it its floor. "batch-timeout": a batch
+     * passed before the next batch could start, or the remaining time could not
+     * meet VERIFY_BATCH_FLOOR_MS. "batch-timeout": a batch
      * ran out of time, so the next batch would meet the same budget; earlier
      * batches stay banked.
      */
