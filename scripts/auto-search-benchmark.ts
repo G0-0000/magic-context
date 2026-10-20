@@ -13,11 +13,11 @@ import { searchAutoHint } from "../packages/plugin/src/hooks/magic-context/auto-
 import { Database } from "../packages/plugin/src/shared/sqlite";
 
 if (process.env.OPENCODE_DB) throw new Error("OPENCODE_DB must not be set");
-const dir = mkdtempSync(join(tmpdir(), "issue-743-bench-"));
+const dir = mkdtempSync(join(tmpdir(), "auto-search-bench-"));
 const db = new Database(join(dir, "context.db"));
 initializeDatabase(db);
 runMigrations(db);
-const session = "issue-743-synthetic";
+const session = "auto-search-synthetic";
 const vector = Float32Array.from({ length: 1024 }, (_, i) => Math.sin(i));
 const insertC = db.prepare(
 	`INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
@@ -147,7 +147,7 @@ try {
 				compartments: 2200,
 				dims: 1024,
 				networkModel:
-					"quantile-matched synthetic distribution from parent Voyage voyage-4 Mac 20-call measurement; not raw samples",
+					"synthetic delays matching measured Mac Voyage voyage-4 query quantiles (20 calls); not raw samples",
 				networkMs: stats(network),
 				poolColdMs: stats(decode),
 				poolWarmMs: stats(warm),
