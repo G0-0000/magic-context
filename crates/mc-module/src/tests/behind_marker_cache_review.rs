@@ -125,3 +125,74 @@ fn behind_marker_recovery_does_not_fail_when_an_unfolded_compartment_ends_before
         s.load(SESSION).unwrap().meta.pending_rewrite.is_some()
     );
 }
+
+/// Raw session (boundary `m5#0`, coverage 5) whose store also holds a published,
+/// unfolded compartment 6..=7 ending at `gap_end_id`. Returns the store and its
+/// directory; the first markerless pass has already armed `pending_rewrite`.
+fn raw_session_with_gap_compartment(gap_end_id: &str) -> (tempfile::TempDir, McStore, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(dir.path());
+    let path = dir.path().to_str().unwrap().to_string();
+    s.replace_compartments(SESSION, &[compartment(1, 1, 5, "S-OLD")])
+        .unwrap();
+    seed_boundary(&s, "m5#0");
+    let raw = pass(&s, &path, live(9..=12), None).unwrap();
+    assert_eq!(raw.response.action, "PASSTHROUGH");
+    let mut gap = compartment(2, 6, 7, "S-GAP");
+    gap.end_message_id = gap_end_id.to_string();
+    let mut rows = s.load_compartments(SESSION).unwrap();
+    rows.push(gap);
+    s.replace_compartments(SESSION, &rows).unwrap();
+    (dir, s, path)
+}
+
+fn served(result: &TransformWithProjection) -> Value {
+    serde_json::to_value(result.response.messages()).unwrap()
+}
+
+/// The recovery folds the gap compartment and anchors on its end `m7#0`, a row the host
+/// never sends. That costs one rebuild; the next passes with the same marker recognize
+/// the trim from the new anchor and replay the frozen bytes without another rebuild.
+#[test]
+fn behind_marker_recovery_folds_an_unfolded_gap_compartment_with_one_rebuild() {
+    let (_dir, s, path) = raw_session_with_gap_compartment("m7#0");
+
+    let recovered = pass(&s, &path, live(9..=12), Some("m9")).unwrap();
+    assert_eq!(recovered.response.action, "HARD");
+    assert_eq!(recovered.boundary_state, BoundaryState::BehindHostMarker);
+    assert_eq!(recovered.response.boundary_id, "m7#0");
+    let served_text = served(&recovered).to_string();
+    assert!(served_text.contains("S-OLD"), "{served_text}");
+    assert!(served_text.contains("S-GAP"), "{served_text}");
+    let loaded = s.load(SESSION).unwrap();
+    assert_eq!(loaded.core.boundary_id, "m7#0");
+    assert_eq!(loaded.meta.coverage_ordinal, Some(7));
+    assert!(loaded.meta.pending_rewrite.is_none());
+
+    for _ in 0..2 {
+        let defer = pass(&s, &path, live(9..=12), Some("m9")).unwrap();
+        assert_eq!(defer.response.action, "SOFT+");
+        assert_eq!(defer.boundary_state, BoundaryState::BehindHostMarker);
+        assert_eq!(served(&defer), served(&recovered));
+    }
+    let appended = pass(&s, &path, live(9..=13), Some("m9")).unwrap();
+    assert_ne!(appended.response.action, "HARD");
+    assert_eq!(appended.boundary_state, BoundaryState::BehindHostMarker);
+    assert!(s.load(SESSION).unwrap().meta.pending_rewrite.is_none());
+}
+
+/// The mint guard still refuses a gap anchor that cannot be the end of a trimmed row:
+/// a bare message id (wrong vocabulary) and a block id of a message the host did send.
+/// Both stay `BoundaryNotPresent`, as they were before gap anchors were accepted.
+#[test]
+fn behind_marker_mint_guard_still_refuses_unpresentable_gap_anchors() {
+    for gap_end_id in ["m7", "m9#3"] {
+        let (_dir, s, path) = raw_session_with_gap_compartment(gap_end_id);
+        let result = pass(&s, &path, live(9..=12), Some("m9"));
+        assert!(
+            matches!(result, Err(TransformError::BoundaryNotPresent(_))),
+            "{gap_end_id}: {:?}",
+            result.map(|r| r.response.action)
+        );
+    }
+}

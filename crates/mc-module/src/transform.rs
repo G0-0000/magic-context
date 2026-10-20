@@ -6493,6 +6493,7 @@ fn apply_once(
                     if minted.is_empty()
                         || !boundary_available(
                             minted,
+                            coverage_end,
                             &live,
                             &boundary_state,
                             boundary_trim.as_ref(),
@@ -6583,6 +6584,7 @@ fn apply_once(
                                 if reminted.is_empty()
                                     || !boundary_available(
                                         reminted,
+                                        coverage_end,
                                         &live,
                                         &boundary_state,
                                         boundary_trim.as_ref(),
@@ -6874,6 +6876,7 @@ fn apply_once(
                         if minted.is_empty()
                             || !boundary_available(
                                 minted,
+                                coverage_end,
                                 &live,
                                 &boundary_state,
                                 boundary_trim.as_ref(),
@@ -7040,6 +7043,7 @@ fn apply_once(
                         if id.is_empty()
                             || !boundary_available(
                                 id,
+                                *coverage_end,
                                 &live,
                                 &boundary_state,
                                 boundary_trim.as_ref(),
@@ -10562,17 +10566,46 @@ fn validate_live_boundary_ordinal(
     )))
 }
 
+/// Whether an anchor the fold is about to commit can be presented on later passes.
+///
+/// A live block always qualifies. Under a validated host trim, the trim's own boundary
+/// qualifies too: it is absent only because the host trimmed it.
+///
+/// Behind the host compaction marker, one more anchor qualifies: the end of a stored
+/// compartment that sits in the trimmed gap, after the current boundary and before the
+/// marker row (for example a compartment that was published but not folded before the
+/// session went raw). The rebuild folds every stored compartment, so it mints that
+/// compartment's end, which the host never sends. The next pass with the same marker
+/// still recognizes the trim from that new anchor, because `host_marker_trim` only needs
+/// a stored compartment ending at the boundary at coverage, and the marker row is still
+/// newer than coverage. Refusing it would fail every pass and leave the session parked.
+/// The anchor must still be a flat block id (`<mid>#<index>`) of a message that is not in
+/// the request, so the guard keeps catching a wrong-vocabulary end id or one that names a
+/// block of a message the host did send.
 fn boundary_available(
     id: &str,
+    ordinal: u64,
     live: &[&FlatBlock],
     boundary_state: &BoundaryState,
     declared: Option<&DeclaredTrim>,
 ) -> bool {
-    live.iter().any(|block| block.id() == id)
-        || matches!(
-            boundary_state,
-            BoundaryState::DeclaredTrimValidated | BoundaryState::BehindHostMarker
-        ) && declared.is_some_and(|declared| declared.flat_boundary_id == id)
+    if live.iter().any(|block| block.id() == id) {
+        return true;
+    }
+    let Some(declared) = declared else {
+        return false;
+    };
+    match boundary_state {
+        BoundaryState::DeclaredTrimValidated => declared.flat_boundary_id == id,
+        BoundaryState::BehindHostMarker => {
+            declared.flat_boundary_id == id
+                || (ordinal > declared.boundary_absolute_ordinal
+                    && ordinal < declared.next_absolute_ordinal
+                    && split_block_id(id)
+                        .is_some_and(|(mid, _)| live.iter().all(|block| block.mid != mid)))
+        }
+        _ => false,
+    }
 }
 
 fn resolve_boundary_state(
