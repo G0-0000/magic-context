@@ -191,9 +191,12 @@ export function backfillMessageFtsRowidMapBatch(
 }
 
 /** Drain legacy FTS rows in bounded turns so SQLite never owns the host loop. */
-export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void> {
+export async function runMessageFtsRowidMapBackfill(
+    db: Database,
+    signal?: AbortSignal,
+): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    for (;;) {
+    while (!signal?.aborted) {
         const progress = backfillMessageFtsRowidMapBatch(db);
         if (progress.completed) return;
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -201,7 +204,7 @@ export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void>
 }
 
 /** Coalesce OpenCode and Pi startup attempts sharing one in-process DB handle. */
-export function startMessageFtsRowidMapBackfill(db: Database): Promise<void> {
+export function startMessageFtsRowidMapBackfill(db: Database, signal?: AbortSignal): Promise<void> {
     const active = activeBackfills.get(db);
     if (active) return active;
     const path = getSqliteDatabasePath(db);
@@ -209,22 +212,22 @@ export function startMessageFtsRowidMapBackfill(db: Database): Promise<void> {
     // mapping on a worker, outside search and outside the serving connection.
     const run = (
         path
-            ? runSessionWarmupWorker({ path, sessionId: "", ftsRowidBackfill: true }, {}).then(
-                  (result) => {
-                      if (!("ftsRowidBackfill" in result)) {
-                          throw Object.assign(
-                              new Error(
-                                  `FTS rowid backfill unavailable: ${"failure" in result ? result.detail : "unexpected reply"}`,
-                              ),
-                              "failure" in result
-                                  ? { code: result.code, errcode: result.errcode }
-                                  : {},
-                          );
-                      }
-                  },
-              )
+            ? runSessionWarmupWorker(
+                  { path, sessionId: "", ftsRowidBackfill: true },
+                  { signal },
+              ).then((result) => {
+                  if (signal?.aborted) return;
+                  if (!("ftsRowidBackfill" in result)) {
+                      throw Object.assign(
+                          new Error(
+                              `FTS rowid backfill unavailable: ${"failure" in result ? result.detail : "unexpected reply"}`,
+                          ),
+                          "failure" in result ? { code: result.code, errcode: result.errcode } : {},
+                      );
+                  }
+              })
             : withoutSqliteTransformPass(() =>
-                  withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db)),
+                  withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db, signal)),
               )
     ).finally(() => {
         activeBackfills.delete(db);

@@ -96,6 +96,7 @@ export type RawOrdinalWarmupFailureReason =
 
 export interface RawOrdinalWarmupOptions {
     entry?: URL;
+    signal?: AbortSignal;
     /** @deprecated File stores always scan off-thread; retained for old callers. */
     inThreadMaxRows?: number;
     acceptMs?: number;
@@ -180,6 +181,7 @@ export function runSessionWarmupWorker(
             if (settled) return;
             settled = true;
             clearTimeout(deadline);
+            options.signal?.removeEventListener("abort", abort);
             if (worker) {
                 activeWorkers.delete(worker);
                 const stopped = worker.terminate();
@@ -201,6 +203,12 @@ export function runSessionWarmupWorker(
             );
             deadline.unref?.();
         };
+        const abort = () => finish({ failure: "stopped", detail: "stopped" });
+        if (options.signal?.aborted) {
+            abort();
+            return;
+        }
+        options.signal?.addEventListener("abort", abort, { once: true });
         try {
             worker = inRootAsyncContext(
                 () => new Worker(options.entry ?? defaultEntry(), { workerData: input }),

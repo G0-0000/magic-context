@@ -11,6 +11,7 @@ import {
     getRawOrdinalWarmupFailures,
     prewarmRawSessionOrdinalsForDb,
     resetRawSessionOrdinalWarmupsForTest,
+    runSessionWarmupWorker,
     stopRawSessionOrdinalWarmups,
 } from "./raw-ordinal-warmup";
 import {
@@ -93,6 +94,30 @@ function withStore(length: number, run: (path: string, reader: Database) => Prom
 afterEach(() => resetRawSessionOrdinalWarmupsForTest());
 
 describe("canonical ordinal warm-up", () => {
+    it("does not start a warmup for an already closed owner", async () => {
+        const controller = new AbortController();
+        controller.abort();
+        expect(
+            await runSessionWarmupWorker(
+                { path: ":memory:", sessionId: SESSION },
+                { signal: controller.signal },
+            ),
+        ).toEqual({ failure: "stopped", detail: "stopped" });
+    });
+
+    it(
+        "joins a terminated warmup when its owner closes",
+        withStore(600, async (path) => {
+            const controller = new AbortController();
+            const running = runSessionWarmupWorker(
+                { path, sessionId: SESSION },
+                { signal: controller.signal },
+            );
+            controller.abort();
+            expect(await running).toEqual({ failure: "stopped", detail: "stopped" });
+        }),
+    );
+
     it(
         "scans on a worker and leaves the serving connection nothing to scan",
         withStore(600, async (_path, reader) => {
