@@ -82,6 +82,9 @@ use crate::ck_wire::{
 };
 
 #[cfg(test)]
+#[path = "tests/behind_marker_cache_review.rs"]
+mod behind_marker_cache_review;
+#[cfg(test)]
 #[path = "tests/compose_large_session.rs"]
 mod compose_large_session;
 #[cfg(test)]
