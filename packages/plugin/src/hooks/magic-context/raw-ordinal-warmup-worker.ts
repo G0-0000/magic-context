@@ -30,11 +30,52 @@ let db: InstanceType<typeof Database> | undefined;
 let reply: RawOrdinalWarmupReply;
 try {
     db =
-        input.indexMessage || input.orphanSweep
+        input.indexMessage || input.orphanSweep || input.ftsRowidBackfill
             ? new Database(input.path)
             : new Database(input.path, { readonly: true });
     db.exec("PRAGMA busy_timeout = 250");
-    if (input.exactOrdinalIds) {
+    if (input.ftsRowidBackfill) {
+        const { runMessageFtsRowidMapBackfill } = await import(
+            "../../features/magic-context/message-fts-rowid-map"
+        );
+        // Startup reschedules transient SQLite contention; fail fast instead of waiting for the writer.
+        db.exec("PRAGMA busy_timeout = 0");
+        await runMessageFtsRowidMapBackfill(db);
+        reply = { kind: "fts-rowid-backfill" };
+    } else if (input.searchArchive) {
+        const { renderSearchArchive } = await import("../../tools/ctx-expand/search-archive");
+        const { readRawSessionMessageIdOrdinalsForRangeFromDb } = await import(
+            "./read-session-raw"
+        );
+        const archive = input.searchArchive;
+        let raw: InstanceType<typeof Database> | undefined;
+        try {
+            reply = {
+                kind: "search-archive",
+                text: renderSearchArchive(
+                    db,
+                    input.sessionId,
+                    archive.start,
+                    archive.end,
+                    archive.tokenBudget,
+                    archive.archiveOnly,
+                    () => {
+                        if (!archive.rawPath) return new Map(archive.rawIds);
+                        raw = new Database(archive.rawPath, { readonly: true });
+                        raw.exec("PRAGMA busy_timeout = 250");
+                        return readRawSessionMessageIdOrdinalsForRangeFromDb(
+                            raw,
+                            input.sessionId,
+                            archive.start,
+                            archive.end,
+                        );
+                    },
+                ),
+            };
+        } finally {
+            raw?.close();
+        }
+    } else if (input.exactOrdinalIds) {
         reply = {
             kind: "exact-ordinal-ids",
             ids: readRawSessionMessageIdsAtOrdinalsFromDb(
@@ -104,9 +145,12 @@ try {
         reply = { kind: "scan", scan };
     }
 } catch (error) {
+    const sqliteError = error as { code?: unknown; errcode?: unknown } | null;
     reply = {
         kind: "error",
         error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        code: typeof sqliteError?.code === "string" ? sqliteError.code : undefined,
+        errcode: typeof sqliteError?.errcode === "number" ? sqliteError.errcode : undefined,
     };
 } finally {
     db?.close();

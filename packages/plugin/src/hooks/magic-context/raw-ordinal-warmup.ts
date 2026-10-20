@@ -55,6 +55,16 @@ export interface RawOrdinalWarmupInput {
     orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
     /** Ordinals whose message ids the worker reads exactly (see raw-exact-ordinal-read.ts). */
     exactOrdinalIds?: number[];
+    ftsRowidBackfill?: boolean;
+    /** Archive rendering uses explicit store paths; workers never discover a host store. */
+    searchArchive?: {
+        start: number;
+        end: number;
+        tokenBudget: number;
+        archiveOnly: boolean;
+        rawPath: string | null;
+        rawIds?: Array<[string, number]>;
+    };
 }
 
 export type RawOrdinalWarmupReply =
@@ -65,7 +75,9 @@ export type RawOrdinalWarmupReply =
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { kind: "orphan-sweep"; result: MessageHistoryOrphanSweepResult }
     | { kind: "exact-ordinal-ids"; ids: Array<[number, string | null]> }
-    | { kind: "error"; error: string };
+    | { kind: "search-archive"; text: string | null }
+    | { kind: "fts-rowid-backfill" }
+    | { kind: "error"; error: string; code?: string; errcode?: number };
 
 /**
  * "warm": this connection has valid rank checkpoints. "failed": the
@@ -156,7 +168,14 @@ export function runSessionWarmupWorker(
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
                 | { orphanSweep: MessageHistoryOrphanSweepResult }
                 | { exactOrdinalIds: Array<[number, string | null]> }
-                | { failure: RawOrdinalWarmupFailureReason; detail: string },
+                | { searchArchive: string | null }
+                | { ftsRowidBackfill: true }
+                | {
+                      failure: RawOrdinalWarmupFailureReason;
+                      detail: string;
+                      code?: string;
+                      errcode?: number;
+                  },
         ) => {
             if (settled) return;
             settled = true;
@@ -203,7 +222,15 @@ export function runSessionWarmupWorker(
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
             else if (reply.kind === "orphan-sweep") finish({ orphanSweep: reply.result });
             else if (reply.kind === "exact-ordinal-ids") finish({ exactOrdinalIds: reply.ids });
-            else finish({ failure: "worker-error", detail: reply.error });
+            else if (reply.kind === "search-archive") finish({ searchArchive: reply.text });
+            else if (reply.kind === "fts-rowid-backfill") finish({ ftsRowidBackfill: true });
+            else
+                finish({
+                    failure: "worker-error",
+                    detail: reply.error,
+                    code: reply.code,
+                    errcode: reply.errcode,
+                });
         });
         worker.on("error", (error) => finish({ failure: "worker-error", detail: String(error) }));
         worker.on("exit", (code) => finish({ failure: "exited", detail: `exit code ${code}` }));
@@ -305,7 +332,9 @@ type WorkerResult =
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { orphanSweep: MessageHistoryOrphanSweepResult }
     | { exactOrdinalIds: Array<[number, string | null]> }
-    | { failure: RawOrdinalWarmupFailureReason; detail: string };
+    | { searchArchive: string | null }
+    | { ftsRowidBackfill: true }
+    | { failure: RawOrdinalWarmupFailureReason; detail: string; code?: string; errcode?: number };
 
 /** One worker scan of a store and session, shared by every connection that asks meanwhile. */
 interface SharedScan {
