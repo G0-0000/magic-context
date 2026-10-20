@@ -24,13 +24,18 @@ The lane is pinned to OpenCode 2.0.22 (`@opencode/cli`, `@opencode/plugin` and `
 
 ## Additional compatibility versions
 
-`packages/e2e-tests/opencode2-versions.json` lists the primary pin and additional
-investigation targets. Listing a version is not a passing compatibility claim.
-The package, Docker and CI pins remain on the primary version. To test an
-additional version, install its CLI separately and set both
+`packages/e2e-tests/opencode2-versions.json` lists the primary package pin and
+compatibility targets. CI runs the same manifest-derived suite on both 2.0.22
+and 2.1.0; the Docker wrapper also runs both exact versions. To test either
+version locally, install its CLI separately and set both
 `MC_E2E_OPENCODE2_CLI=/absolute/path/to/opencode.exe` and
 `MC_E2E_OPENCODE2_VERSION=2.1.0`. The version assertions still require an exact
 match; changing only the binary override will not bypass them.
+
+Each fixture bundles an independent validator for OpenCode's LLM message schema, with the dependency tree
+matching its CLI generation: `@opencode/ai` for 2.0.x, `@opencode/ai-2-1` for
+2.1.0. Bundling prevents foreign Effect imports into the host runtime. The
+fixture is not ready until that guard is active; a failed guard fails startup.
 
 Select the same files as the CI host lane with
 `bun scripts/validate-mode-manifest.ts --mode ts --harness opencode2` from
