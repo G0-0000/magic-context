@@ -407,6 +407,7 @@ function warningInputFrom(raw: Fields, optional: OptionalFields): StatusWarningI
             : undefined,
         compactionMarker: optional.read("compactionMarker", isCompactionMarker),
         memoryAuthorityMismatch: raw.memoryAuthorityMismatch === true,
+        rawPassthrough: isRecord(raw.rawPassthrough) ? raw.rawPassthrough : undefined,
         dreamerFailures: Array.isArray(raw.dreamerFailures) ? raw.dreamerFailures : undefined,
         dreamerTickFailure: isTickFailure(raw.dreamerTickFailure) ? raw.dreamerTickFailure : null,
         hostLimitations: optional.readArray("hostLimitations", isUserFacingFailureKey),

@@ -32,6 +32,12 @@ export const USER_FACING_FAILURES = {
             "This request was not sent: the conversation is larger than the context window the provider reported, and the compressed history Magic Context has ready does not fit either.",
         action: "Run /ctx-flush to compress it now, then send your message again.",
     },
+    history_served_raw: {
+        code: "MC-H08",
+        sentence:
+            "This session is being sent without Magic Context management: its history summary boundary is missing from the conversation OpenCode sends, so nothing is compressed or cleaned up and every turn adds to the request.",
+        action: "If this does not clear after your next message, check the Magic Context log for `pending_rewrite` and run `npx @cortexkit/magic-context doctor`.",
+    },
     historian_window_too_small: {
         code: "MC-H05",
         sentence:

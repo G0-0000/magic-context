@@ -3930,6 +3930,7 @@ mod tests {
             new_epoch: 0,
             constituents: Vec::new(),
             compaction_observed: false,
+            compaction_marker_message_id: None,
         }
     }
 

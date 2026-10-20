@@ -233,6 +233,21 @@ describe("status payloads the dialog receives", () => {
             "upgraded its database from v85 to v91 while OpenCode PID 10376 could not be checked",
         );
     });
+
+    test("a session the Rust module serves raw shows its warning in the dialog", () => {
+        const view = render({
+            ...CURRENT_DETAIL,
+            rawPassthrough: {
+                retainedBoundaryId: "msg_old#3",
+                coverageOrdinal: 14069,
+                armedAtMs: 1,
+            },
+        });
+        expect(warningText(view)).toContain("(MC-H08)");
+        expect(warningText(render({ ...CURRENT_DETAIL, rawPassthrough: null }))).not.toContain(
+            "(MC-H08)",
+        );
+    });
 });
 
 describe("version notice", () => {

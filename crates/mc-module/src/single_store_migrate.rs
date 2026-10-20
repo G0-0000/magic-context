@@ -2006,6 +2006,13 @@ pub struct HistoryDecision {
     pub context_end_message: Option<i64>,
     /// Older context compartments retained before the store's first sequence.
     pub context_prefix_compartments: usize,
+    /// Raw ordinal of the row the session's OpenCode compaction marker sits on, when it
+    /// has one. OpenCode sends nothing older than that row.
+    pub compaction_marker_ordinal: Option<i64>,
+    /// True when the kept history ends before that row. OpenCode does not send the
+    /// messages between the two, and only the copy of history this migration did not keep
+    /// (which stays in the backup) summarizes them.
+    pub kept_ends_before_compaction_marker: bool,
 }
 
 /// The old flat `msg#0` and the bare `msg` identify the same boundary. After splitting
@@ -2124,6 +2131,8 @@ fn decide_history(
         store_end_message: store_side.end_message,
         context_end_message: context_side.end_message,
         context_prefix_compartments: 0,
+        compaction_marker_ordinal: None,
+        kept_ends_before_compaction_marker: false,
     };
     if context_side.changed == 0 && store_side.changed == 0 {
         return Ok(None);
@@ -2292,6 +2301,51 @@ impl<'a> Copier<'a> {
             .collect()
     }
 
+    /// Warn when the history this run keeps for a session ends before the row its OpenCode
+    /// compaction marker sits on. OpenCode sends nothing older than that row, so the
+    /// messages between the kept history's end and the marker are summarized only in the
+    /// copy left in the backup, and a Rust-mode session's history boundary is no longer
+    /// in any request OpenCode sends.
+    fn check_compaction_marker(&self, decision: &mut HistoryDecision) {
+        // The marker is optional state a host writes; a session without one, or a value
+        // that does not parse, has nothing to compare against.
+        let marker: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT CASE WHEN json_valid(compaction_marker_state)
+                             THEN json_extract(compaction_marker_state, '$.boundaryOrdinal') END
+                 FROM ctx.session_meta WHERE session_id = ?1",
+                params![decision.session],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten();
+        decision.compaction_marker_ordinal = marker;
+        let kept_end = match decision.kept {
+            Winner::Store => decision.store_end_message,
+            Winner::Context => decision.context_end_message,
+        };
+        let Some(marker) = marker else {
+            return;
+        };
+        if kept_end.is_some_and(|end| end >= marker) {
+            return;
+        }
+        decision.kept_ends_before_compaction_marker = true;
+        eprintln!(
+            "warning: session {} keeps the {} history, which ends at ordinal {}, before its compaction marker at ordinal {}; OpenCode does not send the messages in between, and their summaries are only in the other copy, which stays in the backup",
+            decision.session,
+            match decision.kept {
+                Winner::Store => "store",
+                Winner::Context => "context",
+            },
+            kept_end.map_or_else(|| "none".to_string(), |end| end.to_string()),
+            marker
+        );
+    }
+
     /// Copy one session's history. The store wins: its compartments replace the
     /// context's, updated in place so each keeps its id (and its chunk embeddings), and
     /// context rows above the store's last sequence go. Events and candidates are matched
@@ -2333,6 +2387,9 @@ impl<'a> Copier<'a> {
             }
         }
         let kept = decision.as_ref().map(|decision| decision.kept);
+        if let Some(decision) = &mut decision {
+            self.check_compaction_marker(decision);
+        }
         self.history.extend(decision);
         if kept == Some(Winner::Context) {
             return self.keep_context_history(
