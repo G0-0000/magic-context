@@ -38,6 +38,7 @@ import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	__test,
 	configurePiSubagentHostTools,
+	HIDDEN_CHILD_OUTPUT_CEILING,
 	PiSubagentRunner,
 } from "./subagent-runner";
 
@@ -2014,6 +2015,98 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: "warning from pi" },
+		});
+	});
+
+	it("caps the output tokens a Pi dreamer child sends to its provider", async () => {
+		const { default: extension } = await import(
+			"./historian-calibration-extension"
+		);
+		// Run the runner for a dreamer child, then load the child extension with
+		// exactly the environment that child receives and replay a provider request.
+		const providerRequest = async (maxOutputTokens?: number) => {
+			const child = createMockChild();
+			const { runner, spawnImpl } = runnerWith(child);
+			const resultPromise = runner.run({
+				...baseOptions,
+				agent: "magic-context-dreamer",
+				...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+			});
+			child.writeStdoutLine(
+				agentEnd([
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "<verify></verify>" }],
+						stopReason: "stop",
+					},
+				]),
+			);
+			child.emitClose(0);
+			await resultPromise;
+			const childEnv = (
+				spawnImpl.mock.calls[0] as unknown as [
+					string,
+					string[],
+					{ env: Record<string, string | undefined> },
+				]
+			)[2].env;
+			const keys = [
+				"MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY",
+				"MAGIC_CONTEXT_HISTORIAN_TEMPERATURE",
+				"MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS",
+				"MAGIC_CONTEXT_SUBAGENT_OUTPUT_CEILING",
+			];
+			const previous = keys.map((key) => process.env[key]);
+			const previousPromptFile = process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
+			const hooks = new Map<string, (event: { payload: unknown }) => unknown>();
+			try {
+				for (const key of keys) {
+					if (childEnv[key] === undefined) delete process.env[key];
+					else process.env[key] = childEnv[key];
+				}
+				// The runner has already removed its prompt file; provenance
+				// observation is not under test here.
+				delete process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
+				extension({
+					on: (
+						name: string,
+						handler: (event: { payload: unknown }) => unknown,
+					) => hooks.set(name, handler),
+				} as never);
+			} finally {
+				keys.forEach((key, index) => {
+					if (previous[index] === undefined) delete process.env[key];
+					else process.env[key] = previous[index];
+				});
+				if (previousPromptFile === undefined)
+					delete process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
+				else
+					process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE = previousPromptFile;
+			}
+			expect(childEnv.MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY).toBe("1");
+			// Pi's request for a 1M-window OpenRouter model with no cap: the
+			// model's output limit, clamped only by the context window.
+			return hooks.get("before_provider_request")?.({
+				payload: {
+					model: "meta/muse-spark",
+					max_tokens: 936_066,
+					temperature: 0.7,
+				},
+			});
+		};
+
+		expect(await providerRequest()).toEqual({
+			model: "meta/muse-spark",
+			max_tokens: HIDDEN_CHILD_OUTPUT_CEILING,
+			temperature: 0.7,
+		});
+		expect(HIDDEN_CHILD_OUTPUT_CEILING).toBe(32_000);
+		// A configured dreamer.maxTokens is sent exactly, and dreamer sampling
+		// is never recalibrated.
+		expect(await providerRequest(4_096)).toEqual({
+			model: "meta/muse-spark",
+			max_tokens: 4_096,
+			temperature: 0.7,
 		});
 	});
 
