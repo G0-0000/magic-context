@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { prependTag } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
-import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
+import {
+	prependTag,
+	stripPersistedAssistantText,
+} from "@magic-context/core/hooks/magic-context/tag-content-primitives";
+import {
+	registerOmpAssistantMessageStrip,
+	strippedAssistantContent,
+	stripTagPrefixFromAssistantMessage,
+} from "./strip-tag-prefix";
 
 describe("stripTagPrefixFromAssistantMessage", () => {
 	describe("leading tag prefix (canonical MC tagger mimicry)", () => {
@@ -204,4 +211,75 @@ it("correct leading self-tag round-trips byte-identically through Pi storage and
 	const message = { role: "assistant", content: [part] };
 	expect(stripTagPrefixFromAssistantMessage(message)).toBe(true);
 	expect(prependTag(12, part.text)).toBe(reply);
+});
+
+describe("Oh My Pi assistant_message strip", () => {
+	type Handler = (event: unknown) => { content: unknown[] } | undefined;
+	function register(isActive = () => true): Handler {
+		let handler: Handler | undefined;
+		registerOmpAssistantMessageStrip(
+			{
+				on: (name: string, fn: Handler) => {
+					if (name === "assistant_message") handler = fn;
+				},
+			},
+			isActive,
+		);
+		if (!handler) throw new Error("assistant_message handler not registered");
+		return handler;
+	}
+
+	it("returns text parts stripped by the message_end rule, in place, other fields kept", () => {
+		const content = [
+			{ type: "thinking", thinking: "§4§ reasoning" },
+			{
+				type: "text",
+				text: "§42§ The pattern §40827§ appeared.",
+				textSignature: "sig",
+			},
+			{ type: "toolCall", id: "t1", name: "read", arguments: {} },
+		];
+		const result = register()({
+			type: "assistant_message",
+			message: { role: "assistant", content },
+		});
+		expect(result?.content).toEqual([
+			content[0],
+			{
+				type: "text",
+				text: stripPersistedAssistantText(content[1].text as string),
+				textSignature: "sig",
+			},
+			content[2],
+		]);
+		// Same rule and result as the in-place message_end strip used on stock Pi.
+		const viaMessageEnd = {
+			role: "assistant",
+			content: structuredClone(content),
+		};
+		stripTagPrefixFromAssistantMessage(viaMessageEnd);
+		expect(result?.content).toEqual(viaMessageEnd.content);
+		// The event's message is left as it was.
+		expect(content[1].text).toBe("§42§ The pattern §40827§ appeared.");
+	});
+
+	it("returns nothing when no text changes, for other roles, or when inactive", () => {
+		const plain = {
+			role: "assistant",
+			content: [{ type: "text", text: "Plain reply" }],
+		};
+		expect(register()({ message: plain })).toBeUndefined();
+		expect(
+			register()({
+				message: { role: "user", content: [{ type: "text", text: "§4§ hi" }] },
+			}),
+		).toBeUndefined();
+		const tagged = {
+			role: "assistant",
+			content: [{ type: "text", text: "§4§ hi" }],
+		};
+		expect(register(() => false)({ message: tagged })).toBeUndefined();
+		expect(register()(null)).toBeUndefined();
+		expect(strippedAssistantContent("§4§ legacy string")).toBeUndefined();
+	});
 });

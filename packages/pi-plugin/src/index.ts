@@ -239,7 +239,10 @@ import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { bindStaleBuildNotice } from "./stale-build-notice";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { registerStreamTagPrefixStrip } from "./stream-tag-prefix-strip";
-import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
+import {
+	registerOmpAssistantMessageStrip,
+	stripTagPrefixFromAssistantMessage,
+} from "./strip-tag-prefix";
 import { registerPiSubagentHostTools } from "./subagent-host-tools";
 import {
 	configurePiSubagentExtensions,
@@ -2896,6 +2899,10 @@ async function startPiMagicContextRuntime(
 	// its stream listeners before extension handlers run, so it cannot work there.
 	if (PI_HARNESS_KIND !== "omp") {
 		registerStreamTagPrefixStrip(pi, () => !compactionOff);
+	} else {
+		// Oh My Pi gives message_end handlers a detached copy, so the strip
+		// below cannot change what it saves; its assistant_message hook can.
+		registerOmpAssistantMessageStrip(pi, () => !compactionOff);
 	}
 	pi.on("message_end", async (event, ctx) => {
 		try {
