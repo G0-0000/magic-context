@@ -87,7 +87,11 @@ const GATED_VERSION: u8 = 3;
 /// `context-ceiling/v1` adds records for a run held at its context ceiling and
 /// the ceiling decision, plus a `context_ceiling` run end. This reader ignores
 /// both record types and, as with `budget_exhausted`, records only that the
-/// run finished.
+/// run finished. `interrupt-reason/v1` may add `interrupt_reason` to an
+/// interrupted run's `run_finished`; this reader records only that the run
+/// finished. `turn-directives/v1` adds `turn_directives_v1` to a run's config
+/// and `directives` to a queued send's request, neither of which this reader
+/// uses.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -113,6 +117,8 @@ const KNOWN_FEATURES: &[&str] = &[
     "runner-tags/v1",
     "compaction-view/v1",
     "context-ceiling/v1",
+    "interrupt-reason/v1",
+    "turn-directives/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1844,6 +1850,8 @@ pub(crate) mod tests {
             "runner-tags/v1",
             "compaction-view/v1",
             "context-ceiling/v1",
+            "interrupt-reason/v1",
+            "turn-directives/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1887,6 +1895,25 @@ pub(crate) mod tests {
                               "ceiling": {"window": 200_000, "size": 199_000, "cause": "overflow"}}}),
             json!({"requires": ["context-ceiling/v1"],
                    "record": {"type": "run_finished", "run_id": "r1", "reason": "context_ceiling"}}),
+        ]);
+        let runs = decode(&bytes).unwrap();
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+        assert!(runs[0].finished);
+    }
+
+    /// `interrupt-reason/v1` adds `interrupt_reason` to an interrupted run's
+    /// end, and `turn-directives/v1` adds directives to its config; such a run
+    /// still yields its steps and finishes.
+    #[test]
+    fn an_interrupted_run_with_a_reason_and_directives_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["config"]["turn_directives_v1"] = json!(["wake"]);
+        let bytes = wal_bytes(&[
+            json!({"requires": ["turn-directives/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+            json!({"requires": ["interrupt-reason/v1"],
+                   "record": {"type": "run_finished", "run_id": "r1", "reason": "interrupted",
+                              "interrupt_reason": "runner_shutdown"}}),
         ]);
         let runs = decode(&bytes).unwrap();
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
