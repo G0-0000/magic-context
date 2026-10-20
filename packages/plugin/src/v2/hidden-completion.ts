@@ -32,10 +32,12 @@ import {
 } from "./hidden-child-record";
 import {
     HIDDEN_CURATE_AGENT,
+    HIDDEN_RUN_DISPOSED_REASON,
     HiddenAgentStepLimit,
     type HiddenChildAttempt,
     type HiddenChildHook,
     hiddenToolLoop,
+    noteChildOfDisposedInstance,
 } from "./hooks/hidden-child";
 import type { StoreRow } from "./store-reader";
 
@@ -68,6 +70,52 @@ export interface V2HiddenCompletionOptions {
      * receive it.
      */
     historianTemperature?: () => number | undefined;
+    /**
+     * Keep the store reader pool open for one hidden run; returns its release. The run
+     * reads the store from its first attempt until it is closed, so a pool closed in the
+     * meantime must wait for it rather than refuse its next read.
+     */
+    holdStore?: () => () => void;
+    /** Maximum time `dispose` waits for cancelled runs to settle. */
+    disposeDrainMs?: number;
+}
+
+/** The OpenCode 2 executor, plus the cancellation its plugin instance runs on dispose. */
+export interface V2HiddenCompletionExecutor extends HiddenCompletionExecutor {
+    /**
+     * Cancel every hidden run in flight and refuse new ones, with
+     * `HIDDEN_RUN_DISPOSED_REASON`. Each in-flight child is interrupted at the host, so
+     * the host stops stepping it before this instance's hooks are removed and the
+     * instance that replaces it never receives its turns. Waits at most
+     * `disposeDrainMs` for the cancelled attempts to settle.
+     */
+    dispose(): Promise<void>;
+}
+
+interface InFlightAttempt {
+    cancel(refusal: HiddenCompletionRefusal): Promise<void>;
+    reject(refusal: HiddenCompletionRefusal): void;
+    settled: Promise<void>;
+}
+
+const DEFAULT_DISPOSE_DRAIN_MS = 2_000;
+
+/** Resolves when `work` settles or `ms` elapses, whichever is first. */
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await Promise.race([
+            work.then(
+                () => undefined,
+                () => undefined,
+            ),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, Math.max(0, ms));
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
 }
 
 interface RunState {
@@ -76,6 +124,8 @@ interface RunState {
     role: HiddenChildRole;
     child: PersistedHiddenChild;
     releaseRole: () => void;
+    /** Releases this run's hold on the store reader pool. */
+    releaseStore: () => void;
     completion?: HiddenCompletion;
     failed: boolean;
     /** A failure other than a settled provider error row (dispatch error, refusal, timeout, abort). */
@@ -334,6 +384,9 @@ async function awaitAssistantRow(
     signal?: AbortSignal,
 ): Promise<StoreRow<"assistant">> {
     for (;;) {
+        // Checked before reading: a cancelled run must not open another reader.
+        const refusedBefore = localFailure();
+        if (refusedBefore) throw refusedBefore;
         const { assistant, idle } = withReader(openReader, (reader) => ({
             assistant: reader.latestAssistant(childID),
             idle: reader.latestIdle(childID),
@@ -422,11 +475,15 @@ export function createLateHiddenExecutor(
 export async function createV2HiddenCompletionExecutor(
     host: HiddenChildHost,
     options: V2HiddenCompletionOptions,
-): Promise<HiddenCompletionExecutor> {
+): Promise<V2HiddenCompletionExecutor> {
     const runs = new WeakMap<HiddenRunHandle, RunState>();
     const generation = options.generation ?? "opencode2";
     const roleTails = new Map<HiddenChildRole, Promise<void>>();
     const note = options.log ?? log;
+    /** Set once by `dispose`; every later open or attempt is refused with it. */
+    let disposed: HiddenCompletionRefusal | undefined;
+    const openRuns = new Set<RunState>();
+    const inFlight = new Set<InFlightAttempt>();
 
     const removeSession = host.removeSession;
     if (!removeSession) throw new Error("Magic Context requires OpenCode 2.0.22 session.remove");
@@ -554,10 +611,15 @@ export async function createV2HiddenCompletionExecutor(
     return {
         capabilities: V2_HIDDEN_EXECUTOR_CAPABILITIES,
         async open(identity) {
+            if (disposed) throw disposed;
             const role = roleFor(identity);
-            const releaseRole = await acquireRole(role);
+            const releaseStore = options.holdStore?.() ?? (() => {});
+            let releaseRole: (() => void) | undefined;
             let openedChild: PersistedHiddenChild | undefined;
+            let opened: RunState | undefined;
             try {
+                releaseRole = await acquireRole(role);
+                if (disposed) throw disposed;
                 await options.ensureAgent?.();
                 const head = await resolveHead(identity);
                 const active = await lifecycle.open(identity, role, head);
@@ -572,22 +634,36 @@ export async function createV2HiddenCompletionExecutor(
                     role,
                     child: active,
                     releaseRole,
+                    releaseStore,
                     failed: false,
                     unsettledFailure: false,
                     retired: false,
                 };
                 runs.set(handle, run);
+                opened = run;
+                openRuns.add(run);
+                if (disposed) noteChildOfDisposedInstance(active.id);
                 await switchChildModel(run, head);
                 return handle;
             } catch (error) {
                 if (openedChild) lifecycle.retire(openedChild, "hidden-run-open-failed");
-                releaseRole();
+                if (opened) openRuns.delete(opened);
+                releaseRole?.();
+                releaseStore();
                 throw error;
             }
         },
         async attempt(handle, request) {
             const run = runs.get(handle);
             if (!run) throw new Error("Unknown hidden completion run");
+            const refuseDisposed = (): void => {
+                if (!disposed) return;
+                run.failed = true;
+                run.unsettledFailure = true;
+                retire(run, "plugin-instance-disposed");
+                throw disposed;
+            };
+            refuseDisposed();
             if (request.signal?.aborted) {
                 await interruptAndRetire(run, "aborted-before-prompt");
                 throw new Error("Hidden completion prompt aborted");
@@ -645,6 +721,8 @@ export async function createV2HiddenCompletionExecutor(
                 handle.childSessionId = run.child.id;
             }
             await switchChildModel(run, requested);
+            // Every await above can span a dispose; nothing is prompted after one.
+            refuseDisposed();
             const baseline = withReader(options.openReader, (reader) =>
                 reader.latestSequence(run.child.id),
             );
@@ -742,6 +820,32 @@ export async function createV2HiddenCompletionExecutor(
                 Math.max(0, deadline - Date.now()),
             );
             request.signal?.addEventListener("abort", onAbort, { once: true });
+            let settle!: () => void;
+            const entry: InFlightAttempt = {
+                cancel: async (refusal) => {
+                    attempt.refusal ??= refusal;
+                    noteChildOfDisposedInstance(run.child.id);
+                    try {
+                        // Stop the host stepping this child while this instance's hooks
+                        // still serve it; any later step would reach the next instance.
+                        await interruptAndRetire(run, "plugin-instance-disposed");
+                    } catch (error) {
+                        note(
+                            `[magic-context] hidden child ${run.child.id} could not be interrupted on dispose: ${errorText(error)}`,
+                        );
+                    } finally {
+                        abortReject(refusal);
+                    }
+                },
+                reject: (refusal) => {
+                    attempt.refusal ??= refusal;
+                    abortReject(refusal);
+                },
+                settled: new Promise<void>((resolve) => {
+                    settle = resolve;
+                }),
+            };
+            inFlight.add(entry);
             try {
                 await Promise.race([
                     host.prompt({ sessionID: run.child.id, text: marker }),
@@ -878,6 +982,8 @@ export async function createV2HiddenCompletionExecutor(
                 if (budgetPoll) clearInterval(budgetPoll);
                 request.signal?.removeEventListener("abort", onAbort);
                 options.hook.releaseAttempt(marker);
+                inFlight.delete(entry);
+                settle();
             }
         },
         async collect(handle) {
@@ -908,9 +1014,38 @@ export async function createV2HiddenCompletionExecutor(
                 }
             } finally {
                 runs.delete(handle);
+                openRuns.delete(run);
                 run.releaseRole();
+                // Session removal below needs no store reads.
+                run.releaseStore();
             }
             await lifecycle.finish(run.child, run.retired);
+        },
+        async dispose() {
+            disposed ??= new HiddenCompletionRefusal(
+                "hidden_instance_disposed",
+                HIDDEN_RUN_DISPOSED_REASON,
+                true,
+            );
+            const refusal = disposed;
+            for (const run of openRuns) noteChildOfDisposedInstance(run.child.id);
+            const entries = [...inFlight];
+            if (entries.length === 0) return;
+            note(
+                `[magic-context] plugin instance disposed with ${entries.length} hidden run(s) in flight; cancelling them`,
+            );
+            const bound = options.disposeDrainMs ?? DEFAULT_DISPOSE_DRAIN_MS;
+            const deadline = Date.now() + bound;
+            await settleWithin(
+                Promise.allSettled(entries.map((entry) => entry.cancel(refusal))),
+                bound,
+            );
+            // A host interrupt that has not answered in time must not keep the run waiting.
+            for (const entry of entries) entry.reject(refusal);
+            await settleWithin(
+                Promise.allSettled(entries.map((entry) => entry.settled)),
+                deadline - Date.now(),
+            );
         },
     };
 }

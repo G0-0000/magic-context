@@ -73,6 +73,55 @@ export function hiddenAgentAllowedTools(agent: string | undefined): readonly str
         : undefined;
 }
 
+/**
+ * Why a hidden run ends when its plugin instance is disposed. OpenCode 2 disposes
+ * a plugin instance when it reloads the plugin (`/plugins` then ctrl+u, a
+ * rewritten config, a location reinitialising) and loads a fresh instance in the
+ * same process. The disposed instance cancels its in-flight hidden runs and the
+ * run's error carries this text; the instance that replaces it refuses any turn
+ * of such a child with the same text, so both sides of a reload name one cause.
+ */
+export const HIDDEN_RUN_DISPOSED_REASON =
+    "the Magic Context plugin instance that started this hidden run was disposed (OpenCode reloaded the plugin), so the run was cancelled; the work is retried on a later run";
+
+/**
+ * Children of disposed instances, shared by every Magic Context instance in this
+ * process. A reloaded plugin is a new module instance, so module state is not
+ * shared; `globalThis` is. Only used to give a refusal its reason: a session in
+ * this set is refused exactly as any other unregistered hidden child is.
+ */
+const DISPOSED_CHILDREN_KEY = Symbol.for("@cortexkit/magic-context/v2/disposed-hidden-children");
+const DISPOSED_CHILDREN_LIMIT = 512;
+
+function disposedChildren(): Set<string> {
+    const store = globalThis as { [DISPOSED_CHILDREN_KEY]?: Set<string> };
+    store[DISPOSED_CHILDREN_KEY] ??= new Set<string>();
+    return store[DISPOSED_CHILDREN_KEY];
+}
+
+/** Record that `sessionID` belonged to a plugin instance that has been disposed. */
+export function noteChildOfDisposedInstance(sessionID: string): void {
+    const children = disposedChildren();
+    children.delete(sessionID);
+    children.add(sessionID);
+    // Oldest first: a Set iterates in insertion order.
+    while (children.size > DISPOSED_CHILDREN_LIMIT) {
+        const oldest = children.values().next().value;
+        if (oldest === undefined) break;
+        children.delete(oldest);
+    }
+}
+
+/** Whether `sessionID` is a hidden child whose plugin instance was disposed. */
+export function isChildOfDisposedInstance(sessionID: string): boolean {
+    return disposedChildren().has(sessionID);
+}
+
+/** Clears the process-wide record, for tests. */
+export function __resetDisposedChildrenForTests(): void {
+    disposedChildren().clear();
+}
+
 /** One OpenCode 2 permission rule: the action is the tool id, the resource a pattern. */
 export interface HiddenPermissionRule {
     action: string;
@@ -143,6 +192,10 @@ export function hiddenToolCallRefusal(
     hook: Pick<HiddenChildHook, "owns" | "agentFor">,
 ): string | undefined {
     const owned = hook.owns(call.sessionID);
+    // A child of a disposed instance has no run left to serve: its instance
+    // cancelled the run, so none of its tool calls may execute here.
+    if (!owned && isChildOfDisposedInstance(call.sessionID))
+        return `Magic Context hidden child ${call.sessionID} refused: ${HIDDEN_RUN_DISPOSED_REASON}; ${call.tool} refused`;
     const agent = owned ? (hook.agentFor(call.sessionID) ?? call.agent) : call.agent;
     const allowed = hiddenAgentAllowedTools(agent);
     if (allowed === undefined) {
@@ -406,6 +459,15 @@ export class HiddenChildHook {
         if (!this.owns(sessionID)) {
             // Another instance's hidden child: refused here exactly as `apply`
             // refuses its turn, rather than summarized as a user conversation.
+            if (isChildOfDisposedInstance(sessionID)) {
+                this.refuse(
+                    `Refusing to compact a Magic Context hidden child of a disposed plugin instance: ${HIDDEN_RUN_DISPOSED_REASON}`,
+                    { sessionID, messages: [] },
+                    undefined,
+                    undefined,
+                    "hidden_instance_disposed",
+                );
+            }
             if (hiddenAgentAllowedTools(agent) !== undefined) {
                 this.refuse(
                     "Refusing to compact a Magic Context hidden-agent session this instance did not register",
@@ -442,6 +504,7 @@ export class HiddenChildHook {
         draft: Pick<SessionContext, "sessionID" | "messages">,
         raw: string | undefined,
         inFlight?: number,
+        code: HiddenCompletionRefusal["code"] = "hidden_prompt_unrecognized",
     ): never {
         const registered = [...this.attempts.values()]
             .filter((attempt) => attempt.childSessionId === draft.sessionID && attempt.marker)
@@ -469,7 +532,7 @@ export class HiddenChildHook {
                 ...(inFlight === undefined ? {} : { in_flight: inFlight }),
             })}`,
         );
-        const refusal = new HiddenCompletionRefusal("hidden_prompt_unrecognized", reason, true);
+        const refusal = new HiddenCompletionRefusal(code, reason, true);
         // The host serializes hook failures as an unknown session error. Retain
         // the typed local cause on this child's attempt, never infer it from a
         // provider's arbitrary error text or assign it to another child's run.
@@ -500,9 +563,22 @@ export class HiddenChildHook {
      * restart) arrives here unshaped: its user message is a bare run marker, and
      * passing it on would send the marker to the model with whatever tools the
      * user's own permissions allow.
+     *
+     * A child whose instance was disposed by a plugin reload is refused with that
+     * reason, whatever agent the host reports for it: its instance has cancelled
+     * the run, and this instance has no record of the prompt it was sent.
      */
     apply(draft: SessionContext): boolean {
         if (!this.owns(draft.sessionID)) {
+            if (isChildOfDisposedInstance(draft.sessionID)) {
+                this.refuse(
+                    `Refusing a turn of a Magic Context hidden child of a disposed plugin instance: ${HIDDEN_RUN_DISPOSED_REASON}`,
+                    draft,
+                    newestUserText(draft),
+                    undefined,
+                    "hidden_instance_disposed",
+                );
+            }
             if (hiddenAgentAllowedTools(draft.agent) !== undefined) {
                 this.refuse(
                     "Refusing a Magic Context hidden-agent turn this instance did not register",
