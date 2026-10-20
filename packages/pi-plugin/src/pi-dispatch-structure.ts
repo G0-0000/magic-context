@@ -1,4 +1,7 @@
-import { piAgentHistory } from "./pi-dispatch-agent-history";
+import {
+	piAgentHistory,
+	piIsDeveloperHistory,
+} from "./pi-dispatch-agent-history";
 import {
 	type PiChatHistoryModel,
 	piChatHistoryPlan,
@@ -23,7 +26,7 @@ import {
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 
 interface MessageStructure {
-	role: "user" | "assistant" | "toolResult";
+	role: "user" | "assistant" | "toolResult" | "system";
 	calls: string[];
 	results: string[];
 	wireCalls?: (string | undefined)[];
@@ -32,6 +35,7 @@ interface MessageStructure {
 	resultNames?: string[];
 	timestamp?: number;
 	exactText?: string;
+	systemText?: readonly string[];
 	exactImages?: readonly string[];
 	wireContent?: unknown;
 	wireRole?: unknown;
@@ -94,7 +98,12 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	].includes(String(message.role))
 		? "user"
 		: message.role;
-	if (role !== "user" && role !== "assistant" && role !== "toolResult")
+	if (
+		role !== "user" &&
+		role !== "assistant" &&
+		role !== "toolResult" &&
+		role !== "system"
+	)
 		return undefined;
 	const row: MessageStructure = { role, calls: [], results: [] };
 	if (ORPHAN_NOTE in message && typeof message.content === "string") {
@@ -330,7 +339,7 @@ function buildPiPreparedStructure(
 		const source = object(message);
 		// History injection and the provider renderer both put instructions before
 		// conversation turns. Ignore only that leading system/developer prefix on
-		// both sides; a system message inside the conversation remains invalid.
+		// both sides; positioned system messages are conversation rows instead.
 		if (
 			rows.length === 0 &&
 			(source?.role === "system" || source?.role === "developer")
@@ -409,6 +418,52 @@ function buildPiPreparedStructure(
 		piRecordImages(imageBudget, row, source);
 	}
 	if (!valid) return undefined;
+	// OMP renders non-user-attributed developer messages as system only after a
+	// user turn (including tool results packed into user) and before assistant or end.
+	// Iterate backwards, as the serializer does, so a promoted notice prevents
+	// the notice immediately before it from becoming a consecutive system row.
+	// @oh-my-pi/pi-ai 18.12.3, providers/anthropic.ts:6150-6210.
+	const positionedRows = [...byIndex];
+	for (let position = positionedRows.length - 1; position >= 0; position--) {
+		const [index, row] = positionedRows[position];
+		const source = object(projectedMessages[index]);
+		if (!source) return undefined;
+		const content = source.content;
+		const parts =
+			typeof content === "string" ? [{ type: "text", text: content }] : content;
+		const textOnly =
+			Array.isArray(parts) &&
+			parts.every(
+				(part) =>
+					object(part)?.type === "text" &&
+					typeof object(part)?.text === "string",
+			);
+		if (piIsDeveloperHistory(source) && source.attribution !== "user") {
+			const previous = rows[position - 1];
+			const next = rows[position + 1];
+			if (
+				model?.api === "ollama-chat" ||
+				(model?.api === "anthropic-messages" &&
+					object(model.compat)?.supportsMidConversationSystem === true &&
+					textOnly &&
+					(previous?.role === "user" || previous?.role === "toolResult") &&
+					(!next || next.role === "assistant"))
+			)
+				row.role = "system";
+		}
+		if (row.role === "system") {
+			if (!textOnly) return undefined;
+			const texts: string[] = parts.map((part) => part.text);
+			row.systemText =
+				model?.api === "anthropic-messages"
+					? texts
+							.filter((text) => text.trim())
+							.map((text) =>
+								new TextDecoder().decode(new TextEncoder().encode(text)),
+							)
+					: texts;
+		}
+	}
 	const responsesApi = responsesLane(model?.api);
 	let responsesMessages: MessageStructure[] | undefined = responsesApi
 		? []
@@ -638,11 +693,7 @@ function payloadStructure(
 				continue;
 			}
 		}
-		const row = messageStructure(
-			ollama && message.role === "system"
-				? { ...message, role: "user" }
-				: message,
-		);
+		const row = messageStructure(message);
 		if (!row) return undefined;
 		row.wireContent = message.content;
 		if (imageProjection)
@@ -822,7 +873,7 @@ function safeRole(
 ): string {
 	if (!readable) return "unreadable";
 	if (!row) return "missing";
-	return ["user", "assistant", "toolResult"].includes(row.role)
+	return ["user", "assistant", "toolResult", "system"].includes(row.role)
 		? row.role
 		: "unknown";
 }
@@ -964,6 +1015,28 @@ export function piPreparedStructureMismatch(
 			const actual = rows[i];
 			if (actual.role !== expected.role)
 				return structureDetail(i, expectedRows, rows, "role");
+			if (expected.systemText !== undefined) {
+				const texts = expected.systemText;
+				const content = actual.wireContent;
+				const actualTexts =
+					typeof content === "string"
+						? [content]
+						: Array.isArray(content) &&
+								content.every(
+									(part) =>
+										object(part)?.type === "text" &&
+										typeof object(part)?.text === "string",
+								)
+							? content.map((part) => part.text)
+							: undefined;
+				if (
+					!actualTexts ||
+					(typeof content === "string"
+						? content !== texts.join("\n")
+						: JSON.stringify(actualTexts) !== JSON.stringify(texts))
+				)
+					return structureDetail(i, expectedRows, rows, "content");
+			}
 			if (
 				imageProjection &&
 				!piMatchesImages(actual.images ?? [], expected.images ?? [])

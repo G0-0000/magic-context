@@ -230,6 +230,57 @@ test("issue 686 WebSocket continuation: a full request then a tool-result delta 
 	expect(h.aborts).toBe(0);
 });
 
+test("issue 686 WebSocket continuation: a hidden resumed custom notice is encoded as developer, not system", async () => {
+	const h = await toolTurn();
+	const notice = {
+		role: "custom",
+		customType: "eval-state-context",
+		display: false,
+		attribution: "agent",
+		content:
+			"<system-reminder>Eval runtime state is host-retained.</system-reminder>",
+		timestamp: 5,
+	};
+	await h.pass([...m2, notice], true);
+	h.send(
+		chained("resp_1", [
+			outputItem("call_1", "§3§ file body"),
+			{
+				role: "developer",
+				content: [{ type: "input_text", text: notice.content }],
+			},
+		]),
+	);
+	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(0);
+});
+
+test("issue 686 WebSocket continuation: changed hidden custom notice text refuses before admission", async () => {
+	const h = await toolTurn();
+	const notice = {
+		role: "custom",
+		customType: "eval-state-context",
+		display: false,
+		attribution: "agent",
+		content: "prepared runtime notice",
+		timestamp: 5,
+	};
+	await h.pass([...m2, notice], true);
+	h.send(
+		chained("resp_1", [
+			outputItem("call_1", "§3§ file body"),
+			{
+				role: "developer",
+				content: [{ type: "input_text", text: "unprepared runtime notice" }],
+			},
+		]),
+	);
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain(
+		"delta differs from the prepared provider input tail",
+	);
+});
+
 test("issue 686 WebSocket continuation: a final answer then the automatic todo-reminder continuation admits", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));

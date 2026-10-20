@@ -130,3 +130,36 @@ test("chain tail encoding: unknown roles, native carriers and unpaired results a
 	).toBeUndefined();
 	expect(piEncodeChainTail([result], assistant, [], model)).toBeUndefined();
 });
+
+test("chain tail encoding: hidden custom notices retain each Responses provider's role", () => {
+	const notice = {
+		role: "custom",
+		customType: "eval-state-context",
+		display: false,
+		attribution: "agent",
+		content:
+			"<system-reminder>Eval runtime state is host-retained.</system-reminder>",
+	};
+	for (const api of [
+		"openai-codex-responses",
+		"openai-responses",
+		"azure-openai-responses",
+	]) {
+		expect(
+			piEncodeChainTail([notice], assistant, [], { ...model, api }),
+		).toEqual([
+			{
+				role: api === "openai-codex-responses" ? "developer" : "user",
+				content: [{ type: "input_text", text: notice.content }],
+			},
+		]);
+	}
+	expect(
+		piEncodeChainTail(
+			[{ role: "system", content: notice.content }],
+			assistant,
+			[],
+			model,
+		),
+	).toBeUndefined();
+});

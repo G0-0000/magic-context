@@ -1,3 +1,7 @@
+import {
+	piAgentHistory,
+	piIsDeveloperHistory,
+} from "./pi-dispatch-agent-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
 
@@ -59,8 +63,31 @@ export function piEncodeChainTail(
 	};
 	const items: unknown[] = [];
 	for (const value of messages) {
-		const message = object(value);
+		let message = object(value);
 		if (!message || message.providerPayload !== undefined) return undefined;
+		if (message.role === "custom" || message.role === "hookMessage") {
+			// The context hook sees the persisted custom message, before OMP turns
+			// its text into a developer row. Do not guess rows for user-attributed
+			// messages, which may wrap the text differently, or for
+			// image-bearing messages that expand to more than one provider item.
+			if (
+				typeof message.customType !== "string" ||
+				message.attribution === "user"
+			)
+				return undefined;
+			const converted = piAgentHistory([message], model.api);
+			const developer = object(converted[0]);
+			if (
+				converted.length !== 1 ||
+				!developer ||
+				!piIsDeveloperHistory(developer)
+			)
+				return undefined;
+			message = {
+				...developer,
+				role: model.api === "openai-codex-responses" ? "developer" : "user",
+			};
+		}
 		const user = message.role === "user" || message.role === "developer";
 		if (!user && message.role !== "toolResult") return undefined;
 		const content =
