@@ -79,7 +79,11 @@ const GATED_VERSION: u8 = 3;
 /// result) or ended unsent; usage, steps and timestamps are unchanged.
 /// `runner-tags/v1` adds `tags` and `origin` members to records that carry
 /// message parts, and may set `render_tags` in the frozen render config; it
-/// changes no text, usage, step or timestamp.
+/// changes no text, usage, step or timestamp. `compaction-view/v1` adds
+/// records for an applied compaction view, the advance notice it published, and
+/// a ceiling in a compaction Setup message. The stored messages stay byte for
+/// byte, so usage, steps and timestamps are unchanged. A future transcript view
+/// that shows the prompt as rendered must apply the recorded view.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -103,6 +107,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "structured-output-downgrade/v1",
     "delivery-order/v1",
     "runner-tags/v1",
+    "compaction-view/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1832,6 +1837,7 @@ pub(crate) mod tests {
             "structured-output-downgrade/v1",
             "delivery-order/v1",
             "runner-tags/v1",
+            "compaction-view/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
