@@ -616,6 +616,50 @@ describe("planEmergencyDrop — minimum achievable reclaim", () => {
 // Fixed overhead is not reclaimable by deleting tool results, even if a fit
 // rebuild has already paid for the cache rewrite or real usage reaches 95%.
 describe("issue 731 impossible fixed overhead", () => {
+    for (const fixture of [
+        { name: "subagent sample latch", usage: 90_000, active: 6_407, floor: 83_593, count: 2 },
+        { name: "producer force gate", usage: 90_000, active: 6_407, floor: 83_593, count: 2 },
+        {
+            name: "protected episode at 90%",
+            usage: 90_000,
+            active: 10_195,
+            floor: 79_805,
+            count: 5,
+        },
+        {
+            name: "protected episode at 96%",
+            usage: 96_000,
+            active: 10_195,
+            floor: 85_805,
+            count: 5,
+        },
+    ]) {
+        it(`preserves the Rust ${fixture.name} fixture's impossible fixed floor`, () => {
+            // Use the calibrated active-token totals reported by the Rust transform,
+            // rather than assuming that a long run of one character is token-rich.
+            const tools = Array.from({ length: fixture.count }, (_, n) =>
+                tag(n + 1, "read", 1, { servedTokens: fixture.active / fixture.count }),
+            );
+            const plan = planEmergencyDrop({
+                tags: tools,
+                floorTags: tools,
+                maxTag: fixture.count,
+                protectedCutoff: null,
+                currentTotalInputTokens: fixture.usage,
+                ceilingTokens: 65_000,
+                usagePercentage: fixture.usage / 1000,
+                passAlreadyPriced: true,
+                priorInputSample: 0,
+                hasPriorDrop: false,
+            });
+            expect(plan.shouldDrop).toBe(false);
+            expect(plan.tagNumbers).toEqual([]);
+            expect(plan.reason).toContain(
+                `fixed floor ≈${fixture.floor} already exceeds ceiling 65000`,
+            );
+        });
+    }
+
     it("preserves every tool result above the ceiling, including on priced and real-95 passes", () => {
         const tools = [
             tag(3, "read", 1, { servedTokens: 1_600, reclaimableTokens: 1_350 }),
