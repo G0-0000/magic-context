@@ -20,10 +20,17 @@ import type { StatusDetail } from "../shared/rpc-types";
 import { statusSummaryFromDetail } from "../shared/status-summary";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
+    _isDreamTimerTickInFlightForTests,
     _resetDreamTimerForTests,
     _setDreamTimerStagesForTests,
     startDreamScheduleTimer,
 } from "./dream-timer";
+
+async function waitForMaintenanceTick(): Promise<void> {
+    const deadline = performance.now() + 5000;
+    while (_isDreamTimerTickInFlightForTests() && performance.now() < deadline) await Bun.sleep(1);
+    expect(_isDreamTimerTickInFlightForTests()).toBe(false);
+}
 
 /**
  * Regression coverage for the schema-fence / null-DB crash:
@@ -299,10 +306,7 @@ describe("dream-timer registration cleanup", () => {
             cleanup = await startDreamScheduleTimer({ ...registration });
             rmSync(directory, { recursive: true, force: true });
             intervalCallback?.();
-            for (let attempt = 0; attempt < 20; attempt += 1) {
-                if (clearIntervalSpy.mock.calls.length > 0) break;
-                await Promise.resolve();
-            }
+            await waitForMaintenanceTick();
 
             expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
             expect(clearTimeoutSpy).toHaveBeenCalledWith(projectStartupHandle);
@@ -499,9 +503,7 @@ describe("dreamer tick stage containment", () => {
         return {
             tick: async () => {
                 intervalCallback?.();
-                // The tick body is a detached async function; yielding the loop
-                // repeatedly lets it run to completion before assertions.
-                for (let attempt = 0; attempt < 50; attempt += 1) await Bun.sleep(0);
+                await waitForMaintenanceTick();
             },
             dispose: () => {
                 for (const cleanup of cleanups) cleanup?.();

@@ -48,6 +48,7 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "../features/magic-context/memory/project-identity";
+import { pruneMissingProjectIdentities } from "../features/magic-context/memory/project-identity-cache";
 import { sweepOrphanedOpenCodeMessageIndexesOffThread } from "../features/magic-context/message-index-async";
 import {
     drainCommitBacklogForProject,
@@ -448,6 +449,9 @@ function persistTickOutcome(db: Database, failure: DreamerTickFailure | null): v
 }
 
 async function runMessageHistoryMaintenance(db: Database): Promise<void> {
+    const prunedIdentities = await pruneMissingProjectIdentities();
+    if (prunedIdentities > 0)
+        log(`[magic-context] pruned ${prunedIdentities} missing project identities`);
     try {
         await drainStaleLkgSlots(db);
     } catch (error) {
@@ -746,6 +750,10 @@ async function sweepOrphanedInternalChildren(
 /** What the process-wide timer holds right now, for tests of host registration. */
 export function _getDreamTimerStateForTests(): { active: boolean; directories: string[] } {
     return { active: activeTimer !== null, directories: [...registeredProjects.keys()] };
+}
+
+export function _isDreamTimerTickInFlightForTests(): boolean {
+    return tickInFlight;
 }
 
 export function _resetDreamTimerForTests(): void {
