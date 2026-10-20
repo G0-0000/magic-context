@@ -165,6 +165,7 @@ export async function embedUnembeddedCommits(db: Database, projectPath: string):
     embedInProgress.add(projectPath);
     const startedAt = Date.now();
     const deadline = startedAt + EMBED_SWEEP_MAX_WALL_CLOCK_MS;
+    const signal = AbortSignal.timeout(EMBED_SWEEP_MAX_WALL_CLOCK_MS);
     let total = 0;
 
     try {
@@ -181,7 +182,7 @@ export async function embedUnembeddedCommits(db: Database, projectPath: string):
                         text: row.message,
                         contentSha256: contentSha256(row.message),
                     })),
-                    undefined,
+                    signal,
                     db,
                     projectPath,
                 );
