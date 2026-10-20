@@ -225,7 +225,12 @@ export function createPiTagSnapshotReader(db: Database) {
 			if (ready(sessionId)) return;
 			desiredSession = sessionId;
 			if (current) {
-				if (current.sessionId === sessionId) return current.result;
+				// A running or non-retryable job is shared by every waiter. A job that
+				// already failed as stale is not: returning its rejected result would
+				// make the readiness retry fail with the same stale error without ever
+				// reading again. Wait for its worker to exit, then start a new one.
+				if (current.sessionId === sessionId && !current.stale)
+					return current.result;
 				current.cancel();
 				await current.released;
 				if (desiredSession !== sessionId)
@@ -341,6 +346,8 @@ export function createPiTagSnapshotReader(db: Database) {
 					cache.set(sessionId, snapshot);
 				})
 				.catch((error) => {
+					if (error instanceof PiTagHydrationError && error.code === "stale")
+						destination.stale = true;
 					// Cancelling an old session is not a connection failure. Do not
 					// replay its cancellation as the next session's startup error.
 					if (
@@ -928,6 +935,10 @@ interface OwnerJob {
 	result: Promise<void>;
 	released: Promise<void>;
 	cancel: () => void;
+	/** Set when this job's result rejected because the database changed while it
+	 * read. Such a result must not be shared with a later load of the same
+	 * session: that load is a retry and needs a fresh read. */
+	stale?: boolean;
 }
 
 type PiSnapshotWorkerFactory = (

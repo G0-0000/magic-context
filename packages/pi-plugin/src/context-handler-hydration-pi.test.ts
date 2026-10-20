@@ -432,6 +432,34 @@ it("a cancelled hydration never backoffs the next session on the same connection
 	expect(h.refusals).toEqual([]);
 });
 
+it("a stale hydration retries with a fresh worker and serves the turn", async () => {
+	const h = harness();
+	let committed = false;
+	__setPiTagSnapshotWorkerForTests(h.db, (request, cached) =>
+		h.track(
+			startPiTagSnapshotWorker(request, {
+				cached,
+				beforeAck: async () => {
+					if (committed) return;
+					committed = true;
+					// A host writes to the shared database while the first worker waits
+					// between its tag and fallback streams, as session startup does on a
+					// real Pi host. That worker must fail as stale; only a new read may
+					// serve the turn.
+					h.foreign.exec(
+						"INSERT OR REPLACE INTO schema_migrations_meta (key, value) VALUES ('hydration-retry-probe', '1')",
+					);
+				},
+			}),
+		),
+	);
+	await h.call();
+	expect(committed).toBe(true);
+	expect(h.starts).toBe(2);
+	expect(h.refusals).toEqual([]);
+	expect(h.dispatches).toBe(1);
+});
+
 for (const evidence of ["allocator observer", "insert journal"] as const) {
 	it(`own first allocation refuses without ${evidence} evidence`, async () => {
 		const h = harness();
