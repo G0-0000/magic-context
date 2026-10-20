@@ -413,11 +413,82 @@ test("issue 686 WebSocket continuation guard: an errored response is not a conti
 	);
 });
 
+test("issue 686 WebSocket continuation guard: an aborted, cut-off or unreplayable response is never a continuation point", async () => {
+	// Oh My Pi runs assistant_message on every finalized message, including ones
+	// whose stream ended in an error or abort (agent-core agent-loop.ts:2309-2310
+	// and 2592-2593 run before stopReason is consulted). Only a completed
+	// response with replayable native items may anchor a chain.
+	const base = response({
+		id: "resp_1",
+		text: "checking the file",
+		tag: 2,
+		timestamp: 3,
+		call: "call_1",
+	}).host;
+	const variants: Record<string, unknown> = {
+		aborted: { ...base, stopReason: "aborted" },
+		length: { ...base, stopReason: "length" },
+		"no response id": { ...base, responseId: undefined },
+		"no native items": { ...base, providerPayload: undefined },
+		"replacing items": {
+			...base,
+			providerPayload: { ...base.providerPayload, dt: false },
+		},
+	};
+	const outcomes: Record<string, string | undefined> = {};
+	for (const [name, message] of Object.entries(variants)) {
+		const h = harness();
+		await h.pass(m1);
+		h.send(full(w1));
+		h.respond(message);
+		await h.pass(m2);
+		h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
+		outcomes[name] = h.refusals[0]?.includes(
+			"no completed managed response is recorded for this continuation",
+		)
+			? "refused"
+			: h.refusals[0];
+		clearPiContextReceipt(session);
+	}
+	expect(outcomes).toEqual(
+		Object.fromEntries(Object.keys(variants).map((name) => [name, "refused"])),
+	);
+});
+
+test("issue 686 WebSocket continuation guard: an errored response drops the earlier anchor too", async () => {
+	// After a failed response neither it nor the response before it describes
+	// what the provider holds for this session's next request.
+	const refusals: string[] = [];
+	for (const previous of ["resp_1", "resp_2"]) {
+		const h = await toolTurn();
+		h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
+		const failed = response({
+			id: "resp_2",
+			text: "done",
+			tag: 4,
+			timestamp: 5,
+			stopReason: "error",
+		});
+		h.respond(failed.host);
+		const u2 = user("§5§ try again", 6);
+		await h.pass([...m2, failed.prepared, u2], true);
+		h.send(chained(previous, [userItem("§5§ try again")]));
+		expect(h.aborts).toBe(1);
+		refusals.push(h.refusals[0] ?? "");
+		clearPiContextReceipt(session);
+	}
+	for (const refusal of refusals)
+		expect(refusal).toContain(
+			"no completed managed response is recorded for this continuation",
+		);
+});
+
 test("issue 686 WebSocket continuation guard: after an aborted response the earlier response is stale", async () => {
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
-	// The stream was aborted: Oh My Pi emits no assistant_message
-	// (agent-core agent-loop.ts:2800-2840), so that request has no response.
+	// The stream was aborted through the request signal: Oh My Pi emits no
+	// assistant_message (agent-core agent-loop.ts:2225-2236 and 2795-2838), so
+	// that request has no response.
 	const u2 = user("§4§ next prompt", 5);
 	await h.pass([...m2, u2], true);
 	h.send(chained("resp_1", [userItem("§4§ next prompt")]));

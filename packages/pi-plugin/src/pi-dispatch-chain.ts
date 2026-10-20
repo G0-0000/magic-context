@@ -111,10 +111,12 @@ export function piChainedRequest(
  * and `providerPayload` holds that response's native output items
  * (openai-codex-responses.ts:2739-2748 and 3272-3275).
  *
- * Errors and length cut-offs are not continuation points; neither is a message
- * whose items would replace rather than extend the input (no `dt` flag). An
- * aborted stream never reaches this event (agent-loop.ts:2800-2840), so the
- * request it answered keeps no anchor at all.
+ * The event also runs for messages that ended in an error or abort, so only a
+ * completed response (`stop` or `toolUse`) counts: errors, aborts and length
+ * cut-offs are not continuation points, and neither is a message whose items
+ * would replace rather than extend the input (no `dt` flag). A stream aborted
+ * through the request signal skips this event entirely (agent-loop.ts:
+ * 2225-2236 and 2795-2838), so the request it answered gets no anchor at all.
  */
 export function piChainResponse(
 	message: unknown,
