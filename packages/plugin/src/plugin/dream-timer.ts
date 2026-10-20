@@ -382,7 +382,7 @@ function runTick(origin: "startup" | "interval"): void {
     // One tick already covers every project, so do not start duplicate work.
     if (tickInFlight) return;
     tickInFlight = true;
-    log(`[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`);
+    log(`[magic-context] maintenance tick (${origin}) — projects=${registeredProjects.size}`);
     void (async () => {
         try {
             const db = openTimerDatabaseOrNull("maintenance tick");
