@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import { runSessionWarmupWorker } from "../../hooks/magic-context/raw-ordinal-warmup";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
-import { withoutSqliteTransformPass, withSqliteBackgroundWriter } from "../../shared/sqlite";
+import {
+    getSqliteDatabasePath,
+    withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
+} from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export const MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE = 100;
@@ -199,8 +204,28 @@ export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void>
 export function startMessageFtsRowidMapBackfill(db: Database): Promise<void> {
     const active = activeBackfills.get(db);
     if (active) return active;
-    const run = withoutSqliteTransformPass(() =>
-        withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db)),
+    const path = getSqliteDatabasePath(db);
+    // Even a bounded batch can checkpoint a large WAL. File stores do all startup
+    // mapping on a worker, outside search and outside the serving connection.
+    const run = (
+        path
+            ? runSessionWarmupWorker({ path, sessionId: "", ftsRowidBackfill: true }, {}).then(
+                  (result) => {
+                      if (!("ftsRowidBackfill" in result)) {
+                          throw Object.assign(
+                              new Error(
+                                  `FTS rowid backfill unavailable: ${"failure" in result ? result.detail : "unexpected reply"}`,
+                              ),
+                              "failure" in result
+                                  ? { code: result.code, errcode: result.errcode }
+                                  : {},
+                          );
+                      }
+                  },
+              )
+            : withoutSqliteTransformPass(() =>
+                  withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db)),
+              )
     ).finally(() => {
         activeBackfills.delete(db);
     });
