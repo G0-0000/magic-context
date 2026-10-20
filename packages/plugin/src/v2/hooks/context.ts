@@ -1294,6 +1294,13 @@ export async function registerContext(context: V2Context) {
                     type?: string;
                     data?: { sessionID?: string; error?: unknown };
                 };
+                // A provider or model reload can change the limit for the same
+                // model key. Drop the one-time catalog reads so the next pass
+                // re-reads the live limit.
+                if (event.type === "provider.updated" || event.type === "model.updated") {
+                    queriedModels.clear();
+                    continue;
+                }
                 if (!event.data?.sessionID) continue;
                 const sessionID = event.data.sessionID;
                 if (
