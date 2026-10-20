@@ -830,7 +830,7 @@ function startGitSweepLeaseRenewal(
     return () => clearInterval(timer);
 }
 
-async function sweepGitCommits(args: {
+export async function sweepGitCommits(args: {
     directory: string;
     projectIdentity: string;
     db: Database;
@@ -840,11 +840,20 @@ async function sweepGitCommits(args: {
     const holderId = crypto.randomUUID();
     const lease = acquireGitSweepLease(db, projectIdentity, holderId);
     if (!lease.acquired) {
-        const reason =
-            lease.reason === "cooldown_active"
-                ? `cooldown active until ${lease.nextAllowedAt}`
-                : `lease held by ${lease.leaseHolder ?? "another holder"} until ${lease.leaseExpiresAt ?? "unknown"}`;
+        if (lease.reason === "cooldown_active") return;
+        const reason = `lease held by ${lease.leaseHolder ?? "another holder"} until ${lease.leaseExpiresAt ?? "unknown"}`;
         log(`[git-commits] sweep skipped for ${projectIdentity}: ${reason}`);
+        return;
+    }
+
+    if (projectIdentity.startsWith("dir:")) {
+        if (parkGitSweepNonIndexable(db, projectIdentity, holderId)) {
+            log(
+                `[git-commits] sweep parked for ${projectIdentity}: directory identity has no commits`,
+            );
+        } else {
+            releaseGitSweepLease(db, projectIdentity, holderId);
+        }
         return;
     }
 

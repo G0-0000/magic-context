@@ -79,6 +79,10 @@ export async function indexCommitsForProject(
         embedded: 0,
         nonIndexable: false,
     };
+    if (projectPath.startsWith("dir:")) {
+        result.nonIndexable = true;
+        return result;
+    }
 
     if (indexInProgress.has(projectPath)) {
         log(`[git-commits] index already in progress for ${projectPath}, skipping`);
