@@ -1969,6 +1969,46 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		if (!result.ok) expect(result.reason).toBe("no_assistant");
 	});
 
+	it("only gives registered historian children the per-call cache-marker flag", async () => {
+		const previous = process.env.MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL;
+		process.env.MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL = "skip";
+		try {
+			for (const [agent, accountingSubagent, cacheTail, expected] of [
+				["historian", "historian", "skip", "skip"],
+				["historian", "historian", "write", "write"],
+				["historian", "historian_editor", "skip", undefined],
+				["magic-context-dreamer", "dreamer", "skip", undefined],
+				["historian", "historian", undefined, undefined],
+			] as const) {
+				const child = createMockChild();
+				const { runner, spawnImpl } = runnerWith(child);
+				const resultPromise = runner.run({
+					...baseOptions,
+					agent,
+					accountingSubagent,
+					cacheTail,
+				});
+				child.writeStdoutLine(
+					agentEnd([
+						{
+							role: "assistant",
+							content: [{ type: "text", text: "done" }],
+							stopReason: "stop",
+						},
+					]),
+				);
+				child.emitClose(0);
+				await resultPromise;
+				const env = spawnImpl.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv;
+				expect(env.MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL).toBe(expected);
+			}
+		} finally {
+			if (previous === undefined)
+				delete process.env.MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL;
+			else process.env.MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL = previous;
+		}
+	});
+
 	it("spawns pi, parses stdout, trims assistant text, and captures stderr", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, { piBinary: "custom-pi" });

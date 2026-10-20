@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withoutHistorianTailCache } from "@magic-context/core/shared/historian-cache";
 import { subagentTemperature } from "@magic-context/core/shared/subagent-temperature";
 import { readHostSystemPrompt } from "./host-system-prompt";
 import { promptFingerprint } from "./subagent-telemetry";
 
 export const HISTORIAN_TEMPERATURE_ENV = "MAGIC_CONTEXT_HISTORIAN_TEMPERATURE";
+export const HISTORIAN_CACHE_TAIL_ENV = "MAGIC_CONTEXT_HISTORIAN_CACHE_TAIL";
 /** Exact output cap from configuration (historian.maxTokens or dreamer.maxTokens). */
 export const HISTORIAN_MAX_OUTPUT_TOKENS_ENV =
 	"MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS";
@@ -169,6 +171,32 @@ export function withoutProviderTemperature(payload: unknown): unknown {
 }
 
 export default function historianCalibrationExtension(pi: ExtensionAPI): void {
+	// Only the hidden-child launcher sets this admission flag. Ordinary sessions
+	// and other subagents never register a cache-rewriting listener.
+	if (process.env[HISTORIAN_CACHE_TAIL_ENV] === "skip") {
+		let requests = 0;
+		let warned = false;
+		pi.on("before_provider_request", (event) => {
+			if (requests++ > 0) return;
+			try {
+				const original = JSON.stringify(event.payload);
+				const body = withoutHistorianTailCache(original);
+				return body === original ? undefined : JSON.parse(body);
+			} catch (error) {
+				if (!warned) {
+					warned = true;
+					try {
+						process.stderr.write(
+							`Historian cache optimization skipped: ${String(error)}\n`,
+						);
+					} catch {
+						// Diagnostic failures must not prevent the original request.
+					}
+				}
+				return undefined;
+			}
+		});
+	}
 	const intendedPath = process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
 	if (intendedPath) {
 		const intended = readFileSync(intendedPath, "utf8");

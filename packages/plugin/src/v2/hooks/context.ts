@@ -769,6 +769,7 @@ export async function registerContext(context: V2Context) {
               })
             : undefined;
     const hiddenChildHook = new HiddenChildHook();
+    await context.session.hook("http.request", (draft) => hiddenChildHook.cacheRequest(draft));
     const tools =
         db && isDatabasePersisted(db)
             ? await registerTools(context, db, config, moduleToolBackends?.backends, (id) =>
