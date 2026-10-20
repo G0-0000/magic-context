@@ -327,6 +327,17 @@ test("issue 686 WebSocket continuation guard: a fresh process without the record
 	);
 });
 
+test("issue 686 WebSocket continuation guard: malformed chain ids cannot fall through to the full-request fence", async () => {
+	for (const id of ["", null, 7]) {
+		const h = harness();
+		await h.pass(m1);
+		h.send({ ...full(w1), previous_response_id: id });
+		expect(h.aborts).toBe(1);
+		expect(h.refusals[0]).toContain("invalid chained continuation frame");
+		clearPiContextReceipt(session);
+	}
+});
+
 test("issue 686 WebSocket continuation guard: an unknown prefix before the delta refuses", async () => {
 	const h = harness();
 	await h.pass(m1);
@@ -353,8 +364,9 @@ test("issue 686 WebSocket continuation guard: a delta answering another call ref
 	const h = await toolTurn();
 	h.send(chained("resp_1", [outputItem("call_other", "§3§ file body")]));
 	expect(h.aborts).toBe(1);
-	expect(h.refusals[0]).toContain("prepared turn structure");
-	expect(h.refusals[0]).toContain("comparison=result id");
+	expect(h.refusals[0]).toContain(
+		"delta differs from the prepared provider input tail",
+	);
 });
 
 test("issue 686 WebSocket continuation guard: a delta with an unprepared extra item refuses", async () => {
@@ -366,8 +378,9 @@ test("issue 686 WebSocket continuation guard: a delta with an unprepared extra i
 		]),
 	);
 	expect(h.aborts).toBe(1);
-	expect(h.refusals[0]).toContain("prepared turn structure");
-	expect(h.refusals[0]).toContain("comparison=count");
+	expect(h.refusals[0]).toContain(
+		"delta differs from the prepared provider input tail",
+	);
 });
 
 test("issue 686 WebSocket continuation guard: an altered resend of the admitted continuation refuses", async () => {
@@ -498,23 +511,82 @@ test("issue 686 WebSocket continuation guard: after an aborted response the earl
 	);
 });
 
-test("issue 686 WebSocket continuation parity: a delta gets the same tail checks as the full request", async () => {
-	// The fence compares structure (roles, call and result IDs, assistant text),
-	// not user or tool-result text, because Oh My Pi legitimately rewrites that
-	// text after the context hook (secret obfuscation, Harmony escaping). A
-	// continuation must be judged exactly like the full request it stands for.
-	const tails = [
-		{ output: outputItem("call_1", "§3§ edited body"), admits: true },
-		{ output: outputItem("call_2", "§3§ file body"), admits: false },
-	];
-	for (const tail of tails) {
-		const viaFull = await toolTurn();
-		viaFull.send(full([...w1, ...a1.wire, tail.output]));
+test("issue 686 WebSocket continuation guard: altered tool-result text on the first delta refuses", async () => {
+	const h = await toolTurn();
+	h.send(chained("resp_1", [outputItem("call_1", "§3§ edited body")]));
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain(
+		"delta differs from the prepared provider input tail",
+	);
+});
+
+test("issue 686 WebSocket continuation parity: full requests retain their existing text-rewrite policy", async () => {
+	const h = await toolTurn();
+	// Full requests use the existing structural policy. A continuation may reuse
+	// a recorded response only if its delta exactly matches the prepared input tail.
+	h.send(full([...w1, ...a1.wire, outputItem("call_1", "§3§ edited body")]));
+	expect(h.aborts).toBe(0);
+});
+
+test("issue 686 WebSocket continuation guard: altered user and todo-reminder text refuses", async () => {
+	const answer = response({ id: "resp_1", text: "done", tag: 2, timestamp: 3 });
+	for (const tail of [user("§3§ next turn", 4), todoReminder(4)]) {
+		const h = harness();
+		await h.pass(m1);
+		h.send(full(w1));
+		h.respond(answer.host);
+		await h.pass([...m1, answer.prepared, tail], true);
+		h.send(
+			chained("resp_1", [
+				{
+					role: tail.role,
+					content: [{ type: "input_text", text: "UNMANAGED replacement" }],
+				},
+			]),
+		);
+		expect(h.aborts).toBe(1);
+		expect(h.refusals[0]).toContain(
+			"delta differs from the prepared provider input tail",
+		);
 		clearPiContextReceipt(session);
-		const viaDelta = await toolTurn();
-		viaDelta.send(chained("resp_1", [tail.output]));
-		clearPiContextReceipt(session);
-		expect(viaFull.aborts).toBe(tail.admits ? 0 : 1);
-		expect(viaDelta.aborts).toBe(viaFull.aborts);
 	}
+});
+
+test("issue 686 WebSocket continuation guard: altered native response with the same id refuses", async () => {
+	const h = harness();
+	await h.pass(m1);
+	h.send(full(w1));
+	h.respond(a1.host);
+	const changed = structuredClone(a1.prepared);
+	changed.providerPayload.items[0] = {
+		...reasoningItem("rs_resp_1"),
+		encrypted_content: "altered",
+	};
+	await h.pass([...m1, changed, r1]);
+	h.send(chained("resp_1", [outputItem("call_1", "§3§ file body")]));
+	expect(h.aborts).toBe(1);
+	expect(h.refusals[0]).toContain(
+		"prepared response or tail encoding cannot continue",
+	);
+});
+
+test("issue 686 WebSocket continuation: split text blocks use the provider's exact newline encoding", async () => {
+	const h = harness();
+	await h.pass(m1);
+	h.send(full(w1));
+	h.respond(a1.host);
+	await h.pass([
+		...m1,
+		a1.prepared,
+		{
+			...r1,
+			content: [
+				{ type: "text", text: "§3§ first" },
+				{ type: "text", text: "second" },
+			],
+		},
+	]);
+	h.send(chained("resp_1", [outputItem("call_1", "§3§ first\nsecond")]));
+	expect(h.refusals).toEqual([]);
+	expect(h.aborts).toBe(0);
 });

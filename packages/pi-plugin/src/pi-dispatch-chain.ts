@@ -1,8 +1,11 @@
+import { isDeepStrictEqual } from "node:util";
 import {
 	exactReusablePrefix,
 	type LkgInputSnapshot,
 	lkgContentFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { piEncodeChainTail } from "./pi-dispatch-chain-tail";
+import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 
 /**
  * Oh My Pi's Responses providers can continue a conversation from the copy the
@@ -28,6 +31,12 @@ export interface PiPreparedHistory {
 	snapshots: readonly LkgInputSnapshot[];
 	/** The provider response ID stored on each assistant message, if any. */
 	responseIds: readonly (string | undefined)[];
+	/** Native response and encoded input tail after the latest completed assistant. */
+	continuation?: {
+		index: number;
+		responseItems: readonly unknown[];
+		delta: readonly unknown[];
+	};
 }
 
 /** An admitted managed request: the full input it carried and the pass that prepared it. */
@@ -68,6 +77,7 @@ export function piChainCapableApi(api: unknown): boolean {
 
 export function piPreparedHistory(
 	messages: readonly unknown[],
+	model?: PiChatHistoryModel,
 ): PiPreparedHistory | undefined {
 	const snapshots: LkgInputSnapshot[] = [];
 	const responseIds: (string | undefined)[] = [];
@@ -86,7 +96,21 @@ export function piPreparedHistory(
 				: undefined,
 		);
 	}
-	return { snapshots, responseIds };
+	const prepared: PiPreparedHistory = { snapshots, responseIds };
+	let index = responseIds.length - 1;
+	while (index >= 0 && responseIds[index] === undefined) index--;
+	const assistant = object(messages[index]);
+	const response = piChainResponse(assistant);
+	if (model && assistant && response) {
+		const delta = piEncodeChainTail(
+			messages.slice(index + 1),
+			assistant,
+			response.responseItems,
+			model,
+		);
+		if (delta) prepared.continuation = { index, ...response, delta };
+	}
+	return prepared;
 }
 
 /** A Responses body that continues a stored response; undefined for a full request. */
@@ -94,12 +118,16 @@ export function piChainedRequest(
 	payload: unknown,
 ): { previousResponseId: string; delta: readonly unknown[] } | undefined {
 	const body = object(payload);
-	if (!body || body.messages !== undefined || !Array.isArray(body.input))
-		return undefined;
+	if (!body || body.previous_response_id === undefined) return undefined;
 	const id = body.previous_response_id;
-	return typeof id === "string" && id.length > 0
-		? { previousResponseId: id, delta: body.input }
-		: undefined;
+	if (
+		body.messages !== undefined ||
+		!Array.isArray(body.input) ||
+		typeof id !== "string" ||
+		!id
+	)
+		throw new Error("invalid chained continuation frame");
+	return { previousResponseId: id, delta: body.input };
 }
 
 /**
@@ -134,7 +162,10 @@ export function piChainResponse(
 		!Array.isArray(payload.items)
 	)
 		return undefined;
-	return { responseId: source.responseId, responseItems: [...payload.items] };
+	return {
+		responseId: source.responseId,
+		responseItems: structuredClone(payload.items),
+	};
 }
 
 /**
@@ -188,6 +219,18 @@ export function piExpandChainedRequest(
 			refusal:
 				"prepared history does not continue from the previous managed response",
 		};
+	const continuation = prepared.continuation;
+	if (
+		!continuation ||
+		continuation.index !== carried ||
+		!isDeepStrictEqual(continuation.responseItems, anchor.responseItems)
+	)
+		return {
+			refusal:
+				"prepared response or tail encoding cannot continue the recorded response",
+		};
+	if (!isDeepStrictEqual(continuation.delta, chained.delta))
+		return { refusal: "delta differs from the prepared provider input tail" };
 	const input = [...anchor.input, ...anchor.responseItems, ...chained.delta];
 	const { previous_response_id: _previous, ...rest } = payload;
 	return { payload: { ...rest, input }, input };

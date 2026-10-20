@@ -684,6 +684,10 @@ export function registerPiGuardedContext(
 							? "provider selected Responses items without a matching history plan"
 							: undefined))
 					: "prepared history representation is not modeled";
+				if (chained && skipReason)
+					throw new Error(
+						"provider request does not match this pass's managed dispatch (chained continuation requires a modeled prepared history)",
+					);
 				if (skipReason && !structureWarnings.has(key)) {
 					structureWarnings.set(key, true);
 					log(
@@ -871,7 +875,10 @@ export function registerPiGuardedContext(
 					!budget.sideTurn &&
 					piChainCapableApi(ctx.model?.api)
 				)
-					active.preparedHistory = piPreparedHistory(result.messages);
+					active.preparedHistory = piPreparedHistory(
+						result.messages,
+						ctx.model,
+					);
 				budget.completed = true;
 				active.ready = true;
 				// Oh My Pi persists the new prompt concurrently with preparation; its
