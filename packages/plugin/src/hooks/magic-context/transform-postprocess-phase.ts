@@ -2158,6 +2158,12 @@ export async function runPostTransformPhase(
         rewritingSignedPrefix = true;
         thinkingReleasedForFit ||= forFit;
     };
+    // Fit proof authorizes rebuilding the signed prefix, independently of
+    // pressure. Release before prefix preparation so it can refresh history
+    // without pretending the protected tool window has reached 95% usage.
+    if (activeThinkingPrefixHold && args.forceSignedRebuildForFit) {
+        releaseThinkingForRewrite(true);
+    }
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
@@ -2425,7 +2431,11 @@ export async function runPostTransformPhase(
         (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
-        hardFold: foldBustsServedPrefixThisPass || firstRenderBust || idleExpiryRebuild,
+        hardFold:
+            rewritingSignedPrefix ||
+            foldBustsServedPrefixThisPass ||
+            firstRenderBust ||
+            idleExpiryRebuild,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||

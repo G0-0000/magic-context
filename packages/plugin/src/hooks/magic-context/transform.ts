@@ -2861,8 +2861,7 @@ export function createTransform(deps: TransformDeps) {
         const protectedCutoff = protectionWindow.cutoff;
 
         const tPostProcess = performance.now();
-        dropProjectionEmergency =
-            thinkingFitRetries.has(sessionId) || contextUsage.percentage >= 95;
+        dropProjectionEmergency = contextUsage.percentage >= 95;
         const postTransformResult = await runPostTransformPhase({
             opencode2: deps.storeGeneration === "v2",
             normalizeRecoveryTail,
@@ -2891,9 +2890,9 @@ export function createTransform(deps: TransformDeps) {
             client: deps.client,
             activeAgent,
             batch,
-            contextUsage: thinkingFitRetries.has(sessionId)
-                ? { ...contextUsage, percentage: Math.max(95, contextUsage.percentage) }
-                : contextUsage,
+            // A fit retry permits rebuilding signed thinking, not yielding the
+            // protected tool tail. Only real pressure may open the 95% drop lane.
+            contextUsage,
             usableWindow: resolvedContextLimit ?? 0,
             schedulerDecision,
             schedulerDeferReason,

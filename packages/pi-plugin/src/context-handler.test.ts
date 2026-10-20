@@ -4036,7 +4036,7 @@ describe("registerPiContextHandler", () => {
 	it("latches one emergency batch per force-pressure episode and rearms only on safe edges", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-forward-emergency-latch";
-		const largeToolOutput = "word ".repeat(2999);
+		const largeToolOutput = "word ".repeat(4999);
 		try {
 			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
 			const fake = createFakePi();
@@ -7836,7 +7836,7 @@ it("contract Pi consumed episode reaches 95", async () => {
 					{
 						...toolResultMessage(
 							`audit-call-${i}`,
-							"x".repeat(12000),
+							"word ".repeat(2999),
 							3 + i * 2,
 						),
 						toolName: "bash",
@@ -8097,7 +8097,7 @@ for (const withTools of [false, true]) {
 							{
 								...toolResultMessage(
 									`cross-${i}`,
-									"x".repeat(12000),
+									"word ".repeat(2999),
 									103 + i * 2,
 								),
 								toolName: "bash",

@@ -2,6 +2,7 @@ import { afterEach, expect, it, spyOn } from "bun:test";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
+    getTagsBySession,
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -618,7 +619,23 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
             updatedAt: at,
             hasUsageTokens: true,
         });
+        // Below the real 95% wall, fit recovery must refuse an oversized
+        // protected result rather than fabricate pressure to erase it.
         toolOutput = "RECLAIMABLE tool result words ".repeat(30_000);
+        await expect(transform({}, { messages: active() })).rejects.toMatchObject({
+            name: "EmergencyFailClosedError",
+        });
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.messageId === "read-call")?.status,
+        ).toBe("active");
+        expect(logs.mock.calls.map((call) => call.slice(1).join(" ")).join("\n")).not.toContain(
+            "context=95.0%",
+        );
+        usage.set(sessionId, {
+            usage: { percentage: 96, inputTokens: 15_360 },
+            updatedAt: at,
+            hasUsageTokens: true,
+        });
         const released = active();
         await transform({}, { messages: released });
         expect(logs.mock.calls.map((call) => call.slice(1).join(" ")).join("\n")).toContain(

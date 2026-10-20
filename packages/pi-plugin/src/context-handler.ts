@@ -6385,10 +6385,9 @@ export function registerPiContextHandler(
 							messages: inputForThinkingFit,
 							forceSignedRebuildForFit: true,
 							forceMaterialization: true,
-							contextUsage: {
-								...pipelineArgs.contextUsage,
-								percentage: Math.max(95, pipelineArgs.contextUsage.percentage),
-							},
+							// Rebuilding signed thinking does not turn estimated fit pressure
+							// into real 95% usage or release the protected tool tail.
+							contextUsage: pipelineArgs.contextUsage,
 						}),
 					);
 					observePipelineResultForTests(sessionId, result);
@@ -6594,10 +6593,7 @@ export function registerPiContextHandler(
 												})
 											: undefined,
 										contextUsage: {
-											percentage:
-												fitCase === "over-window-proof"
-													? Math.max(95, usagePercentage)
-													: usagePercentage,
+											percentage: usagePercentage,
 											inputTokens: usageInputTokens,
 										},
 									}),

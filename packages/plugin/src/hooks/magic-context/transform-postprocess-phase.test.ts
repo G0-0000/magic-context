@@ -48,6 +48,7 @@ import {
     clearThinkingBindingRecoveryIf,
     getCompactionMarkerHealth,
     getDeferredClearedCompactionMarkerState,
+    getEmergencyInputSample,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
     getPersistedTodoPermissionDenied,
@@ -3550,7 +3551,7 @@ describe("postprocess emergency drop accounting", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 tags: getActiveTagsBySession(db, sessionId),
                 targets,
-                contextUsage: { percentage: 110, inputTokens: 20_000 },
+                contextUsage: { percentage: 110, inputTokens: 8_000 },
                 emergencyCeilingTokens: 10_000,
                 currentTurnId: "turn-reclaim",
             }),
@@ -4129,7 +4130,7 @@ describe("automatic reclaim ignores the ctx_reduce verdict", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 tags: getActiveTagsBySession(db, sessionId),
                 targets,
-                contextUsage: { percentage: 110, inputTokens: 20_000 },
+                contextUsage: { percentage: 110, inputTokens: 8_000 },
                 emergencyCeilingTokens: 10_000,
                 currentTurnId: "turn-verdict-emergency",
                 ctxReduceAvailability: { callable, frozen: true },
@@ -4324,7 +4325,7 @@ describe("issue #386 sustained execute-pressure batching", () => {
             );
         };
 
-        await runPressurePass(90_000);
+        await runPressurePass(60_000);
         const firstStatuses = new Map(
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
@@ -4355,7 +4356,7 @@ describe("issue #386 sustained execute-pressure batching", () => {
             );
         }
 
-        await runPressurePass(91_000);
+        await runPressurePass(43_000);
         const secondStatuses = new Map(
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
@@ -4364,10 +4365,10 @@ describe("issue #386 sustained execute-pressure batching", () => {
         expect(JSON.stringify(messages.slice(0, 30))).toBe(pricedPrefix);
 
         queuePendingOp(db, sessionId, 19, "drop", 1);
-        await runPressurePass(92_000);
+        await runPressurePass(44_000);
         expect(getPendingOps(db, sessionId)).toHaveLength(1);
         expect(JSON.stringify(messages.slice(0, 30))).toBe(pricedPrefix);
-        await runPressurePass(92_000, true);
+        await runPressurePass(44_000, true);
         const ridingStatuses = new Map(
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
@@ -9993,7 +9994,7 @@ describe("ride-only configuration table", () => {
             targets,
             tags: getActiveTagsBySession(db, sessionId),
             sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            emergencyCeilingTokens: 10_000,
+            emergencyCeilingTokens: 18_000,
         };
         const before = JSON.stringify(messages);
         const routine = await runPostTransformPhase(
@@ -10614,7 +10615,17 @@ it("contract OC 95 backstop bypasses consumed tool latch", async () => {
         return runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
-                contextUsage: { percentage, inputTokens: percentage * 1000 },
+                contextUsage: {
+                    percentage,
+                    // Follow the served tail after the first batch rather than
+                    // treating removed output as irreducible overhead.
+                    inputTokens:
+                        60_000 +
+                        messages.reduce(
+                            (sum, message) => sum + estimateMessageTokens(message).toolCall,
+                            0,
+                        ),
+                },
                 emergencyCeilingTokens: 65000,
                 targets,
                 tags: getActiveTagsBySession(db, sessionId),
@@ -13819,5 +13830,42 @@ describe("independent image cache safety through both host projections", () => {
                 replayStorage.getProcessedImageMarkers(db, sessionId).get("independent-image"),
             ).toBe("[image stripped]");
         });
+    }
+});
+
+// Subagents have no historian prefix to trade for their current working results.
+it("issue 731 small subagent preserves results when fixed overhead exceeds the ceiling", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    for (const percentage of [72.3, 95]) {
+        const sessionId = `issue731-subagent-${percentage}`;
+        const messages = [makeToolMessage("old"), makeToolMessage("latest")];
+        const targets = new Map<number, TagTarget>();
+        for (let tag = 1; tag <= 2; tag++) {
+            insertTag(db, sessionId, `tool-${tag}`, "tool", 4000, tag, 0, "bash");
+            targets.set(tag, makeDropTarget(messages[tag - 1]!));
+        }
+        const before = JSON.stringify(messages);
+        const pending = new Set<string>();
+        requestPendingMaterialization(pending, sessionId, "fit_retry");
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                fullFeatureMode: false,
+                schedulerDecision: "execute",
+                contextUsage: { percentage, inputTokens: 144_520 },
+                usableWindow: 200_000,
+                emergencyCeilingTokens: 93_938,
+                forceSignedRebuildForFit: true,
+                pendingMaterializationSessions: pending,
+                tags: getActiveTagsBySession(db, sessionId),
+                targets,
+            }),
+        );
+        expect(getTagsBySession(db, sessionId).map((tag) => tag.status)).toEqual([
+            "active",
+            "active",
+        ]);
+        expect(JSON.stringify(messages)).toBe(before);
+        expect(getEmergencyInputSample(db, sessionId)).toBe(0);
     }
 });
