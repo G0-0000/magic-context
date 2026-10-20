@@ -217,7 +217,7 @@ import {
     evaluateEmergencyFailClosed,
     runPostTransformPhase,
 } from "./transform-postprocess-phase";
-import { logTransformTiming } from "./transform-stage-logger";
+import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
 import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
 import {
     storedHistoryBoundaryPresence,
@@ -3694,7 +3694,9 @@ export function createTransform(deps: TransformDeps) {
             });
     };
 
-    return Object.assign(transform, {
+    const timedTransform: typeof transform = (input, output) =>
+        withTransformTimingSummary(() => transform(input, output));
+    return Object.assign(timedTransform, {
         clearSessionLogState,
         invalidateRustWireState(sessionId: string): void {
             rustModeTransform?.invalidateWireState(sessionId);

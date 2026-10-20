@@ -253,6 +253,10 @@ import {
 	buildSyntheticToolReclaimOps,
 	toolReclaimDistanceEntries,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
+import {
+	logTransformElapsed as logStageElapsed,
+	withTransformTimingSummary,
+} from "@magic-context/core/hooks/magic-context/transform-stage-logger";
 import { getUnpublishedAutoSearchNoHint } from "@magic-context/core/shared/auto-search-lifecycle";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
 import { getHarness } from "@magic-context/core/shared/harness";
@@ -1124,12 +1128,8 @@ function logTransformElapsed(
 	elapsedMs: number,
 	extra?: string,
 ): void {
-	const suffix = extra ? ` ${extra}` : "";
 	recordPiTransformTiming({ sessionId, stage, elapsedMs, extra });
-	sessionLog(
-		sessionId,
-		`transform stage: stage=${stage} elapsed=${elapsedMs.toFixed(1)}ms${suffix}`,
-	);
+	logStageElapsed(sessionId, stage, elapsedMs, extra);
 }
 
 function logTransformTiming(
@@ -4262,7 +4262,7 @@ export function registerPiContextHandler(
 		sessionLog(sessionId, message);
 	});
 
-	const contextHandler: Parameters<typeof registerPiGuardedContext>[1] = async (
+	const runHandler: Parameters<typeof registerPiGuardedContext>[1] = async (
 		event,
 		ctx,
 		budget,
@@ -7102,6 +7102,12 @@ export function registerPiContextHandler(
 			return;
 		}
 	};
+	const contextHandler: Parameters<typeof registerPiGuardedContext>[1] = (
+		...args
+	) =>
+		withTransformTimingSummary(
+			async () => (await runHandler(...args)) ?? undefined,
+		);
 	registerPiGuardedContext(pi, contextHandler, {
 		compactionOff: (ctx) =>
 			(baseOptions.resolveForProject?.(ctx.cwd) ?? baseOptions)
