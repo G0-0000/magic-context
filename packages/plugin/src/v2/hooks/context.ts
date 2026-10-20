@@ -1970,7 +1970,7 @@ export async function registerContext(context: V2Context) {
                 let nativeRestored: V2Message[] | undefined;
                 // Validate fold provenance before the cache path or its raw-row
                 // fallback can invisibly replace the checkpoint. Without a valid
-                // local admission, keep the host-supplied checkpoint instead.
+                // local admission, use ordinary managed-history reconstruction instead.
                 if (cut && nativeFoldReplay && await nativeFoldReplay.admits(draft.sessionID, cut, reader)) {
                     try {
                         nativeRestored = await nativeFoldReplay.restore(
@@ -1993,7 +1993,7 @@ export async function registerContext(context: V2Context) {
                         );
                     }
                 }
-                if (nativeRestored && nativeFoldReplay?.sourceChanged(draft.sessionID)) {
+                if (cut && nativeFoldReplay?.sourceChanged(draft.sessionID)) {
                     // A host edit or revert changed the restored history, so the
                     // ordinary transform may rebuild the history head (the
                     // <session-history> block in the first head message). Each rebuild
@@ -2023,25 +2023,33 @@ export async function registerContext(context: V2Context) {
                         ...draft.messages.filter((message) => message !== incoming),
                     );
                 } else if (localCut && cut && incoming) {
-                    const identity = await folds.observe({
-                        sessionID: draft.sessionID,
-                        cutSeq: cut.seq,
-                        summary: cut.data.summary ?? "",
-                        rendered: incoming,
-                        onHard: (reason) => {
-                            sessionLog(draft.sessionID, `HARD reason=${reason}`);
-                            materialize(draft);
-                            requestPendingMaterialization(
-                                pendingMaterializationSessions,
-                                draft.sessionID,
-                                "host_compaction",
-                            );
-                        },
-                    });
-                    checkpoint = structuredClone(identity.rendered ?? incoming);
-                    submitted = identity.rendered
-                        ? (identity.renderedSummary ?? identity.submitted)
-                        : (cut.data.summary ?? "");
+                    // A checkpoint without native replay admission still uses our
+                    // ordinary host-row reconstruction below. Let the transform
+                    // render or reuse the history head from our compartments, so
+                    // any rebuild opens the same mutation/drain gate as other folds.
+                    // Keep FoldOwner's host wrapper out of this path: its serialized
+                    // raw context can already be covered by the compartments.
+                    if (!nativeFoldReplay) {
+                        const identity = await folds.observe({
+                            sessionID: draft.sessionID,
+                            cutSeq: cut.seq,
+                            summary: cut.data.summary ?? "",
+                            rendered: incoming,
+                            onHard: (reason) => {
+                                sessionLog(draft.sessionID, `HARD reason=${reason}`);
+                                materialize(draft);
+                                requestPendingMaterialization(
+                                    pendingMaterializationSessions,
+                                    draft.sessionID,
+                                    "host_compaction",
+                                );
+                            },
+                        });
+                        checkpoint = structuredClone(identity.rendered ?? incoming);
+                        submitted = identity.rendered
+                            ? (identity.renderedSummary ?? identity.submitted)
+                            : (cut.data.summary ?? "");
+                    }
                     // Rust mode restores against the boundary the module itself published and
                     // keeps that boundary row, because the array handed to the module has to
                     // begin there — exactly where an OpenCode 1 compaction row would have made
