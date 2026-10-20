@@ -452,7 +452,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // builds this so it runs through the exact same runner as the RPC dialog path
     // — identical fallback, progress, and terminal state. `fallbackModelId` is
     // resolved here with the OpenCode-DB recovery (resolveLiveModel) so the
-    // last-resort fallback model is known even when a command is invoked before
+    // unconfigured historian's session model is known even when a command is invoked before
     // the first transform pass populates the map.
     const buildManagedRecompCtx = (sessionId: string): ManagedRecompContext => {
         const historianRun = sampleHistorian();

@@ -110,7 +110,7 @@ After each Magic Context release, update both hosts before using either one, so 
 
 1. Check the harness-specific model in `magic-context.jsonc`: `historian.opencode.model` for OpenCode or `historian.pi.model` for Pi.
 2. Run `doctor` to inspect the active configuration and reported provider errors.
-3. Add ordered alternatives under the matching harness block's `fallback_models`. Magic Context does not add a hidden provider-agnostic fallback list; after your explicit list, the live session model is the last resort.
+3. Add ordered alternatives under the matching harness block's `fallback_models`. A configured historian uses only its primary and that list. Exhaustion reports failure; the active session model is never appended. Without a historian model, OpenCode inherits the session model, while Pi and Oh My Pi do not summarize.
 4. If runs succeed but compartments are confusing, choose a stronger historian model. Summary quality comes from the historian model, not the main model. See [Historian → Choose the historian model](/concepts/historian/#choose-the-historian-model).
 
 ---
