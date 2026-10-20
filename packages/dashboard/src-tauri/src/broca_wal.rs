@@ -84,6 +84,10 @@ const GATED_VERSION: u8 = 3;
 /// a ceiling in a compaction Setup message. The stored messages stay byte for
 /// byte, so usage, steps and timestamps are unchanged. A future transcript view
 /// that shows the prompt as rendered must apply the recorded view.
+/// `context-ceiling/v1` adds records for a run held at its context ceiling and
+/// the ceiling decision, plus a `context_ceiling` run end. This reader ignores
+/// both record types and, as with `budget_exhausted`, records only that the
+/// run finished.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -108,6 +112,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "delivery-order/v1",
     "runner-tags/v1",
     "compaction-view/v1",
+    "context-ceiling/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1838,6 +1843,7 @@ pub(crate) mod tests {
             "delivery-order/v1",
             "runner-tags/v1",
             "compaction-view/v1",
+            "context-ceiling/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1863,6 +1869,28 @@ pub(crate) mod tests {
         ]);
         let runs = decode(&bytes).unwrap();
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `context-ceiling/v1` adds a ceiling wait, a ceiling decision and a
+    /// `context_ceiling` run end; a run that hits its ceiling still yields its
+    /// steps and finishes.
+    #[test]
+    fn a_run_ended_at_its_context_ceiling_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            run_started("r1", 1),
+            step_finished(1, usage(1, 2, 3, 4)),
+            json!({"requires": ["context-ceiling/v1"],
+                   "record": {"type": "context_ceiling_wait", "run_id": "r1",
+                              "step_id": 2, "deadline_ms": 5_000, "unavailable": false}}),
+            json!({"requires": ["context-ceiling/v1"],
+                   "record": {"type": "context_ceiling_decided", "run_id": "r1", "step_id": 2,
+                              "ceiling": {"window": 200_000, "size": 199_000, "cause": "overflow"}}}),
+            json!({"requires": ["context-ceiling/v1"],
+                   "record": {"type": "run_finished", "run_id": "r1", "reason": "context_ceiling"}}),
+        ]);
+        let runs = decode(&bytes).unwrap();
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+        assert!(runs[0].finished);
     }
 
     /// `session-class/v1` adds `session_class` to `RunStarted`; a run that
