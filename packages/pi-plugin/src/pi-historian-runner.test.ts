@@ -227,6 +227,16 @@ function attemptedModels(runner: SubagentRunner): Array<string | undefined> {
 	).mock.calls.map(([options]) => options.model);
 }
 
+function attemptedUserMessages(
+	runner: SubagentRunner,
+): Array<string | undefined> {
+	return (
+		runner.run as unknown as {
+			mock: { calls: Array<[Parameters<SubagentRunner["run"]>[0]]> };
+		}
+	).mock.calls.map(([options]) => options.userMessage);
+}
+
 async function runHistorianWith(args: {
 	outputs?: string[];
 	runner?: SubagentRunner;
@@ -775,6 +785,32 @@ describe("runPiHistorian", () => {
 			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
 				1,
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("passes repair feedback to fallback models after repair validation fails", async () => {
+		const { db, runner } = await runHistorianWith({
+			outputs: [
+				"not xml",
+				"still not xml",
+				successXml("Pi fallback recovered the history."),
+			],
+			fallbackModels: ["fallback/model"],
+		});
+		try {
+			expect(attemptedModels(runner)).toEqual([
+				"test/model",
+				"test/model",
+				"fallback/model",
+			]);
+			const userMessages = attemptedUserMessages(runner);
+			expect(userMessages).toHaveLength(3);
+			expect(userMessages[1]).toContain("Validation error:");
+			expect(userMessages[1]).toContain("Previous invalid XML:\nnot xml");
+			expect(userMessages[2]).toBe(userMessages[1]);
+			expect(getCompartments(db, "ses-historian")).toHaveLength(1);
 		} finally {
 			closeQuietly(db);
 		}

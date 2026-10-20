@@ -1109,6 +1109,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			let validatedDraftText: string | null = firstResult.ok
 				? firstResult.assistantText
 				: null;
+			let fallbackPrompt = prompt;
 
 			// Repair retry on validation failure (mirrors OpenCode behavior).
 			if (validatedPass.kind === "validation-failed") {
@@ -1122,6 +1123,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					validatedPass.error,
 					deps.language,
 				);
+				fallbackPrompt = repairPrompt;
 				const repairResult = await runHistorianSubagentWithTransientRetries({
 					runner,
 					sessionId,
@@ -1190,7 +1192,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						options: {
 							agent: HISTORIAN_AGENT_NAME,
 							systemPrompt: historianSystemPrompt,
-							userMessage: prompt,
+							userMessage: fallbackPrompt,
 							model: candidate.model,
 							timeoutMs: historianTimeoutMs,
 							cwd: directory,
