@@ -92,7 +92,22 @@ export const VERIFY_BATCH_SIZE = 5;
 // provider usage reports cannot attribute tokens to individual memories.
 export const VERIFY_TOKENS_PER_MEMORY = 100_000;
 export const VERIFY_RUN_TOKEN_BUDGET = 2_500_000;
+/**
+ * Run deadline for starting batches. No new batch starts once this much time
+ * has passed since the run began, and no single batch gets a longer time slice.
+ */
 export const VERIFY_RUN_SLICE_MS = 240_000;
+/**
+ * Extra time a batch that is already running at the run deadline may take to
+ * finish. Cutting such a batch off throws away the tokens it already spent, and
+ * finishing it costs little more. On 2026-10-20 live data, five-memory batches
+ * finished in 64 s at the median, 90 s at p90 and 96 s at worst. Batches under
+ * the 500k token envelope finished in 103 s at p95. The slowest full batch
+ * consumed about 4.6k prompt tokens per second, so its token budget runs out
+ * after roughly 110 s. 120 s therefore covers nearly every batch that can still
+ * finish, and the slice timer stops a runaway batch at deadline + 120 s.
+ */
+export const VERIFY_IN_FLIGHT_GRACE_MS = 120_000;
 
 export function verifyBatchTokenBudget(size: number, configured?: number): number {
     return Math.min(configured ?? Number.MAX_SAFE_INTEGER, size * VERIFY_TOKENS_PER_MEMORY);
@@ -132,7 +147,10 @@ const IDENTICAL_PROVIDER_FAILURE_BATCH_LIMIT = 2;
  */
 export const VERIFY_BATCH_FLOOR_MS = 30_000;
 
-/** A slice is a ceiling, not a per-model minimum that grows with the run deadline. */
+/**
+ * A slice is a ceiling, not a per-model minimum that grows with the run deadline.
+ * `remainingMs` is measured to the hard stop (run deadline plus in-flight grace).
+ */
 export function computeVerifyBatchSliceMs(remainingMs: number, _batchesRemaining: number): number {
     return Math.min(remainingMs, VERIFY_RUN_SLICE_MS);
 }
@@ -183,8 +201,9 @@ export interface VerifyResult extends VerifyVerdictCounts {
     /** The open broad-cycle watermark, when this run used verify-broad. */
     broadCycleStartAt?: number;
     /**
-     * Why a run stopped before draining its scope. "deadline": the remaining
-     * budget could not give the next batch its floor. "batch-timeout": a batch
+     * Why a run stopped before draining its scope. "deadline": the run deadline
+     * passed before the next batch could start, or the remaining budget could not
+     * give it its floor. "batch-timeout": a batch
      * ran out of time, so the next batch would meet the same budget; earlier
      * batches stay banked.
      */
@@ -281,7 +300,20 @@ async function runVerifyWithCooldown(args: VerifyArgs): Promise<VerifyResult> {
     );
     try {
         for (let i = 0; i < batches.length; i += 1) {
-            const remainingMs = Math.max(0, Math.min(args.deadline, sliceDeadline) - Date.now());
+            const now = Date.now();
+            // The run deadline only stops new batches from starting. A batch that
+            // starts before it may run on to the hard stop, which adds the
+            // in-flight grace but never passes the task's own deadline.
+            const startCutoff = Math.min(args.deadline, sliceDeadline);
+            const hardStop = Math.min(args.deadline, sliceDeadline + VERIFY_IN_FLIGHT_GRACE_MS);
+            const remainingMs = Math.max(0, hardStop - now);
+            if (now >= startCutoff) {
+                result.stopReason = "deadline";
+                log(
+                    `[dreamer] ${args.forceBroad ? "verify-broad" : "verify"}: stopping before batch ${i + 1}/${batches.length} — the run deadline passed ${now - startCutoff}ms ago`,
+                );
+                break;
+            }
             if (remainingMs < VERIFY_BATCH_FLOOR_MS) {
                 result.stopReason = "deadline";
                 log(
