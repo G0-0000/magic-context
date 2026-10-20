@@ -674,7 +674,7 @@ export async function registerContext(context: V2Context) {
             ? nativeFoldCache(() => storage.require())
             : undefined;
     const nativeFoldReplay = nativeFoldMemory
-        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader())
+        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage)
         : undefined;
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
@@ -1959,12 +1959,19 @@ export async function registerContext(context: V2Context) {
                         "boundary_repair",
                     );
                 }
-                const incoming = cut && draft.messages.find((message) => message.id === cut.id);
+                // Provider-native windows have already been selected by the host for
+                // this model. They need not carry the checkpoint id and must not be
+                // replaced with locally reconstructed history.
+                const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
+                const incoming = localCut && draft.messages.find((message) => message.id === localCut.id);
                 postFold = cut !== undefined;
-                if (cut && !incoming)
+                if (localCut && !incoming)
                     throw new Error("The host checkpoint disappeared from the context draft");
                 let nativeRestored: V2Message[] | undefined;
-                if (cut && nativeFoldReplay && isLocalCheckpoint(cut)) {
+                // Validate fold provenance before the cache path or its raw-row
+                // fallback can invisibly replace the checkpoint. Without a valid
+                // local admission, keep the host-supplied checkpoint instead.
+                if (cut && nativeFoldReplay && await nativeFoldReplay.admits(draft.sessionID, cut, reader)) {
                     try {
                         nativeRestored = await nativeFoldReplay.restore(
                             draft.sessionID,
@@ -2015,7 +2022,7 @@ export async function registerContext(context: V2Context) {
                         ...hidden,
                         ...draft.messages.filter((message) => message !== incoming),
                     );
-                } else if (cut && incoming) {
+                } else if (localCut && cut && incoming) {
                     const identity = await folds.observe({
                         sessionID: draft.sessionID,
                         cutSeq: cut.seq,

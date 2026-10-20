@@ -1,6 +1,6 @@
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { HEAD_IDS } from "../hooks/payload";
-import type { SessionContext, V2Message } from "../hooks/types";
+import type { SessionContext, V2Context, V2Message } from "../hooks/types";
 import {
     RAW_MESSAGE_TYPES,
     type StoreRow,
@@ -41,8 +41,29 @@ export function isLocalCheckpoint(row: StoreRow): row is StoreRow<"compaction"> 
     return (
         row.type === "compaction" &&
         row.data.status === "completed" &&
-        row.data.providerContext === undefined
+        row.data.providerContext === undefined &&
+        (row.data.native as { messages?: unknown } | undefined)?.messages === undefined
     );
+}
+export function isAdmittedLocalCheckpoint(
+    storage: NativeFoldCache,
+    sessionID: string,
+    cut: StoreRow<"compaction">,
+): boolean {
+    if (!isLocalCheckpoint(cut) || cut.session_id !== sessionID) return false;
+    const admission = storage.admission(sessionID, cut.id);
+    if (!admission?.payload || admission.digest !== foldDigest(admission.payload)) return false;
+    try {
+        const snapshot = JSON.parse(admission.payload) as Snapshot;
+        return (
+            snapshot.source === storage.sourceID &&
+            snapshot.sessionID === sessionID &&
+            snapshot.admissionID === cut.id &&
+            snapshot.summary === cut.data.summary
+        );
+    } catch {
+        return false;
+    }
 }
 const conversational = (row: { type: string }) =>
     (RAW_MESSAGE_TYPES as readonly string[]).includes(row.type) || row.type === "location-switched";
@@ -64,6 +85,7 @@ export class NativeFoldReplay {
     constructor(
         readonly storage: NativeFoldCache,
         private readonly openReader: (sessionID: string) => V2StoreReader,
+        private readonly admissions?: V2Context["storage"],
     ) {
         storage.onEvict((sessionID) => this.clear(sessionID));
     }
@@ -105,6 +127,44 @@ export class NativeFoldReplay {
     }
     async baseline(sessionID: string): Promise<string | undefined> {
         return this.tail(sessionID)?.baseline;
+    }
+    private admissionKey(sessionID: string, source: string): string {
+        return `native-fold/v1/${foldDigest(source)}/${sessionID}`;
+    }
+    async admits(
+        sessionID: string,
+        cut: StoreRow<"compaction">,
+        reader: V2StoreReader,
+    ): Promise<boolean> {
+        if (!isLocalCheckpoint(cut) || cut.session_id !== sessionID) return false;
+        if (isAdmittedLocalCheckpoint(this.storage, sessionID, cut)) return true;
+        if (!this.admissions) return false;
+        // Persist only provenance, never captured message bytes. After restart,
+        // a matching host-store identity authorizes rebuilding from that store;
+        // an imported checkpoint cannot borrow another store's admission.
+        try {
+            const source = reader.hostIdentity();
+            const saved = (await this.admissions.get(this.admissionKey(sessionID, source))) as
+                | { payload: string; digest: string }
+                | undefined;
+            if (!saved?.payload || saved.digest !== foldDigest(saved.payload)) return false;
+            const snapshot = JSON.parse(saved.payload) as Snapshot;
+            if (
+                snapshot.source !== source ||
+                snapshot.sessionID !== sessionID ||
+                snapshot.admissionID !== cut.id ||
+                snapshot.summary !== cut.data.summary
+            )
+                return false;
+            await this.storage.supply(
+                sessionID,
+                cut.id,
+                JSON.stringify({ ...snapshot, source: this.storage.sourceID }),
+            );
+            return true;
+        } catch {
+            return false;
+        }
     }
     private rendered(row: StoreRow, model: SessionContext["model"]): V2Message[] {
         return restoreRow(
@@ -279,6 +339,14 @@ export class NativeFoldReplay {
             summary,
         };
         await this.storage.supply(draft.sessionID, id, JSON.stringify(snapshot));
+        if (this.admissions) {
+            const source = reader.hostIdentity();
+            const payload = JSON.stringify({ ...snapshot, source });
+            await this.admissions.set(this.admissionKey(draft.sessionID, source), {
+                payload,
+                digest: foldDigest(payload),
+            });
+        }
         return true;
     }
     async restore(
@@ -411,6 +479,9 @@ export class NativeFoldReplay {
         this.changed.delete(sessionID);
     }
     async forget(sessionID: string): Promise<void> {
+        const source = this.sources.get(sessionID);
+        if (source && this.admissions)
+            await this.admissions.set(this.admissionKey(sessionID, source), null);
         await this.storage.forget(sessionID);
     }
 }
