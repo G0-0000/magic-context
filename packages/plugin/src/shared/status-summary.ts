@@ -33,7 +33,6 @@ export interface UserStatusSummary {
         detail: string;
     };
     compactionMarker?: StatusDetail["compactionMarker"];
-    rawPassthrough?: StatusDetail["rawPassthrough"];
     historianRunner?: RunnerStatus;
     dreamerRunner?: RunnerStatus;
     warnings: UserFacingFailureKey[];
@@ -56,7 +55,6 @@ export interface StatusWarningInput {
     readonly memoryMirror?: { readonly stalled?: boolean };
     readonly compactionMarker?: { readonly code: string | null };
     readonly memoryAuthorityMismatch?: boolean;
-    readonly rawPassthrough?: unknown;
     readonly dreamerFailures?: readonly unknown[];
     readonly dreamerTickFailure?: unknown;
     readonly hostLimitations?: readonly UserFacingFailureKey[];
@@ -75,9 +73,6 @@ export function statusWarningsFromDetail(detail: StatusWarningInput): UserFacing
     if (detail.memoryMirror?.stalled) warnings.push("memory_mirror_stalled");
     if (detail.compactionMarker?.code) warnings.push("compaction_marker_missing");
     if (detail.memoryAuthorityMismatch) warnings.push("memory_authority_mismatch");
-    // A session the Rust module serves raw is not managed at all; the user must see that
-    // rather than a status that reads like a normal session.
-    if (detail.rawPassthrough) warnings.push("history_served_raw");
     if ((detail.dreamerFailures?.length ?? 0) > 0) warnings.push("dreamer_task_failing");
     // A whole maintenance pass that never reached its work is a different
     // problem from an individual task that keeps failing, so it gets its own
@@ -133,7 +128,6 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         historianRunner: detail.historianRunner,
         dreamerRunner: detail.dreamerRunner,
         compactionMarker: detail.compactionMarker,
-        rawPassthrough: detail.rawPassthrough,
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
         dreamerSkipped: detail.dreamerSkipped,
@@ -248,12 +242,6 @@ export function renderUserStatusSummary(
         values.push([
             "History boundary marker",
             `${summary.compactionMarker.code} · ${summary.compactionMarker.attempts} attempts · last error: ${summary.compactionMarker.lastError ?? "unknown"}`,
-        ]);
-    }
-    if (summary.rawPassthrough) {
-        values.push([
-            "Session state",
-            `raw pass-through · boundary ${summary.rawPassthrough.retainedBoundaryId || "unknown"} (coverage ordinal ${summary.rawPassthrough.coverageOrdinal ?? "unknown"}) is not in the request`,
         ]);
     }
     const lines =

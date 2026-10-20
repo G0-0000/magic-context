@@ -2634,12 +2634,7 @@ impl TransformRequest {
                     .as_ref()
                     .map_or(0, String::capacity),
             )
-            .saturating_add(self.prior_conversation_key.capacity())
-            .saturating_add(
-                self.compaction_marker_message_id
-                    .as_ref()
-                    .map_or(0, String::capacity),
-            );
+            .saturating_add(self.prior_conversation_key.capacity());
         let prompt_surface = btree_map_allocation_bytes::<String, String>(
             self.prompt_surface_tool_descriptions.len(),
         )

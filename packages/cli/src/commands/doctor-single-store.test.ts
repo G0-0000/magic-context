@@ -268,40 +268,6 @@ test("completed migration prints transaction and vacuum timings from the engine 
     expect(output()).toContain("Transaction: 123 ms; vacuum: 45 ms");
 });
 
-test("a kept history that ends before the session's compaction marker is printed as a warning", () => {
-    const decision = {
-        session: "ses_a",
-        project: "git:p",
-        kept: "context",
-        reason: "preferred",
-        store_compartments: 25,
-        context_compartments: 20,
-        store_end_message: 14714,
-        context_end_message: 14069,
-    };
-    process.env.FAKE_REPORT = JSON.stringify({
-        ...report,
-        history: [
-            {
-                ...decision,
-                compaction_marker_ordinal: 14708,
-                kept_ends_before_compaction_marker: true,
-            },
-            {
-                ...decision,
-                session: "ses_b",
-                compaction_marker_ordinal: 14000,
-                kept_ends_before_compaction_marker: false,
-            },
-        ],
-    });
-    expect(run()).toBe(0);
-    expect(output()).toContain(
-        "warning: history ses_a: the kept context copy ends at ordinal 14069, before the session's compaction marker at ordinal 14708",
-    );
-    expect(output()).not.toContain("warning: history ses_b");
-});
-
 test("offline preflight upgrades v92 and seeds history revisions before invoking the engine", () => {
     const path = join(data, "context.db");
     const context = new Database(path);

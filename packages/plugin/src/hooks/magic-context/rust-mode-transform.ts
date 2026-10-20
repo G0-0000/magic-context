@@ -1695,8 +1695,6 @@ function buildTransformBody(args: {
     channel2NudgeState: string;
     emergencyRecoveryArmed: boolean;
     declaredTrim?: unknown;
-    /** OpenCode message id of the row the persisted compaction marker sits on. */
-    compactionMarkerMessageId?: string | null;
     fullArrayFingerprint?: string;
     tailDelta?: {
         after: string;
@@ -1803,9 +1801,6 @@ function buildTransformBody(args: {
         compaction_observed: args.passInputs.compaction_observed === true,
         pass_inputs: args.passInputs,
         declared_trim: args.declaredTrim,
-        ...(args.compactionMarkerMessageId
-            ? { compaction_marker_message_id: args.compactionMarkerMessageId }
-            : {}),
     };
 }
 
@@ -2798,15 +2793,10 @@ export function createRustModeTransform(
         // Read before this pass can advance the marker: the nudge arm below needs the
         // coverage a previous process already published.
         let persistedBoundaryOrdinal: number | null = null;
-        // The row the persisted compaction marker sits on. OpenCode sends nothing older,
-        // so the module uses it to recognize its own boundary trimmed away by the marker
-        // instead of serving the session raw.
-        let compactionMarkerMessageId: string | null = null;
         try {
             const marker = getPersistedCompactionMarkerState(deps.db, sessionId);
             markerAt = marker?.targetEndMessageId ?? marker?.boundaryMessageId ?? null;
             persistedBoundaryOrdinal = marker?.boundaryOrdinal ?? null;
-            compactionMarkerMessageId = marker?.boundaryMessageId || null;
         } catch {
             // Diagnostics remain available even when the local state database is unavailable.
         }
@@ -3113,14 +3103,6 @@ export function createRustModeTransform(
                     timings,
                 }),
             );
-            if (materializeReason === "pending_rewrite") {
-                // Named separately from the pass line so a session the module serves raw
-                // stands out in the log instead of reading like one more defer.
-                sessionLog(
-                    sessionId,
-                    `rust session state=raw_passthrough: the module's history boundary is not in this request, so it was sent unmanaged (compaction marker row ${compactionMarkerMessageId ?? "none"}, first ordinal ${inputFirstOrdinal ?? "unknown"})`,
-                );
-            }
             if (served) {
                 writeRustTransformDecision({
                     sessionId,
@@ -3943,7 +3925,6 @@ export function createRustModeTransform(
                 requestObservedAtMs,
                 channel2NudgeState: String(passInputs.channel2_nudge_state ?? ""),
                 emergencyRecoveryArmed: passInputs.emergency_recovery_armed === true,
-                compactionMarkerMessageId,
             });
             logStage(
                 sessionId,
@@ -4270,7 +4251,6 @@ export function createRustModeTransform(
                         requestObservedAtMs,
                         channel2NudgeState: String(passInputs.channel2_nudge_state ?? ""),
                         emergencyRecoveryArmed: passInputs.emergency_recovery_armed === true,
-                        compactionMarkerMessageId,
                     });
                     logStage(
                         sessionId,

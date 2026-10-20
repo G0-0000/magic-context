@@ -216,26 +216,6 @@ describe("status detail text", () => {
         expect(summary).toContain("(MC-M02)");
     });
 
-    test("names a session the Rust module serves raw as its own state and warning", () => {
-        const managed = formatStatusDetailMarkdown({ ...STATUS_FIXTURE, rawPassthrough: null });
-        expect(managed).not.toContain("raw pass-through");
-        expect(managed).not.toContain("(MC-H08)");
-
-        const raw = formatStatusDetailMarkdown({
-            ...STATUS_FIXTURE,
-            hostBackendsModuleSide: true,
-            rawPassthrough: {
-                retainedBoundaryId: "msg_old#3",
-                coverageOrdinal: 14069,
-                armedAtMs: 1,
-            },
-        });
-        expect(raw).toContain("**Session state:** raw pass-through");
-        expect(raw).toContain("msg_old#3");
-        expect(raw).toContain("14069");
-        expect(raw).toContain("(MC-H08)");
-    });
-
     test("renders historian refusal stage and received runner text", () => {
         const detail =
             "historian refusal stage=credential provider=google model=google/model-a received=\"open_failed: no apikey credential for provider 'google'\"";

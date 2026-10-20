@@ -101,10 +101,6 @@ interface Report {
         reason: string;
         store_compartments: number;
         context_compartments: number;
-        store_end_message?: number | null;
-        context_end_message?: number | null;
-        compaction_marker_ordinal?: number | null;
-        kept_ends_before_compaction_marker?: boolean;
     }[];
     sessions_reset: number;
     normalized_context_compartments?: number;
@@ -326,20 +322,10 @@ export function runDoctorSingleStore(
                     `  ${table}: source ${counts.source} / copied ${counts.copied} / updated ${counts.updated} / kept ${counts.kept} / deleted ${counts.deleted} / orphans_kept ${counts.orphans_kept} / superseded ${counts.superseded ?? 0}`,
                 );
         }
-        for (const decision of report.history ?? []) {
+        for (const decision of report.history ?? [])
             deps.print(
                 `history ${decision.session}: kept the ${decision.kept} copy (${decision.reason}; store ${decision.store_compartments} / context ${decision.context_compartments} compartments)`,
             );
-            if (decision.kept_ends_before_compaction_marker) {
-                const keptEnd =
-                    decision.kept === "store"
-                        ? decision.store_end_message
-                        : decision.context_end_message;
-                deps.print(
-                    `warning: history ${decision.session}: the kept ${decision.kept} copy ends at ordinal ${keptEnd ?? "none"}, before the session's compaction marker at ordinal ${decision.compaction_marker_ordinal ?? "unknown"}; OpenCode does not send the messages in between, and their summaries are only in the backup`,
-                );
-            }
-        }
         deps.print(
             `Render check: sampled ${report.render_check.sampled}, passed ${report.render_check.passed}, seed ${report.render_check.seed}`,
         );
