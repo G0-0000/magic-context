@@ -33053,8 +33053,9 @@ pub(crate) mod tests {
         }
         assert!(s.load(session).unwrap().meta.pending_rewrite.is_none());
 
-        // The historian resumes from the marker row. Its compartment lands after the gap,
-        // the next rebuild folds it, and the boundary is back in the array.
+        // History compression resumes from the marker row: a new compartment starting
+        // after the unsummarized messages is published, the next HARD pass folds it into
+        // the prefix, and the module's boundary is then a block in the live request.
         let mut compartments = s.load_compartments(session).unwrap();
         compartments.push(comp(2, 9, 10, "m10", "S-NEW"));
         s.replace_compartments(session, &compartments).unwrap();

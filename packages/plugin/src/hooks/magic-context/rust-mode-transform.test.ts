@@ -1955,8 +1955,9 @@ describe("Rust mode authority adapter", () => {
     });
 
     it("names the persisted compaction marker row on the transform wire only when one exists", () => {
-        // The module accepts a boundary older than the array only when the array starts
-        // at the row the host's own compaction marker sits on, so the wire names it.
+        // The module accepts a history boundary older than the first message it was sent
+        // only when that first message is the row the host's own compaction marker sits
+        // on, so the transform request names that row's message id.
         const base = {
             input: [],
             nativeMessages: [],

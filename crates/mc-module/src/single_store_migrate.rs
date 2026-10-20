@@ -2009,8 +2009,9 @@ pub struct HistoryDecision {
     /// Raw ordinal of the row the session's OpenCode compaction marker sits on, when it
     /// has one. OpenCode sends nothing older than that row.
     pub compaction_marker_ordinal: Option<i64>,
-    /// True when the kept history ends before that row: the messages between the two are
-    /// hidden by the marker and summarized only in the copy this run did not keep.
+    /// True when the kept history ends before that row. OpenCode does not send the
+    /// messages between the two, and only the copy of history this migration did not keep
+    /// (which stays in the backup) summarizes them.
     pub kept_ends_before_compaction_marker: bool,
 }
 
