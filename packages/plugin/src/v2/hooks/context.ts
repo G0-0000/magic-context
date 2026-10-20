@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled, isSmartNoteSurfaceAvailable } from "../../config/agent-disable";
 import { logConfigDependencyNotesOnce } from "../../config/dependency-notes";
@@ -1298,97 +1299,129 @@ export async function registerContext(context: V2Context) {
             : undefined;
     const usageController = new AbortController();
     const usageDone = (async () => {
-        try {
-            for await (const value of context.event.subscribe({ signal: usageController.signal })) {
-                if (usageController.signal.aborted) break;
-                const event = value as {
-                    type?: string;
-                    data?: { sessionID?: string; error?: unknown };
-                };
-                // A provider or model reload can change the limit for the same
-                // model key. Drop the one-time catalog reads so the next pass
-                // re-reads the live limit.
-                if (event.type === "provider.updated" || event.type === "model.updated") {
-                    queriedModels.clear();
-                    continue;
-                }
-                if (!event.data?.sessionID) continue;
-                const sessionID = event.data.sessionID;
-                if (
-                    event.type?.startsWith("session.revert.") ||
-                    event.type === "session.message.content.updated"
-                ) {
-                    nativeFoldReplay?.onEvent(event);
-                    restoredRows.forget(sessionID);
-                }
-                if (event.type === "session.error" || event.type === "session.execution.failed") {
-                    const error = hiddenTerminalError(event);
-                    if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
-                    if (error !== undefined && db && !compactionOff) {
-                        const model = liveModels.get(sessionID);
-                        try {
-                            armLatestThinkingRecoveryFromError({
-                                db,
-                                sessionId: sessionID,
-                                error,
-                                providerID: model?.providerID,
-                                modelID: model?.modelID,
-                            });
-                        } catch (armError) {
-                            log("[magic-context] v2 latest-thinking recovery arm failed", armError);
+        let retry = 0;
+        while (!usageController.signal.aborted) {
+            const subscribedAt = Date.now();
+            try {
+                for await (const value of context.event.subscribe({
+                    signal: usageController.signal,
+                })) {
+                    if (usageController.signal.aborted) break;
+                    const event = value as {
+                        type?: string;
+                        data?: { sessionID?: string; error?: unknown };
+                    };
+                    try {
+                        // A provider or model reload can change the limit for the same
+                        // model key. Drop the one-time catalog reads so the next pass
+                        // re-reads the live limit.
+                        if (event.type === "provider.updated" || event.type === "model.updated") {
+                            queriedModels.clear();
+                            continue;
                         }
+                        if (!event.data?.sessionID) continue;
+                        const sessionID = event.data.sessionID;
+                        if (
+                            event.type?.startsWith("session.revert.") ||
+                            event.type === "session.message.content.updated"
+                        ) {
+                            nativeFoldReplay?.onEvent(event);
+                            restoredRows.forget(sessionID);
+                        }
+                        if (
+                            event.type === "session.error" ||
+                            event.type === "session.execution.failed"
+                        ) {
+                            const error = hiddenTerminalError(event);
+                            if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
+                            if (error !== undefined && db && !compactionOff) {
+                                const model = liveModels.get(sessionID);
+                                try {
+                                    armLatestThinkingRecoveryFromError({
+                                        db,
+                                        sessionId: sessionID,
+                                        error,
+                                        providerID: model?.providerID,
+                                        modelID: model?.modelID,
+                                    });
+                                } catch (armError) {
+                                    log(
+                                        "[magic-context] v2 latest-thinking recovery arm failed",
+                                        armError,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                        if (event.type === "session.deleted") {
+                            clearLkgMeasuredRequest(sessionID);
+                            deletedSessions.add(sessionID);
+                            transform?.clearSessionLogState(sessionID);
+                            if (db) {
+                                markSessionCleanupPending(db, sessionID);
+                                clearSession(db, sessionID);
+                            }
+                            rawProviders.get(sessionID)?.();
+                            rawProviders.delete(sessionID);
+                            usage.delete(sessionID);
+                            hiddenSessionErrors.delete(sessionID);
+                            storageNoticeBySession.delete(sessionID);
+                            liveModels.delete(sessionID);
+                            variants.delete(sessionID);
+                            agents.delete(sessionID);
+                            channel1.delete(sessionID);
+                            commitSeenLastPass.delete(sessionID);
+                            clearEmbedSessionState(sessionID);
+                            historyRefreshSessions.delete(sessionID);
+                            clearPendingMaterialization(pendingMaterializationSessions, sessionID);
+                            lastHeuristicsTurnId.delete(sessionID);
+                            restoredRows.forget(sessionID);
+                            await nativeFoldReplay?.forget(sessionID);
+                            generateReplay.forget(sessionID);
+                            systemPromptRefreshSessions.delete(sessionID);
+                            systemPrompt?.clearSession(sessionID);
+                            tagger.cleanup(sessionID);
+                            continue;
+                        }
+                        if (event.type !== "session.execution.succeeded") continue;
+                        const model = liveModels.get(sessionID);
+                        if (model) {
+                            await recordUsage({
+                                sessionID,
+                                model: { providerID: model.providerID, id: model.modelID },
+                            });
+                            // Do not block event handling while the automatic fold runs: idle()
+                            // queues a compaction and then waits for OpenCode to settle it.
+                            if (
+                                !compactionOff &&
+                                typeof (await nativeFoldReplay?.baseline(sessionID)) === "string"
+                            )
+                                void hostFolds?.idle(sessionID);
+                        }
+                    } catch (error) {
+                        log(
+                            `[magic-context] v2 event handler failed (type=${event.type ?? "unknown"}, session=${event.data?.sessionID ?? "none"})`,
+                            error,
+                        );
                     }
-                    continue;
                 }
-                if (event.type === "session.deleted") {
-                    clearLkgMeasuredRequest(sessionID);
-                    deletedSessions.add(sessionID);
-                    transform?.clearSessionLogState(sessionID);
-                    if (db) {
-                        markSessionCleanupPending(db, sessionID);
-                        clearSession(db, sessionID);
-                    }
-                    rawProviders.get(sessionID)?.();
-                    rawProviders.delete(sessionID);
-                    usage.delete(sessionID);
-                    hiddenSessionErrors.delete(sessionID);
-                    storageNoticeBySession.delete(sessionID);
-                    liveModels.delete(sessionID);
-                    variants.delete(sessionID);
-                    agents.delete(sessionID);
-                    channel1.delete(sessionID);
-                    commitSeenLastPass.delete(sessionID);
-                    clearEmbedSessionState(sessionID);
-                    historyRefreshSessions.delete(sessionID);
-                    clearPendingMaterialization(pendingMaterializationSessions, sessionID);
-                    lastHeuristicsTurnId.delete(sessionID);
-                    restoredRows.forget(sessionID);
-                    await nativeFoldReplay?.forget(sessionID);
-                    generateReplay.forget(sessionID);
-                    systemPromptRefreshSessions.delete(sessionID);
-                    systemPrompt?.clearSession(sessionID);
-                    tagger.cleanup(sessionID);
-                    continue;
-                }
-                if (event.type !== "session.execution.succeeded") continue;
-                const model = liveModels.get(sessionID);
-                if (model) {
-                    await recordUsage({
-                        sessionID,
-                        model: { providerID: model.providerID, id: model.modelID },
-                    });
-                    // Do not block event handling while the automatic fold runs: idle()
-                    // queues a compaction and then waits for OpenCode to settle it.
-                    if (
-                        !compactionOff &&
-                        typeof (await nativeFoldReplay?.baseline(sessionID)) === "string"
-                    )
-                        void hostFolds?.idle(sessionID);
-                }
+            } catch (error) {
+                if (!usageController.signal.aborted)
+                    log("[magic-context] v2 usage subscription failed", error);
             }
-        } catch (error) {
-            if (!usageController.signal.aborted)
-                log("[magic-context] v2 usage subscription failed", error);
+            if (usageController.signal.aborted) break;
+            // Only a stable subscription resets the backoff: a stream that ends
+            // immediately, even after yielding an event, must not spin on reconnect.
+            if (Date.now() - subscribedAt >= 30_000) retry = 0;
+            const ceiling = Math.min(30_000, 250 * 2 ** retry);
+            retry = Math.min(retry + 1, 7);
+            try {
+                await delay(ceiling * (0.5 + Math.random() * 0.5), undefined, {
+                    signal: usageController.signal,
+                });
+            } catch (error) {
+                if (!usageController.signal.aborted) throw error;
+            }
         }
     })();
     const materialize = (draft: SessionContext) => {
@@ -2498,6 +2531,7 @@ export async function registerContext(context: V2Context) {
     );
     return {
         async dispose() {
+            usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
             // (scope finalizers run in reverse registration order, and the disposer
             // is added after setup has registered them), and loads the replacing
@@ -2507,12 +2541,11 @@ export async function registerContext(context: V2Context) {
             // The disposer cannot wait for those runs to finish instead: the host
             // holds every new session drain until the reload completes.
             await hiddenCompletionExecutor?.dispose();
+            await usageDone;
             rpcStopped = true;
             rpcServer.stop();
             transform?.disposeRust();
             tools?.dispose();
-            usageController.abort();
-            await usageDone;
             deletedSessions.clear();
             await dreamTrigger?.dispose();
             await maintenanceTimer?.dispose();

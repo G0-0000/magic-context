@@ -46,7 +46,7 @@ try {
     } else if (input.orphanSweep) {
         const [
             { setHarness },
-            { sweepOrphanedOpenCodeMessageIndexes },
+            { sweepOrphanedOpenCodeMessageIndexesCooperatively },
             { configureContextDatabasePragmas },
         ] = await Promise.all([
             import("../../shared/harness"),
@@ -58,7 +58,7 @@ try {
         const sourcePath = input.orphanSweep.sourcePath;
         reply = {
             kind: "orphan-sweep",
-            result: sweepOrphanedOpenCodeMessageIndexes(
+            result: await sweepOrphanedOpenCodeMessageIndexesCooperatively(
                 db,
                 () => (sourcePath ? new Database(sourcePath, { readonly: true }) : null),
                 input.orphanSweep.options,

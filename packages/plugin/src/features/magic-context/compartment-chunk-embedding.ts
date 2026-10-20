@@ -1356,12 +1356,26 @@ export function deleteChunkEmbedBackoffForCompartments(db: Database, ids: readon
 }
 
 /** Also removes the session's recorded window sources (see recordChunkWindowSource). */
-export function deleteChunkEmbedBackoffForSession(db: Database, sessionId: string): void {
-    db.prepare(`DELETE FROM schema_migrations_meta WHERE key IN (
+export function deleteChunkEmbedBackoffForSession(
+    db: Database,
+    sessionId: string,
+    limit?: number,
+): number {
+    if (limit !== undefined)
+        return db
+            .prepare(`DELETE FROM schema_migrations_meta WHERE key IN (
+        SELECT key FROM schema_migrations_meta JOIN compartments
+        ON key = ? || compartments.id OR key = ? || compartments.id
+        WHERE compartments.session_id = ? LIMIT ?
+    )`)
+            .run(BACKOFF_PREFIX, WINDOW_SOURCE_PREFIX, sessionId, limit).changes;
+    return db
+        .prepare(`DELETE FROM schema_migrations_meta WHERE key IN (
         SELECT ? || id FROM compartments WHERE session_id = ?
         UNION ALL
         SELECT ? || id FROM compartments WHERE session_id = ?
-    )`).run(BACKOFF_PREFIX, sessionId, WINDOW_SOURCE_PREFIX, sessionId);
+    )`)
+        .run(BACKOFF_PREFIX, sessionId, WINDOW_SOURCE_PREFIX, sessionId).changes;
 }
 
 export function recordChunkEmbedBackoff(
