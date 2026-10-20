@@ -160,7 +160,6 @@ export function createPiTagSnapshotReader(db: Database) {
 	let desiredSession: string | undefined;
 	let failedUntil = 0;
 	let lastFailure: unknown;
-	const dataVersion = db.prepare("PRAGMA data_version");
 	const totalRevision = db.prepare(
 		"SELECT COALESCE(value, '0') AS revision, value IS NOT NULL AS present FROM (SELECT 1) LEFT JOIN schema_migrations_meta ON key = ?",
 	);
@@ -193,7 +192,6 @@ export function createPiTagSnapshotReader(db: Database) {
 			foreignRevision: revision[1],
 			durableVersion: stamp.durable,
 			ownVersion: stamp.own,
-			dataVersion: (dataVersion.get() as { data_version: number }).data_version,
 			totalRevision: total.revision,
 			revisionPresent: total.present,
 		};
@@ -632,8 +630,8 @@ export interface PiTagSnapshotCandidate {
 
 /**
  * Evidence required to publish a job into its original connection/session.
- * SQLite data_version values are connection-local: compare the owner's launch
- * and publication samples, never the owner's number with the worker's number.
+ * Only this session's revisions participate: unrelated database commits must
+ * not invalidate a long-running hydration.
  */
 export interface PiTagSnapshotToken {
 	connectionEpoch: number;
@@ -644,7 +642,6 @@ export interface PiTagSnapshotToken {
 	foreignRevision: string;
 	durableVersion: number;
 	ownVersion: number;
-	dataVersion: number;
 }
 
 export function samePiTagSnapshotToken(
@@ -659,8 +656,7 @@ export function samePiTagSnapshotToken(
 		left.localRevision === right.localRevision &&
 		left.foreignRevision === right.foreignRevision &&
 		left.durableVersion === right.durableVersion &&
-		left.ownVersion === right.ownVersion &&
-		left.dataVersion === right.dataVersion
+		left.ownVersion === right.ownVersion
 	);
 }
 
@@ -1049,7 +1045,9 @@ export function ensurePiTagSnapshotReady(
 	}
 	const end = deadline;
 	return (async () => {
-		for (let attempt = 0; attempt < 2; attempt++) {
+		// A stale worker's partial candidate is discarded. Start at the first page
+		// again until one complete generation fits in the original pass allowance.
+		for (;;) {
 			budget.assert();
 			const allowance = Math.min(
 				end - performance.now(),
@@ -1084,13 +1082,7 @@ export function ensurePiTagSnapshotReady(
 				return;
 			} catch (error) {
 				budget.assert();
-				if (
-					!(
-						error instanceof PiTagHydrationError &&
-						error.code === "stale" &&
-						attempt === 0
-					)
-				)
+				if (!(error instanceof PiTagHydrationError && error.code === "stale"))
 					throw error;
 			} finally {
 				clearTimeout(timer);

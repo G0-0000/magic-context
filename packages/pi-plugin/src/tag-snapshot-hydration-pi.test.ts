@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import { installTagIdentityRevisionTrigger } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
 import {
 	getTagsBySession,
 	normalizeTagSnapshotRow,
@@ -11,12 +12,16 @@ import {
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
+import { PiContextBudget } from "./pi-context-budget";
 import {
 	decodePiHydrationOperation,
 	encodePiHydrationOperation,
 } from "./tag-snapshot-codec-pi";
 import {
+	__setPiTagSnapshotWorkerForTests,
 	createPiTagSnapshotCandidate,
+	drainPiTagSnapshotSession,
+	ensurePiTagSnapshotReady,
 	getPiTagSnapshotView,
 	loadPiTagSnapshotCandidate,
 	PI_FALLBACK_ROW_COLUMNS,
@@ -213,7 +218,6 @@ it("candidate authority includes rollback-safe revisions, incarnation and destin
 			foreignRevision: revision[1],
 			durableVersion: 4,
 			ownVersion: 0,
-			dataVersion: 1,
 		};
 		db.exec("BEGIN; UPDATE tags SET byte_size = 99; ROLLBACK");
 		expect(readPiTagSnapshotRevision(db, "s")).toEqual(revision);
@@ -247,6 +251,142 @@ function requestFor(path: string): PiHydrationRequest {
 		jobId: 1,
 	};
 }
+
+function seedPages(db: Database) {
+	const insert = db.prepare(`INSERT INTO tags
+		(session_id, tag_number, message_id, type, status, byte_size)
+		VALUES ('s', ?, ?, 'message', 'active', 10)`);
+	db.transaction(() => {
+		for (let n = 1; n <= 768; n++) insert.run(n, `pi-msg-${n}:p0`);
+	})();
+}
+
+it("worker completes while another session commits between every page", async () => {
+	const { db, foreign, path, close } = fixture();
+	try {
+		seedPages(db);
+		let writes = 0;
+		const job = startPiTagSnapshotWorker(requestFor(path), {
+			beforeAck: async () => {
+				foreign
+					.prepare(`INSERT INTO tags
+					(session_id, tag_number, message_id, type, status, byte_size)
+					VALUES ('other', ?, ?, 'message', 'active', 10)`)
+					.run(++writes, `other-${writes}`);
+			},
+		});
+		try {
+			const result = await job.result;
+			expect(result.candidate.tags).toEqual(getTagsBySession(db, "s"));
+			expect(writes).toBeGreaterThanOrEqual(8);
+		} finally {
+			await job.released;
+		}
+	} finally {
+		close();
+	}
+});
+
+it("hydration completes while another session commits between every page", async () => {
+	const { db, foreign, close } = fixture();
+	try {
+		seedPages(db);
+		let writes = 0;
+		let starts = 0;
+		__setPiTagSnapshotWorkerForTests(db, (request, cached) => {
+			starts++;
+			return startPiTagSnapshotWorker(request, {
+				cached,
+				beforeAck: async () => {
+					foreign
+						.prepare(`INSERT INTO tags
+						(session_id, tag_number, message_id, type, status, byte_size)
+						VALUES ('other', ?, ?, 'message', 'active', 10)`)
+						.run(++writes, `other-${writes}`);
+				},
+			});
+		});
+		await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+		expect(starts).toBe(1);
+		expect(writes).toBeGreaterThanOrEqual(8);
+		expect(getPiTagSnapshotView(db, "s")).toEqual(getTagsBySession(db, "s"));
+	} finally {
+		await drainPiTagSnapshotSession("s");
+		close();
+	}
+});
+
+it("hydration restarts from the first page after repeated same-session writes", async () => {
+	const { db, foreign, close } = fixture();
+	try {
+		seedPages(db);
+		let starts = 0;
+		let writes = 0;
+		const firstTags: number[] = [];
+		__setPiTagSnapshotWorkerForTests(db, (request, cached) => {
+			const attempt = ++starts;
+			let changed = false;
+			return startPiTagSnapshotWorker(request, {
+				cached,
+				beforeAck: async (message) => {
+					if (message.type !== "packet" || changed) return;
+					changed = true;
+					firstTags.push(message.rows);
+					if (attempt <= 3) {
+						foreign.exec(
+							"UPDATE tags SET byte_size = byte_size + 1 WHERE session_id = 's' AND tag_number = 1",
+						);
+						writes++;
+					}
+				},
+			});
+		});
+		await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+		expect(writes).toBe(3);
+		expect(starts).toBe(4);
+		expect(firstTags).toHaveLength(4);
+		const tags = getPiTagSnapshotView(db, "s");
+		expect(tags).toHaveLength(768);
+		expect(tags[0]?.tagNumber).toBe(1);
+		expect(tags[0]?.byteSize).toBe(13);
+		expect(tags).toEqual(getTagsBySession(db, "s"));
+	} finally {
+		await drainPiTagSnapshotSession("s");
+		close();
+	}
+});
+
+it("repeated stale hydrations exhaust the original pass allowance", async () => {
+	const { db, foreign, close } = fixture();
+	try {
+		seedPages(db);
+		let starts = 0;
+		const budget = new PiContextBudget();
+		budget.hydrationAllowance = () => (starts >= 3 ? 0 : 5_000);
+		__setPiTagSnapshotWorkerForTests(db, (request, cached) => {
+			starts++;
+			let changed = false;
+			return startPiTagSnapshotWorker(request, {
+				cached,
+				beforeAck: async () => {
+					if (changed) return;
+					changed = true;
+					foreign.exec(
+						"UPDATE tags SET byte_size = byte_size + 1 WHERE session_id = 's' AND tag_number = 1",
+					);
+				},
+			});
+		});
+		await expect(ensurePiTagSnapshotReady(db, "s", budget)).rejects.toThrow(
+			"remaining pass budget exhausted",
+		);
+		expect(starts).toBe(3);
+		expect(() => getPiTagSnapshotView(db, "s")).toThrow("not ready");
+	} finally {
+		await drainPiTagSnapshotSession("s");
+		close();
+	}
+});
 
 it("worker hydrates full active and fallback projections with bounded credited packets", async () => {
 	const { db, path, close } = fixture();
@@ -303,11 +443,12 @@ it("worker releases read transactions before slow acknowledgments in WAL and rol
 	}
 });
 
-it("worker rejects raw commits between streams even when shared revision and durable version stay equal", async () => {
+it("worker rejects metadata commits from a writer with revision triggers between streams", async () => {
 	const { db, path, close } = fixture();
 	const raw = new Database(path);
 	try {
 		seed(db);
+		installTagIdentityRevisionTrigger(raw);
 		let changed = false;
 		const job = startPiTagSnapshotWorker(requestFor(path), {
 			beforeAck: async () => {
@@ -322,6 +463,31 @@ it("worker rejects raw commits between streams even when shared revision and dur
 		expect(
 			getTagsBySession(db, "s").find((tag) => tag.tagNumber === 8)?.byteSize,
 		).toBe(999);
+	} finally {
+		raw.close();
+		close();
+	}
+});
+
+it("worker rejects legacy status commits between streams even without connection-local revision triggers", async () => {
+	const { db, path, close } = fixture();
+	const raw = new Database(path);
+	try {
+		seed(db);
+		let changed = false;
+		const job = startPiTagSnapshotWorker(requestFor(path), {
+			beforeAck: async () => {
+				if (!changed) {
+					changed = true;
+					raw.exec("UPDATE tags SET status = 'dropped' WHERE tag_number = 8");
+				}
+			},
+		});
+		await expect(job.result).rejects.toThrow("changed");
+		await job.released;
+		expect(
+			getTagsBySession(db, "s").find((tag) => tag.tagNumber === 8)?.status,
+		).toBe("dropped");
 	} finally {
 		raw.close();
 		close();

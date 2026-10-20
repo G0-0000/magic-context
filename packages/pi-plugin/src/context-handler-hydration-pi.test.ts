@@ -442,13 +442,12 @@ it("a stale hydration retries with a fresh worker and serves the turn", async ()
 				beforeAck: async () => {
 					if (committed) return;
 					committed = true;
-					// A host writes to the shared database while the first worker waits
-					// between its tag and fallback streams, as session startup does on a
-					// real Pi host. That worker must fail as stale; only a new read may
-					// serve the turn.
-					h.foreign.exec(
-						"INSERT OR REPLACE INTO schema_migrations_meta (key, value) VALUES ('hydration-retry-probe', '1')",
-					);
+					// Only a write to this session makes its in-flight read stale.
+					h.foreign
+						.prepare(
+							"INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size) VALUES (?, 99, 'older-99', 'message', 'active', 13)",
+						)
+						.run(h.sessionId);
 				},
 			}),
 		),
