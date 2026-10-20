@@ -332,27 +332,18 @@ function buildHistorianFallbackChain(
 	primaryModel: string,
 	primaryThinkingLevel: string | undefined,
 	fallbackModels?: readonly ModelInput[],
-	fallbackModelId?: string,
-): Array<{ entry: ResolvedModelEntry; kind: "configured" | "session" }> {
+): ResolvedModelEntry[] {
 	const seen = new Set<string>([
 		`${primaryModel}\u0000${primaryThinkingLevel ?? ""}`,
 	]);
-	const chain: Array<{
-		entry: ResolvedModelEntry;
-		kind: "configured" | "session";
-	}> = [];
+	const chain: ResolvedModelEntry[] = [];
 	for (const candidate of fallbackModels ?? []) {
 		const entry =
 			typeof candidate === "string" ? { model: candidate } : candidate;
 		const key = `${entry.model}\u0000${entry.qualifier ?? ""}`;
 		if (!entry.model || seen.has(key)) continue;
 		seen.add(key);
-		chain.push({ entry, kind: "configured" });
-	}
-	if (fallbackModelId) {
-		const entry = { model: fallbackModelId };
-		const key = `${entry.model}\u0000`;
-		if (!seen.has(key)) chain.push({ entry, kind: "session" });
+		chain.push(entry);
 	}
 	return chain;
 }
@@ -414,7 +405,7 @@ export interface PiHistorianDeps {
 	historianModel: string;
 	/** Optional ordered fallback chain, retaining each entry's Pi thinking level. */
 	fallbackModels?: readonly ModelInput[];
-	/** Live session model used as the final fallback after configured fallbacks. */
+	/** Live session model for host context; never appended to the configured chain. */
 	fallbackModelId?: string;
 	/** Historian chunk budget derived from its context window. */
 	historianChunkTokens: number;
@@ -1170,13 +1161,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			// Escalate through the fallback chain on empty/invalid output. Each
 			// candidate is run and validated explicitly because a model can complete
-			// successfully while producing no usable compartments. The live session's
-			// current model is appended as the final last-resort candidate.
+			// successfully while producing no usable compartments. Only configured
+			// entries may spend quota on summarization.
 			const fallbackChain = buildHistorianFallbackChain(
 				historianModel,
 				thinkingLevel,
 				fallbackModels,
-				fallbackModelId,
 			);
 			if (
 				validatedPass.kind !== "ok" &&
@@ -1190,30 +1180,28 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					const candidate = fallbackChain[i];
 					sessionLog(
 						sessionId,
-						`historian: escalating to ${candidate.kind === "session" ? "session-model last resort" : "configured fallback model"} ${candidate.entry.model}`,
+						`historian: escalating to configured fallback model ${candidate.model}`,
 					);
 					const fbResult = await runHistorianSubagentWithTransientRetries({
 						runner,
 						sessionId,
-						passLabel:
-							candidate.kind === "session" ? "fallback-session" : "fallback",
+						passLabel: "fallback",
 						retryBackoffMs,
 						options: {
 							agent: HISTORIAN_AGENT_NAME,
 							systemPrompt: historianSystemPrompt,
 							userMessage: prompt,
-							model: candidate.entry.model,
+							model: candidate.model,
 							timeoutMs: historianTimeoutMs,
 							cwd: directory,
 							signal,
-							thinkingLevel: candidate.entry.qualifier,
+							thinkingLevel: candidate.qualifier,
 							temperature,
 							maxOutputTokens,
 							onProgress: buildProgressLogger("fallback"),
 							accountingSessionId: sessionId,
 							accountingSubagent: "historian",
-							accountingTask:
-								candidate.kind === "session" ? "fallback-session" : "fallback",
+							accountingTask: "fallback",
 						},
 					});
 					const fbPass = await validateHistorianResult(

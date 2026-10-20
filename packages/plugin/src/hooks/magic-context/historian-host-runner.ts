@@ -786,6 +786,8 @@ export class HistorianHostRunner {
                     timeoutMs: attemptMs,
                     signal,
                     fallbackModels: rest.map(withVariant),
+                    // Rust supplies the complete allowed chain; provider suggestions are not entries.
+                    allowModelSuggestions: false,
                     callContext: `historian-host:${claim.runId}`,
                     fetchOutput: () =>
                         withinAttempt(

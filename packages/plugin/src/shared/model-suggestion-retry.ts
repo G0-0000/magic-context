@@ -72,6 +72,8 @@ export interface PromptAttemptInfo {
 export interface PromptRetryOptions {
     transport?: PromptTransport;
     timeoutMs?: number;
+    /** False for callers whose configured model chain must not accept provider suggestions. Defaults to true. */
+    allowModelSuggestions?: boolean;
     /** External abort signal — cancels the in-flight LLM prompt immediately when aborted */
     signal?: AbortSignal;
     /**
@@ -508,6 +510,7 @@ async function attemptOnce(
     callContext: string,
     label: string,
     transport?: PromptTransport,
+    allowModelSuggestions = true,
 ): Promise<void> {
     // Keep this snapshot separate from the object passed to the client. A
     // failed prompt facade may rewrite its request body before rejecting; the
@@ -518,9 +521,9 @@ async function attemptOnce(
         await promptWithTimeout(client, attemptArgs, timeoutMs, signal, transport);
         return;
     } catch (error) {
-        // If non-retryable (abort, overflow, timeout), bubble up immediately.
-        // Don't even try suggestion retry — caller needs the original error.
-        if (isNonRetryable(error, signal)) throw error;
+        // Non-retryable failures and callers with an authoritative model chain
+        // must surface the original error without accepting a provider suggestion.
+        if (isNonRetryable(error, signal) || !allowModelSuggestions) throw error;
 
         const suggestion = parseModelSuggestion(error);
         if (!suggestion || !originalBody.model) {
@@ -596,6 +599,7 @@ export async function promptSyncWithModelSuggestionRetry(
             callContext,
             explicitPrimaryLabel,
             options.transport,
+            options.allowModelSuggestions,
         );
         return;
     } catch (error) {
@@ -640,6 +644,7 @@ export async function promptSyncWithModelSuggestionRetry(
                 callContext,
                 label,
                 options.transport,
+                options.allowModelSuggestions,
             );
             log(
                 `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${fallbacks.length + 1})`,
@@ -685,6 +690,7 @@ async function attemptAndValidate<TOutput, TValidated>(
             callContext,
             attempt.label,
             options.transport,
+            options.allowModelSuggestions,
         );
     } catch (error) {
         throw {
