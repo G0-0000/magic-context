@@ -16,6 +16,7 @@ beforeAll(async () => {
 		[
 			"pi-context-budget.ts",
 			"omp-request-kind.ts",
+			"pi-dispatch-chain.ts",
 			"pi-context-refusal.ts",
 		].map((file) => readFile(new URL(file, import.meta.url), "utf8")),
 	);
