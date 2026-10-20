@@ -4374,6 +4374,22 @@ export function registerPiContextHandler(
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
 			lkgOptions = options;
+			const projectIdentity =
+				resolveProjectIdentityForSession(
+					projectDirectory,
+					options.allowHomeProject,
+				) ?? "";
+			// Queue history embedding before optional work can exhaust the context
+			// budget, including the tag snapshot wait below: a cold session whose
+			// tag load spends or refuses the pass must still schedule its backfill.
+			// The callback yields before storage work, outside the foreground writer scope.
+			withoutSqliteTransformPass(() =>
+				options.maybeAutoEmbedSession?.(
+					sessionId,
+					projectDirectory,
+					projectIdentity,
+				),
+			);
 			if (!options.compactionOff) {
 				budget.stage = "tag snapshot hydration";
 				const hydration = ensurePiTagSnapshotReady(
@@ -4398,20 +4414,6 @@ export function registerPiContextHandler(
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
 			lkgCompactionOff = options.compactionOff === true;
-			const projectIdentity =
-				resolveProjectIdentityForSession(
-					projectDirectory,
-					options.allowHomeProject,
-				) ?? "";
-			// Queue history embedding before optional work can exhaust the context
-			// budget. The callback yields before storage work, outside the foreground writer scope.
-			withoutSqliteTransformPass(() =>
-				options.maybeAutoEmbedSession?.(
-					sessionId,
-					projectDirectory,
-					projectIdentity,
-				),
-			);
 			logTransformTiming(
 				sessionId,
 				"findSessionId",
