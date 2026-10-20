@@ -32,18 +32,13 @@ let generation: PiHydrationGeneration = { revision: "0", durable: 0 };
 let maxReadTransactionMs = 0;
 let packetCount = 0;
 let packetBytes = 0;
-let workerDataVersion: number | undefined;
-let dataVersionStatement: Statement;
+let sampledGeneration = false;
 let generationStatement: Statement;
 let opened = false;
 let persistedVersion = 0;
 
 class StaleGeneration extends Error {}
 class UnsupportedSchema extends Error {}
-
-function dataVersion(_connection: Database): number {
-	return (dataVersionStatement.get() as { data_version: number }).data_version;
-}
 
 function sample(_connection: Database): PiHydrationGeneration {
 	return generationStatement.get(
@@ -138,16 +133,19 @@ async function stream(kind: PiHydrationStream) {
 		let rows: Record<string, unknown>[];
 		connection.exec("BEGIN");
 		try {
+			// Initialized writers install the full-row TEMP revision triggers; durable
+			// tags_version also covers legacy status/identity writes. Raw metadata
+			// edits without those triggers (for example manual sqlite3) are outside
+			// this cache contract. data_version would reject unrelated sessions too.
 			const stamp = sample(connection);
-			if (workerDataVersion === undefined) {
-				workerDataVersion = dataVersion(connection);
+			if (!sampledGeneration) {
+				sampledGeneration = true;
 				generation = stamp;
 			} else if (
 				stamp.revision !== generation.revision ||
-				stamp.durable !== generation.durable ||
-				dataVersion(connection) !== workerDataVersion
+				stamp.durable !== generation.durable
 			)
-				throw new StaleGeneration("database changed between pages");
+				throw new StaleGeneration("session tags changed between pages");
 			// Canonical (tag_number, id) order also applies to fallback metadata.
 			// context-handler.ts discards these rows after synchronizing before
 			// adoption-revision capture; fallback-tag-probes-pi.ts asks only
@@ -229,7 +227,6 @@ try {
 	db.exec(
 		"PRAGMA query_only = ON; PRAGMA busy_timeout = 50; PRAGMA cache_size = -1024",
 	);
-	dataVersionStatement = db.prepare("PRAGMA data_version");
 	generationStatement = db.prepare(`SELECT
 		COALESCE((SELECT value FROM schema_migrations_meta WHERE key = ?), '0') AS revision,
 		COALESCE((SELECT tags_version FROM session_meta WHERE session_id = ?), 0) AS durable`);
@@ -245,11 +242,10 @@ try {
 		throw new Error("injected worker crash before completion");
 	const final = sample(db);
 	if (
-		dataVersion(db) !== workerDataVersion ||
 		final.revision !== generation.revision ||
 		final.durable !== generation.durable
 	)
-		throw new StaleGeneration("database changed after final page");
+		throw new StaleGeneration("session tags changed after final page");
 	db.close();
 	db = undefined;
 	port.postMessage({
