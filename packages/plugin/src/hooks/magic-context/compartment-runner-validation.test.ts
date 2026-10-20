@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
 import {
     buildHistorianFailureNotice,
     buildHistorianRepairPrompt,
@@ -380,6 +381,87 @@ describe("validateHistorianOutput primer candidate contract", () => {
             expect(result.primerCandidates?.map((candidate) => candidate.question)).toEqual([
                 "How does the cache materialization flow work?",
             ]);
+        }
+    });
+});
+
+/**
+ * The historian prompt must say what `<unprocessed_from>` holds when nothing is
+ * left unprocessed; otherwise small models guess `0` or the last index and an
+ * otherwise complete chunk fails validation. The prompt prescribes chunk end + 1,
+ * so that exact value must validate, while a chunk that leaves a trailing suffix
+ * uncovered must still name that suffix's first message.
+ */
+describe("<unprocessed_from> completion boundary", () => {
+    const FULLY_COVERED_RULE =
+        "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1.";
+
+    test("the historian prompt prescribes chunk end + 1 for a fully covered chunk", () => {
+        expect(COMPARTMENT_AGENT_SYSTEM_PROMPT).toContain(FULLY_COVERED_RULE);
+    });
+
+    test("a fully covered chunk validates with chunk end + 1", () => {
+        const xml = buildXml(
+            [
+                { start: 54353, end: 54428, title: "work A" },
+                { start: 54429, end: 54431, title: "work B" },
+            ],
+            54432,
+        );
+        const result = validateHistorianOutput(xml, "ses-test", buildChunk(54353, 54431), [], 0);
+        expect(result.ok).toBe(true);
+    });
+
+    test("a fully covered chunk rejects 0 and the last index", () => {
+        const chunk = buildChunk(1, 10);
+        const zero = validateHistorianOutput(
+            buildXml([{ start: 1, end: 10 }], 0),
+            "ses-test",
+            chunk,
+            [],
+            0,
+        );
+        expect(zero.ok).toBe(false);
+        if (!zero.ok) expect(zero.error).toContain("<unprocessed_from> 0 is outside chunk 1-10");
+
+        const last = validateHistorianOutput(
+            buildXml([{ start: 1, end: 10 }], 10),
+            "ses-test",
+            chunk,
+            [],
+            0,
+        );
+        expect(last.ok).toBe(false);
+        if (!last.ok) {
+            expect(last.error).toContain(
+                "<unprocessed_from> 10 does not match completed chunk boundary 11",
+            );
+        }
+    });
+
+    test("an uncovered tail still requires its first message as the boundary", () => {
+        const chunk = buildChunk(1, 10);
+        const correct = validateHistorianOutput(
+            buildXml([{ start: 1, end: 6 }], 7),
+            "ses-test",
+            chunk,
+            [],
+            0,
+        );
+        expect(correct.ok).toBe(true);
+
+        const claimsComplete = validateHistorianOutput(
+            buildXml([{ start: 1, end: 6 }], 11),
+            "ses-test",
+            chunk,
+            [],
+            0,
+        );
+        expect(claimsComplete.ok).toBe(false);
+        if (!claimsComplete.ok) {
+            expect(claimsComplete.error).toContain(
+                "<unprocessed_from> 11 does not match next uncovered message 7",
+            );
         }
     });
 });

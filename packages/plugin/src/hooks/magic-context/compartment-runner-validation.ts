@@ -359,18 +359,24 @@ function validateParsedCompartments(
     }
 
     if (unprocessedFrom !== null) {
-        // Treat unprocessed_from === chunkEnd + 1 as "fully processed" —
-        // historian consumed all messages and reported the next ordinal.
+        // Same order as the Rust validator: when the compartments leave a trailing
+        // suffix uncovered, <unprocessed_from> must name its first message, so
+        // chunkEnd + 1 cannot claim completion over an uncovered tail.
+        if (expectedStart <= chunkEnd) {
+            if (unprocessedFrom !== expectedStart) {
+                return `<unprocessed_from> ${unprocessedFrom} does not match next uncovered message ${expectedStart}`;
+            }
+            return null;
+        }
+        // Every message is covered. The historian prompt tells the model to report
+        // chunkEnd + 1 here, meaning nothing is left unprocessed.
         if (unprocessedFrom === chunkEnd + 1) {
             return null;
         }
         if (unprocessedFrom < chunkStart || unprocessedFrom > chunkEnd) {
             return `<unprocessed_from> ${unprocessedFrom} is outside chunk ${chunkStart}-${chunkEnd}`;
         }
-        if (unprocessedFrom !== expectedStart) {
-            return `<unprocessed_from> ${unprocessedFrom} does not match next uncovered message ${expectedStart}`;
-        }
-        return null;
+        return `<unprocessed_from> ${unprocessedFrom} does not match completed chunk boundary ${chunkEnd + 1}`;
     }
 
     if (expectedStart <= chunkEnd) {
