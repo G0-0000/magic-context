@@ -1163,8 +1163,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			// Escalate through the fallback chain on empty/invalid output. Each
 			// candidate is run and validated explicitly because a model can complete
-			// successfully while producing no usable compartments. Only configured
-			// entries may spend quota on summarization.
+			// successfully while producing no usable compartments. Only explicitly
+			// configured fallback models may receive these summarization requests.
 			const fallbackChain = buildHistorianFallbackChain(
 				historianModel,
 				thinkingLevel,
