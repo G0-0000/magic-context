@@ -1,0 +1,19 @@
+{
+	"extends": "./tsconfig.ctx-search.json",
+	"compilerOptions": {
+		"paths": {
+			"@magic-context/core/*": ["src/*"],
+			"@cortexkit/retina-local-fs/*": [
+				"../retina-local-fs/dist/types/*",
+				"../retina-local-fs/src/*"
+			]
+		}
+	},
+	"include": [
+		"issue-743-benchmark.ts",
+		"issue-743-replay.ts",
+		"../packages/plugin/src/hooks/magic-context/auto-search-quality.test.ts",
+		"../packages/pi-plugin/src/auto-search-quality.test.ts"
+	],
+	"exclude": ["../node_modules"]
+}
