@@ -1077,10 +1077,13 @@ for (const trigger of ["wall", "final fit"] as const)
 					expect(output).not.toContain("RECLAIMABLE");
 					if (trigger === "final fit")
 						expect(output).toContain("LATEST FIT RESULT");
-				} else
-					await expect(serve()).rejects.toMatchObject({
-						name: "EmergencyFailClosedError",
-					});
+				} else {
+					// Even when thinking omission is replayed, the outgoing request must fit the model window.
+					for (let attempt = 0; attempt < 2; attempt++)
+						await expect(serve()).rejects.toMatchObject({
+							name: "EmergencyFailClosedError",
+						});
+				}
 				expect(getPendingOps(db, sessionId)).toHaveLength(0);
 				expect(
 					getTagsBySession(db, sessionId).find(

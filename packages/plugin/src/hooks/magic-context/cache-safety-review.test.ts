@@ -521,21 +521,23 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
     ]);
     const deferred = new Set<string>();
     let decision: "execute" | "defer" = "defer";
-    const transform = createTransform({
-        db,
-        tagger: createTagger(),
-        scheduler: { shouldExecute: () => decision },
-        contextUsageMap: usage,
-        liveModelBySession: new Map([[sessionId, route]]),
-        historyRefreshSessions: new Set(),
-        pendingMaterializationSessions: new Set(),
-        deferredHistoryRefreshSessions: deferred,
-        lastHeuristicsTurnId: new Map(),
-        directory: root.dir,
-        protectedTokens: 0,
-        clearReasoningAge: 0,
-        historianRunnable: false,
-    });
+    const newTransform = () =>
+        createTransform({
+            db,
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => decision },
+            contextUsageMap: usage,
+            liveModelBySession: new Map([[sessionId, route]]),
+            historyRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            deferredHistoryRefreshSessions: deferred,
+            lastHeuristicsTurnId: new Map(),
+            directory: root.dir,
+            protectedTokens: 0,
+            clearReasoningAge: 0,
+            historianRunnable: false,
+        });
+    let transform = newTransform();
     const msg = (
         id: string,
         role: "user" | "assistant",
@@ -625,12 +627,28 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
         await expect(transform({}, { messages: active() })).rejects.toMatchObject({
             name: "EmergencyFailClosedError",
         });
+        await expect(transform({}, { messages: active() })).rejects.toMatchObject({
+            name: "EmergencyFailClosedError",
+        });
+        // A fresh transform has no recursive retry flag. Persisted refusal must
+        // still check the outgoing request, even on a low-pressure defer pass.
+        transform = newTransform();
+        decision = "defer";
+        usage.set(sessionId, {
+            usage: { percentage: 20, inputTokens: 3_200 },
+            updatedAt: at,
+            hasUsageTokens: true,
+        });
+        await expect(transform({}, { messages: active() })).rejects.toMatchObject({
+            name: "EmergencyFailClosedError",
+        });
         expect(
             getTagsBySession(db, sessionId).find((tag) => tag.messageId === "read-call")?.status,
         ).toBe("active");
         expect(logs.mock.calls.map((call) => call.slice(1).join(" ")).join("\n")).not.toContain(
             "context=95.0%",
         );
+        decision = "execute";
         usage.set(sessionId, {
             usage: { percentage: 96, inputTokens: 15_360 },
             updatedAt: at,
