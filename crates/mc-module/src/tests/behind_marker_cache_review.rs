@@ -128,7 +128,7 @@ fn behind_marker_recovery_does_not_fail_when_an_unfolded_compartment_ends_before
 
 /// Raw session (boundary `m5#0`, coverage 5) whose store also holds a published,
 /// unfolded compartment 6..=7 ending at `gap_end_id`. Returns the store and its
-/// directory; the first markerless pass has already armed `pending_rewrite`.
+/// directory; the first pass without a marker id has already armed `pending_rewrite`.
 fn raw_session_with_gap_compartment(gap_end_id: &str) -> (tempfile::TempDir, McStore, String) {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
