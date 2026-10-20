@@ -14,6 +14,27 @@ import {
 import { createTestTempDir } from "./test-temp-dir";
 
 describe("SQLite runtime selector", () => {
+    it("imports the shared SQLite module in Bun without node:sqlite available", () => {
+        const sqliteUrl = new URL("./sqlite.ts", import.meta.url).href;
+        const script = `
+            const getBuiltinModule = process.getBuiltinModule;
+            process.getBuiltinModule = function (specifier) {
+                if (specifier === "node:sqlite") throw new Error("node:sqlite deliberately unavailable");
+                return getBuiltinModule.call(process, specifier);
+            };
+            await import(${JSON.stringify(sqliteUrl)});
+            console.log("shared SQLite import succeeded");
+        `;
+        const child = spawnSync(process.execPath, ["-e", script], {
+            encoding: "utf8",
+            windowsHide: true,
+        });
+
+        expect(child.error).toBeUndefined();
+        expect(child.status).toBe(0);
+        expect(child.stdout).toContain("shared SQLite import succeeded");
+    });
+
     it("suppresses only the node:sqlite experimental warning in a real Node process", () => {
         // Node 24.21 no longer emits this warning, so inject it during loading
         // to keep the suppression assertion load-bearing on newer runtimes.

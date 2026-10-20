@@ -8,8 +8,8 @@
  *     flag-free since Node 22.13/23.4).
  *
  * Bun has no `node:sqlite`, and Node/Electron have no `bun:sqlite`. Static
- * imports of either would crash at parse time in the wrong runtime, so we use
- * dynamic imports gated by runtime detection.
+ * imports of either would crash at parse time in the wrong runtime, so the
+ * selected backend is loaded only after runtime detection.
  *
  * Why `node:sqlite` instead of `better-sqlite3`: better-sqlite3 is a native
  * module requiring per-ABI prebuilds, and Electron's ABI never matches the npm
@@ -141,6 +141,13 @@ const bunSpec = "bun:" + "sqlite";
 const nodeSpec = "node:" + "sqlite";
 
 async function importSqliteModule(specifier: string): Promise<SqliteModule> {
+    if (specifier === nodeSpec && typeof process.getBuiltinModule === "function") {
+        const loaded = process.getBuiltinModule(specifier) as SqliteModule | undefined;
+        if (loaded) return loaded;
+        throw Object.assign(new Error(`No such built-in module: ${specifier}`), {
+            code: "ERR_UNKNOWN_BUILTIN_MODULE",
+        });
+    }
     // The runtime chooses this specifier; Vite must not resolve it as a
     // build-time dependency because the other runtime's backend is absent.
     return (await import(
@@ -244,7 +251,6 @@ export async function loadSqliteModule(
 const detectedRuntime = detectSqliteRuntime();
 const isBun = detectedRuntime === "Bun";
 const sqliteModule = await loadSqliteModule(detectedRuntime);
-const immutableSqliteModule = isBun ? await loadSqliteModule("Node.js") : sqliteModule;
 
 // Different export shapes between the two backends:
 //   - bun:sqlite  → named export `Database` (has its own .transaction, accepts
@@ -254,9 +260,7 @@ const immutableSqliteModule = isBun ? await loadSqliteModule("Node.js") : sqlite
 const DatabaseImpl: typeof BetterSqlite3 = isBun
     ? (sqliteModule.Database as typeof BetterSqlite3)
     : buildNodeSqliteDatabaseClass(sqliteModule.DatabaseSync);
-const ImmutableDatabaseImpl: typeof BetterSqlite3 = isBun
-    ? buildNodeSqliteDatabaseClass(immutableSqliteModule.DatabaseSync)
-    : DatabaseImpl;
+let immutableDatabaseImpl: typeof BetterSqlite3 | undefined;
 
 interface TrackedSqliteConnection {
     sequence: number;
@@ -611,15 +615,6 @@ const TrackedDatabase = new Proxy(DatabaseImpl, {
     },
 }) as typeof BetterSqlite3;
 
-const TrackedImmutableDatabase = new Proxy(ImmutableDatabaseImpl, {
-    construct(target, args) {
-        const db = inRootAsyncContext(
-            () => Reflect.construct(target, args, target) as BetterSqlite3.Database,
-        );
-        return trackSqliteConnection(db, args[0], args[1]);
-    },
-}) as typeof BetterSqlite3;
-
 /**
  * Wrap node:sqlite's `DatabaseSync` so it presents the better-sqlite3/bun
  * surface the rest of the codebase calls:
@@ -669,12 +664,44 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
 
 export const Database: typeof BetterSqlite3 = TrackedDatabase;
 
+function immutableDatabaseImplementation(): typeof BetterSqlite3 {
+    if (!isBun) return DatabaseImpl;
+    if (immutableDatabaseImpl) return immutableDatabaseImpl;
+
+    const getBuiltinModule = process.getBuiltinModule;
+    if (typeof getBuiltinModule !== "function")
+        throw new SqliteRuntimeUnavailableError(
+            "Bun",
+            nodeSpec,
+            new Error("This Bun runtime does not expose process.getBuiltinModule"),
+        );
+    const nodeSqlite = getBuiltinModule.call(process, nodeSpec) as SqliteModule | undefined;
+    if (!nodeSqlite?.DatabaseSync)
+        throw new SqliteRuntimeUnavailableError(
+            "Bun",
+            nodeSpec,
+            new Error(`No such built-in module: ${nodeSpec}`),
+        );
+
+    immutableDatabaseImpl = buildNodeSqliteDatabaseClass(nodeSqlite.DatabaseSync);
+    return immutableDatabaseImpl;
+}
+
 /** Open a closed SQLite file without asking SQLite to create missing WAL sidecars. */
 export function openImmutableDatabase(path: string): BetterSqlite3.Database {
     // Immutable mode avoids creating missing WAL sidecars; callers must first rule out writers.
     const uri = pathToFileURL(path);
     uri.searchParams.set("immutable", "1");
-    return new TrackedImmutableDatabase(uri.href, { readonly: true });
+    const target = immutableDatabaseImplementation();
+    const db = inRootAsyncContext(
+        () =>
+            Reflect.construct(
+                target,
+                [uri.href, { readonly: true }],
+                target,
+            ) as BetterSqlite3.Database,
+    );
+    return trackSqliteConnection(db, uri.href, { readonly: true });
 }
 
 /** The constructor path, without querying SQLite on the prompt thread. */
