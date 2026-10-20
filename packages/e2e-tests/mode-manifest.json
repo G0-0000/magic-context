@@ -1337,6 +1337,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/hidden-mapping-transcript.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Issue 725: a real OpenCode 2 host mock drives the dreamer mapper's tool loop and verifies that complete, incremental and replacement mapping replies are committed and the offered reasoning variant is used; dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/hidden-child-foreign-location.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
