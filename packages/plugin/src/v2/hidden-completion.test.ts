@@ -453,6 +453,78 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
+    for (const stage of ["initial", "repair", "fallback", "editor"] as const) {
+        test(`OpenCode 2 historian rejects unconfigured model suggestions during ${stage}`, async () => {
+            const { dir: dataHome, cleanup } = createTestTempDir("v2-historian-suggestion-");
+            const previous = process.env.XDG_DATA_HOME;
+            process.env.XDG_DATA_HOME = dataHome;
+            const state = await setup();
+            try {
+                await observeProducerModelsForTest(["mock/cheap", "mock/fallback", "mock/user"]);
+                const valid =
+                    '<compartment start="1" end="2" title="Allowed"><p1>Summary</p1></compartment>';
+                const prompt = state.host.prompt.bind(state.host);
+                let calls = 0;
+                state.host.prompt = async (input) => {
+                    calls += 1;
+                    const shouldSuggest = calls === (stage === "initial" ? 1 : 2);
+                    state.setCompletion(stage === "repair" && calls === 1 ? "not XML" : valid);
+                    state.setPromptError(
+                        shouldSuggest
+                            ? new Error(
+                                  `model not found: mock/${stage === "fallback" ? "fallback" : "cheap"}. Did you mean: user?`,
+                              )
+                            : stage === "fallback" && calls === 1
+                              ? new Error("invalid credentials for configured primary")
+                              : undefined,
+                    );
+                    await prompt(input);
+                };
+                const result = await runValidatedHistorianPass({
+                    client: undefined,
+                    hiddenCompletionExecutor: state.executor,
+                    db: state.db,
+                    parentSessionId: "user-session",
+                    sessionDirectory: "/project",
+                    prompt: "Summarize history",
+                    chunk: {
+                        startIndex: 1,
+                        endIndex: 2,
+                        lines: [
+                            { ordinal: 1, messageId: "m1" },
+                            { ordinal: 2, messageId: "m2" },
+                        ],
+                    },
+                    priorCompartments: [],
+                    sequenceOffset: 0,
+                    dumpLabelBase: `v2-suggestion-${stage}`,
+                    model: { model: "mock/cheap", qualifier: "high" },
+                    fallbackModels: stage === "fallback" ? ["mock/fallback"] : [],
+                    fallbackModelId: "mock/user",
+                    twoPass: stage === "editor",
+                });
+                expect(
+                    state.requests.map(
+                        (request) => `${request.model.providerID}/${request.model.id}`,
+                    ),
+                ).toEqual(
+                    stage === "initial"
+                        ? ["mock/cheap"]
+                        : ["mock/cheap", stage === "fallback" ? "mock/fallback" : "mock/cheap"],
+                );
+                expect(state.switches.some((input) => input.model.id === "user")).toBe(false);
+                expect(result.ok).toBe(stage === "editor");
+                if (result.ok) expect(result.compartments[0]?.title).toBe("Allowed");
+            } finally {
+                state.db.close();
+                closeDatabase();
+                clearProducerModelObservations();
+                if (previous === undefined) delete process.env.XDG_DATA_HOME;
+                else process.env.XDG_DATA_HOME = previous;
+                cleanup();
+            }
+        });
+    }
     for (const scenario of ["exhausted", "success", "unconfigured"] as const) {
         test(`OpenCode 2 historian ${scenario} respects configured model ownership`, async () => {
             const { dir: dataHome, cleanup } = createTestTempDir("v2-historian-chain-");

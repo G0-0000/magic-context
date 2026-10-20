@@ -718,6 +718,9 @@ async function runHistorianPrompt(args: {
                             { childSessionId: opened.childSessionId },
                         ),
                         timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                        // A provider's spelling suggestion may name an unconfigured, costly model.
+                        // Only the configured historian fallback chain may select a different model.
+                        allowModelSuggestions: false,
                         // When modelOverride is set we're already in the last-ditch retry
                         // path; iterating fallbacks again would be redundant.
                         fallbackModels: modelOverride ? undefined : fallbackModels,
