@@ -168,7 +168,8 @@ function fakeLocation(options: { steps: number; interruptStopsDrain?: boolean })
                 try {
                     entry.hook.apply(draft);
                 } catch (error) {
-                    // "Failed to drain Session" on the host.
+                    // The hook threw, so the host ends this drain as failed; OpenCode
+                    // logs that as "Failed to drain Session" and shows the session failed.
                     hostErrors.push({ sessionID, owner: entry.owner, error });
                     rows.idle(sessionID, "failed");
                     return;
