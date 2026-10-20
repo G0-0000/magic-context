@@ -1940,12 +1940,11 @@ describe("createTransform", () => {
         useTempDataHome("context-transform-force-materialize-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
         const db = openDatabase();
-        // Realistic ~200KB tool output (~50k tokens). NOT a single repeated char:
-        // BPE tokenizes "x".repeat(200k) pathologically slowly (~17s) AND yields
-        // only ~6k tokens, so it never matched the "~50k tokens" intent. Real
-        // content of the same size tokenizes in ~7ms and hits the real token mass.
+        // Give the served tail enough mass that the fixed overhead stays below
+        // the 130k ceiling; a smaller tail would correctly skip impossible reclaim.
+        // Repeated source lines tokenize quickly unlike a single repeated character.
         const bigOutput = "const value = compute(input, options); // step output line\n".repeat(
-            3400,
+            14000,
         );
         const transform = createTransform({
             tagger: createTagger(),
@@ -5537,6 +5536,24 @@ for (const trigger of ["wall", "final fit"] as const)
                 await serve();
                 const tag = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool")!;
                 (source[1].parts[0] as ToolPart).state.output = "RECLAIMABLE ".repeat(60000);
+                // Add newer results so recency no longer protects the queued
+                // old result; reclaim then needs no synthetic 95% window yield.
+                for (let n = 0; n < 3; n++) {
+                    source.push({
+                        info: { id: `filler-${n}`, role: "assistant", sessionID: sessionId },
+                        parts: [
+                            {
+                                type: "tool",
+                                tool: "read",
+                                callID: `filler-${n}`,
+                                state: {
+                                    status: "completed",
+                                    output: "filler words ".repeat(1000),
+                                },
+                            },
+                        ],
+                    });
+                }
                 source.push(
                     {
                         info: { id: "active-user", role: "user", sessionID: sessionId },

@@ -433,6 +433,24 @@ async function runRebuildThenDefer(boundaryAbsent = false) {
         observations.length = 0;
         logs.mockClear();
         tailOutput = "RECLAIMABLE live tool result words ".repeat(30_000);
+        let refusedTrim: TrimObservation | undefined;
+        if (!boundaryAbsent) {
+            // A fit rebuild cannot yield the protected live output below 95%.
+            // Once real usage reaches that wall, recovery may reclaim it.
+            await expect(transform({}, { messages: source() })).rejects.toMatchObject({
+                name: "EmergencyFailClosedError",
+            });
+            refusedTrim = observations.at(-1);
+            expect(
+                getTagsBySession(db, sessionId).find((tag) => tag.messageId === "live-read")
+                    ?.status,
+            ).toBe("active");
+            usage.set(sessionId, {
+                usage: { percentage: 96, inputTokens: 15_360 },
+                updatedAt: at,
+                hasUsageTokens: true,
+            });
+        }
         const rebuild = source().filter((row) => !boundaryAbsent || row.info.id !== boundaryId);
         await transform({}, { messages: rebuild });
         const rebuildTrim = observations.at(-1)!;
@@ -459,6 +477,7 @@ async function runRebuildThenDefer(boundaryAbsent = false) {
         return {
             rebuild,
             replay,
+            refusedTrim,
             rebuildTrim,
             replayTrim,
             rebuildLogs,
@@ -502,9 +521,13 @@ it("MOTOR: rebuild and five-second defer have byte-identical Anthropic history",
     expect(run.rebuildTrim.status).toBe("applied");
     expect(run.rebuildTrim.sourceIds).toContain(run.boundaryId);
     expect(run.rebuildTrim.liveIds).not.toContain(run.boundaryId);
-    expect(run.rebuildTrim.coveredPlaceholders).toHaveLength(50);
+    // The fit attempt refuses the oversized protected output, but applies drops
+    // for messages covered by the new history summary. Real-pressure recovery
+    // then replays those drops behind the history boundary.
+    expect(run.refusedTrim!.coveredPlaceholders).toHaveLength(50);
+    expect(run.rebuildTrim.coveredPlaceholders).toHaveLength(0);
     expect(
-        run.rebuildTrim.coveredPlaceholders.every((text) => /^\[dropped §\d+§\]$/.test(text)),
+        run.refusedTrim!.coveredPlaceholders.every((text) => /^\[dropped §\d+§\]$/.test(text)),
     ).toBe(true);
     expect(run.remainingCauses).toEqual({
         history: false,
@@ -524,7 +547,7 @@ it("MOTOR: rebuild and five-second defer have byte-identical Anthropic history",
     ).toHaveLength(1);
     expect(assistant.content.filter((part) => part.text?.includes(survivorText))).toHaveLength(1);
     expect(JSON.stringify(rebuild.pinned).split(survivorText)).toHaveLength(2);
-    for (const placeholder of run.rebuildTrim.coveredPlaceholders) {
+    for (const placeholder of run.refusedTrim!.coveredPlaceholders) {
         expect(JSON.stringify(rebuild.pinned)).not.toContain(placeholder);
     }
     expect(

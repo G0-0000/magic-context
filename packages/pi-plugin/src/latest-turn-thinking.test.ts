@@ -1001,6 +1001,31 @@ for (const trigger of ["wall", "final fit"] as const)
 				)!;
 				(source[2].content as { text: string }[])[0].text =
 					"RECLAIMABLE ".repeat(60000);
+				// Add newer results so the queued old result is no longer protected
+				// by recency. Fit recovery can reclaim it without yielding the newest result.
+				for (let n = 0; n < 3; n++) {
+					source.push(
+						assistantMessage("", 10 + n * 2, {
+							content: [
+								{
+									type: "toolCall",
+									id: `filler-${n}`,
+									name: "read",
+									arguments: {},
+								},
+							],
+						}),
+						{
+							role: "toolResult",
+							toolCallId: `filler-${n}`,
+							toolName: "read",
+							content: [{ type: "text", text: "filler words ".repeat(1000) }],
+							isError: false,
+							timestamp: 11 + n * 2,
+						},
+					);
+					ids.push(`filler-call-${n}`, `filler-result-${n}`);
+				}
 				source.push(
 					userMessage(
 						outcome === "fits" ? "continue" : "MANDATORY_USER ".repeat(90000),
@@ -1021,16 +1046,44 @@ for (const trigger of ["wall", "final fit"] as const)
 					}),
 				);
 				ids.push("active-user", "active");
+				source.push(
+					assistantMessage("", 30, {
+						content: [
+							{
+								type: "toolCall",
+								id: "latest-fit-call",
+								name: "read",
+								arguments: {},
+							},
+						],
+					}),
+					{
+						role: "toolResult",
+						toolCallId: "latest-fit-call",
+						toolName: "read",
+						content: [
+							{ type: "text", text: "LATEST FIT RESULT ".repeat(12000) },
+						],
+						isError: false,
+						timestamp: 31,
+					},
+				);
+				ids.push("latest-fit-call", "latest-fit-result");
 				queuePendingOp(db, sessionId, tag.tagNumber, "drop");
 				percent = trigger === "wall" ? 96 : 75;
 				if (outcome === "fits") {
 					const output = JSON.stringify(await serve());
 					expect(output).not.toContain("fit-signature");
 					expect(output).not.toContain("RECLAIMABLE");
-				} else
-					await expect(serve()).rejects.toMatchObject({
-						name: "EmergencyFailClosedError",
-					});
+					if (trigger === "final fit")
+						expect(output).toContain("LATEST FIT RESULT");
+				} else {
+					// Even when thinking omission is replayed, the outgoing request must fit the model window.
+					for (let attempt = 0; attempt < 2; attempt++)
+						await expect(serve()).rejects.toMatchObject({
+							name: "EmergencyFailClosedError",
+						});
+				}
 				expect(getPendingOps(db, sessionId)).toHaveLength(0);
 				expect(
 					getTagsBySession(db, sessionId).find(

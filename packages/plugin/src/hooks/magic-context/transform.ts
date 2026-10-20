@@ -29,6 +29,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
+    addMergedReasoningStrippedIds,
     casChannel2NudgeState,
     clearDetectedContextLimit,
     clearEmergencyDropSample,
@@ -41,6 +42,7 @@ import {
     getEmergencyInputSample,
     getHistorianFailureState,
     getLastNudgeUndropped,
+    getMergedReasoningStrippedIds,
     getOverflowState,
     getPersistedCompactionMarkerState,
     loadTransformPassStateSnapshot,
@@ -727,6 +729,10 @@ export function resolveTransformHostSeams(
         hostRefuse: deps.hostRefuse ?? abortSessionFailClosed,
     };
 }
+
+// A control entry for the thinking-omission ledger, not a message id. After a
+// signed-fit refusal, check later requests against the model window even if thinking was omitted.
+const SIGNED_FIT_REFUSED_MARKER = "signed_fit:refused:v1";
 
 export function createTransform(deps: TransformDeps) {
     registerSystemDateRefresh(deps.historyRefreshSessions);
@@ -2861,8 +2867,7 @@ export function createTransform(deps: TransformDeps) {
         const protectedCutoff = protectionWindow.cutoff;
 
         const tPostProcess = performance.now();
-        dropProjectionEmergency =
-            thinkingFitRetries.has(sessionId) || contextUsage.percentage >= 95;
+        dropProjectionEmergency = contextUsage.percentage >= 95;
         const postTransformResult = await runPostTransformPhase({
             opencode2: deps.storeGeneration === "v2",
             normalizeRecoveryTail,
@@ -2891,9 +2896,9 @@ export function createTransform(deps: TransformDeps) {
             client: deps.client,
             activeAgent,
             batch,
-            contextUsage: thinkingFitRetries.has(sessionId)
-                ? { ...contextUsage, percentage: Math.max(95, contextUsage.percentage) }
-                : contextUsage,
+            // A fit retry permits rebuilding signed thinking, not yielding the
+            // protected tool tail. Only real pressure may open the 95% drop lane.
+            contextUsage,
             usableWindow: resolvedContextLimit ?? 0,
             schedulerDecision,
             schedulerDeferReason,
@@ -3017,6 +3022,9 @@ export function createTransform(deps: TransformDeps) {
         // A persisted latch is cleared by the off-transition, never consumed
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
+        const signedFitPreviouslyRefused =
+            !compactionOff &&
+            getMergedReasoningStrippedIds(db, sessionId).has(SIGNED_FIT_REFUSED_MARKER);
         let finalWireEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
         if (postTransformResult.bustedThisPass) {
             try {
@@ -3049,7 +3057,9 @@ export function createTransform(deps: TransformDeps) {
                   : contextUsage.percentage;
             finalWireEstimate =
                 finalWireEstimate ??
-                (emergencyUsagePercentage >= 95 || schedulerDecision === "execute"
+                (emergencyUsagePercentage >= 95 ||
+                schedulerDecision === "execute" ||
+                signedFitPreviouslyRefused
                     ? finalWireUsage.estimate(
                           sessionId,
                           {
@@ -3100,10 +3110,22 @@ export function createTransform(deps: TransformDeps) {
                     }
                     return;
                 }
-                if (thinkingFitRetries.has(sessionId) || postTransformResult.thinkingReleasedForFit)
+                if (
+                    thinkingFitRetries.has(sessionId) ||
+                    postTransformResult.thinkingReleasedForFit ||
+                    signedFitPreviouslyRefused
+                ) {
+                    // The omission ledger outlives the recursive retry flag and host restarts.
+                    // Remember refusal there without granting another prefix rewrite or tool drop.
+                    if (
+                        !signedFitPreviouslyRefused &&
+                        !addMergedReasoningStrippedIds(db, sessionId, [SIGNED_FIT_REFUSED_MARKER])
+                    )
+                        throw contextRefusalError("Cannot persist the signed-fit refusal");
                     throw contextRefusalError(
                         "The request remains over the model window after stripping signed thinking and reclaiming context",
                     );
+                }
             }
             // The prefix trim could not find the history boundary, so the whole
             // window is about to go out uncut. That is harmless while it fits and
