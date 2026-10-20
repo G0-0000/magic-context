@@ -37,6 +37,12 @@ describe("buildHistorianRepairPrompt", () => {
             prompt.trim().endsWith("write the surrounding summary prose in Turkish (Türkçe)."),
         ).toBe(true);
     });
+
+    test("includes the full-coverage completion boundary rule", () => {
+        expect(buildHistorianRepairPrompt("base", "<bad />", "bad xml")).toContain(
+            "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1.",
+        );
+    });
 });
 
 /**
@@ -462,6 +468,34 @@ describe("<unprocessed_from> completion boundary", () => {
             expect(claimsComplete.error).toContain(
                 "<unprocessed_from> 11 does not match next uncovered message 7",
             );
+        }
+    });
+
+    test("preserves the six synthetic chunk 1902-1938 boundary cases", () => {
+        const cases = [
+            { label: "full chunk with no marker", end: 1938, marker: null, ok: true },
+            { label: "full chunk with next ordinal", end: 1938, marker: 1939, ok: true },
+            { label: "full chunk with last ordinal", end: 1938, marker: 1938, ok: false },
+            { label: "full chunk with chunk start", end: 1938, marker: 1902, ok: false },
+            {
+                label: "partial chunk with next uncovered ordinal",
+                end: 1910,
+                marker: 1911,
+                ok: true,
+            },
+            { label: "partial chunk with no marker", end: 1910, marker: null, ok: false },
+        ] as const;
+        const chunk = buildChunk(1902, 1938);
+
+        for (const boundary of cases) {
+            const result = validateHistorianOutput(
+                buildXml([{ start: 1902, end: boundary.end }], boundary.marker),
+                "ses-test",
+                chunk,
+                [],
+                0,
+            );
+            expect(result.ok, boundary.label).toBe(boundary.ok);
         }
     });
 });

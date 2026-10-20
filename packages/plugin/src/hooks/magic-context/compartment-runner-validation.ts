@@ -291,6 +291,7 @@ export function buildHistorianRepairPrompt(
         "Return a corrected full XML response for the same existing state and new messages.",
         "Do not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.",
         "Every displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.",
+        "If every message in the chunk is covered by a compartment, nothing is unprocessed: set `<unprocessed_from>` to the chunk's last message index + 1.",
         "",
         "Previous invalid XML:",
         previousOutput,

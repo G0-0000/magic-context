@@ -185,6 +185,65 @@ test("a timed-out primary historian falls back to the next model and publishes i
     expect(invocations.find((row) => row.status === "completed")?.task).toBe("fallback");
 });
 
+test("a failed historian repair passes its repair prompt to fallback models", async () => {
+    const directory = createTestTempDirFromPath(join(tmpdir(), "mc-historian-repair-fallback-"));
+    tempDirs.push(directory);
+    process.env.XDG_DATA_HOME = directory;
+    const db = openDatabase();
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const outputs = [
+        "not xml",
+        "still not xml",
+        '<output><compartment start="1" end="1" title="History"><p1>Fallback repaired this.</p1></compartment></output>',
+    ];
+    const prompts: string[] = [];
+    const outputIndexByChild = new Map<string, number>();
+    let nextOutput = 0;
+    const executor: HiddenCompletionExecutor = {
+        capabilities: { tools: false, harness: "opencode" },
+        open: async () => {
+            const index = nextOutput++;
+            const id = `child-repair-fallback-${index}`;
+            outputIndexByChild.set(id, index);
+            return { id, childSessionId: id };
+        },
+        attempt: (_handle, request) => {
+            const parts = (request.body as { parts?: Array<{ text?: string }> }).parts;
+            prompts.push(parts?.[0]?.text ?? "");
+            return Promise.resolve();
+        },
+        collect: async (handle) => ({
+            text: outputs[outputIndexByChild.get(handle.id) ?? -1] ?? "",
+            reasoning: null,
+            lengthCapped: false,
+            usage,
+        }),
+        close: async () => {},
+    };
+
+    const result = await runValidatedHistorianPass({
+        client: undefined,
+        hiddenCompletionExecutor: executor,
+        db,
+        parentSessionId: "parent-repair-fallback",
+        sessionDirectory: directory,
+        prompt: "Messages 1-1:\n1: U: preserve this",
+        model: { model: "prov/primary" },
+        fallbackModels: [{ model: "prov/fallback" }],
+        chunk: { startIndex: 1, endIndex: 1, lines: [{ ordinal: 1, messageId: "message-1" }] },
+        priorCompartments: [],
+        sequenceOffset: 0,
+        dumpLabelBase: "repair-fallback",
+    });
+
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1]).toContain("Validation error:");
+    expect(prompts[1]).toContain("Previous invalid XML:\nnot xml");
+    expect(prompts[2]).toBe(prompts[1]);
+    expect(result.ok).toBe(true);
+    expect(result.compartments?.[0]?.content).toContain("Fallback repaired this.");
+});
+
 test("32k historian reaches the provider without a configured output cap and surfaces its assistant error", async () => {
     const directory = createTestTempDirFromPath(join(tmpdir(), "mc-historian-assistant-error-"));
     tempDirs.push(directory);
