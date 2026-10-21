@@ -24,6 +24,7 @@ import {
 	piResponsesWireTexts,
 } from "./pi-dispatch-responses-history";
 import { piToolCallWireId } from "./pi-dispatch-tool-ids";
+import { piToolCallPairing } from "./pi-dispatch-tool-pairing";
 
 interface MessageStructure {
 	role: "user" | "assistant" | "toolResult" | "system";
@@ -128,162 +129,392 @@ function messageStructure(value: unknown): MessageStructure | undefined {
 	return row;
 }
 
+/**
+ * Which host serializes the prepared history. Oh My Pi and Pi ship different
+ * transformMessages tool-call window rules; see projectMissingToolResults.
+ */
+export type PiDispatchHost = "omp" | "pi";
+
+interface WindowCall {
+	id: string;
+	name: string;
+}
+
+function windowCalls(message: Record<string, unknown>): WindowCall[] {
+	if (!Array.isArray(message.content)) return [];
+	return message.content.flatMap((value) => {
+		const block = object(value);
+		return block?.type === "toolCall" && typeof block.id === "string"
+			? [
+					{
+						id: block.id,
+						name: typeof block.name === "string" ? block.name : "",
+					},
+				]
+			: [];
+	});
+}
+
+/**
+ * The `_dup` suffix and per-segment id budget the provider hands
+ * transformMessages for a reused call id. openai-completions.ts and devin.ts
+ * pass their own; every other provider takes the defaults ("_dup", 64).
+ */
+function duplicateSuffix(model?: PiChatHistoryModel): {
+	prefix: string;
+	max: number;
+} {
+	const compat = object(model?.compat);
+	if (model?.api === "openai-completions") {
+		if (compat?.requiresMistralToolIds === true)
+			return { prefix: "dup", max: 9 };
+		if (compat?.usesOpenAIToolCallIdLimit === true)
+			return { prefix: "_dup", max: 40 };
+	}
+	if (model?.api === "devin-agent") return { prefix: "_dup", max: 40 };
+	return { prefix: "_dup", max: 64 };
+}
+
+/** transform-messages.ts appendDuplicateSuffix: every composite segment gets the suffix. */
+function appendDuplicateSuffix(id: string, suffix: string, max: number) {
+	const segment = (part: string) =>
+		part.length + suffix.length <= max
+			? `${part}${suffix}`
+			: `${part.slice(0, Math.max(0, max - suffix.length))}${suffix}`;
+	return id.includes("|") ? id.split("|").map(segment).join("|") : segment(id);
+}
+
+/**
+ * Mirror the host's tool-call window pass so prepared rows sit where the host
+ * puts them. Oh My Pi and Pi differ:
+ *
+ * Oh My Pi (identical in 18.2.6, 18.8.9, 18.11.3, 18.12.3 and 18.12.5;
+ * @oh-my-pi/pi-ai src/providers/transform-messages.ts deduplicateToolCallIds,
+ * takeRealToolResult, flushPendingToolCalls, flushPendingAbortedToolCalls and
+ * the second pass of transformMessages):
+ * - A reused call id is renamed with a `_dupN` suffix, and the next result
+ *   for that id follows it. A later turn reusing the id discards the earlier
+ *   turn's unclaimed renames.
+ * - Every assistant, user, developer or other non-result message closes the
+ *   open window. Each call still unanswered there takes the earliest real
+ *   result for its pairing key that sits after the call's assistant message
+ *   and was not taken before, and that result moves into the window; a call
+ *   with no such result gets a "No result provided" stub ("aborted" for an
+ *   aborted or errored turn, stamped with that turn's timestamp).
+ * - A result for an already answered call is dropped, so a moved result never
+ *   appears again at its old position. So is a result whose call is valid but
+ *   whose window is not open (it arrived before its call).
+ * - A result whose call is not in the history is dropped while a window is
+ *   unanswered, and otherwise becomes a `<stale-tool-result>` user note.
+ *
+ * Pi (0.87.1 and 1.3.0; @earendil-works/pi-ai dist/api/transform-messages.js)
+ * never moves a result. Only assistant and user messages close a window, and
+ * only calls with no result after their assistant message get a stub. System
+ * messages inside an open window are held until it closes. Errored and aborted
+ * assistant messages are not replayed at all.
+ *
+ * Only message order and tool ids change; the returned history is untouched.
+ */
 function projectMissingToolResults(
 	messages: readonly unknown[],
-	api?: string,
+	model?: PiChatHistoryModel,
+	host: PiDispatchHost = "omp",
 ): unknown[] {
-	const projectOrphans = TRANSFORM_MESSAGES_APIS.has(api ?? "");
-	const responsesComponents = new Set<string>();
-	const opaqueIds = new Set<string>();
-	const validToolUseIds = projectOrphans ? new Set<string>() : undefined;
-	const component = (id: string) => {
-		const pipe = id.indexOf("|");
-		return pipe > 0 ? id.slice(0, pipe) : id;
-	};
-	for (const value of messages) {
+	// Excluded executions never reach the host transform (convertToLlm drops
+	// them), so they neither close a window nor take a position.
+	const input = messages.filter((value) => {
 		const message = object(value);
-		if (message?.role !== "assistant" || !Array.isArray(message.content))
-			continue;
-		for (const value of message.content) {
-			const block = object(value);
-			if (block?.type !== "toolCall" || typeof block.id !== "string") continue;
-			if (
-				[
-					"openai-responses",
-					"azure-openai-responses",
-					"openai-codex-responses",
-				].includes(String(message.api))
-			) {
-				responsesComponents.add(component(block.id));
-				validToolUseIds?.add(component(block.id));
-			} else {
-				if (block.id.includes("|")) opaqueIds.add(block.id);
-				validToolUseIds?.add(block.id);
-			}
-		}
-	}
-	// Responses item suffixes are not part of the call identity; opaque Chat IDs
-	// containing a pipe remain whole (transform-messages.ts:56-59,94-143).
-	const pairingId = (id: string) =>
-		!opaqueIds.has(id) && responsesComponents.has(component(id))
-			? component(id)
-			: id;
-	const lastResult = new Map<string, number>();
-	messages.forEach((value, index) => {
+		return !(
+			(message?.role === "bashExecution" ||
+				message?.role === "pythonExecution") &&
+			message.excludeFromContext === true
+		);
+	});
+	if (host === "pi") return projectPiToolResults(input);
+	const api = model?.api;
+	const projectOrphans = TRANSFORM_MESSAGES_APIS.has(api ?? "");
+	const pairingId = piToolCallPairing(input);
+	const { prefix, max } = duplicateSuffix(model);
+	// Deduplication pass: rename reused call ids and file every real result by
+	// its pairing key at its position.
+	const seen = new Map<string, number>();
+	const renames = new Map<string, (string | undefined)[]>();
+	const realResults = new Map<
+		string,
+		{ index: number; message: unknown; consumed: boolean }[]
+	>();
+	const validToolUseIds = new Set<string>();
+	const deduplicated = input.map((value, index) => {
 		const message = object(value);
 		if (
 			message?.role === "toolResult" &&
 			typeof message.toolCallId === "string"
-		)
-			lastResult.set(pairingId(message.toolCallId), index);
+		) {
+			let key = pairingId(message.toolCallId);
+			let output: unknown = value;
+			const queue = renames.get(key);
+			if (queue?.length) {
+				const replacement = queue.shift();
+				if (!queue.length) renames.delete(key);
+				if (replacement !== undefined) {
+					output = { ...message, toolCallId: replacement };
+					key = pairingId(replacement);
+				}
+			}
+			const entry = { index, message: output, consumed: false };
+			const entries = realResults.get(key);
+			if (entries) entries.push(entry);
+			else realResults.set(key, [entry]);
+			return output;
+		}
+		if (message?.role !== "assistant" || !Array.isArray(message.content))
+			return value;
+		const touched = new Set<string>();
+		let changed = false;
+		const content = message.content.map((part) => {
+			const block = object(part);
+			if (block?.type !== "toolCall" || typeof block.id !== "string")
+				return part;
+			const key = pairingId(block.id);
+			// An earlier turn's unclaimed renames for this id are discarded: its
+			// call is stubbed, and the next result belongs to this turn.
+			if (!touched.has(key)) {
+				touched.add(key);
+				renames.delete(key);
+			}
+			const count = seen.get(key) ?? 0;
+			const queue = renames.get(key) ?? [];
+			renames.set(key, queue);
+			if (count === 0) {
+				seen.set(key, 1);
+				queue.push(undefined);
+				return part;
+			}
+			let suffix = count;
+			let replacement = appendDuplicateSuffix(
+				block.id,
+				`${prefix}${suffix}`,
+				max,
+			);
+			while (seen.has(pairingId(replacement))) {
+				suffix++;
+				replacement = appendDuplicateSuffix(
+					block.id,
+					`${prefix}${suffix}`,
+					max,
+				);
+			}
+			seen.set(key, suffix + 1);
+			seen.set(pairingId(replacement), 1);
+			queue.push(replacement);
+			changed = true;
+			return { ...block, id: replacement };
+		});
+		for (const call of windowCalls({ content }))
+			validToolUseIds.add(pairingId(call.id));
+		return changed ? { ...message, content } : value;
 	});
+	const takeRealResult = (id: string, afterIndex: number) => {
+		for (const entry of realResults.get(pairingId(id)) ?? []) {
+			if (entry.consumed || entry.index <= afterIndex) continue;
+			entry.consumed = true;
+			return entry.message;
+		}
+		return undefined;
+	};
 	const projected: unknown[] = [];
-	const resolved = new Set<string>();
-	let pending: { id: string; name: string }[] = [];
-	let start = -1;
-	let aborted = false;
-	let timestamp: unknown;
+	// Pairing keys of calls that already have their one provider-visible result.
+	const answered = new Set<string>();
+	let pending: WindowCall[] = [];
+	let pendingStart = -1;
+	let aborted = new Map<string, WindowCall>();
+	let abortedTimestamp: unknown;
+	let abortedStart = -1;
+	const stub = (call: WindowCall, text: string, timestamp: unknown) => ({
+		role: "toolResult",
+		toolCallId: call.id,
+		toolName: call.name,
+		content: [{ type: "text", text }],
+		isError: true,
+		timestamp,
+	});
 	const flush = (boundaryTimestamp?: unknown) => {
 		for (const call of pending) {
 			const key = pairingId(call.id);
-			if (resolved.has(key) || (lastResult.get(key) ?? -1) > start) continue;
-			projected.push({
-				role: "toolResult",
-				toolCallId: call.id,
-				toolName: call.name,
-				content: [
-					{ type: "text", text: aborted ? "aborted" : "No result provided" },
-				],
-				isError: true,
-				timestamp: aborted ? timestamp : boundaryTimestamp,
-			});
-			resolved.add(key);
+			if (answered.has(key)) continue;
+			projected.push(
+				takeRealResult(call.id, pendingStart) ??
+					stub(call, "No result provided", boundaryTimestamp),
+			);
+			answered.add(key);
 		}
 		pending = [];
+		// The host keeps an aborted window open while its turn has no timestamp.
+		if (abortedTimestamp === undefined) return;
+		for (const call of aborted.values()) {
+			const key = pairingId(call.id);
+			if (answered.has(key)) continue;
+			projected.push(
+				takeRealResult(call.id, abortedStart) ??
+					stub(call, "aborted", abortedTimestamp),
+			);
+			answered.add(key);
+		}
+		aborted = new Map();
+		abortedTimestamp = undefined;
 	};
-	for (let index = 0; index < messages.length; index++) {
-		const value = messages[index];
+	for (let index = 0; index < deduplicated.length; index++) {
+		const value = deduplicated[index];
 		const message = object(value);
-		if (
-			(message?.role === "bashExecution" ||
-				message?.role === "pythonExecution") &&
-			message.excludeFromContext === true
-		)
-			continue;
-		// OMP flushes unresolved calls at every non-result boundary and at EOF,
-		// not only on the latest turn. A later real result prevents synthesis;
-		// its reordering and all other history rewrites still fail comparison.
-		// @oh-my-pi/pi-ai transform-messages.ts:1256-1303,1305-1327,1457-1469 (18.10.4).
-		if (message?.role !== "toolResult") flush(message?.timestamp);
-		else if (
-			typeof message.toolCallId === "string" &&
-			pending.some(
-				(call) => pairingId(call.id) === pairingId(String(message.toolCallId)),
+		if (message?.role === "assistant") {
+			flush(message.timestamp);
+			projected.push(value);
+			const calls = windowCalls(message);
+			// A truncated turn with no text or call is not replayed and opens no window.
+			const truncated = ["length", "error", "aborted"].includes(
+				String(message.stopReason),
+			);
+			if (
+				truncated &&
+				Array.isArray(message.content) &&
+				!message.content.some((part) =>
+					["toolCall", "text"].includes(String(object(part)?.type)),
+				)
 			)
-		)
-			resolved.add(pairingId(message.toolCallId));
-		else if (
-			validToolUseIds &&
-			message?.role === "toolResult" &&
-			typeof message.toolCallId === "string" &&
-			typeof message.toolName === "string" &&
-			!validToolUseIds.has(pairingId(message.toolCallId)) &&
-			Array.isArray(message.content)
-		) {
-			// Native replay drops an orphan inside an unresolved normal or aborted
-			// result window; otherwise it preserves nonblank text as an unprivileged
-			// user note. This changes only the plan, never the returned history.
-			// @oh-my-pi/pi-ai transform-messages.ts:1406-1460 (18.11.1).
-			if (pending.some((call) => !resolved.has(pairingId(call.id)))) continue;
-			const parts = message.content.flatMap((value) => {
-				const part = object(value);
-				return part?.type === "text" &&
-					typeof part.text === "string" &&
-					part.text.trim()
-					? [part.text]
-					: [];
-			});
-			if (parts.length) {
-				const error = message.isError ? ' is-error="true"' : "";
-				const note = `<stale-tool-result tool="${message.toolName}" id="${message.toolCallId}"${error}>\n${parts.join("\n")}\n</stale-tool-result>`;
-				projected.push({
-					role: "user",
-					content:
-						api === "ollama-chat"
-							? note
-							: new TextDecoder().decode(new TextEncoder().encode(note)),
-					timestamp: message.timestamp,
-					[ORPHAN_NOTE]: true,
-				});
+				continue;
+			if (message.stopReason === "aborted" || message.stopReason === "error") {
+				aborted = new Map(calls.map((call) => [pairingId(call.id), call]));
+				abortedTimestamp = message.timestamp;
+				abortedStart = index;
+			} else if (calls.length) {
+				pending = calls;
+				pendingStart = index;
 			}
 			continue;
 		}
-		projected.push(value);
-		if (message?.role !== "assistant" || !Array.isArray(message.content))
+		if (
+			message?.role !== "toolResult" ||
+			typeof message.toolCallId !== "string"
+		) {
+			if (message?.role !== "toolResult") flush(message?.timestamp);
+			projected.push(value);
 			continue;
-		start = index;
-		aborted =
-			message.stopReason === "aborted" || message.stopReason === "error";
-		timestamp = message.timestamp;
-		if (aborted && typeof timestamp !== "number") continue;
-		for (const value of message.content) {
-			const block = object(value);
-			if (block?.type === "toolCall" && typeof block.id === "string")
-				pending.push({
-					id: block.id,
-					name: typeof block.name === "string" ? block.name : "",
-				});
 		}
+		const key = pairingId(message.toolCallId);
+		if (answered.has(key)) continue;
+		if (
+			aborted.has(key) ||
+			pending.some((call) => pairingId(call.id) === key)
+		) {
+			aborted.delete(key);
+			answered.add(key);
+			projected.push(value);
+			continue;
+		}
+		if (validToolUseIds.has(key)) continue;
+		if (
+			!projectOrphans ||
+			typeof message.toolName !== "string" ||
+			!Array.isArray(message.content)
+		) {
+			// Providers outside transformMessages keep an unpaired result in place,
+			// and a malformed one keeps its row so the structure stays unreadable.
+			projected.push(value);
+			continue;
+		}
+		// Native replay drops an orphan inside an unresolved normal or aborted
+		// result window; otherwise it preserves nonblank text as an unprivileged
+		// user note.
+		if (
+			pending.some((call) => !answered.has(pairingId(call.id))) ||
+			aborted.size > 0
+		)
+			continue;
+		const parts = message.content.flatMap((value) => {
+			const part = object(value);
+			return part?.type === "text" &&
+				typeof part.text === "string" &&
+				part.text.trim()
+				? [part.text]
+				: [];
+		});
+		if (!parts.length) continue;
+		const error = message.isError ? ' is-error="true"' : "";
+		const note = `<stale-tool-result tool="${message.toolName}" id="${message.toolCallId}"${error}>\n${parts.join("\n")}\n</stale-tool-result>`;
+		projected.push({
+			role: "user",
+			content:
+				api === "ollama-chat"
+					? note
+					: new TextDecoder().decode(new TextEncoder().encode(note)),
+			timestamp: message.timestamp,
+			[ORPHAN_NOTE]: true,
+		});
 	}
 	flush();
+	return projected;
+}
+
+/** Pi's window pass; see projectMissingToolResults. */
+function projectPiToolResults(messages: readonly unknown[]): unknown[] {
+	const projected: unknown[] = [];
+	let pending: WindowCall[] = [];
+	let answered = new Set<string>();
+	const held: unknown[] = [];
+	const close = (timestamp?: unknown) => {
+		for (const call of pending)
+			if (!answered.has(call.id))
+				projected.push({
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: call.name,
+					content: [{ type: "text", text: "No result provided" }],
+					isError: true,
+					timestamp,
+				});
+		pending = [];
+		answered = new Set();
+		projected.push(...held);
+		held.length = 0;
+	};
+	for (const value of messages) {
+		const message = object(value);
+		const role = message?.role;
+		if (role === "assistant") {
+			close(message?.timestamp);
+			if (message?.stopReason === "error" || message?.stopReason === "aborted")
+				continue;
+			const calls = message ? windowCalls(message) : [];
+			if (calls.length) pending = calls;
+		} else if (role === "toolResult") {
+			if (typeof message?.toolCallId === "string")
+				answered.add(message.toolCallId);
+		} else if (role === "system" && pending.length) {
+			held.push(value);
+			continue;
+		} else if (
+			// Pi's convertToLlm turns these into user messages before the transform.
+			[
+				"user",
+				"custom",
+				"bashExecution",
+				"branchSummary",
+				"compactionSummary",
+			].includes(String(role))
+		)
+			close(message?.timestamp);
+		projected.push(value);
+	}
+	close();
 	return projected;
 }
 
 export function piPreparedStructure(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
+	host: PiDispatchHost = "omp",
 ): PiPreparedStructure | undefined {
-	return buildPiPreparedStructure(messages, model);
+	return buildPiPreparedStructure(messages, model, undefined, host);
 }
 
 /** Prepare the returned OMP messages and their dispatch receipt in one walk. */
@@ -307,6 +538,7 @@ export function preparePiDispatch<T>(
 					output[index] = copy as T;
 				}
 			: undefined,
+		omp ? "omp" : "pi",
 	);
 	return { messages: output, structure };
 }
@@ -315,6 +547,7 @@ function buildPiPreparedStructure(
 	messages: readonly unknown[],
 	model?: PiChatHistoryModel,
 	prepareUser?: (index: number, source: Record<string, unknown>) => void,
+	host: PiDispatchHost = "omp",
 ): PiPreparedStructure | undefined {
 	if (!messages.length || messages.length > MAX_MESSAGES) return undefined;
 	for (let index = 0; index < messages.length; index++) {
@@ -323,8 +556,11 @@ function buildPiPreparedStructure(
 			prepareUser?.(index, source);
 	}
 	const projectedMessages = projectMissingToolResults(
-		model?.api ? piAgentHistory(messages, model.api) : messages,
-		model?.api,
+		model?.api && host === "omp"
+			? piAgentHistory(messages, model.api)
+			: messages,
+		model,
+		host,
 	);
 	if (projectedMessages.length > MAX_MESSAGES) return undefined;
 	const rows: MessageStructure[] = [];

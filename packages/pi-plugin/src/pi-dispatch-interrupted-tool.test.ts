@@ -217,6 +217,8 @@ test("dispatch interrupted tool: aborted and error calls use the assistant times
 });
 
 test("dispatch interrupted tool: a real result prevents synthesis even after a boundary", () => {
+	// Oh My Pi moves both later real results into the window the interrupting
+	// user message closed, and drops them from their old positions.
 	const snapshot = piPreparedStructure([
 		history[0],
 		call,
@@ -224,12 +226,14 @@ test("dispatch interrupted tool: a real result prevents synthesis even after a b
 		realResult,
 		{ ...realResult, toolCallId: "pending" },
 	]);
-	expect(snapshot?.messages.map((row) => row.role)).toEqual([
-		"user",
-		"assistant",
-		"user",
-		"toolResult",
-		"toolResult",
+	expect(
+		snapshot?.messages.map((row) => [row.role, row.results, row.timestamp]),
+	).toEqual([
+		["user", [], 1],
+		["assistant", [], 2],
+		["toolResult", ["done"], 3],
+		["toolResult", ["pending"], 3],
+		["user", [], 4],
 	]);
 	const moved = {
 		messages: [
@@ -240,7 +244,17 @@ test("dispatch interrupted tool: a real result prevents synthesis even after a b
 			history[3],
 		],
 	};
-	expect(piMatchesPreparedStructure(moved, snapshot)).toBe(false);
+	expect(piMatchesPreparedStructure(moved, snapshot)).toBe(true);
+	const unmoved = {
+		messages: [
+			history[0],
+			call,
+			history[3],
+			realResult,
+			{ ...realResult, toolCallId: "pending" },
+		],
+	};
+	expect(piMatchesPreparedStructure(unmoved, snapshot)).toBe(false);
 });
 
 test("dispatch interrupted tool: complete arcs cannot borrow an extra synthesized row", () => {
