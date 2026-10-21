@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { expectedOpenCode2Version } from "../../src/opencode2-runner/cli-resolution";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +23,7 @@ for (const mode of ["manual", "scheduled"] as const) {
         else process.env.TMPDIR = previousTmp;
         const version = spawnSync(CLI, ["--version"], { env: fixture.env, encoding: "utf8" });
         expect(version.status).toBe(0);
-        expect(version.stdout).toContain("2.0.22");
+        expect(version.stdout.trim()).toBe(`opencode v${expectedOpenCode2Version()}`);
         const host = await spawnOpencode2({
             existingIsolation: fixture, serviceMode: true, compactionAuto: false,
             magicContextConfig: {

@@ -204,7 +204,14 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         expect(schemaPasses.length).toBeGreaterThanOrEqual(2);
         const milestones = log.split("\n").filter((line) => /v2 usage:|emergency tiered drop:|heuristic cleanup:|pending ops WILL APPLY|prefix trim:|rematerialized=true/.test(line));
         console.log("REPORTER_V2_USAGE", milestones.filter((line) => line.includes("v2 usage:")).join("\n"));
-        expect(milestones.some((line) => line.includes("pending ops WILL APPLY — reason=pending_materialization origin=user_flush, pendingOps=46"))).toBe(true);
+        // Queue depth in a diagnostic is not the drain contract: earlier cleanup
+        // may already consume duplicate intents. Require the flush origin and the
+        // actual empty queue, while retaining the wire-schema and reclaim checks.
+        expect(milestones.some((line) => line.includes("pending ops WILL APPLY — reason=pending_materialization origin=user_flush,"))).toBe(true);
+        const drained = new Database(fixture.contextDbPath, { readonly: true });
+        try {
+            expect(drained.prepare("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(sessionID)).toHaveLength(0);
+        } finally { drained.close(); }
         // Restart discards the stale provider reading, so the seeded tool outputs
         // themselves must price above the usable window without opaque signatures.
         const pricedInputs = [...log.matchAll(/using wire estimate for priced pass inputTokens=(\d+) .*trusted=true/g)]

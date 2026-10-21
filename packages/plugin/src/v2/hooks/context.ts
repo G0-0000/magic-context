@@ -38,6 +38,7 @@ import {
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { clearSession } from "../../features/magic-context/storage-meta-session";
+import { clearCachedM0 } from "../../features/magic-context/storage-meta-shared";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
@@ -146,6 +147,7 @@ import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { nativeFoldCache } from "../fold/memory-cache";
 import {
     copyNativeInput,
+    forgetNativeFoldProvenance,
     isLocalCheckpoint,
     NativeFoldReplay,
     nativeRowID,
@@ -674,7 +676,7 @@ export async function registerContext(context: V2Context) {
             ? nativeFoldCache(() => storage.require())
             : undefined;
     const nativeFoldReplay = nativeFoldMemory
-        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader())
+        ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage)
         : undefined;
     setOutputReserveConfig(config.output_reserve);
     const queriedModels = new Set<string>();
@@ -1363,7 +1365,8 @@ export async function registerContext(context: V2Context) {
                     clearPendingMaterialization(pendingMaterializationSessions, sessionID);
                     lastHeuristicsTurnId.delete(sessionID);
                     restoredRows.forget(sessionID);
-                    await nativeFoldReplay?.forget(sessionID);
+                    if (nativeFoldReplay) await nativeFoldReplay.forget(sessionID);
+                    else await forgetNativeFoldProvenance(context.storage, sessionID);
                     generateReplay.forget(sessionID);
                     systemPromptRefreshSessions.delete(sessionID);
                     systemPrompt?.clearSession(sessionID);
@@ -1821,6 +1824,8 @@ export async function registerContext(context: V2Context) {
                 // it writes a finished reply), so assistant text restored from a saved
                 // source copy gets the same strip `adaptPayload` gives the live text.
                 normalizeRestoredAssistantText: stripCopiedTagNotation,
+                refreshSourceContents: (sessionID) =>
+                    nativeFoldReplay?.needsHeadRebuild(sessionID) ?? false,
                 // GA owns its native checkpoints; this adapter never writes the v1
                 // synthetic marker rows that the shared off-transition deletes.
                 hostCleanupCompactionMarkers: () => ({
@@ -1959,12 +1964,24 @@ export async function registerContext(context: V2Context) {
                         "boundary_repair",
                     );
                 }
-                const incoming = cut && draft.messages.find((message) => message.id === cut.id);
+                // Provider-native windows have already been selected by the host for
+                // this model. They need not carry the checkpoint id and must not be
+                // replaced with locally reconstructed history.
+                const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
+                const incoming =
+                    localCut && draft.messages.find((message) => message.id === localCut.id);
                 postFold = cut !== undefined;
-                if (cut && !incoming)
+                if (localCut && !incoming)
                     throw new Error("The host checkpoint disappeared from the context draft");
                 let nativeRestored: V2Message[] | undefined;
-                if (cut && nativeFoldReplay && isLocalCheckpoint(cut)) {
+                // Validate fold provenance before the cache path or its raw-row
+                // fallback can invisibly replace the checkpoint. Without a valid
+                // local admission, use ordinary managed-history reconstruction instead.
+                if (
+                    cut &&
+                    nativeFoldReplay &&
+                    (await nativeFoldReplay.admits(draft.sessionID, cut, reader))
+                ) {
                     try {
                         nativeRestored = await nativeFoldReplay.restore(
                             draft.sessionID,
@@ -1986,7 +2003,19 @@ export async function registerContext(context: V2Context) {
                         );
                     }
                 }
-                if (nativeRestored && nativeFoldReplay?.sourceChanged(draft.sessionID)) {
+                if (cut && nativeFoldReplay?.sourceChanged(draft.sessionID)) {
+                    // Durable provenance no longer matches the host's pre-checkpoint
+                    // rows. Its cached raw prefix is obsolete even with no compartments.
+                    // Expire it rather than render here: first_render must execute
+                    // in the shared transform and open its normal mutation/drain gate.
+                    if (
+                        db &&
+                        !rustModeModuleClient &&
+                        nativeFoldReplay.needsHeadRebuild(draft.sessionID)
+                    )
+                        clearCachedM0(db, draft.sessionID);
+                    if (nativeFoldReplay.needsHeadRebuild(draft.sessionID))
+                        restoredRows.forget(draft.sessionID);
                     // A host edit or revert changed the restored history, so the
                     // ordinary transform may rebuild the history head (the
                     // <session-history> block in the first head message). Each rebuild
@@ -2015,26 +2044,34 @@ export async function registerContext(context: V2Context) {
                         ...hidden,
                         ...draft.messages.filter((message) => message !== incoming),
                     );
-                } else if (cut && incoming) {
-                    const identity = await folds.observe({
-                        sessionID: draft.sessionID,
-                        cutSeq: cut.seq,
-                        summary: cut.data.summary ?? "",
-                        rendered: incoming,
-                        onHard: (reason) => {
-                            sessionLog(draft.sessionID, `HARD reason=${reason}`);
-                            materialize(draft);
-                            requestPendingMaterialization(
-                                pendingMaterializationSessions,
-                                draft.sessionID,
-                                "host_compaction",
-                            );
-                        },
-                    });
-                    checkpoint = structuredClone(identity.rendered ?? incoming);
-                    submitted = identity.rendered
-                        ? (identity.renderedSummary ?? identity.submitted)
-                        : (cut.data.summary ?? "");
+                } else if (localCut && cut && incoming) {
+                    // A checkpoint without native replay admission still uses our
+                    // ordinary host-row reconstruction below. Let the transform
+                    // render or reuse the history head from our compartments, so
+                    // any rebuild opens the same mutation/drain gate as other folds.
+                    // Keep FoldOwner's host wrapper out of this path: its serialized
+                    // raw context can already be covered by the compartments.
+                    if (!nativeFoldReplay) {
+                        const identity = await folds.observe({
+                            sessionID: draft.sessionID,
+                            cutSeq: cut.seq,
+                            summary: cut.data.summary ?? "",
+                            rendered: incoming,
+                            onHard: (reason) => {
+                                sessionLog(draft.sessionID, `HARD reason=${reason}`);
+                                materialize(draft);
+                                requestPendingMaterialization(
+                                    pendingMaterializationSessions,
+                                    draft.sessionID,
+                                    "host_compaction",
+                                );
+                            },
+                        });
+                        checkpoint = structuredClone(identity.rendered ?? incoming);
+                        submitted = identity.rendered
+                            ? (identity.renderedSummary ?? identity.submitted)
+                            : (cut.data.summary ?? "");
+                    }
                     // Rust mode restores against the boundary the module itself published and
                     // keeps that boundary row, because the array handed to the module has to
                     // begin there — exactly where an OpenCode 1 compaction row would have made
@@ -2074,6 +2111,11 @@ export async function registerContext(context: V2Context) {
                         ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
                         : null;
                     const boundary =
+                        // A changed hidden row may have lived inside the frozen
+                        // prefix. Make it available to the shared-path rebuild too.
+                        (nativeFoldReplay?.sourceChanged(draft.sessionID) && !rustModeModuleClient
+                            ? (reader.earliestSequence(draft.sessionID) ?? 0) - 1
+                            : undefined) ??
                         (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
                         servedBoundary?.seq ??
                         reader.sequenceForId(draft.sessionID, boundaryID) ??
