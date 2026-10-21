@@ -679,6 +679,83 @@ describe("checkCompartmentTrigger", () => {
         }
     });
 
+    it("the redundancy skip never credits a ride a held pass cannot take", () => {
+        useTempDataHome("compartment-trigger-held-ride-");
+        createOpenCodeDb("ses-held-ride", [
+            { id: "m-1", role: "user", text: "a ".repeat(3500) },
+            { id: "m-2", role: "assistant", text: "done" },
+            { id: "m-3", role: "user", text: "b ".repeat(3500) },
+            { id: "m-4", role: "assistant", text: "done" },
+            { id: "m-5", role: "user", text: "c ".repeat(3500) },
+            { id: "m-6", role: "assistant", text: "done" },
+            ...Array.from({ length: 5 }, (_, i) => ({
+                id: `m-${i + 7}`,
+                role: "user",
+                text: `protected ${i}`,
+            })),
+        ]);
+        const db = openDatabase();
+        insertTag(db, "ses-held-ride", "m-1", "message", 800, 1);
+        insertTag(db, "ses-held-ride", "m-2", "message", 200, 2);
+        queuePendingOp(db, "ses-held-ride", 1, "drop", 1);
+        const targets = new Map<number, TagTarget>([
+            [1, { getContent: () => "a".repeat(800), setContent: () => true }],
+        ]);
+        const evaluate = (gate?: { signedThinkingHold: boolean; emergency?: boolean }) =>
+            checkCompartmentTrigger(
+                db,
+                "ses-held-ride",
+                makeSessionMeta("ses-held-ride", 60),
+                { percentage: 61, inputTokens: 122_000 },
+                60,
+                63,
+                6500,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                {
+                    hardFold: false,
+                    force: false,
+                    explicitFlush: true,
+                    publishedHistory: true,
+                    ...(gate
+                        ? {
+                              permission: {
+                                  signedThinkingHold: gate.signedThinkingHold,
+                                  firstRender: false,
+                                  idleExpiry: false,
+                                  emergency: gate.emergency === true,
+                              },
+                          }
+                        : {}),
+                },
+                capturePendingDropEligibility(targets, new Set()),
+            );
+        const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            // An unheld pass takes the flush ride, so the queued drop makes the
+            // summarizer redundant on this pass.
+            expect(evaluate({ signedThinkingHold: false })).toEqual({ shouldFire: false });
+            // A held pass cancels its flush and history rides: the drop stays queued,
+            // so the skip must not count it and the historian fires.
+            expect(evaluate({ signedThinkingHold: true })).toMatchObject({
+                shouldFire: true,
+                reason: "projected_headroom",
+            });
+            // Emergency pressure admits work even on a held pass.
+            expect(evaluate({ signedThinkingHold: true, emergency: true })).toEqual({
+                shouldFire: false,
+            });
+            expect(getPendingOps(db, "ses-held-ride")).toHaveLength(1);
+        } finally {
+            log.mockRestore();
+        }
+    });
+
     it("projects over-budget reasoning only when the provider can clear it from the wire", async () => {
         // Match issue #274's shape: at 36.8% usage, 70% of tagged bytes are
         // aged reasoning. Counting it as reclaimable projects 11.0%, below the

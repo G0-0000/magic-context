@@ -59,6 +59,36 @@ export function hasReclaimRide(signals: ReclaimRideSignals): boolean {
     );
 }
 
+/**
+ * What decides whether a pass held for recent signed thinking may still take a
+ * ride. Such a pass keeps its prefix unchanged, so only the rides that rebuild
+ * the prefix anyway admit work on it: a first render, an idle cache expiry and
+ * emergency pressure.
+ */
+export interface ReclaimRidePermissionGate {
+    signedThinkingHold: boolean;
+    firstRender: boolean;
+    idleExpiry: boolean;
+    emergency: boolean;
+}
+
+/** Whether the pass may change its prefix at all, before any ride is considered. */
+export function prefixMutationPermitted(gate: ReclaimRidePermissionGate): boolean {
+    return !gate.signedThinkingHold || gate.firstRender || gate.idleExpiry || gate.emergency;
+}
+
+/**
+ * The one permission every automatic reduction lane uses. The historian's
+ * redundancy skip must use it too: crediting a ride the pass cannot take skips
+ * the summarizer while the queued drops it counted on stay queued.
+ */
+export function reclaimRidePermitted(
+    signals: ReclaimRideSignals,
+    gate: ReclaimRidePermissionGate,
+): boolean {
+    return prefixMutationPermitted(gate) && hasReclaimRide(signals);
+}
+
 const RECLAIM_RIDE_NAMES = [
     "hardFold",
     "force",

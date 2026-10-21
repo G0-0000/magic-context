@@ -16,7 +16,13 @@ import { escalationBands } from "../../shared/escalation-bands";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
-import { hasReclaimRide, type ReclaimRideSignals, reclaimRideLabel } from "./cache-busting-signals";
+import {
+    hasReclaimRide,
+    type ReclaimRidePermissionGate,
+    type ReclaimRideSignals,
+    reclaimRideLabel,
+    reclaimRidePermitted,
+} from "./cache-busting-signals";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -474,7 +480,7 @@ export function checkCompartmentTrigger(
     inMemoryTail?: InMemoryTailSource | LazyInMemoryTailSource,
     taggerFloorOverride?: number,
     reasoningProjection?: ReasoningProjectionCapability,
-    reclaimRide?: ReclaimRideSignals,
+    reclaimRide?: ReclaimRideSignals & { permission?: ReclaimRidePermissionGate },
     eligiblePendingDropTagIds?: ReadonlySet<number>,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
@@ -681,9 +687,16 @@ export function checkCompartmentTrigger(
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
     // Queued drops need an existing cache-busting event to apply. A future history
-    // publication cannot justify skipping the historian that would produce it.
+    // publication cannot justify skipping the historian that would produce it,
+    // and neither can a ride this pass is not permitted to take: a pass held for
+    // recent signed thinking keeps its queued drops queued.
+    const ridePermitted =
+        reclaimRide !== undefined &&
+        (reclaimRide.permission
+            ? reclaimRidePermitted(reclaimRide, reclaimRide.permission)
+            : hasReclaimRide(reclaimRide));
     const rideLabel = reclaimRide ? reclaimRideLabel(reclaimRide) : "ride=none";
-    const dropsCanLand = reclaimRide !== undefined && hasReclaimRide(reclaimRide);
+    const dropsCanLand = ridePermitted;
 
     const forceMaterializationPercentage = escalationBands(
         executeThresholdPercentage,
