@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { clearLkgRecoveryFence } from "../../hooks/magic-context/lkg-recovery-fence";
 import {
     cancelAutoSearchWork,
     clearUnpublishedAutoSearchNoHints,
@@ -378,20 +379,23 @@ export function clearSession(
     cancelAutoSearchWork(sessionId);
     let transactionStartedAt = 0;
     let clearedMarker: PendingPiCompactionMarker | null = null;
+    let eligibleSessions = 0;
     withoutSqliteTransformPass(() =>
         withSqliteBackgroundWriter(() =>
             db
                 .transaction(() => {
                     transactionStartedAt = performance.now();
                     clearedMarker = getPendingPiCompactionMarkerState(db, sessionId);
-                    deleteSessionScopedRows(db, [sessionId], undefined, {
+                    eligibleSessions = deleteSessionScopedRows(db, [sessionId], undefined, {
                         rustModuleCleanupAcknowledged,
                         preserveTagRevisionTombstones: !permanentlyDeleted,
+                        deferRecoveryFenceCleanup: true,
                     });
                 })
                 .immediate(),
         ),
     );
+    if (eligibleSessions > 0) clearLkgRecoveryFence(sessionId);
     if (clearedMarker) logPiCompactionMarkerClear(sessionId, clearedMarker, "session-reset");
     clearUnpublishedAutoSearchNoHints(sessionId);
     logSlowWriteTransaction("clear-session", transactionStartedAt);

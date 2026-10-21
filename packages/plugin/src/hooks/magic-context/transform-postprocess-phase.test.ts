@@ -10989,12 +10989,16 @@ describe("postprocess defer instrumentation and scaling", () => {
             for (const increment of [7, 13]) {
                 step = increment;
                 logs.length = 0;
-                await runPostTransformPhase(
-                    basePostTransformArgs(db, "timed-defer", [], {
-                        channel1StateBySession: new Map(),
-                        resolvedProviderID: "anthropic",
-                    }),
+                await withTransformTimingSummary(() =>
+                    runPostTransformPhase(
+                        basePostTransformArgs(db, "timed-defer", [], {
+                            channel1StateBySession: new Map(),
+                            resolvedProviderID: "anthropic",
+                        }),
+                    ),
                 );
+                const summary = logs.filter((line) => line.startsWith("transform stages:"));
+                expect(summary).toHaveLength(1);
                 for (const stage of [
                     "setupAndOperations",
                     "replaySnapshot",
@@ -11009,9 +11013,11 @@ describe("postprocess defer instrumentation and scaling", () => {
                     "tailBaseline",
                     "tailGuard",
                 ]) {
-                    const records = logs.filter((line) => line.includes(`stage=pp.${stage} `));
+                    const records = [
+                        ...summary[0].matchAll(new RegExp(`pp\\.${stage}=([\\d.]+)ms`, "g")),
+                    ];
                     expect(records).toHaveLength(1);
-                    const elapsed = Number(records[0].match(/elapsed=([\d.]+)ms/)?.[1]);
+                    const elapsed = Number(records[0][1]);
                     expect(elapsed).toBeGreaterThanOrEqual(increment);
                     if (stage === "tailReads") expect(elapsed).toBe(increment);
                 }
@@ -13266,6 +13272,7 @@ it("a first render reproducing the served pair keeps all signed thinking", async
 
 import { prepareCompactionMarkerCandidates } from "../../features/magic-context/compaction-marker";
 import * as markerCandidates from "../../features/magic-context/compaction-marker-candidates";
+import { withTransformTimingSummary } from "./transform-stage-logger";
 
 describe("issue 699 processed-image provider replay", () => {
     const image = () => ({
