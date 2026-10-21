@@ -131,9 +131,10 @@ function makeTransform(
 }
 
 // The transform waits at most 250 ms for the tag-owner digest, which a worker
-// thread computes. When the worker is late the pass deliberately defers reasoning
-// removal, so on a loaded machine the first pass could skip the inline strip
-// this test starts from. Wait for the digest itself instead of a deadline.
+// thread computes. When the worker misses that deadline, the pass defers
+// reasoning removal by design, so on a loaded machine the first pass could leave
+// a1's inline <think> block intact and fail the assertion that it was stripped.
+// Wait for the digest itself instead of a deadline.
 // The spy is restored in afterEach.
 function awaitTagOwnersWithoutDeadline(): boolean[] {
     const readiness: boolean[] = [];

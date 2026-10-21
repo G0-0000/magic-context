@@ -700,9 +700,10 @@ describe("magic-context hook", () => {
                 },
             );
             // The drain runs in the background after the transform returns. Its
-            // finally block releases the session's run claim and then either
-            // latches completion or schedules a retry, so wait for that outcome
-            // rather than a fixed deadline, which a loaded machine can overrun.
+            // finally block removes the session's in-flight marker and, unless
+            // the drain was aborted or the embedding identity changed, records
+            // completion or a retry. Wait for that outcome rather than a fixed
+            // deadline, which a loaded machine can overrun.
             const drainSettled = () =>
                 !embedRunStateBySession.has(sessionId) &&
                 (autoEmbedAttemptedBySession.has(sessionId) ||
