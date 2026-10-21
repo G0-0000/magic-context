@@ -1308,7 +1308,12 @@ describe("createTransform", () => {
     it("persists distinct TypeScript transform decision reasons from ordinary passes", async () => {
         useTempDataHome("context-transform-decision-fence-");
         const sessionId = "ses-transform-decision-fence";
-        const db = openDatabase();
+        // Decision rows are best-effort: the writer uses busy_timeout=0 and drops
+        // a row whenever another connection holds the write lock. A default-path
+        // open also starts the startup backfills, whose worker-thread writer can
+        // hold that lock while a row is written on a loaded machine. An explicit
+        // path skips those backfills, so this test sees only its own writes.
+        const db = openDatabase(join(process.env.XDG_DATA_HOME ?? "", "context.db"));
         const liveModelBySession = new Map([
             [sessionId, { providerID: "test-provider", modelID: "model-a" }],
         ]);

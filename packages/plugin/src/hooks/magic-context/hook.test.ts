@@ -1,3 +1,4 @@
+import { startMessageFtsRowidMapBackfill } from "../../features/magic-context/message-fts-rowid-map";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /// <reference types="bun-types" />
@@ -45,7 +46,12 @@ import {
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
-import { autoEmbedAttemptedBySession, clearEmbedSessionState } from "./embed-session-state";
+import {
+    autoEmbedAttemptedBySession,
+    autoEmbedRetryAfterBySession,
+    clearEmbedSessionState,
+    embedRunStateBySession,
+} from "./embed-session-state";
 import { createMagicContextHook, type MagicContextDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
@@ -780,6 +786,12 @@ describe("magic-context hook", () => {
             category: "CONSTRAINTS",
             content: "A memory that must stay unembedded while memory is off.",
         });
+        // History chunk text is read from message_history_fts only for ordinals
+        // the FTS rowid map covers, or after the one-time rowid-map backfill has
+        // finished. The rows above are inserted directly, without map entries,
+        // so until that backfill (started on a worker by the default-path open)
+        // completes, the drain finds nothing to embed and defers its retry.
+        await startMessageFtsRowidMapBackfill(db);
 
         try {
             await hook["experimental.chat.messages.transform"]!(
@@ -793,12 +805,20 @@ describe("magic-context hook", () => {
                     ] as never,
                 },
             );
-            const deadline = Date.now() + 3_000;
-            const embedded = () =>
-                getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session.embedded;
-            while (embedded() < 3 && Date.now() < deadline) {
+            // The drain runs in the background after the transform returns. Its
+            // finally block removes the session's in-flight marker and, unless
+            // the drain was aborted or the embedding identity changed, records
+            // completion or a retry. Wait for that outcome rather than a fixed
+            // deadline, which a loaded machine can overrun.
+            const drainSettled = () =>
+                !embedRunStateBySession.has(sessionId) &&
+                (autoEmbedAttemptedBySession.has(sessionId) ||
+                    autoEmbedRetryAfterBySession.has(sessionId));
+            while (!drainSettled()) {
                 await new Promise((resolve) => setTimeout(resolve, 10));
             }
+            // A retry instead of a latch means the drain stopped short.
+            expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
             await new Promise((resolve) => setTimeout(resolve, 30));
 
             expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
