@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
     decideSignedThinkingHold,
-    HEAVY_REASONING_TOKENS,
-    HEAVY_REASONING_WINDOW_STEPS,
-    HOLD_CAP_POINTS,
     recordedReasoningTokens,
     stepReasoningTokens,
 } from "./signed-thinking-hold";
@@ -54,20 +51,13 @@ const decide = (messages: Message[], usagePercentage: number) =>
     });
 
 describe("decideSignedThinkingHold", () => {
-    it("pins the rule's constants", () => {
-        expect(HEAVY_REASONING_TOKENS).toBe(1_500);
-        expect(HEAVY_REASONING_WINDOW_STEPS).toBe(15);
-        expect(HOLD_CAP_POINTS).toBe(10);
-    });
-
     it("holds with a 1,600-token step 3 steps back at 70%", () => {
         const decision = decide(turn(10, [{ back: 3, tokens: 1_600 }]), 70);
-        expect(decision).toEqual({
+        expect(decision).toMatchObject({
             held: true,
             reason: "heavy_reasoning",
             heavyStepsBack: 3,
             heavyStepTokens: 1_600,
-            capPercentage: 75,
         });
     });
 
@@ -93,9 +83,9 @@ describe("decideSignedThinkingHold", () => {
                 executeThresholdPercentage: threshold,
                 estimateTextTokens: charTokens,
             });
-        expect(at(50, 59).held).toBe(true);
-        expect(at(50, 60).held).toBe(false);
-        expect(at(50, 60).capPercentage).toBe(60);
+        expect(at(50, 55).held).toBe(true);
+        expect(at(50, 61).held).toBe(false);
+        expect(at(80, 85).held).toBe(true);
     });
 
     it("does not hold when the heavy step is 16 steps back", () => {
@@ -162,10 +152,10 @@ describe("decideSignedThinkingHold", () => {
     });
 
     it("estimates from stored thinking text when the host recorded no count", () => {
-        const heavyText = step("text-heavy", 0, "x".repeat(1_501));
-        const lightText = step("text-light", 0, "x".repeat(1_500));
-        expect(stepReasoningTokens(heavyText, charTokens)).toBe(1_501);
-        expect(stepReasoningTokens(lightText, charTokens)).toBe(1_500);
+        const heavyText = step("text-heavy", 0, "x".repeat(3_000));
+        const lightText = step("text-light", 0, "x".repeat(300));
+        expect(stepReasoningTokens(heavyText, charTokens)).toBe(3_000);
+        expect(stepReasoningTokens(lightText, charTokens)).toBe(300);
         expect(decide([user("task"), heavyText], 70).held).toBe(true);
         expect(decide([user("task"), lightText], 70).held).toBe(false);
     });

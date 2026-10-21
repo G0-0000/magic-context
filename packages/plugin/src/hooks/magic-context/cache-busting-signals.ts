@@ -99,7 +99,8 @@ const RECLAIM_RIDE_NAMES = [
 
 /**
  * Names the ride signals that actually granted permission to mutate, for the
- * logs that announce that permission. The permission is `hasReclaimRide`, so a
+ * logs that announce that permission. The permission is `reclaimRidePermitted`
+ * (a ride from `hasReclaimRide` that the pass may take), so a
  * log naming anything else sends whoever reads it to the wrong cause: a drain
  * granted by freshly published history used to be reported as
  * "reason=scheduler_execute", which is a different signal entirely and was not
