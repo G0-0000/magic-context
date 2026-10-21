@@ -60,8 +60,29 @@ export interface PiPreparedStructure {
 
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
-// These native serializers share transformMessages. Cursor, GitLab and custom
-// APIs do not, so their result rows must retain their existing expectations.
+// APIs whose Oh My Pi provider runs transformMessages, so the host's tool-call
+// window rules are known for them. Checked against @oh-my-pi/pi-ai 18.12.3 and
+// 18.12.5 (stream.ts streamDispatch is identical in both), src/:
+// - openai-completions: providers/openai-completions.ts:2372 (convertMessages).
+// - openrouter: stream.ts routes it to openai-responses, or to
+//   openai-completions when PI_OPENROUTER_RESPONSES=0.
+// - openai-responses, azure-openai-responses: openai-responses.ts:1612 and
+//   azure-openai-responses.ts:373 call buildResponsesInput, which runs it at
+//   openai-shared.ts:2162.
+// - openai-codex-responses: openai-codex-responses.ts:4977.
+// - anthropic-messages: anthropic.ts:5835.
+// - bedrock-converse-stream: amazon-bedrock.ts:1093.
+// - google-generative-ai, google-vertex, google-gemini-cli: google.ts:35,
+//   google-vertex.ts:32 and google-gemini-cli.ts:1266 reach google-shared.ts
+//   convertMessages, which runs it at google-shared.ts:213.
+// - ollama-chat: ollama.ts:269. devin-agent: devin.ts:248.
+// - factory-droid-agent: factory-droid.ts streamWire sends every route through
+//   factory-droid/gemini.ts:190 or the Anthropic, Responses or Chat streams.
+// - apple-foundation-models: apple-foundation-models.ts:194.
+// cursor-agent (providers/cursor.ts) and gitlab-duo-agent
+// (gitlab-duo-workflow.ts:2581, "bypasses transformMessages") do not, and an
+// extension's custom API is unknown. Those use projectUnmodeledToolResults,
+// which keeps every result where the history has it.
 const TRANSFORM_MESSAGES_APIS = new Set([
 	"openai-completions",
 	"openai-responses",
@@ -235,7 +256,8 @@ function projectMissingToolResults(
 	});
 	if (host === "pi") return projectPiToolResults(input);
 	const api = model?.api;
-	const projectOrphans = TRANSFORM_MESSAGES_APIS.has(api ?? "");
+	if (!TRANSFORM_MESSAGES_APIS.has(api ?? ""))
+		return projectUnmodeledToolResults(messages);
 	const pairingId = piToolCallPairing(input);
 	const { prefix, max } = duplicateSuffix(model);
 	// Deduplication pass: rename reused call ids and file every real result by
@@ -418,12 +440,10 @@ function projectMissingToolResults(
 		}
 		if (validToolUseIds.has(key)) continue;
 		if (
-			!projectOrphans ||
 			typeof message.toolName !== "string" ||
 			!Array.isArray(message.content)
 		) {
-			// Providers outside transformMessages keep an unpaired result in place,
-			// and a malformed result is preserved unchanged.
+			// A malformed result is preserved unchanged.
 			projected.push(value);
 			continue;
 		}
@@ -455,6 +475,111 @@ function projectMissingToolResults(
 			timestamp: message.timestamp,
 			[ORPHAN_NOTE]: true,
 		});
+	}
+	flush();
+	return projected;
+}
+
+/**
+ * The projection for APIs whose provider does not run transformMessages (see
+ * TRANSFORM_MESSAGES_APIS), whose tool-result handling is not known.
+ * It synthesizes a stub at every boundary for a call with no later result and
+ * leaves every result where the history has it; it never moves, drops or
+ * renames anything. It writes no <stale-tool-result> notes, because those come
+ * from transformMessages.
+ */
+function projectUnmodeledToolResults(messages: readonly unknown[]): unknown[] {
+	const responsesComponents = new Set<string>();
+	const opaqueIds = new Set<string>();
+	const component = (id: string) => {
+		const pipe = id.indexOf("|");
+		return pipe > 0 ? id.slice(0, pipe) : id;
+	};
+	for (const value of messages) {
+		const message = object(value);
+		if (message?.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		for (const value of message.content) {
+			const block = object(value);
+			if (block?.type !== "toolCall" || typeof block.id !== "string") continue;
+			if (
+				[
+					"openai-responses",
+					"azure-openai-responses",
+					"openai-codex-responses",
+				].includes(String(message.api))
+			)
+				responsesComponents.add(component(block.id));
+			else if (block.id.includes("|")) opaqueIds.add(block.id);
+		}
+	}
+	// Responses item suffixes are not part of the call identity; opaque Chat IDs
+	// containing a pipe remain whole.
+	const pairingId = (id: string) =>
+		!opaqueIds.has(id) && responsesComponents.has(component(id))
+			? component(id)
+			: id;
+	const lastResult = new Map<string, number>();
+	messages.forEach((value, index) => {
+		const message = object(value);
+		if (
+			message?.role === "toolResult" &&
+			typeof message.toolCallId === "string"
+		)
+			lastResult.set(pairingId(message.toolCallId), index);
+	});
+	const projected: unknown[] = [];
+	const resolved = new Set<string>();
+	let pending: WindowCall[] = [];
+	let start = -1;
+	let aborted = false;
+	let timestamp: unknown;
+	const flush = (boundaryTimestamp?: unknown) => {
+		for (const call of pending) {
+			const key = pairingId(call.id);
+			if (resolved.has(key) || (lastResult.get(key) ?? -1) > start) continue;
+			projected.push({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: [
+					{ type: "text", text: aborted ? "aborted" : "No result provided" },
+				],
+				isError: true,
+				timestamp: aborted ? timestamp : boundaryTimestamp,
+			});
+			resolved.add(key);
+		}
+		pending = [];
+	};
+	for (let index = 0; index < messages.length; index++) {
+		const value = messages[index];
+		const message = object(value);
+		if (
+			(message?.role === "bashExecution" ||
+				message?.role === "pythonExecution") &&
+			message.excludeFromContext === true
+		)
+			continue;
+		// Unresolved calls are flushed at every non-result boundary and at EOF. A
+		// later real result prevents synthesis and keeps its own position.
+		if (message?.role !== "toolResult") flush(message?.timestamp);
+		else if (
+			typeof message.toolCallId === "string" &&
+			pending.some(
+				(call) => pairingId(call.id) === pairingId(String(message.toolCallId)),
+			)
+		)
+			resolved.add(pairingId(message.toolCallId));
+		projected.push(value);
+		if (message?.role !== "assistant" || !Array.isArray(message.content))
+			continue;
+		start = index;
+		aborted =
+			message.stopReason === "aborted" || message.stopReason === "error";
+		timestamp = message.timestamp;
+		if (aborted && typeof timestamp !== "number") continue;
+		pending.push(...windowCalls(message));
 	}
 	flush();
 	return projected;
