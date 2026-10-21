@@ -1,3 +1,4 @@
+import { startMessageFtsRowidMapBackfill } from "../../features/magic-context/message-fts-rowid-map";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /// <reference types="bun-types" />
@@ -686,6 +687,12 @@ describe("magic-context hook", () => {
             category: "CONSTRAINTS",
             content: "A memory that must stay unembedded while memory is off.",
         });
+        // History chunk text is read from message_history_fts only for ordinals
+        // the FTS rowid map covers, or after the one-time rowid-map backfill has
+        // finished. The rows above are inserted directly, without map entries,
+        // so until that backfill (started on a worker by the default-path open)
+        // completes, the drain finds nothing to embed and defers its retry.
+        await startMessageFtsRowidMapBackfill(db);
 
         try {
             await hook["experimental.chat.messages.transform"]!(
