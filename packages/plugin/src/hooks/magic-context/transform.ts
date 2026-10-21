@@ -121,8 +121,7 @@ import {
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
-    isCoveredInstructionRow,
-    markCoveredInstructionRow,
+    cloneKeepingCoveredInstructionMarks,
     takeCoveredInstructionRows,
 } from "./host-served-rows";
 import {
@@ -807,15 +806,10 @@ export function createTransform(deps: TransformDeps) {
                     ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type)),
             ),
         )
-            ? structuredClone(messages)
+            ? cloneKeepingCoveredInstructionMarks(messages)
             : null;
         // Covered instruction rows restored by the OpenCode 2 hook stay out of
         // every stage until postprocess decides whether this session serves them.
-        // The retry copy keeps them in place, marked again (cloning drops marks).
-        originalForThinkingFit?.forEach((copy, index) => {
-            if (isCoveredInstructionRow(messages[index]?.info))
-                markCoveredInstructionRow(copy.info);
-        });
         const coveredHostInstructions = takeCoveredInstructionRows(messages);
         const passOutcome = createPassOutcome();
         const tSessionId = performance.now();

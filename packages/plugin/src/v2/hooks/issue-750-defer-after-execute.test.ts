@@ -6,6 +6,7 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import * as retention from "../../features/magic-context/storage-host-instruction-retention";
 import { setHostInstructionRetentionEnabledForTests } from "../../features/magic-context/storage-host-instruction-retention";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
@@ -842,3 +843,79 @@ for (const where of ["admission", "transform"] as const)
             await f.cleanup();
         }
     }, 60000);
+
+// The switch that serves covered instruction rows decides bytes a later pass
+// replays, so a pass that cannot read it, or cannot save it on the pass that
+// turns it on, must refuse rather than guess.
+for (const failure of ["read", "write"] as const)
+    test(`issue 750: a pass refuses when the instruction-row switch cannot be ${failure === "read" ? "read" : "saved"}`, async () => {
+        const spy =
+            failure === "read"
+                ? spyOn(retention, "isHostInstructionRetentionOn").mockImplementation(() => {
+                      throw new Error("replay document unreadable");
+                  })
+                : spyOn(retention, "markHostInstructionRetention").mockReturnValue(false);
+        const f = await fixture(failure === "read" ? 755 : 756);
+        try {
+            f.compartment(4);
+            // The first pass may rewrite the whole prefix, so it reads (and on
+            // first use saves) the switch.
+            const first = await f.attempt();
+            const site =
+                failure === "read"
+                    ? "host-instruction-retention-read-failure"
+                    : "host-instruction-retention-persistence-failure";
+            expect(first.logs.join("\n")).toContain(`transform refused degraded pass site=${site}`);
+            expect(first.error).toBeDefined();
+        } finally {
+            spy.mockRestore();
+            await f.cleanup();
+        }
+    }, 60000);
+
+// A compartment can end after the host checkpoint. Instruction rows between
+// the checkpoint and that boundary are still sent by the host in its own
+// window, so the restore must stop at the checkpoint, or those rows would be
+// served twice.
+test("issue 750: an instruction row after the checkpoint is served once when the boundary passes it", async () => {
+    const f = await fixture(757);
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.respond();
+        await f.pass();
+        await f.fold();
+        f.user(`757 after the checkpoint: ${prose}`, 120000);
+        f.respond(3);
+        f.instruction("Today's date is now: after the checkpoint.");
+        f.user(`757 next turn: ${prose}`, 120000);
+        const boundary = f.rows.length;
+        f.respond(3);
+        f.user(`757 later turn: ${prose}`, 120000);
+        f.respond(3);
+        f.user(`757 latest turn: ${prose.repeat(2)}`, 120000);
+        await f.pass();
+        f.respond();
+        // The new compartment ends after the checkpoint, past the instruction row.
+        f.compartment(boundary);
+        f.idle();
+        const execute = await f.pass();
+        f.respond();
+        const defer = await f.pass();
+        expect(defer.logs.join("\n")).toMatch(/transform scheduler: .*decision=defer/);
+        for (const served of [execute, defer])
+            expect(
+                instructionTexts(served.draft.messages).filter(
+                    (text) => text === "Today's date is now: after the checkpoint.",
+                ),
+            ).toHaveLength(1);
+        expect(
+            firstDivergence(
+                execute.draft.messages,
+                defer.draft.messages.slice(0, execute.draft.messages.length),
+            ),
+        ).toBeNull();
+    } finally {
+        await f.cleanup();
+    }
+}, 60000);

@@ -146,3 +146,20 @@ export function takeCoveredInstructionRows<T extends { info: object }>(messages:
     }
     return taken;
 }
+
+/**
+ * A deep copy of `messages` whose covered instruction rows keep their mark.
+ * Cloning drops the non-enumerable mark, and a pass re-run from the copy (the
+ * signed-thinking fit retry) would then serve those rows as ordinary host rows
+ * instead of setting them aside.
+ */
+export function cloneKeepingCoveredInstructionMarks<T extends { info: object }>(
+    messages: T[],
+): T[] {
+    const copy = structuredClone(messages);
+    messages.forEach((message, index) => {
+        const copied = copy[index];
+        if (copied && isCoveredInstructionRow(message.info)) markCoveredInstructionRow(copied.info);
+    });
+    return copy;
+}
