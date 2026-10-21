@@ -2165,7 +2165,11 @@ export async function runPostTransformPhase(
     // Fit proof authorizes rebuilding the signed prefix, independently of
     // pressure. Release before prefix preparation so it can refresh history
     // without pretending the protected tool window has reached 95% usage.
-    if (activeThinkingPrefixHold && args.forceSignedRebuildForFit) {
+    if (
+        args.forceSignedRebuildForFit &&
+        (activeThinkingPrefixHold ||
+            (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true))
+    ) {
         releaseThinkingForRewrite(true);
     }
     const foldDueDecision =

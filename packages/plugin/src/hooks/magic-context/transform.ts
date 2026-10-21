@@ -3140,9 +3140,11 @@ export function createTransform(deps: TransformDeps) {
                 boundaryContextLimit > 0 &&
                 (finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens) > boundaryContextLimit
             ) {
+                // Held or not, an open signed turn that does not fit is retried
+                // once with every signed block stripped before refusing.
                 if (
                     !thinkingFitRetries.has(sessionId) &&
-                    activeThinkingPrefixHold &&
+                    signedThinkingPrefixBound &&
                     originalForThinkingFit &&
                     hasActiveAnthropicThinkingTurn(
                         messages,
