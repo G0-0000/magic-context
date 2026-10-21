@@ -91,7 +91,12 @@ const GATED_VERSION: u8 = 3;
 /// interrupted run's `run_finished`; this reader records only that the run
 /// finished. `turn-directives/v1` adds `turn_directives_v1` to a run's config
 /// and `directives` to a queued send's request, neither of which this reader
-/// uses.
+/// uses. `google-rpc-error-details/v1` adds an optional `provider_details`
+/// object (Google RPC QuotaFailure, ErrorInfo and RetryInfo) inside a run's or
+/// step's `error`; this reader never reads errors, so it needs no handling.
+/// `chatgpt-codex-wire/v1` adds a frozen `chatgpt_wire` profile to `RunStarted`
+/// (and to a refreeze record) and transport fields to model-attempt records;
+/// usage, steps and timestamps are unchanged.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -119,6 +124,8 @@ const KNOWN_FEATURES: &[&str] = &[
     "context-ceiling/v1",
     "interrupt-reason/v1",
     "turn-directives/v1",
+    "google-rpc-error-details/v1",
+    "chatgpt-codex-wire/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1852,6 +1859,8 @@ pub(crate) mod tests {
             "context-ceiling/v1",
             "interrupt-reason/v1",
             "turn-directives/v1",
+            "google-rpc-error-details/v1",
+            "chatgpt-codex-wire/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1914,6 +1923,23 @@ pub(crate) mod tests {
             json!({"requires": ["interrupt-reason/v1"],
                    "record": {"type": "run_finished", "run_id": "r1", "reason": "interrupted",
                               "interrupt_reason": "runner_shutdown"}}),
+        ]);
+        let runs = decode(&bytes).unwrap();
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+        assert!(runs[0].finished);
+    }
+
+    /// `google-rpc-error-details/v1` adds Google RPC error details inside a
+    /// failed run's `error`; such a run still yields its steps and finishes.
+    #[test]
+    fn a_run_failed_with_google_rpc_error_details_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            run_started("r1", 1),
+            step_finished(1, usage(1, 2, 3, 4)),
+            json!({"requires": ["google-rpc-error-details/v1"],
+                   "record": {"type": "run_finished", "run_id": "r1", "reason": "failed",
+                              "error": {"code": "quota_exhausted", "message": "quota",
+                                        "provider_details": {"retry_info": {"retry_delay": "3600s"}}}}}),
         ]);
         let runs = decode(&bytes).unwrap();
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
