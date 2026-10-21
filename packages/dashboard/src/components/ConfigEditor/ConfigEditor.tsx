@@ -22,6 +22,7 @@ import ModelRoutes from "./ModelRoutes";
 import PerModelTable from "./PerModelTable";
 import ProtectedTools from "./ProtectedTools";
 import { PER_MODEL_KEYS, type PerModelValues } from "./per-model-overrides";
+import RadioButtonGroup from "./RadioButtonGroup";
 import SearchPicker from "./SearchPicker";
 import StringList from "./StringList";
 import { structuredConfigSaveContent } from "./structured-save";
@@ -39,6 +40,12 @@ const USER_DEFAULT_CONFIG = `{
 }`;
 
 type ConfigTarget = "user" | "projects";
+
+const EMBEDDING_PROVIDER_OPTIONS = [
+  { value: "local", label: "Local" },
+  { value: "openai-compatible", label: "OpenAI Compatible" },
+  { value: "off", label: "Off" },
+] as const;
 
 function loadConfigTarget(): ConfigTarget {
   try {
@@ -710,25 +717,14 @@ function ConfigForm(props: {
                                       <span class="config-field-desc">
                                         Provider for memory semantic search
                                       </span>
-                                      <div style={{ display: "flex", gap: "6px" }}>
-                                        <For each={["local", "openai-compatible", "off"] as const}>
-                                          {(opt) => (
-                                            <button
-                                              class={`btn sm ${embeddingProvider() === opt ? "primary" : ""}`}
-                                              onClick={() =>
-                                                handleFieldChange("embedding.provider", opt)
-                                              }
-                                              type="button"
-                                            >
-                                              {opt === "local"
-                                                ? "Local"
-                                                : opt === "openai-compatible"
-                                                  ? "OpenAI Compatible"
-                                                  : "Off"}
-                                            </button>
-                                          )}
-                                        </For>
-                                      </div>
+                                      <RadioButtonGroup
+                                        label="Embedding Provider"
+                                        options={EMBEDDING_PROVIDER_OPTIONS}
+                                        value={embeddingProvider()}
+                                        onChange={(opt) =>
+                                          handleFieldChange("embedding.provider", opt)
+                                        }
+                                      />
                                       <Show when={embeddingProvider() === "local"}>
                                         <div class="config-field">
                                           <div class="config-field-header">
