@@ -45,6 +45,7 @@ import {
 	createFakePi,
 	createTestDb,
 	fakeContext,
+	heavyReasoningUsage,
 	userMessage,
 } from "./test-utils.test";
 
@@ -107,7 +108,11 @@ test("Pi thinking spans every tool round until the next real user", () => {
 	}
 });
 
-test("Pi Anthropic task retains queued drops at execute, force and 95% without refusing", async () => {
+// Earlier revisions held the queued drop for the whole signed turn, through
+// the force band and 95%. The bounded hold ends at the cap (65% + 10), so the
+// first execute bust above it applies the drop mid-turn and strips every signed
+// block, and later passes replay that result.
+test("Pi Anthropic task applies queued drops mid-turn above the hold cap and strips signed thinking once", async () => {
 	const db = createTestDb();
 	const sessionId = "pi-latest-turn-pipeline";
 	getOrCreateSessionMeta(db, sessionId);
@@ -144,9 +149,12 @@ test("Pi Anthropic task retains queued drops at execute, force and 95% without r
 	};
 	const messages = [
 		userMessage("task", 1),
+		// Heavy steps hold the turn below the cap, so its signed thinking is
+		// still kept when usage crosses it.
 		assistantMessage("spent", 2, {
 			provider: "anthropic",
 			model: "claude-opus-5-5",
+			usage: heavyReasoningUsage(),
 			content: [
 				{
 					type: "thinking",
@@ -159,6 +167,7 @@ test("Pi Anthropic task retains queued drops at execute, force and 95% without r
 		assistantMessage("newest", 3, {
 			provider: "anthropic",
 			model: "claude-opus-5-5",
+			usage: heavyReasoningUsage(),
 			content: [
 				{
 					type: "thinking",
@@ -174,21 +183,22 @@ test("Pi Anthropic task retains queued drops at execute, force and 95% without r
 	try {
 		await pass();
 		const before = JSON.stringify((await pass()).messages);
+		expect(before).toContain("signature-two");
 		queuePendingOp(db, sessionId, 2, "drop");
-		for (const n of [76_000, 85_000]) {
-			tokens = n;
-			expect(JSON.stringify((await pass()).messages)).toBe(before);
-			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toContain(2);
-		}
-		tokens = 95_000;
-		// Holding the unsafe drop never refuses the turn on its own: the unchanged
-		// turn is served, because only a proven final-wire overflow refuses.
-		expect(JSON.stringify((await pass()).messages)).toBe(before);
-		expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toContain(2);
-		messages.push(userMessage("next real user", 4));
 		tokens = 76_000;
-		await pass();
+		const busted = JSON.stringify((await pass()).messages);
+		expect(busted).not.toBe(before);
 		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(busted).not.toContain("signature-one");
+		expect(busted).not.toContain("signature-two");
+		expect(busted).toContain("newest");
+		for (const n of [85_000, 95_000]) {
+			tokens = n;
+			// Nothing refuses: the stripped request is served and replayed.
+			const replay = JSON.stringify((await pass()).messages);
+			expect(replay).not.toContain("signature-one");
+			expect(replay).not.toContain("signature-two");
+		}
 	} finally {
 		clearContextHandlerSession(sessionId);
 		closeQuietly(db);
@@ -358,10 +368,13 @@ for (const lane of [
 			event: { messages: never[] },
 			ctx: never,
 		) => Promise<{ messages: unknown[] }>;
+		// The active turn's steps are heavy, so the 66% passes are held by the
+		// bounded hold (below 65% + 10).
 		const thought = (n: number) =>
 			assistantMessage(`answer ${n}`, n, {
 				provider: "anthropic",
 				model: "claude-opus-5-5",
+				...(n >= 4 ? { usage: heavyReasoningUsage() } : {}),
 				content: [
 					{
 						type: "thinking",
@@ -554,10 +567,12 @@ for (const cause of ["first render", "idle expiry"] as const) {
 			};
 			registerPiContextHandler(fake.pi as never, options);
 			const handler = fake.handlers.get("context")!;
+			// A heavy active step keeps the 66% passes under the bounded hold.
 			const thought = (n: number) =>
 				assistantMessage(`answer ${n}`, n, {
 					provider: "anthropic",
 					model: "claude-opus-5-5",
+					...(n >= 4 ? { usage: heavyReasoningUsage() } : {}),
 					content: [
 						{
 							type: "thinking",

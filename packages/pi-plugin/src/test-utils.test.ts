@@ -90,6 +90,23 @@ export function assistantMessage(
 	} as PiMessage;
 }
 
+/**
+ * Assistant usage recording a heavy reasoning step (more than the bounded
+ * signed-thinking hold's 1,500 tokens), so a signed turn below the hold cap is
+ * held for it.
+ */
+export function heavyReasoningUsage(reasoning = 1_600) {
+	return {
+		input: 0,
+		output: reasoning,
+		reasoning,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: reasoning,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
 export function assistantToolCall(
 	id: string,
 	name: string,
