@@ -50,6 +50,8 @@ export interface RawOrdinalWarmupInput {
     previous?: RawSessionSummaryScan;
     harness?: HarnessId;
     indexCancellation?: SharedArrayBuffer;
+    /** Shared cancellation checked after imports, before the worker opens its SQLite connection. */
+    openCancellation?: SharedArrayBuffer;
     indexCoordination?: SharedArrayBuffer;
     indexOwner?: number;
     orphanSweep?: { sourcePath: string | null; options: MessageHistoryOrphanSweepOptions };
@@ -158,6 +160,9 @@ export function runSessionWarmupWorker(
 ): Promise<WorkerResult> {
     ensureExitHook();
     return new Promise((resolve) => {
+        const openCancellation = new Int32Array(
+            new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
+        );
         let worker: Worker | undefined;
         let deadline: ReturnType<typeof setTimeout> | undefined;
         let settled = false;
@@ -180,6 +185,8 @@ export function runSessionWarmupWorker(
         ) => {
             if (settled) return;
             settled = true;
+            // Worker termination is asynchronous; publish cancellation before requesting it.
+            Atomics.store(openCancellation, 0, 1);
             clearTimeout(deadline);
             options.signal?.removeEventListener("abort", abort);
             if (worker) {
@@ -211,7 +218,10 @@ export function runSessionWarmupWorker(
         options.signal?.addEventListener("abort", abort, { once: true });
         try {
             worker = inRootAsyncContext(
-                () => new Worker(options.entry ?? defaultEntry(), { workerData: input }),
+                () =>
+                    new Worker(options.entry ?? defaultEntry(), {
+                        workerData: { ...input, openCancellation: openCancellation.buffer },
+                    }),
             );
         } catch (error) {
             finish({ failure: "start-failed", detail: String(error) });

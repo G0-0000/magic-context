@@ -94,7 +94,7 @@ export { ensureColumn, FORK_MIGRATION_VERSION_FLOOR, healAllNullColumns };
 
 const databases = new Map<string, Database>();
 const pendingAsyncOpens = new Map<string, Promise<Database | null>>();
-const pendingDatabaseCloses = new Map<string, Promise<void>>();
+const pendingDatabaseCloses = new Set<Promise<void>>();
 interface StartupBackfills {
     controller: AbortController;
     timer?: ReturnType<typeof setTimeout>;
@@ -2648,10 +2648,6 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
     const existing = databases.get(dbPath);
-    if (!existing && pendingDatabaseCloses.has(dbPath)) {
-        log(`[magic-context] storage not ready: ${dbPath} is still closing its startup writer`);
-        return null;
-    }
     if (!existing && pendingAsyncOpens.has(dbPath)) {
         // A startup open of this database is still in flight, possibly with a
         // worker thread migrating it. A second connection opened here would run
@@ -2753,10 +2749,6 @@ export async function openDatabaseAsync(
         typeof dbPathOrOptions === "string" ? { dbPath: dbPathOrOptions } : dbPathOrOptions;
     const explicitDbPath = options?.dbPath !== undefined;
     const { dbDir, dbPath } = resolveDatabasePath(options?.dbPath);
-    // A terminated worker can still be releasing its native SQLite connection.
-    // Join that shutdown before a new connection reads or migrates the file.
-    const closing = pendingDatabaseCloses.get(dbPath);
-    if (closing) await closing;
     const latestSupportedVersion = getRuntimeLatestSupportedVersion(options);
     const busyTimeoutMs = resolveBootBusyTimeoutMs(options?.busyTimeoutMs);
     lastSchemaFenceRejection = null;
@@ -2903,7 +2895,7 @@ export function getDatabasePersistenceError(db: Database | null): string | null 
     return persistenceErrorByDatabase.get(db) ?? null;
 }
 
-/** Close serving handles immediately; await the result before reusing their files. */
+/** Close serving handles immediately; the result joins canceled startup work before file removal. */
 export function closeDatabase(): Promise<void> {
     pendingAsyncOpens.clear();
     for (const [key, db] of databases) {
@@ -2914,10 +2906,11 @@ export function closeDatabase(): Promise<void> {
             startupBackfills.delete(db);
             if (state.running) {
                 const closing = state.running.finally(() => {
-                    if (pendingDatabaseCloses.get(key) === closing)
-                        pendingDatabaseCloses.delete(key);
+                    pendingDatabaseCloses.delete(closing);
                 });
-                pendingDatabaseCloses.set(key, closing);
+                // A new generation may open while this worker releases its own connection.
+                // Track each shutdown separately so awaiting close still joins older generations.
+                pendingDatabaseCloses.add(closing);
             }
         }
         try {
@@ -2928,7 +2921,7 @@ export function closeDatabase(): Promise<void> {
             databases.delete(key);
         }
     }
-    return Promise.all(pendingDatabaseCloses.values()).then(() => {});
+    return Promise.all(pendingDatabaseCloses).then(() => {});
 }
 
 export type ContextDatabase = Database;

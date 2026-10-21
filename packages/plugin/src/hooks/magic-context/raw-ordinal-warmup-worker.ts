@@ -29,6 +29,11 @@ registerSqliteDiagnosticSink(log, getHarness);
 let db: InstanceType<typeof Database> | undefined;
 let reply: RawOrdinalWarmupReply;
 try {
+    // The imports above may still be loading after the parent requests termination.
+    // Check shared cancellation before opening SQLite; termination itself is asynchronous.
+    if (input.openCancellation && Atomics.load(new Int32Array(input.openCancellation), 0) !== 0) {
+        throw new Error("warm-up owner closed before database open");
+    }
     db =
         input.indexMessage || input.orphanSweep || input.ftsRowidBackfill
             ? new Database(input.path)

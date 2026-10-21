@@ -42,7 +42,10 @@ test("closing before the startup turn cancels the queued FTS writer", async () =
     expect(worker).not.toHaveBeenCalled();
 });
 
-test("closing joins the startup worker before reopening and cancels its continuation", async () => {
+test.each([
+    "sync",
+    "async",
+] as const)("%s reopen does not wait for a closed generation's startup worker", async (mode) => {
     useStore();
     let started!: () => void;
     const workerStarted = new Promise<void>((resolve) => {
@@ -64,29 +67,31 @@ test("closing joins the startup worker before reopening and cancels its continua
     const time = spyOn(messageTime, "startMessageTimeBackfill").mockResolvedValue();
     restoreWorker = () => worker.mockRestore();
     restoreTime = () => time.mockRestore();
-    expect(openDatabase()).not.toBeNull();
+    const original = openDatabase();
+    expect(original).not.toBeNull();
     await workerStarted;
     let closed = false;
     const closing = closeDatabase().then(() => {
         closed = true;
     });
-    let opening: Promise<ReturnType<typeof openDatabase>> | undefined;
     try {
         expect(aborted).toBe(true);
         expect(closed).toBe(false);
-        expect(openDatabase()).toBeNull();
-        let reopened = false;
-        opening = openDatabaseAsync().then((db) => {
-            reopened = true;
-            return db;
-        });
-        await Promise.resolve();
-        expect(reopened).toBe(false);
+        const reopened =
+            mode === "sync"
+                ? openDatabase()
+                : await Promise.race([
+                      openDatabaseAsync(),
+                      new Promise<null>((resolve) => setTimeout(() => resolve(null), 0)),
+                  ]);
+        expect(reopened).not.toBeNull();
+        expect(reopened).not.toBe(original);
+        expect(reopened?.query("SELECT 1 AS ready").get()).toEqual({ ready: 1 });
+        expect(closed).toBe(false);
     } finally {
         release();
     }
     await closing;
-    expect(await opening).not.toBeNull();
     expect(closed).toBe(true);
     expect(time).not.toHaveBeenCalled();
 });
