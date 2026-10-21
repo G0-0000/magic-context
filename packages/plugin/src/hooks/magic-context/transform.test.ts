@@ -5701,11 +5701,10 @@ describe("sticky nudge request-byte stability", () => {
         };
     }
 
-    // Earlier revisions held all 224 drops through the force band, and the claim
-    // was that the held pass could not first-append a nudge 150 steps back. The
-    // bounded hold ends at the cap (65% + 10), so this force-band pass is an
-    // ordinary bust: it applies the drops, strips every signed block once, and
-    // the next pass below the force band replays it byte for byte.
+    // Earlier versions held all 224 drops through the force band. With the
+    // bounded hold (it ends at 65% + 10), the force-band pass applies them,
+    // strips every signed block once, and the next pass replays the result
+    // byte for byte.
     it("force pass above the hold cap applies 224 queued drops mid-turn, strips signed thinking once and is replayed", async () => {
         const f = await fixture("held-nudge-prefix");
         const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
