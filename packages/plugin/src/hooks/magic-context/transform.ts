@@ -3140,11 +3140,9 @@ export function createTransform(deps: TransformDeps) {
                 boundaryContextLimit > 0 &&
                 (finalWireEstimate.refusalTokens ?? finalWireEstimate.tokens) > boundaryContextLimit
             ) {
-                // Held or not, an open signed turn that does not fit is retried
-                // once with every signed block stripped before refusing.
                 if (
                     !thinkingFitRetries.has(sessionId) &&
-                    signedThinkingPrefixBound &&
+                    activeThinkingPrefixHold &&
                     originalForThinkingFit &&
                     hasActiveAnthropicThinkingTurn(
                         messages,
@@ -3166,12 +3164,14 @@ export function createTransform(deps: TransformDeps) {
                     }
                     return;
                 }
-                // A pass that already stripped the turn's signed thinking (an
-                // unheld bust) and still does not fit refuses the same way.
+                // Only a held turn refuses on an estimated overflow: it cannot
+                // reclaim anything, so sending would loop on provider rejections.
+                // An unheld pass has already stripped and drained like any other
+                // model's bust; if it is still over, the ordinary overflow path
+                // (provider error, learned limit, emergency reclaim) takes over.
                 if (
                     thinkingFitRetries.has(sessionId) ||
                     postTransformResult.thinkingReleasedForFit ||
-                    postTransformResult.signedThinkingStripped ||
                     signedFitPreviouslyRefused
                 ) {
                     // The omission ledger outlives the recursive retry flag and host restarts.

@@ -1746,8 +1746,6 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
-    /** This pass stripped every signed block of the open turn before its edits. */
-    signedThinkingStripped?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -4859,7 +4857,6 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
-        signedThinkingStripped: rewritingSignedPrefix,
     };
 }
 

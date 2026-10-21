@@ -5515,7 +5515,13 @@ for (const trigger of ["wall", "final fit"] as const)
                 db,
                 tagger: createTagger(),
                 directory: makeTempDir("signed-fit-dir-"),
-                scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+                // The 95% wall release exists only for a held turn, and the hold
+                // ends at the execute threshold plus 10 points: the wall case
+                // needs a threshold of 90% (cap 100%) to still be held at 96%.
+                ...(trigger === "wall" ? { executeThresholdPercentage: 90 } : {}),
+                scheduler: createScheduler({
+                    executeThresholdPercentage: trigger === "wall" ? 90 : 65,
+                }),
                 contextUsageMap: usage,
                 historyRefreshSessions: new Set(),
                 pendingMaterializationSessions: new Set(),
@@ -5600,8 +5606,8 @@ for (const trigger of ["wall", "final fit"] as const)
                     },
                 );
                 queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-                // The final fit runs on a held pass (just below the 75% cap); the
-                // wall pass is above the cap and strips as an unheld bust.
+                // Both cases run on a held pass: the final fit just below the 75%
+                // cap, the wall at 96% under a 90% threshold (cap 100%).
                 const percentage = trigger === "wall" ? 96 : 74;
                 usage.set(sessionId, {
                     usage: { percentage, inputTokens: percentage * 1000 },
