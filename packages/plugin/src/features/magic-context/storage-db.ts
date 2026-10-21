@@ -1099,7 +1099,8 @@ function finishDatabaseOpen(
                                 // chain after yielding, without sharing an interactive turn's lock-wait limit.
                                 withoutSqliteTransformPass(() => {
                                     state.timer = setTimeout(runBackfills, busyRetryMs);
-                                    state.timer.unref();
+                                    // Hosts and test doubles may hand back a timer id without unref.
+                                    state.timer.unref?.();
                                 });
                                 busyRetryMs = Math.min(30000, busyRetryMs * 2);
                                 return;
