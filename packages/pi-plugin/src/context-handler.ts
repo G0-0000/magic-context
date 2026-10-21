@@ -8689,9 +8689,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		activeThinkingTurn = false;
 		protectedSignedPrefix = false;
 	};
+	// A fit rebuild strips an open signed turn whether or not it is held.
 	if (
 		args.recoveryRebuildReason ||
-		(args.forceSignedRebuildForFit && protectedSignedPrefix)
+		(args.forceSignedRebuildForFit && signedTurnOnPrefixBoundModel)
 	)
 		stripForPrefixRewrite(isCacheBustingPass);
 	// An unheld bust invalidates the signed thinking still kept in the turn.
