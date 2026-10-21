@@ -10,10 +10,13 @@ import { setHostInstructionRetentionEnabledForTests } from "../../features/magic
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
+import * as transformModule from "../../hooks/magic-context/transform";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
 import { setHarness } from "../../shared/harness";
 import * as logger from "../../shared/logger";
+import * as models from "../../shared/models-dev-cache";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
+import * as sqlite from "../../shared/sqlite";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { resetHostMediaForTests } from "../fold/host-media";
@@ -41,7 +44,14 @@ type Row = {
  */
 async function fixture(
     seed: number,
-    { provider = "openai", model = "gpt-4.1", cacheTtl = "5m", historian = false } = {},
+    {
+        provider = "openai",
+        model = "gpt-4.1",
+        cacheTtl = "5m",
+        historian = false,
+        instructions = true,
+        temporal = true,
+    } = {},
 ) {
     setHarness("opencode2");
     const base = join(tmpdir(), "magic-context/issue-750");
@@ -86,7 +96,7 @@ async function fixture(
         historian: { disable: !historian },
         dreamer: { disable: true },
         memory: { enabled: false, git_commit_indexing: { enabled: false } },
-        temporal_awareness: true,
+        temporal_awareness: temporal,
         mural: { enabled: false },
         protected_tokens: 4000,
         commit_cluster_trigger: { enabled: false },
@@ -189,7 +199,8 @@ async function fixture(
     addRow("user", `${seed}: start ${prose.repeat(2)}`);
     for (let n = 0; n < 12; n++) {
         addTurn();
-        if (n === 2 || n === 6 || n === 8) addRow("system", `Today's date is now: day ${n}.`);
+        if (instructions && (n === 2 || n === 6 || n === 8))
+            addRow("system", `Today's date is now: day ${n}.`);
     }
     persist();
     const startHook = async () => {
@@ -222,6 +233,22 @@ async function fixture(
             return {
                 draft,
                 bytes: JSON.stringify({ system: draft.system, messages: draft.messages }),
+                logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
+            };
+        },
+        /** A pass whose refusal is returned rather than thrown. */
+        async attempt() {
+            const draft = inputDraft();
+            const before = logs.mock.calls.length;
+            let error: unknown;
+            try {
+                await hooks.get("context")!(draft);
+            } catch (caught) {
+                error = caught;
+            }
+            return {
+                draft,
+                error,
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
@@ -664,3 +691,154 @@ test("issue 750: a historian join at 97% and the defer pass after it serve the s
         await f.cleanup();
     }
 }, 60000);
+
+/**
+ * Make the next request's first writer admission report a busy database once,
+ * as another process holding the writer does, before the admission succeeds.
+ */
+function installBusyAdmission() {
+    const realAdmit = sqlite.withAsyncPrivilegedWriter;
+    const state = { busyNext: false };
+    const spy = spyOn(sqlite, "withAsyncPrivilegedWriter").mockImplementation((async (
+        ...args: Parameters<typeof realAdmit>
+    ) => {
+        if (state.busyNext) {
+            state.busyNext = false;
+            args[2]?.beforeRetry?.(new sqlite.SqliteAcquisitionBusyError("database is locked"));
+        }
+        return realAdmit(...args);
+    }) as typeof realAdmit);
+    return { state, restore: () => spy.mockRestore() };
+}
+
+const lkgEvents = (logs: string[]) =>
+    logs
+        .filter((line) => /\blkg_[a-z_]+$/.test(line))
+        .map((line) => line.replace(/^.*\b(lkg_[a-z_]+)$/, "$1"))
+        .join(",");
+
+/** Make the next transform pass fail with a transient SQLite error, as a busy writer does. */
+function installTransientFailure() {
+    const realCreate = transformModule.createTransform;
+    const state = { failNext: false };
+    const spy = spyOn(transformModule, "createTransform").mockImplementation(((
+        deps: Parameters<typeof realCreate>[0],
+    ) => {
+        const real = realCreate(deps);
+        const wrapped = async (...args: Parameters<typeof real>) => {
+            if (state.failNext) {
+                state.failNext = false;
+                throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+            }
+            return real(...args);
+        };
+        return Object.assign(wrapped, real) as typeof real;
+    }) as typeof realCreate);
+    return { state, restore: () => spy.mockRestore() };
+}
+
+// Without a host checkpoint and without any instruction row, the fix serves
+// nothing new, so a busy database must end exactly as on base 122e2cc981. On
+// OpenCode 2 in TypeScript mode base does not replay here either:
+// - at admission the draft is adapted without the stored message times the
+//   transform input carries, so the saved copy's content digests differ:
+//   lkg_content_mismatch, then the pass runs;
+// - inside the transform the host's fit check compares the saved system prompt
+//   with one that already carries Magic Context's guidance and declines:
+//   lkg_replay_does_not_fit, then a refusal.
+for (const where of ["admission", "transform"] as const)
+    test(`issue 750: a busy database before any checkpoint ends as on base (${where})`, async () => {
+        const failure = installTransientFailure();
+        const busy = installBusyAdmission();
+        const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+        const f = await fixture(754, { instructions: false });
+        try {
+            f.compartment(4);
+            await f.pass();
+            f.respond();
+            const before = await f.pass();
+            f.respond();
+            if (where === "admission") busy.state.busyNext = true;
+            else failure.state.failNext = true;
+            const failed = await f.attempt();
+            console.log(
+                `ISSUE750_LKG pre-checkpoint ${where} error=${failed.error ? String(failed.error).slice(0, 80) : "none"} lkg=${lkgEvents(failed.logs)}`,
+            );
+            if (where === "admission") {
+                expect(lkgEvents(failed.logs)).toBe("lkg_content_mismatch");
+                expect(failed.error).toBeUndefined();
+                expect(
+                    firstDivergence(
+                        before.draft.messages,
+                        failed.draft.messages.slice(0, before.draft.messages.length),
+                    ),
+                ).toBeNull();
+            } else {
+                expect(lkgEvents(failed.logs)).toBe("lkg_replay_does_not_fit,lkg_replay_declined");
+                expect(String(failed.error)).toContain("database is busy");
+            }
+        } finally {
+            busy.restore();
+            failure.restore();
+            limit.mockRestore();
+            await f.cleanup();
+        }
+    }, 60000);
+
+// After a host checkpoint the restored covered instruction rows reach the
+// transform handler without ids, and the request serves them. The saved copy
+// must still be captured and the entry check must skip those rows, so a busy
+// database ends exactly as on base 122e2cc981 (where every covered row was cut):
+// - at admission the entry is the host draft without the restored rows, which
+//   never matches the saved input: lkg_invalidated_reshape, then the pass runs;
+// - inside the transform the candidate is built and reaches the host's fit
+//   check, which declines it: lkg_replay_does_not_fit, then a refusal.
+// Neither may end as lkg_miss (no saved copy at all).
+for (const where of ["admission", "transform"] as const)
+    test(`issue 750: a busy database after a checkpoint ends as on base (${where})`, async () => {
+        const failure = installTransientFailure();
+        const busy = installBusyAdmission();
+        const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+        const f = await fixture(753);
+        try {
+            f.compartment(4);
+            await f.pass();
+            // Every instruction row (rows 7, 16, 21) is covered, so on base the
+            // request had no id-less row.
+            f.compartment(22);
+            f.idle();
+            await f.pass();
+            f.respond();
+            await f.pass();
+            await f.fold();
+            f.user(`753 after the checkpoint: ${prose}`, 120000);
+            await f.pass();
+            f.respond();
+            const before = await f.pass();
+            f.respond();
+            if (where === "admission") busy.state.busyNext = true;
+            else failure.state.failNext = true;
+            const failed = await f.attempt();
+            console.log(
+                `ISSUE750_LKG after-checkpoint ${where} error=${failed.error ? String(failed.error).slice(0, 80) : "none"} lkg=${lkgEvents(failed.logs)} instructions=${instructionTexts(before.draft.messages).length}`,
+            );
+            if (where === "admission") {
+                expect(lkgEvents(failed.logs)).toBe("lkg_invalidated_reshape");
+                expect(failed.error).toBeUndefined();
+                expect(
+                    firstDivergence(
+                        before.draft.messages,
+                        failed.draft.messages.slice(0, before.draft.messages.length),
+                    ),
+                ).toBeNull();
+            } else {
+                expect(lkgEvents(failed.logs)).toBe("lkg_replay_does_not_fit,lkg_replay_declined");
+                expect(String(failed.error)).toContain("database is busy");
+            }
+        } finally {
+            busy.restore();
+            failure.restore();
+            limit.mockRestore();
+            await f.cleanup();
+        }
+    }, 60000);

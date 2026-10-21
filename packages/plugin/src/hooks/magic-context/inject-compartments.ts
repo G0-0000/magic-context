@@ -76,7 +76,7 @@ import {
 } from "./compartment-render-epoch";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
-import { isHostRenderedSystemMessage } from "./host-served-rows";
+import { isHostRenderedSystemMessage, markCoveredInstructionRow } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
@@ -430,7 +430,13 @@ function cutCoveredPrefix(
     coveredInstructions: MessageLike[],
 ): void {
     const removed = messages.splice(0, count);
-    coveredInstructions.push(...removed.filter(isHostRenderedSystemMessage));
+    for (const message of removed) {
+        if (!isHostRenderedSystemMessage(message)) continue;
+        // Marked like a restored covered row, so a request that serves it again
+        // can still be saved as the last-known-good copy (see lkg-replay.ts).
+        markCoveredInstructionRow(message.info);
+        coveredInstructions.push(message);
+    }
 }
 
 export function prepareCompartmentInjection(
