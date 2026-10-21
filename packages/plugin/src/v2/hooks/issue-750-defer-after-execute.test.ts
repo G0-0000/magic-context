@@ -738,9 +738,10 @@ function installTransientFailure() {
     return { state, restore: () => spy.mockRestore() };
 }
 
-// Without a host checkpoint and without any instruction row, the fix serves
-// nothing new, so a busy database must end exactly as on base 122e2cc981. On
-// OpenCode 2 in TypeScript mode base does not replay here either:
+// Without a host checkpoint and without any instruction row there are no
+// covered rows, so a busy database must end as it did before covered rows were
+// served. On OpenCode 2 in TypeScript mode that earlier code does not replay
+// here either:
 // - at admission the draft is adapted without the stored message times the
 //   transform input carries, so the saved copy's content digests differ:
 //   lkg_content_mismatch, then the pass runs;
@@ -748,7 +749,7 @@ function installTransientFailure() {
 //   with one that already carries Magic Context's guidance and declines:
 //   lkg_replay_does_not_fit, then a refusal.
 for (const where of ["admission", "transform"] as const)
-    test(`issue 750: a busy database before any checkpoint ends as on base (${where})`, async () => {
+    test(`issue 750: a busy database before any checkpoint ends as before covered rows were served (${where})`, async () => {
         const failure = installTransientFailure();
         const busy = installBusyAdmission();
         const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
@@ -789,14 +790,15 @@ for (const where of ["admission", "transform"] as const)
 // After a host checkpoint the restored covered instruction rows reach the
 // transform handler without ids, and the request serves them. The saved copy
 // must still be captured and the entry check must skip those rows, so a busy
-// database ends exactly as on base 122e2cc981 (where every covered row was cut):
+// database ends as it did before covered rows were served, when the history
+// trim cut every covered row and the request had no id-less row:
 // - at admission the entry is the host draft without the restored rows, which
 //   never matches the saved input: lkg_invalidated_reshape, then the pass runs;
 // - inside the transform the candidate is built and reaches the host's fit
 //   check, which declines it: lkg_replay_does_not_fit, then a refusal.
 // Neither may end as lkg_miss (no saved copy at all).
 for (const where of ["admission", "transform"] as const)
-    test(`issue 750: a busy database after a checkpoint ends as on base (${where})`, async () => {
+    test(`issue 750: a busy database after a checkpoint ends as before covered rows were served (${where})`, async () => {
         const failure = installTransientFailure();
         const busy = installBusyAdmission();
         const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
@@ -804,8 +806,9 @@ for (const where of ["admission", "transform"] as const)
         try {
             f.compartment(4);
             await f.pass();
-            // Every instruction row (rows 7, 16, 21) is covered, so on base the
-            // request had no id-less row.
+            // Every instruction row (rows 7, 16, 21) is covered. Before covered
+            // rows were served, the trim cut them all and the request had no
+            // id-less row.
             f.compartment(22);
             f.idle();
             await f.pass();
