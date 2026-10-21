@@ -7,6 +7,7 @@ import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { setHostInstructionRetentionEnabledForTests } from "../../features/magic-context/storage-host-instruction-retention";
+import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import { resetLkgSlotsForTest } from "../../hooks/magic-context/lkg-slot";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
@@ -29,6 +30,8 @@ type Row = {
     text: string;
     created: number;
     seq: number;
+    /** Provider input tokens recorded on an assistant row (drives context usage). */
+    inputTokens?: number;
 };
 
 /**
@@ -38,7 +41,7 @@ type Row = {
  */
 async function fixture(
     seed: number,
-    { provider = "openai", model = "gpt-4.1", cacheTtl = "5m" } = {},
+    { provider = "openai", model = "gpt-4.1", cacheTtl = "5m", historian = false } = {},
 ) {
     setHarness("opencode2");
     const base = join(tmpdir(), "magic-context/issue-750");
@@ -80,7 +83,7 @@ async function fixture(
     const config = MagicContextConfigSchema.parse({
         auto_update: false,
         embedding: { provider: "off" },
-        historian: { disable: true },
+        historian: { disable: !historian },
         dreamer: { disable: true },
         memory: { enabled: false, git_commit_indexing: { enabled: false } },
         temporal_awareness: true,
@@ -152,7 +155,7 @@ async function fixture(
                           model: { providerID: provider, id: model },
                           time: { created: row.created, completed: row.created + 1000 },
                           tokens: {
-                              input: 10000,
+                              input: row.inputTokens ?? 10000,
                               output: 50,
                               reasoning: 0,
                               cache: { read: 0, write: 0 },
@@ -278,8 +281,9 @@ async function fixture(
             nowClock += hours * 3600000;
         },
         /** The provider answers the last request: a new assistant row completes now. */
-        respond(repeat = 1) {
+        respond(repeat = 1, inputTokens?: number) {
             addRow("assistant", `${seed}/reply ${rows.length}: ${prose.repeat(repeat)}`, 5000);
+            if (inputTokens !== undefined) rows[rows.length - 1]!.inputTokens = inputTokens;
             persist();
         },
         /** A user turn after `gapMs` of quiet, optionally carrying an injected reminder. */
@@ -599,3 +603,64 @@ for (const checkpoint of [true, false]) {
         }
     }, 60000);
 }
+
+// At 95% context and above a pass waits for the historian and, once the run
+// publishes, prepares the history a second time at the new boundary. That
+// second cut must set covered instruction rows aside exactly like the first
+// cut of the next pass, so the pass that joined the historian and the defer
+// pass after it serve the same instruction rows. The historian's model call is
+// replaced by a stub that publishes one compartment; the join, the publication
+// signal and the re-preparation are the real ones. While a session has a cached
+// m[0], both preparations trim at its stored boundary, so the re-preparation
+// cuts new rows only on a pass without one (here, after a compaction-mode switch).
+test("issue 750: a historian join at 97% and the defer pass after it serve the same bytes", async () => {
+    const f = await fixture(752, { historian: true });
+    let published = 0;
+    const agent = spyOn(incremental, "runCompartmentAgent").mockImplementation(async (deps) => {
+        if (published++ > 0) return;
+        // Covers rows 5..15, across the "day 2" instruction row (row 7).
+        f.compartment(15);
+        deps.onCompartmentStatePublished?.(deps.sessionId);
+    });
+    try {
+        f.compartment(4);
+        await f.pass();
+        f.respond();
+        await f.pass();
+        // A compaction-mode switch clears the cached m[0]/m[1] bytes (the same
+        // statement as clearCachedM0Baseline in compaction-off-transition.ts),
+        // so the next trim follows the newest compartment. That pass arrives at
+        // 97% of the window: it blocks on the historian, which publishes a
+        // compartment across "day 2".
+        f.db
+            .prepare(
+                "UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL, cached_m0_mural_data_url = NULL WHERE session_id = ?",
+            )
+            .run(f.session);
+        f.respond(1, 970_000);
+        const joined = await f.pass();
+        const joinedLog = joined.logs.join("\n");
+        expect(joinedLog).toMatch(/blocking at 97\.\d% until compartment agent completes/);
+        expect(joinedLog).toContain("compartment agent completed, refreshing compartment coverage");
+        expect(published).toBe(1);
+        // The usage after the joined request is ordinary again: a defer pass.
+        f.respond();
+        const defer = await f.pass();
+        expect(defer.logs.join("\n")).toMatch(/transform scheduler: .*decision=defer/);
+        expect(defer.draft.system).toEqual(joined.draft.system);
+        expect(
+            firstDivergence(
+                joined.draft.messages,
+                defer.draft.messages.slice(0, joined.draft.messages.length),
+            ),
+        ).toBeNull();
+        expect(instructionTexts(joined.draft.messages)).toEqual([
+            "Today's date is now: day 2.",
+            "Today's date is now: day 6.",
+            "Today's date is now: day 8.",
+        ]);
+    } finally {
+        agent.mockRestore();
+        await f.cleanup();
+    }
+}, 60000);
