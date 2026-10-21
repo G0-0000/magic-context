@@ -98,6 +98,14 @@ Both hosts open the same `context.db`, but each keeps its own cached copy of the
 
 After each Magic Context release, update both hosts before using either one, so neither is left behind the database.
 
+### Claude rejects a turn: conversation must end with a user message (OpenCode 1)
+
+**The error:** On OpenCode 1, Anthropic sometimes refuses a turn with: “This model does not support assistant message prefill. The conversation must end with a user message.” It happens more often when background subagents or other tools post notices into a session.
+
+**The cause:** OpenCode 1 has a race in its own step loop. Each step reads the history before it creates its reply. A message saved between those events, such as a background-task notice, sorts before the reply. The next request can then end on the model's own reply instead of a user message. This also happens with no plugins installed; Magic Context doesn't cause it and doesn't change the order.
+
+**The fix:** Use OpenCode 2. It holds messages posted mid-step until the step ends and orders history by sequence, so this can't happen there. On OpenCode 1, send the next message to continue.
+
 ---
 
 ## Historian failures
