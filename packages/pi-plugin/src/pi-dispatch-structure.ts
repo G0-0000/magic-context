@@ -192,20 +192,22 @@ function appendDuplicateSuffix(id: string, suffix: string, max: number) {
  * @oh-my-pi/pi-ai src/providers/transform-messages.ts deduplicateToolCallIds,
  * takeRealToolResult, flushPendingToolCalls, flushPendingAbortedToolCalls and
  * the second pass of transformMessages):
- * - A reused call id is renamed with a `_dupN` suffix, and the next result
- *   for that id follows it. A later turn reusing the id discards the earlier
- *   turn's unclaimed renames.
+ * - A reused call id is renamed with a duplicate suffix (`_dupN`, or `dupN`
+ *   for Mistral-style ids), and the next result for that id follows it. A
+ *   later turn reusing the id discards the earlier turn's unclaimed renames.
  * - Every assistant, user, developer or other non-result message closes the
  *   open window. Each call still unanswered there takes the earliest real
  *   result for its pairing key that sits after the call's assistant message
  *   and was not taken before, and that result moves into the window; a call
- *   with no such result gets a "No result provided" stub ("aborted" for an
- *   aborted or errored turn, stamped with that turn's timestamp).
+ *   with no such result gets a "No result provided" stub. An aborted or
+ *   errored turn's calls get an "aborted" stub stamped with that turn's
+ *   timestamp; without a timestamp its window never closes.
  * - A result for an already answered call is dropped, so a moved result never
  *   appears again at its old position. So is a result whose call is valid but
  *   whose window is not open (it arrived before its call).
- * - A result whose call is not in the history is dropped while a window is
- *   unanswered, and otherwise becomes a `<stale-tool-result>` user note.
+ * - On providers that use transformMessages, a result whose call is not in
+ *   the history is dropped while a window is unanswered; otherwise its
+ *   nonblank text becomes a `<stale-tool-result>` user note.
  *
  * Pi (0.87.1 and 1.3.0; @earendil-works/pi-ai dist/api/transform-messages.js)
  * never moves a result. Only assistant and user messages close a window, and
@@ -213,7 +215,8 @@ function appendDuplicateSuffix(id: string, suffix: string, max: number) {
  * messages inside an open window are held until it closes. Errored and aborted
  * assistant messages are not replayed at all.
  *
- * Only message order and tool ids change; the returned history is untouched.
+ * The input is not mutated; the projection may add, drop, move or replace rows
+ * and rename duplicate tool ids.
  */
 function projectMissingToolResults(
 	messages: readonly unknown[],
@@ -370,7 +373,9 @@ function projectMissingToolResults(
 			flush(message.timestamp);
 			projected.push(value);
 			const calls = windowCalls(message);
-			// A truncated turn with no text or call is not replayed and opens no window.
+			// The host does not replay a truncated turn with neither text nor a tool
+			// call, so it opens no window. Its row stays here for the lane-specific
+			// omissions later in this file.
 			const truncated = ["length", "error", "aborted"].includes(
 				String(message.stopReason),
 			);
@@ -418,7 +423,7 @@ function projectMissingToolResults(
 			!Array.isArray(message.content)
 		) {
 			// Providers outside transformMessages keep an unpaired result in place,
-			// and a malformed one keeps its row so the structure stays unreadable.
+			// and a malformed result is preserved unchanged.
 			projected.push(value);
 			continue;
 		}
