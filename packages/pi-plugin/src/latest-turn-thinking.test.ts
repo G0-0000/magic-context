@@ -149,8 +149,8 @@ test("Pi Anthropic task applies queued drops mid-turn above the hold cap and str
 	};
 	const messages = [
 		userMessage("task", 1),
-		// Heavy steps hold the turn below the cap, so its signed thinking is
-		// still kept when usage crosses it.
+		// Heavy steps keep the turn's signed thinking while usage stays below
+		// the 75% cap; the 76% bust below strips it.
 		assistantMessage("spent", 2, {
 			provider: "anthropic",
 			model: "claude-opus-5-5",
