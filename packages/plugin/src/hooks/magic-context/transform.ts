@@ -701,6 +701,7 @@ export interface TransformDeps {
      * adapter supplies it.
      */
     normalizeRestoredAssistantText?: (text: string) => string;
+    refreshSourceContents?: (sessionId: string) => boolean;
 }
 
 export function resolveTransformHostSeams(
@@ -2367,6 +2368,7 @@ export function createTransform(deps: TransformDeps) {
                       skipPrefixInjection: !ctxReduceCallable,
                       servedMessages: messages,
                       normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
+                      refreshSourceContents: deps.refreshSourceContents?.(sessionId),
                   });
                   for (const [number, target] of tagged.targets) targets.set(number, target);
                   for (const [message, parts] of tagged.reasoningByMessage)
@@ -2432,6 +2434,7 @@ export function createTransform(deps: TransformDeps) {
                         scopedToolSweep,
                         servedMessages: messages,
                         normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
+                        refreshSourceContents: deps.refreshSourceContents?.(sessionId),
                     },
                 );
                 targets = result.targets;

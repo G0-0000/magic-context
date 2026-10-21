@@ -1,5 +1,9 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
-import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
+import {
+    getSourceContents,
+    replaceSourceContent,
+    saveSourceContent,
+} from "../../features/magic-context/storage";
 import {
     adoptNullOwnerToolTag,
     getCandidateToolOwners,
@@ -10,6 +14,8 @@ import {
     getToolTagNumberByOwner,
     markWhitespaceAssistantTagInert,
     pickNearestPriorOwner,
+    updateTagByteSize,
+    updateTagTokenCount,
 } from "../../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
 import { textMentionsRecentCommit } from "../../shared/commit-detection";
@@ -477,6 +483,9 @@ function extractToolTagMetadata(part: unknown): {
 }
 
 export interface TagMessagesOptions {
+    /** Rebaseline saved text when the host proves stored rows changed under the
+     * same ids. Also expire the cached history head so the shared transform rebuilds it. */
+    refreshSourceContents?: boolean;
     /** Original part references in the provider's unfinished signed assistant turn. */
     protectedThinkingMessages?: ReadonlySet<MessageLike>;
     /**
@@ -937,16 +946,25 @@ export function tagMessages(
                 // when assignTag's recovery rebound a different tag number
                 // than what the resolver expected.
                 const persistedSource = sourceContents.get(tagId);
-                if (persistedSource !== undefined) {
+                if (persistedSource !== undefined && !options.refreshSourceContents) {
                     textPart.text =
                         options.normalizeRestoredAssistantText && message.info.role === "assistant"
                             ? options.normalizeRestoredAssistantText(persistedSource)
                             : persistedSource;
                 } else {
                     const sourceContent = stripTagPrefix(textPart.text);
-                    if (sourceContent.trim().length > 0) {
+                    if (sourceContent.trim().length > 0 || options.refreshSourceContents) {
                         const _tSaveText = performance.now();
-                        saveSourceContent(db, sessionId, tagId, sourceContent);
+                        if (options.refreshSourceContents) {
+                            replaceSourceContent(db, sessionId, tagId, sourceContent);
+                            updateTagByteSize(db, sessionId, tagId, byteSize(sourceContent));
+                            updateTagTokenCount(
+                                db,
+                                sessionId,
+                                tagId,
+                                estimateTextTagTokenCount(sourceContent),
+                            );
+                        } else saveSourceContent(db, sessionId, tagId, sourceContent);
                         accSaveSource += performance.now() - _tSaveText;
                     }
                 }
@@ -1095,7 +1113,9 @@ export function tagMessages(
                     const sourceContent = buildFileSourceContent(message.parts);
                     if (sourceContent) {
                         const _tSaveFile = performance.now();
-                        saveSourceContent(db, sessionId, tagId, sourceContent);
+                        if (options.refreshSourceContents)
+                            replaceSourceContent(db, sessionId, tagId, sourceContent);
+                        else saveSourceContent(db, sessionId, tagId, sourceContent);
                         accSaveSource += performance.now() - _tSaveFile;
                     }
                 }
