@@ -3164,9 +3164,12 @@ export function createTransform(deps: TransformDeps) {
                     }
                     return;
                 }
+                // A pass that already stripped the turn's signed thinking (an
+                // unheld bust) and still does not fit refuses the same way.
                 if (
                     thinkingFitRetries.has(sessionId) ||
                     postTransformResult.thinkingReleasedForFit ||
+                    postTransformResult.signedThinkingStripped ||
                     signedFitPreviouslyRefused
                 ) {
                     // The omission ledger outlives the recursive retry flag and host restarts.

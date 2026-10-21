@@ -1746,6 +1746,8 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
+    /** This pass stripped every signed block of the open turn before its edits. */
+    signedThinkingStripped?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -2495,20 +2497,33 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
-    // An unheld bust of a prefix-bound model with signed thinking still kept in
-    // the turn invalidates that thinking: strip every signed block now, before
-    // any lane edits, through the same persisted freeze a held pass's release
-    // uses. Latest-turn protection is then lifted, so queued drops and cleanup
-    // in the turn land on this bust as on any other model. This treats every
-    // such bust as changing bytes before the kept thinking; removing every
-    // block is always accepted, so the cost is only reasoning, never validity.
+    // An unheld bust of a prefix-bound model whose turn still keeps signed
+    // thinking lands like a bust on any other model: latest-turn protection is
+    // lifted so queued drops and cleanup in the turn apply on it. A bust that
+    // changes anything before the kept thinking must then strip every signed
+    // block, because those blocks no longer match their prefix:
+    // - a pass whose head changed (fold, first render, m[1] refresh) strips
+    //   now, before any lane edits, through the same persisted freeze a held
+    //   pass's release uses;
+    // - any other bust (flush, pressure, idle expiry, subagent execute) strips
+    //   at the end of the pass through the proactive strip, only if one of its
+    //   edits lies before newer thinking, so a bust with nothing to apply keeps
+    //   the turn's thinking.
+    let unheldSignedTurnBust = false;
     if (
         isCacheBustingPass &&
         !activeThinkingPrefixHold &&
         activeThinkingTurn &&
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
-        releaseThinkingForRewrite();
+        if (foldBustsServedPrefixThisPass || firstRenderBust || publishedM1RefreshedThisPass)
+            releaseThinkingForRewrite();
+        else {
+            unheldSignedTurnBust = true;
+            retainedThinking.clear();
+            protectedThinkingMessages.clear();
+            newTargets = args.targets;
+        }
     }
     // Keep recovery bytes until the shared permission allows a cache rewrite
     // (for example, a user flush or pressure relief). Normalize before applying
@@ -4549,7 +4564,14 @@ export async function runPostTransformPhase(
                 mergedReasoningStrippedIds.add(thinkingBindingRecoveryFrozenId(messageId));
             }
             bustedThisPass = true;
+            // The open turn's thinking went with it: its pre-rejection originals
+            // must not be restored over the strip.
+            if (unheldSignedTurnBust) rewritingSignedPrefix = true;
         } else if (outcome.persistenceFailed) {
+            // The open turn's edits are already applied in front of its kept
+            // thinking; serving them without the strip would be rejected.
+            if (unheldSignedTurnBust)
+                throw new Error("Cannot persist signed thinking omission after a mid-turn edit");
             failPass("proactive-thinking-strip-persistence-failure");
         }
     }
@@ -4833,6 +4855,7 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
+        signedThinkingStripped: rewritingSignedPrefix,
     };
 }
 

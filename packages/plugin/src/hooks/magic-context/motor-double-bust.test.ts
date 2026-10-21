@@ -536,7 +536,11 @@ it("MOTOR: rebuild and five-second defer have byte-identical Anthropic history",
         pendingDrops: 0,
     });
     expect(JSON.stringify(rebuild.pinned)).toContain("New history covers all fifty old users");
-    expect(run.rebuildLogs).toContain("origin=fit_retry");
+    // At 96% the signed turn is above the hold cap (65% + 10), so it is never
+    // held and needs no signed-fit retry: the rebuild is an ordinary bust.
+    // (Earlier revisions held the turn and reached the rebuild through a fit
+    // retry.)
+    expect(run.rebuildLogs).not.toContain("origin=fit_retry");
     expect(run.replayLogs).toMatch(/transform scheduler: .*decision=defer/);
     expect(run.replayLogs).not.toContain("heuristics WILL RUN");
     expect(run.rebuild.filter((row) => run.coveredIds.includes(row.info.id ?? ""))).toHaveLength(0);

@@ -23,7 +23,7 @@
 //   identical provider-visible bytes in front of it on both.
 import { afterAll, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -36,6 +36,7 @@ import {
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import * as logger from "@magic-context/core/shared/logger";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	__test as contextHandlerInternals,
@@ -225,7 +226,7 @@ test.skipIf(!BASE || !HEAD)(
 		const pick = <T>(items: readonly T[]): T =>
 			items[Math.floor(random() * items.length)]!;
 		const sessionId = "pi-hold-diff";
-		const root = mkdtempSync(join(tmpdir(), "pi-hold-diff-"));
+		const root = createTestTempDirFromPath(join(tmpdir(), "pi-hold-diff-"));
 		const db = createTestDb(join(root, "warm.db"));
 		const counts = {
 			passes: 0,

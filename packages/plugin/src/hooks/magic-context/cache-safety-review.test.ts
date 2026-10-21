@@ -656,7 +656,10 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
         });
         const released = active();
         await transform({}, { messages: released });
-        expect(logs.mock.calls.map((call) => call.slice(1).join(" ")).join("\n")).toContain(
+        // At 96% the signed turn is above the hold cap (65% + 10): it is never
+        // held, so the release is an ordinary bust rather than a signed-fit
+        // retry (as it was before the hold was bounded).
+        expect(logs.mock.calls.map((call) => call.slice(1).join(" ")).join("\n")).not.toContain(
             "origin=fit_retry",
         );
         expect(JSON.stringify(released)).not.toContain("Active thought");

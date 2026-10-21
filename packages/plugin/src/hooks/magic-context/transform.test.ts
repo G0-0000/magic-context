@@ -4954,7 +4954,11 @@ describe("Channel 1 reminder copy changes", () => {
 });
 
 for (const generation of ["v1", "v2"] as const) {
-    it(`${generation} Anthropic task queues reductions for the whole thinking turn, including force`, async () => {
+    // Earlier revisions held the queued reduction for the whole signed turn,
+    // through the force band. The bounded hold ends at the cap (65% + 10), so the
+    // first bust above it applies the reduction mid-turn and strips every signed
+    // block of the turn.
+    it(`${generation} Anthropic task applies queued reductions mid-turn above the hold cap`, async () => {
         useTempDataHome(`latest-turn-${generation}-`);
         const db = openDatabase()!;
         const sessionId = `latest-turn-${generation}`;
@@ -5017,26 +5021,29 @@ for (const generation of ["v1", "v2"] as const) {
             )!;
             expect(tag).toBeDefined();
             queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-            for (const percentage of [76, 85]) {
-                usage.set(sessionId, {
-                    usage: { percentage, inputTokens: percentage * 1000 },
-                    updatedAt: Date.now(),
-                    hasUsageTokens: true,
-                });
-                expect(JSON.stringify(await pass())).toBe(JSON.stringify(baseline));
-                expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toContain(tag.tagNumber);
-                expect(
-                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag.tagNumber)
-                        ?.status,
-                ).toBe("active");
-            }
+            usage.set(sessionId, {
+                usage: { percentage: 76, inputTokens: 76_000 },
+                updatedAt: Date.now(),
+                hasUsageTokens: true,
+            });
+            const busted = await pass();
+            expect(JSON.stringify(busted)).not.toBe(JSON.stringify(baseline));
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag.tagNumber)?.status,
+            ).toBe("dropped");
+            expect(
+                busted
+                    .flatMap((message) => message.parts)
+                    .filter((part) => part.type === "reasoning"),
+            ).toHaveLength(0);
             usage.set(sessionId, {
                 usage: { percentage: 95, inputTokens: 95_000 },
                 updatedAt: Date.now(),
                 hasUsageTokens: true,
             });
-            // The wall cannot reclaim in front of kept signatures. It first
-            // omits every signed block, then applies the queued reduction.
+            // A newer step's thinking is kept until the next bust; the 95% wall
+            // strips it again.
             raw.push({
                 info: {
                     id: "last-thought",
@@ -5053,7 +5060,6 @@ for (const generation of ["v1", "v2"] as const) {
                     .flatMap((message) => message.parts)
                     .filter((part) => part.type === "reasoning"),
             ).toHaveLength(0);
-            expect(getPendingOps(db, sessionId)).toHaveLength(0);
             raw.push({
                 info: { id: "next", role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "Next real user" }],
@@ -5099,8 +5105,16 @@ for (const { modelID, prefixBound } of [
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map(),
         });
+        // Heavy steps (1,600 reasoning tokens): on the prefix-bound model the
+        // bounded hold keeps the turn's prefix below the cap (65% + 10).
         const step = (id: string, n: number, output: string): TestMessage => ({
-            info: { id, role: "assistant", sessionID: sessionId, ...model },
+            info: {
+                id,
+                role: "assistant",
+                sessionID: sessionId,
+                ...model,
+                tokens: { input: 0, output: 1_600, reasoning: 1_600 },
+            },
             parts: [
                 { type: "reasoning", text: `signed thinking ${n}` },
                 {
@@ -5170,15 +5184,15 @@ for (const { modelID, prefixBound } of [
             // Either way, the active turn's thinking reaches the provider unchanged.
             expect(activeThinking(executed)).toBe(activeThinking(baseline));
             if (prefixBound) {
-                // At 66%, the unfinished thinking turn postpones every prefix edit,
-                // including old thinking removal, until the next real user request.
+                // At 66%, below the cap, the turn held for its heavy reasoning
+                // postpones every prefix edit, including old thinking removal.
                 expect(JSON.stringify(executed)).toBe(JSON.stringify(baseline));
                 expect(JSON.stringify(await pass())).toBe(JSON.stringify(baseline));
                 const holds = logs.mock.calls.filter((call) =>
                     String(call[1]).includes("m[0]/m[1] frozen:"),
                 );
                 expect(holds.map((call) => call[1])).toEqual([
-                    "m[0]/m[1] frozen: active thinking turn (prefix-bound model); replaying the frozen prefix and deferring any rebuild",
+                    "m[0]/m[1] frozen: recent heavy reasoning in the active thinking turn (prefix-bound model); replaying the frozen prefix and deferring any rebuild",
                 ]);
                 expect(JSON.stringify(executed)).toContain("OLD-SPENT");
                 expect(JSON.stringify(executed)).toContain("ACTIVE-SPENT");
@@ -5378,6 +5392,8 @@ it("a flush in a held signed turn is parked through execute and defer passes and
                     sessionID: sessionId,
                     providerID: "anthropic",
                     modelID: "claude-opus-5-5",
+                    // A heavy step: the bounded hold keeps the turn below the cap.
+                    tokens: { input: 0, output: 1_600, reasoning: 1_600 },
                 },
                 parts: [
                     { type: "reasoning", text: "kept signed thinking" },
@@ -5398,8 +5414,9 @@ it("a flush in a held signed turn is parked through execute and defer passes and
         // held execute and a later explicit-flush defer must leave it that way.
         expect(getStrippedPlaceholderIds(db, sessionId).has("held-placeholder")).toBe(false);
         const start = logs.mock.calls.length;
+        // Execute, and just below the hold cap (65% + 10).
         usage.set(sessionId, {
-            usage: { percentage: 75.1, inputTokens: 150200 },
+            usage: { percentage: 74.9, inputTokens: 149800 },
             updatedAt: Date.now(),
             hasUsageTokens: true,
         });
@@ -5439,7 +5456,9 @@ it("a flush in a held signed turn is parked through execute and defer passes and
         ).toBe(false);
         expect(
             logs.mock.calls.filter((args) =>
-                String(args[1]).includes("m[0]/m[1] frozen: active thinking turn"),
+                String(args[1]).includes(
+                    "m[0]/m[1] frozen: recent heavy reasoning in the active thinking turn",
+                ),
             ),
         ).toHaveLength(1);
         source.push({
@@ -5574,12 +5593,16 @@ for (const trigger of ["wall", "final fit"] as const)
                             sessionID: sessionId,
                             providerID: "anthropic",
                             modelID: fitModel,
+                            // A heavy step: below the cap the bounded hold keeps it.
+                            tokens: { input: 0, output: 1_600, reasoning: 1_600 },
                         },
                         parts: [{ type: "reasoning", text: "kept signed thinking" }],
                     },
                 );
                 queuePendingOp(db, sessionId, tag.tagNumber, "drop");
-                const percentage = trigger === "wall" ? 96 : 75;
+                // The final fit runs on a held pass (just below the 75% cap); the
+                // wall pass is above the cap and strips as an unheld bust.
+                const percentage = trigger === "wall" ? 96 : 74;
                 usage.set(sessionId, {
                     usage: { percentage, inputTokens: percentage * 1000 },
                     updatedAt: Date.now(),
@@ -5678,7 +5701,12 @@ describe("sticky nudge request-byte stability", () => {
         };
     }
 
-    it("force pass with 224 thinking-held drops cannot first-append a nudge 150 steps back", async () => {
+    // Earlier revisions held all 224 drops through the force band, and the claim
+    // was that the held pass could not first-append a nudge 150 steps back. The
+    // bounded hold ends at the cap (65% + 10), so this force-band pass is an
+    // ordinary bust: it applies the drops, strips every signed block once, and
+    // the next pass below the force band replays it byte for byte.
+    it("force pass above the hold cap applies 224 queued drops mid-turn, strips signed thinking once and is replayed", async () => {
         const f = await fixture("held-nudge-prefix");
         const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
         try {
@@ -5729,16 +5757,12 @@ describe("sticky nudge request-byte stability", () => {
             const first = await f.serve();
             f.force(78.6, 685633);
             const second = await f.serve();
-            expect(getPendingOps(f.db, "held-nudge-prefix")).toHaveLength(224);
+            expect(getPendingOps(f.db, "held-nudge-prefix")).toHaveLength(0);
+            expect(JSON.stringify(first)).not.toBe(JSON.stringify(baseline));
             expect(
-                logs.mock.calls.some((call) => String(call[1]).includes("active_thinking:224")),
-            ).toBe(true);
-            expect(first.find((m) => m.info.id === f.anchor)).toEqual(
-                baseline.find((m) => m.info.id === f.anchor),
-            );
-            expect(JSON.stringify(first)).toBe(JSON.stringify(baseline));
+                first.flatMap((m) => m.parts).filter((part) => part.type === "reasoning"),
+            ).toHaveLength(0);
             expect(JSON.stringify(second)).toBe(JSON.stringify(first));
-            expect(getNoteNudgeAnchors(f.db, "held-nudge-prefix")).toHaveLength(0);
         } finally {
             logs.mockRestore();
             closeQuietly(f.db);
