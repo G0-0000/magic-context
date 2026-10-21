@@ -308,7 +308,11 @@ test("labeled synthetic hint calibration separates useful passages from reported
     }
 });
 
-test("warm served hints stay below 300ms p95 with the measured Voyage delay model", async () => {
+// Wall-clock latency on shared CI runners is too noisy for a hard bound; the 300 ms p95
+// target is measured by scripts/auto-search-benchmark.ts. This test pins the mechanism the
+// target depends on: a query embedding that never answers is abandoned at the vector budget,
+// and the hint is still served from keyword search instead of waiting for the turn deadline.
+test("a query embedding that never answers is abandoned at the vector budget and the hint is still served", async () => {
     const f = fixture();
     f.db
         .transaction(() => {
@@ -324,37 +328,24 @@ test("warm served hints stay below 300ms p95 with the measured Voyage delay mode
         autoSearchTestSnapshot("/synthetic"),
     );
     const backfill = spyOn(workers, "queueAutoSearchBackfill").mockResolvedValue();
-    // Delays approximate measured Mac Voyage quantiles; the original per-request trace was unavailable.
-    const delays = [
-        265, 270, 274, 278, 282, 285, 288, 290, 291, 293, 293, 300, 315, 350, 400, 500, 600, 675,
-        700, 732,
-    ];
-    let delay = delays[0];
+    let calls = 0;
     const embed = spyOn(embedding, "embedTextForProject").mockImplementation(
         async (_project, _text, signal) =>
             new Promise((resolve) => {
-                const timer = setTimeout(() => resolve(null), delay);
-                signal?.addEventListener(
-                    "abort",
-                    () => {
-                        clearTimeout(timer);
-                        resolve(null);
-                    },
-                    { once: true },
-                );
+                calls += 1;
+                // Only an abort can release this call, so a served hint proves the
+                // search stopped waiting for it.
+                signal?.addEventListener("abort", () => resolve(null), { once: true });
             }),
     );
-    const elapsed: number[] = [];
     try {
-        for (const [index, value] of delays.entries()) {
-            delay = value;
+        for (let index = 0; index < 5; index++) {
             const messages = [
                 {
                     info: { id: `warm-${index}`, role: "user" },
                     parts: [{ type: "text", text: "historian cache wiring" }],
                 },
             ];
-            const started = performance.now();
             await runAutoSearchHint({
                 db: f.db,
                 sessionId: "session",
@@ -366,21 +357,9 @@ test("warm served hints stay below 300ms p95 with the measured Voyage delay mode
                     minPromptChars: 10,
                 },
             });
-            elapsed.push(performance.now() - started);
             expect(messages[0].parts[0].text).toContain("<ctx-search-hint>");
         }
-        elapsed.sort((a, b) => a - b);
-        const p95 = elapsed[Math.ceil(elapsed.length * 0.95) - 1];
-        console.log(
-            JSON.stringify({
-                measurement: "warm served hint; synthetic Voyage delay model",
-                n: elapsed.length,
-                p50: elapsed[9],
-                p95,
-                max: elapsed[19],
-            }),
-        );
-        expect(p95).toBeLessThan(300);
+        expect(calls).toBe(5);
     } finally {
         embed.mockRestore();
         backfill.mockRestore();
