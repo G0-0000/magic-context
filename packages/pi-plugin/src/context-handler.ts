@@ -343,6 +343,7 @@ import {
 	preparePiToolRemovalMeasurements,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
+import { adaptPiAppendCompaction } from "./pi-append-compaction";
 import { PI_CONTEXT_BUDGET, PiContextDeadlineError } from "./pi-context-budget";
 import {
 	resolvePiUsableContextLimit,
@@ -619,6 +620,7 @@ function logPiLkgRecovery(sessionId: string, message: string): void {
 }
 
 export const __test = {
+	stripMcOwnedPiCompactionSummary,
 	readPiFallbackFingerprintHeaders,
 	setBeforePipelineForTests(fn: (() => Promise<void>) | undefined) {
 		const previous = beforePipelineForTests;
@@ -2698,6 +2700,7 @@ function stripMcOwnedPiCompactionSummary(
 				summary?: unknown;
 				tokensBefore?: unknown;
 				fromHook?: unknown;
+				fromExtension?: unknown;
 				details?: unknown;
 		  }
 		| undefined;
@@ -2708,7 +2711,8 @@ function stripMcOwnedPiCompactionSummary(
 			break;
 		}
 	}
-	if (compaction?.fromHook !== true) return false;
+	if (compaction?.fromHook !== true && compaction?.fromExtension !== true)
+		return false;
 	const details = compaction.details as { source?: unknown } | undefined;
 	if (details?.source !== "magic-context") return false;
 	if (
@@ -7587,19 +7591,7 @@ function spawnPiHistorianRun(args: {
 function resolvePiAppendCompaction(
 	ctx: ExtensionContext,
 ): PiHistorianDeps["appendCompaction"] {
-	const sm = ctx.sessionManager as
-		| {
-				appendCompaction?: (
-					summary: string,
-					firstKeptEntryId: string,
-					tokensBefore: number,
-					details?: unknown,
-					fromHook?: boolean,
-				) => string | undefined;
-		  }
-		| undefined;
-	if (typeof sm?.appendCompaction !== "function") return undefined;
-	return sm.appendCompaction.bind(sm);
+	return adaptPiAppendCompaction(ctx.sessionManager);
 }
 
 function guardedPiAppendCompaction(

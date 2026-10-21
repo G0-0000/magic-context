@@ -6303,6 +6303,59 @@ describe("registerPiContextHandler", () => {
 	});
 
 	describe("Pi deferred compaction marker drain", () => {
+		it("strips an OMP extension summary only with matching Magic Context ownership", () => {
+			const strip = contextHandlerInternals.stripMcOwnedPiCompactionSummary;
+			for (const owner of ["fromHook", "fromExtension"]) {
+				const messages = [
+					{ role: "compactionSummary", summary: "marker", tokensBefore: 400 },
+					userMessage("tail", 1),
+				];
+				const ids: (string | undefined)[] = [undefined, "kept"];
+				expect(
+					strip(messages as never[], ids, [
+						{
+							type: "compaction",
+							summary: "marker",
+							tokensBefore: 400,
+							[owner]: true,
+							details: { source: "magic-context" },
+						},
+					]),
+				).toBe(true);
+				expect(messages).toEqual([userMessage("tail", 1)]);
+				expect(ids).toEqual(["kept"]);
+			}
+			for (const fields of [
+				{ fromExtension: true, details: { source: "another-extension" } },
+				{ fromExtension: true },
+				{ details: { source: "magic-context" } },
+				{
+					fromExtension: true,
+					details: { source: "magic-context" },
+					summary: "different",
+				},
+			]) {
+				const messages = [
+					{ role: "compactionSummary", summary: "marker", tokensBefore: 400 },
+				];
+				expect(
+					strip(
+						messages as never[],
+						[undefined],
+						[
+							{
+								type: "compaction",
+								summary: "marker",
+								tokensBefore: 400,
+								...fields,
+							},
+						],
+					),
+				).toBe(false);
+				expect(messages).toHaveLength(1);
+			}
+		});
+
 		function seedCompartment(
 			db: ReturnType<typeof createTestDb>,
 			sessionId: string,
@@ -6353,6 +6406,7 @@ describe("registerPiContextHandler", () => {
 			) as never as {
 				sessionManager: {
 					getBranch: () => unknown[];
+					getEntry?: (id: string) => unknown;
 					appendCompaction?: (...args: unknown[]) => string | undefined;
 				};
 			};
@@ -6365,8 +6419,23 @@ describe("registerPiContextHandler", () => {
 				ctx.sessionManager.getBranch = () => branchEntries;
 			}
 			if (args.appendCompaction) {
-				ctx.sessionManager.appendCompaction = (...appendArgs) => {
-					const compactionId = args.appendCompaction?.(...appendArgs);
+				ctx.sessionManager.getEntry = (id) =>
+					branchEntries.find((entry) => (entry as { id?: string }).id === id);
+				ctx.sessionManager.appendCompaction = (
+					summary,
+					firstKeptEntryId,
+					tokensBefore,
+					details,
+					fromHook,
+					_usage,
+				) => {
+					const compactionId = args.appendCompaction?.(
+						summary,
+						firstKeptEntryId,
+						tokensBefore,
+						details,
+						fromHook,
+					);
 					if (
 						typeof compactionId === "string" &&
 						!args.omitAppendedCompactionEntry
@@ -6374,7 +6443,8 @@ describe("registerPiContextHandler", () => {
 						branchEntries.push({
 							type: "compaction",
 							id: compactionId,
-							firstKeptEntryId: appendArgs[1],
+							firstKeptEntryId,
+							details,
 							...args.appendedEntryFields,
 						});
 					}
@@ -6695,12 +6765,30 @@ describe("registerPiContextHandler", () => {
 						sessionManager: {
 							...ctx.sessionManager,
 							getBranch: () => branchEntries,
-							appendCompaction: (...args: unknown[]) => {
-								const id = appendCompaction(...args);
+							getEntry: (id: string) =>
+								branchEntries.find(
+									(entry) => (entry as { id?: string }).id === id,
+								),
+							appendCompaction: (
+								summary: unknown,
+								firstKeptEntryId: unknown,
+								tokensBefore: unknown,
+								details: unknown,
+								fromHook: unknown,
+								_usage: unknown,
+							) => {
+								const id = appendCompaction(
+									summary,
+									firstKeptEntryId,
+									tokensBefore,
+									details,
+									fromHook,
+								);
 								branchEntries.push({
 									type: "compaction",
 									id,
-									firstKeptEntryId: args[1],
+									firstKeptEntryId,
+									details,
 								});
 								return id;
 							},
@@ -7316,7 +7404,7 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
-		it("logs unavailable equivalence once when the appended entry cannot be read", async () => {
+		it("logs a failed read-back once and retains the pending marker when the appended entry cannot be read", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-equivalence-unavailable-log-once";
 			const logger = await import("@magic-context/core/shared/logger");
@@ -7347,11 +7435,11 @@ describe("registerPiContextHandler", () => {
 				}
 				const gateLines = logCalls.mock.calls.filter(
 					([id, message]) =>
-						id === sessionId &&
-						String(message).includes("gate=equivalence-unavailable"),
+						id === sessionId && String(message).includes("gate=manager-threw"),
 				);
 				expect(gateLines).toHaveLength(1);
 				expect(String(gateLines[0]?.[1])).not.toContain("private summary text");
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).not.toBeNull();
 			} finally {
 				clearContextHandlerSession(sessionId);
 				logCalls.mockRestore();
