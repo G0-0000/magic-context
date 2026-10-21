@@ -1779,9 +1779,10 @@ export function createTransform(deps: TransformDeps) {
                   usagePercentage: contextUsageEarly.percentage,
                   executeThresholdPercentage: effectiveExecuteThresholdPercentage,
                   // The session's frozen calibration, read without adopting a new one.
-                  estimateTextTokens: (text) =>
-                      estimateTokens(text) *
-                      (holdProseRatio ??= sessionDecisionCalibration(db, sessionId).proseRatio),
+                  estimateTextTokens: (text) => {
+                      holdProseRatio ??= sessionDecisionCalibration(db, sessionId).proseRatio;
+                      return estimateTokens(text) * holdProseRatio;
+                  },
               })
             : null;
         activeThinkingPrefixHold = signedThinkingHold?.held === true;

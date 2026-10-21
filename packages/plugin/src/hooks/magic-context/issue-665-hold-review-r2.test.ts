@@ -179,6 +179,12 @@ export async function runOpenCodeHoldDriver(options: {
     trace?: string;
 }): Promise<{ records: PassRecord[]; violations: Violation[] }> {
     const random = rng(options.seed);
+    // Reasoning weight and synthetic continuations draw from their own stream,
+    // so a seed keeps the event sequence it had before they were added.
+    const shape = rng(options.seed ^ 0x729);
+    const heavyRate = Number(process.env.R2_HEAVY_RATE ?? 0.12);
+    const continuationRate = Number(process.env.R2_CONTINUATION_RATE ?? 0.12);
+    const recordedRate = Number(process.env.R2_RECORDED_RATE ?? 0.5);
     const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
     const modelID = options.scenario === "unheld-unbound" ? UNBOUND : PREFIX_BOUND;
     const model = { providerID: "anthropic", modelID };
@@ -298,8 +304,8 @@ export async function runOpenCodeHoldDriver(options: {
     const toolStep = () => {
         const callID = `call-${++call}`;
         const parts: Array<Record<string, unknown>> = [];
-        const heavy = options.scenario !== "unheld-bound" && random() < 0.12;
-        const recorded = random() < 0.5;
+        const heavy = options.scenario !== "unheld-bound" && shape() < heavyRate;
+        const recorded = shape() < recordedRate;
         if (options.scenario !== "unheld-bound") parts.push(reasoning(heavy, recorded));
         parts.push({
             type: "tool",
@@ -322,7 +328,7 @@ export async function runOpenCodeHoldDriver(options: {
                 tokens: {
                     input: 0,
                     output: 0,
-                    reasoning: heavy && recorded ? 1_600 + Math.floor(random() * 3_000) : 0,
+                    reasoning: heavy && recorded ? 1_600 + Math.floor(shape() * 3_000) : 0,
                     cache: { read: 0, write: 0 },
                 },
             },
@@ -394,7 +400,7 @@ export async function runOpenCodeHoldDriver(options: {
                 // thinking yet, so this pass is not held and may apply queued work.
                 servedUserTail = random() < 0.4;
             }
-            if (!servedUserTail && random() < 0.12) {
+            if (!servedUserTail && shape() < continuationRate) {
                 syntheticContinuation();
                 events.push("continuation");
             }
