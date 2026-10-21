@@ -1,4 +1,5 @@
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	type MessageLike,
@@ -6,6 +7,10 @@ import {
 } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import { adaptPayload } from "../../../../plugin/src/v2/hooks/payload";
+import {
+	authorizePiToolRemoval,
+	preparePiToolRemovalMeasurements,
+} from "../../../src/native-replay-state-pi";
 import { createPiTranscript } from "../../../src/transcript-pi";
 
 export type DropHost = "pi" | "oc1" | "oc2";
@@ -125,11 +130,43 @@ export function history(host: DropHost, count: number, seed = 0): unknown[] {
 	];
 }
 
-export function project(host: DropHost, raw: unknown[], db: ContextDatabase) {
+export function project(
+	host: DropHost,
+	raw: unknown[],
+	db: ContextDatabase,
+	nativeAuthorization = false,
+) {
 	const tagger = createTagger();
 	tagger.initFromDb(session, db);
 	if (host === "pi") {
-		const transcript = createPiTranscript(raw, session);
+		const saved = nativeAuthorization
+			? getNativeReplayState(db, session).toolInputs
+			: undefined;
+		const transcript = createPiTranscript(
+			raw,
+			session,
+			undefined,
+			nativeAuthorization
+				? {
+						authorizeToolRemoval: (callId) =>
+							authorizePiToolRemoval({
+								db,
+								sessionId: session,
+								callId,
+								saved,
+								canApply: true,
+							}),
+						authorizeToolRemovals: (callIds) =>
+							preparePiToolRemovalMeasurements({
+								db,
+								sessionId: session,
+								callIds,
+								saved,
+								canApply: true,
+							}),
+					}
+				: {},
+		);
 		return {
 			...tagTranscript(session, transcript, tagger, db),
 			commit: () => transcript.commit(),

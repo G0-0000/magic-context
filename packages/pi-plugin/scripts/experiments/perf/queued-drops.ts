@@ -25,6 +25,7 @@ const { history, project, seedHistory, session } = await import(
 	"./queued-drops-fixture"
 );
 const repeats = Number(process.env.DROP_REPEATS ?? 20);
+const nativeAuthorization = process.env.DROP_NATIVE_AUTH === "1";
 const hosts = (process.env.DROP_HOSTS ?? "pi,oc1,oc2").split(",") as (
 	| "pi"
 	| "oc1"
@@ -46,9 +47,12 @@ try {
 					db.prepare("DELETE FROM pending_ops WHERE session_id = ?").run(
 						session,
 					);
+					db.prepare("DELETE FROM session_meta WHERE session_id = ?").run(
+						session,
+					);
 				}).immediate();
 				const raw = history(host, count);
-				const tagged = project(host, raw, db);
+				const tagged = project(host, raw, db, nativeAuthorization);
 				const tools = getTagsBySession(db, session).filter(
 					(t) => t.type === "tool",
 				);
@@ -93,6 +97,7 @@ try {
 			console.log(
 				JSON.stringify({
 					host,
+					nativeAuthorization,
 					count,
 					dbBytes: statSync(path).size,
 					journal: db.prepare("PRAGMA journal_mode").get(),
