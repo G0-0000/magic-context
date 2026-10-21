@@ -73,6 +73,7 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { markCoveredInstructionRow } from "../../hooks/magic-context/host-served-rows";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
 import {
@@ -613,6 +614,27 @@ export async function applyV2SystemPrompt(
             text,
         })),
     );
+}
+
+/**
+ * The instruction-update rows at or before `throughSeq`, rendered the way the
+ * host renders them (id-less system messages) and marked as covered by the
+ * history boundary. After a host checkpoint these rows are hidden from the draft
+ * like every other row before it; restoring them lets every pass, before and
+ * after the checkpoint and on both sides of a boundary move, see the same
+ * instruction rows (see storage-host-instruction-retention.ts).
+ */
+function coveredInstructionRows(
+    reader: Pick<V2StoreReader, "instructionRowsThrough">,
+    sessionID: string,
+    throughSeq: number,
+    model: SessionContext["model"],
+): V2Message[] {
+    if (throughSeq < 0) return [];
+    return reader
+        .instructionRowsThrough(sessionID, throughSeq)
+        .flatMap((row) => restoreRow(row, model))
+        .map((message) => markCoveredInstructionRow(message));
 }
 
 export async function registerContext(context: V2Context) {
@@ -2106,6 +2128,17 @@ export async function registerContext(context: V2Context) {
                     draft.messages.splice(
                         0,
                         draft.messages.length,
+                        // Instruction rows the history boundary covers come first,
+                        // in store order; the transform decides whether they are
+                        // served. Rust mode's module owns its own boundary.
+                        ...(rustModeModuleClient
+                            ? []
+                            : coveredInstructionRows(
+                                  reader,
+                                  draft.sessionID,
+                                  Math.min(boundary, cut.seq),
+                                  draft.model,
+                              )),
                         ...restored,
                         ...draft.messages.filter((message) => message !== incoming),
                     );

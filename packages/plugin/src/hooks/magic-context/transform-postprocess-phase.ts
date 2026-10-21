@@ -39,6 +39,11 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
+    hostInstructionRetentionEnabled,
+    isHostInstructionRetentionOn,
+    markHostInstructionRetention,
+} from "../../features/magic-context/storage-host-instruction-retention";
+import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
     clearEmergencyDropSample,
@@ -1662,6 +1667,12 @@ interface RunPostTransformPhaseArgs {
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     /** Save host-order IDs before tag replay or tool pruning can remove the message that marks the prefix-trimming boundary. */
     prefixTrimSourceOrder?: PrefixTrimSourceOrder;
+    /**
+     * OpenCode 2 id-less instruction rows the history boundary covers, set aside
+     * by the history trim (and by the OpenCode 2 restore after a host checkpoint)
+     * until this phase decides whether the session serves them.
+     */
+    coveredHostInstructions?: MessageLike[];
     /**
      * Messages trimmed while this transform rebuilds history. OpenCode rebuilds
      * the next request from the boundary written later in this pass, so some rows
@@ -3414,6 +3425,32 @@ export async function runPostTransformPhase(
 
     // Same gate computed once at the top for the known-bust fold decision.
     const m0M1Enabled = m0M1EnabledForFold;
+    if (m0M1Enabled && args.m0M1 && !compactionOff && args.opencode2) {
+        // OpenCode 2 instruction rows are served even once the history summary
+        // covers them; the delivery trim below already keeps every one still in
+        // the array. The switch that extends this to the earlier trims is set on
+        // the first pass allowed to rewrite the whole prefix, so a session served
+        // before it never changes bytes on a defer pass. Every pass after that
+        // serves the same rows, whichever pass moved the history boundary.
+        const covered = args.coveredHostInstructions ?? [];
+        if (covered.length > 0 || canEditWholePrefix) {
+            let retain = false;
+            if (hostInstructionRetentionEnabled()) {
+                try {
+                    retain = isHostInstructionRetentionOn(args.db, args.sessionId);
+                } catch (error) {
+                    failPass("host-instruction-retention-read-failure", error);
+                }
+                if (!retain && canEditWholePrefix) {
+                    if (!markHostInstructionRetention(args.db, args.sessionId))
+                        failPass("host-instruction-retention-persistence-failure");
+                    retain = true;
+                }
+            }
+            // The covered rows are older than everything left in the array.
+            if (retain && covered.length > 0) args.messages.unshift(...covered);
+        }
+    }
     if (m0M1Enabled && args.m0M1) {
         // Serve the persisted pair and its trim boundary as they are. Marking
         // the replay contention-exhausted keeps this pass from counting as

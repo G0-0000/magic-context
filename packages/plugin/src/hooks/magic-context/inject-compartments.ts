@@ -419,6 +419,21 @@ export function selectHiddenMessagesAtCompactionSeam(
     return markerBoundaryIndex < 0 ? [] : trimmed.slice(markerBoundaryIndex + 1);
 }
 
+/**
+ * Remove the first `count` messages, setting aside the id-less instruction rows
+ * among them (OpenCode 2 instruction updates). The caller decides later in the
+ * pass whether those are served; see storage-host-instruction-retention.ts.
+ */
+function cutCoveredPrefix(
+    messages: MessageLike[],
+    count: number,
+    coveredInstructions: MessageLike[] | undefined,
+): void {
+    const removed = messages.splice(0, count);
+    if (coveredInstructions)
+        coveredInstructions.push(...removed.filter(isHostRenderedSystemMessage));
+}
+
 export function prepareCompartmentInjection(
     db: Database,
     sessionId: string,
@@ -427,6 +442,8 @@ export function prepareCompartmentInjection(
     projectPath?: string,
     injectionBudgetTokens?: number,
     temporalAwareness?: boolean,
+    /** Receives covered id-less instruction rows this trim removes. */
+    coveredInstructions?: MessageLike[],
 ): PreparedCompartmentInjection | null {
     // On defer (cache-safe) passes, replay the cached injection result so that
     // historian publications between passes do not bust the prompt-cache prefix.
@@ -463,7 +480,8 @@ export function prepareCompartmentInjection(
                     prepared.compartmentEndMessageId,
                 );
                 if (cutoffIndex >= 0) {
-                    const remaining = messages.slice(
+                    cutCoveredPrefix(
+                        messages,
                         cutoffIndex +
                             (isPartialCompartmentEnd(
                                 db,
@@ -472,8 +490,8 @@ export function prepareCompartmentInjection(
                             )
                                 ? 0
                                 : 1),
+                        coveredInstructions,
                     );
-                    messages.splice(0, messages.length, ...remaining);
                 } else {
                     // Boundary message not in array — covered messages were already
                     // trimmed by OpenCode (compaction, old history not sent). The splice
@@ -680,8 +698,7 @@ export function prepareCompartmentInjection(
         clearDegradedRebuild(sessionId);
         skippedVisibleMessages =
             cutoffIndex + (isPartialCompartmentEnd(db, sessionId, trimEndMessageId) ? 0 : 1);
-        const remaining = messages.slice(skippedVisibleMessages);
-        messages.splice(0, messages.length, ...remaining);
+        cutCoveredPrefix(messages, skippedVisibleMessages, coveredInstructions);
         resultEndMessageId = trimEndMessageId;
     } else {
         // Degraded: the natural boundary message is not in the visible window.
@@ -717,8 +734,7 @@ export function prepareCompartmentInjection(
                         (isPartialCompartmentEnd(db, sessionId, reAnchorCompartment.endMessageId)
                             ? 0
                             : 1);
-                    const remaining = messages.slice(skippedVisibleMessages);
-                    messages.splice(0, messages.length, ...remaining);
+                    cutCoveredPrefix(messages, skippedVisibleMessages, coveredInstructions);
                     resultEndMessage = reAnchorCompartment.endMessage;
                     resultEndMessageId = reAnchorCompartment.endMessageId;
                     reAnchored = true;

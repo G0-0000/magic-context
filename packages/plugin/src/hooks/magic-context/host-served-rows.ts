@@ -107,3 +107,42 @@ export function isHostRenderedSystemMessage(message: {
     const id = message.info.id;
     return (typeof id !== "string" || id.length === 0) && message.info.role === "system";
 }
+
+const COVERED_INSTRUCTION_ROW = "coveredInstructionRow";
+
+/**
+ * Mark an id-less instruction message that OpenCode 2's context hook restored
+ * from before the history boundary. After a host checkpoint the host no longer
+ * sends those rows, so the hook restores them, and the transform decides whether
+ * this session serves them (see storage-host-instruction-retention.ts).
+ * Non-enumerable, like `markHostUnservedRow`, so the request bytes are unchanged.
+ */
+export function markCoveredInstructionRow<T extends object>(target: T): T {
+    Object.defineProperty(target, COVERED_INSTRUCTION_ROW, {
+        value: true,
+        enumerable: false,
+        configurable: true,
+    });
+    return target;
+}
+
+export function isCoveredInstructionRow(value: unknown): boolean {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        (value as Record<string, unknown>)[COVERED_INSTRUCTION_ROW] === true
+    );
+}
+
+/**
+ * Remove the messages whose `info` carries the covered-instruction mark and
+ * return them in order. The array keeps every other message in place.
+ */
+export function takeCoveredInstructionRows<T extends { info: object }>(messages: T[]): T[] {
+    const taken = messages.filter((message) => isCoveredInstructionRow(message.info));
+    if (taken.length > 0) {
+        const kept = messages.filter((message) => !isCoveredInstructionRow(message.info));
+        messages.splice(0, messages.length, ...kept);
+    }
+    return taken;
+}
