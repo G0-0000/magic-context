@@ -336,7 +336,7 @@ it("fresh prefix and replay cut at the same removed assistant seam", () => {
         },
     });
     const replay = structuredClone(source);
-    prepareCompartmentInjection(db, sessionId, replay, false);
+    prepareCompartmentInjection(db, sessionId, replay, false, []);
     expect(replay.map((m) => m.info.id)).toEqual(["retained-user"]);
     expect(delivered.preparedTrimBoundaryId).toBe("assistant-boundary");
     expect(fresh.map((m) => m.info.id)).toEqual(replay.map((m) => m.info.id));

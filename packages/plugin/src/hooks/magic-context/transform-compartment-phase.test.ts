@@ -166,6 +166,7 @@ describe("runCompartmentPhase boundary handoff", () => {
                 historianChunkTokens: 20_000,
                 compartmentDirectory: "/tmp",
                 messages,
+                coveredInstructions: [],
                 pendingCompartmentInjection: null,
                 deferredHistoryRefreshSessions: new Set(),
                 client: {} as PluginContext["client"],
@@ -235,6 +236,7 @@ describe("runCompartmentPhase boundary handoff", () => {
                 historianChunkTokens: 20_000,
                 compartmentDirectory: "/tmp",
                 messages: [],
+                coveredInstructions: [],
                 pendingCompartmentInjection: null,
                 deferredHistoryRefreshSessions: new Set(),
                 client: {} as PluginContext["client"],
@@ -302,6 +304,7 @@ describe("runCompartmentPhase boundary handoff", () => {
                 historianChunkTokens: 25_000,
                 compartmentDirectory: "/tmp",
                 messages: messages as never,
+                coveredInstructions: [],
                 pendingCompartmentInjection: null,
                 deferredHistoryRefreshSessions: new Set(),
                 preResolvedBoundarySnapshot: {
@@ -385,6 +388,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             historianChunkTokens: 25_000,
             compartmentDirectory: "/tmp",
             messages: [],
+            coveredInstructions: [],
             pendingCompartmentInjection: null,
             deferredHistoryRefreshSessions: new Set<string>(),
             // historianTimeoutMs short so the await returns "timed_out" quickly
@@ -458,6 +462,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 { info: { id: "m2", role: "assistant" }, parts: [] },
                 { info: { id: "m3", role: "user" }, parts: [] },
             ],
+            coveredInstructions: [],
             pendingCompartmentInjection: null,
             deferredHistoryRefreshSessions,
         };
@@ -522,6 +527,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             historianTimeoutMs: 13,
             compartmentDirectory: "/tmp",
             messages: [],
+            coveredInstructions: [],
             pendingCompartmentInjection: null,
             deferredHistoryRefreshSessions: new Set<string>(),
         };
@@ -657,6 +663,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
                 { info: { id: "m2", role: "assistant" }, parts: [] },
                 { info: { id: "m3", role: "user" }, parts: [] },
             ],
+            coveredInstructions: [],
             pendingCompartmentInjection: null,
             deferredHistoryRefreshSessions,
         });
@@ -712,6 +719,7 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             historyBudgetTokens: 1,
             compartmentDirectory: "/tmp",
             messages: [],
+            coveredInstructions: [],
             pendingCompartmentInjection: null,
             deferredHistoryRefreshSessions: new Set<string>(),
             safeForBackgroundCompression: true,

@@ -427,11 +427,10 @@ export function selectHiddenMessagesAtCompactionSeam(
 function cutCoveredPrefix(
     messages: MessageLike[],
     count: number,
-    coveredInstructions: MessageLike[] | undefined,
+    coveredInstructions: MessageLike[],
 ): void {
     const removed = messages.splice(0, count);
-    if (coveredInstructions)
-        coveredInstructions.push(...removed.filter(isHostRenderedSystemMessage));
+    coveredInstructions.push(...removed.filter(isHostRenderedSystemMessage));
 }
 
 export function prepareCompartmentInjection(
@@ -439,11 +438,15 @@ export function prepareCompartmentInjection(
     sessionId: string,
     messages: MessageLike[],
     isCacheBusting: boolean,
+    /**
+     * Receives the covered id-less instruction rows this trim removes. Every
+     * caller in a pass must pass that pass's one list, or a row cut here is
+     * neither served nor set aside (see storage-host-instruction-retention.ts).
+     */
+    coveredInstructions: MessageLike[],
     projectPath?: string,
     injectionBudgetTokens?: number,
     temporalAwareness?: boolean,
-    /** Receives covered id-less instruction rows this trim removes. */
-    coveredInstructions?: MessageLike[],
 ): PreparedCompartmentInjection | null {
     // On defer (cache-safe) passes, replay the cached injection result so that
     // historian publications between passes do not bust the prompt-cache prefix.

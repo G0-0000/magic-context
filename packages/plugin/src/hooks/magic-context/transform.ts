@@ -2295,10 +2295,10 @@ export function createTransform(deps: TransformDeps) {
                 sessionId,
                 messages,
                 isCacheBusting,
+                coveredHostInstructions,
                 projectIdentity,
                 deps.memoryConfig?.injectionBudgetTokens,
                 deps.experimentalTemporalAwareness,
-                coveredHostInstructions,
             );
             if (messagesBeforeInitialPrepare) {
                 const skippedVisibleMessages =
@@ -2673,6 +2673,7 @@ export function createTransform(deps: TransformDeps) {
             fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
             compartmentDirectory,
             messages,
+            coveredInstructions: coveredHostInstructions,
             pendingCompartmentInjection,
             fallbackModelId,
             projectPath: projectIdentity,
