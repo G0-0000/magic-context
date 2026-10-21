@@ -3,8 +3,9 @@
  *
  * Several Config controls are plain buttons styled as segmented choices or as
  * pop-up pickers. Sighted users read their state from styling or from the
- * visible text, but assistive technology (screen readers, macOS accessibility
- * clients) only sees the role, name and ARIA state. These helpers compute
+ * visible text, but for assistive technology (screen readers, macOS
+ * accessibility clients) the choice is exposed through the control's role,
+ * accessible name and ARIA state. These helpers compute
  * that state in one place so the components and the tests agree on it.
  */
 
@@ -54,7 +55,8 @@ export interface RadioOptionAttributes {
  * Attributes for option `index` of a radio group whose current value is
  * `selected`. Only one option is in the Tab order (roving tabindex): the
  * checked one, or the first option when the stored value matches none of
- * them, so keyboard users can always reach the group.
+ * them, so for a non-empty option list keyboard users can always reach the
+ * group.
  */
 export function radioOptionAttributes<T>(
   options: readonly T[],
