@@ -91,7 +91,7 @@ import {
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
-import { hasReclaimRide, reclaimRideLabel } from "./cache-busting-signals";
+import { reclaimRideLabel, reclaimRidePermitted } from "./cache-busting-signals";
 import type { CavemanWordRules } from "./caveman";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
@@ -2134,9 +2134,11 @@ export async function runPostTransformPhase(
         const tag = args.messageTagNumbers.get(message);
         if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
     }
-    let activeThinkingPrefixHold =
-        args.activeThinkingPrefixHold === true ||
-        (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true);
+    // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
+    // model it holds only right after heavy reasoning and below the cap. Any
+    // other pass of a signed turn busts like a pass of any other model, and
+    // strips the turn's signed thinking when it does (see below).
+    let activeThinkingPrefixHold = args.activeThinkingPrefixHold === true;
     let freezeM0M1 = args.freezeM0M1 === true || activeThinkingPrefixHold;
     let rewritingSignedPrefix = false;
     let thinkingReleasedForFit = false;
@@ -2405,8 +2407,12 @@ export async function runPostTransformPhase(
     const hasPendingUserOps = pendingOps.length > 0;
     // Preserve the requested application opportunity when thinking safety, not
     // cache policy, prevents this batch. The next real user releases the veto.
+    // Prefix-bound models request nothing: their queued drops ride the next
+    // bust of the turn, which strips the signed thinking that protected them,
+    // so a request here would originate a bust no other model takes.
     if (
         args.schedulerDecision === "execute" &&
+        args.thinkingBindingRecoveryEnabledForModel !== true &&
         pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
     )
         requestPendingMaterialization(
@@ -2458,13 +2464,15 @@ export async function runPostTransformPhase(
     // expiry and pressure relief can admit work, but the target guards still
     // forbid changes before any retained signature. A genuine prefix rewrite
     // first omits every signed block. The directory veto freezes injection only.
+    // The historian's redundancy skip applies the same predicate.
     const publishedWorkDrainAllowed =
         !compactionOff &&
-        (!activeThinkingPrefixHold ||
-            firstRenderBust ||
-            idleExpiryRebuild ||
-            emergencyDropEligible) &&
-        hasReclaimRide(rideSignals);
+        reclaimRidePermitted(rideSignals, {
+            signedThinkingHold: activeThinkingPrefixHold,
+            firstRender: firstRenderBust,
+            idleExpiry: idleExpiryRebuild,
+            emergency: emergencyDropEligible,
+        });
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
     const shouldRunHeuristics =
         publishedWorkDrainAllowed &&
@@ -2487,6 +2495,21 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    // An unheld bust of a prefix-bound model with signed thinking still kept in
+    // the turn invalidates that thinking: strip every signed block now, before
+    // any lane edits, through the same persisted freeze a held pass's release
+    // uses. Latest-turn protection is then lifted, so queued drops and cleanup
+    // in the turn land on this bust as on any other model. This treats every
+    // such bust as changing bytes before the kept thinking; removing every
+    // block is always accepted, so the cost is only reasoning, never validity.
+    if (
+        isCacheBustingPass &&
+        !activeThinkingPrefixHold &&
+        activeThinkingTurn &&
+        args.thinkingBindingRecoveryEnabledForModel === true
+    ) {
+        releaseThinkingForRewrite();
+    }
     // Keep recovery bytes until the shared permission allows a cache rewrite
     // (for example, a user flush or pressure relief). Normalize before applying
     // drops so the saved drop state and the request sent to the provider agree.

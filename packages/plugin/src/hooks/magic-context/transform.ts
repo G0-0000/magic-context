@@ -163,7 +163,10 @@ import {
     createPendingDropEligibilityCache,
     pendingDropEligibilityKey,
 } from "./pending-drop-eligibility";
-import { requestPendingMaterialization } from "./pending-materialization";
+import {
+    hasPendingMaterializationOrigin,
+    requestPendingMaterialization,
+} from "./pending-materialization";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -175,6 +178,7 @@ import {
 import { noteTransformPassForExactOrdinalReads } from "./raw-exact-ordinal-read";
 import { prepareRawSessionOrdinals, readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
+import { estimateTokens } from "./read-session-formatting";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import {
     projectOpencodeReasoningBudgetCutoff,
@@ -184,6 +188,7 @@ import { createM0RenderOptions } from "./render-options";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
+import { decideSignedThinkingHold, type SignedThinkingHoldDecision } from "./signed-thinking-hold";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -1262,13 +1267,12 @@ export function createTransform(deps: TransformDeps) {
                     return true;
                 }
             })();
-        let activeThinkingPrefixHold =
-            activeThinkingTurn &&
-            isPrefixBoundThinkingModel(
-                activeThinkingModel?.providerID,
-                activeThinkingModel?.modelID,
-            );
-        let freezeM0M1 = unresolvedDirectoryHold || activeThinkingPrefixHold;
+        // Whether this pass is held for recent heavy signed thinking is decided
+        // once the execute threshold and the pass's usage are known (see
+        // decideSignedThinkingHold below). Until then only the directory freeze
+        // applies.
+        let activeThinkingPrefixHold = false;
+        let freezeM0M1 = unresolvedDirectoryHold;
         const compartmentDirectory = sessionDirectory;
         const historianRunnable = deps.historianRunnable !== false;
         const canRunCompartments =
@@ -1627,20 +1631,13 @@ export function createTransform(deps: TransformDeps) {
             resolvedProviderID,
             modelForBudget?.modelID,
         );
-        activeThinkingPrefixHold ||=
+        const signedThinkingPrefixBound =
             activeThinkingTurn &&
-            isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID);
-        freezeM0M1 ||= activeThinkingPrefixHold;
-        if (freezeM0M1 && prefixHoldLogTurnIds.get(sessionId) !== currentTurnId) {
-            prefixHoldLogTurnIds.set(sessionId, currentTurnId);
-            const reason = activeThinkingPrefixHold
-                ? "active thinking turn (prefix-bound model)"
-                : "session directory unresolved";
-            sessionLog(
-                sessionId,
-                `m[0]/m[1] frozen: ${reason}; replaying the frozen prefix and deferring any rebuild`,
-            );
-        }
+            (isPrefixBoundThinkingModel(
+                activeThinkingModel?.providerID,
+                activeThinkingModel?.modelID,
+            ) ||
+                isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID));
         const canUseEmptySentinels = modelAcceptsEmptyContent(resolvedProviderID);
         const protectedThinkingMessages =
             activeThinkingTurn ||
@@ -1772,6 +1769,46 @@ export function createTransform(deps: TransformDeps) {
         const { forceMaterializationPercentage } = escalationBands(
             effectiveExecuteThresholdPercentage,
         );
+        // Prefix-bound thinking models hold prefix changes only right after heavy
+        // reasoning and only below the cap; every other pass busts as on any
+        // other model and strips the turn's signed thinking when it does.
+        let holdProseRatio: number | undefined;
+        const signedThinkingHold: SignedThinkingHoldDecision | null = signedThinkingPrefixBound
+            ? decideSignedThinkingHold({
+                  messages,
+                  usagePercentage: contextUsageEarly.percentage,
+                  executeThresholdPercentage: effectiveExecuteThresholdPercentage,
+                  // The session's frozen calibration, read without adopting a new one.
+                  estimateTextTokens: (text) =>
+                      estimateTokens(text) *
+                      (holdProseRatio ??= sessionDecisionCalibration(db, sessionId).proseRatio),
+              })
+            : null;
+        activeThinkingPrefixHold = signedThinkingHold?.held === true;
+        freezeM0M1 ||= activeThinkingPrefixHold;
+        const prefixHoldLogKey = signedThinkingHold
+            ? `${currentTurnId}:${signedThinkingHold.reason}:${signedThinkingHold.heavyStepsBack ?? "none"}`
+            : freezeM0M1
+              ? `${currentTurnId}:directory`
+              : null;
+        if (prefixHoldLogKey !== null && prefixHoldLogTurnIds.get(sessionId) !== prefixHoldLogKey) {
+            prefixHoldLogTurnIds.set(sessionId, prefixHoldLogKey);
+            if (signedThinkingHold) {
+                sessionLog(
+                    sessionId,
+                    `signed thinking hold: held=${signedThinkingHold.held} reason=${signedThinkingHold.reason} heavyStepsBack=${signedThinkingHold.heavyStepsBack ?? "none"} heavyStepTokens=${signedThinkingHold.heavyStepTokens} usage=${contextUsageEarly.percentage.toFixed(1)}% cap=${signedThinkingHold.capPercentage}%`,
+                );
+            }
+            if (freezeM0M1) {
+                const reason = activeThinkingPrefixHold
+                    ? "recent heavy reasoning in the active thinking turn (prefix-bound model)"
+                    : "session directory unresolved";
+                sessionLog(
+                    sessionId,
+                    `m[0]/m[1] frozen: ${reason}; replaying the frozen prefix and deferring any rebuild`,
+                );
+            }
+        }
         const persistedUsageFreshForBoundary =
             persistedUsageBeforeResets &&
             Date.now() - persistedUsageBeforeResets.updatedAt <= 10 * 60 * 1000 &&
@@ -2244,8 +2281,24 @@ export function createTransform(deps: TransformDeps) {
                             contextUsageEarly.percentage >= forceMaterializationPercentage &&
                             (contextUsageEarly.percentage >= 95 ||
                                 getEmergencyInputSample(db, sessionId) === 0),
-                        explicitFlush: deps.pendingMaterializationSessions.has(sessionId),
+                        // Postprocess counts a pending materialization as the flush
+                        // ride only when a user flush requested it.
+                        explicitFlush: hasPendingMaterializationOrigin(
+                            deps.pendingMaterializationSessions,
+                            sessionId,
+                            "user_flush",
+                        ),
                         publishedHistory: isCacheBusting,
+                        // The same gate postprocess applies. First render and idle
+                        // expiry are not known yet, so a held pass is credited no
+                        // ride here unless it is under emergency pressure.
+                        permission: {
+                            signedThinkingHold: activeThinkingPrefixHold,
+                            firstRender: false,
+                            idleExpiry: false,
+                            emergency:
+                                contextUsageEarly.percentage >= forceMaterializationPercentage,
+                        },
                     },
                     pendingDropEligibility.read(sessionId, dropProjectionKey()),
                 );
