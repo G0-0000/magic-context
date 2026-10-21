@@ -20,15 +20,20 @@
  */
 
 import { expect, spyOn, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
+	closeDatabase,
 	getPendingOps,
 	getTagsBySession,
+	openDatabase,
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { sessionDecisionCalibration } from "@magic-context/core/features/magic-context/session-decision-calibration";
+import { prewarmTagOwners } from "@magic-context/core/hooks/magic-context/tag-owner-warmup";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	beginV2LkgRequest,
@@ -43,7 +48,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/transform";
 import * as transformOperations from "@magic-context/core/hooks/magic-context/transform-operations";
 import { createMessagesTransformHandler } from "@magic-context/core/plugin/messages-transform";
-import { _resetHarnessForTesting } from "@magic-context/core/shared/harness";
+import { _resetHarnessForTesting, setHarness } from "@magic-context/core/shared/harness";
 import {
 	cleanupTestTempDir,
 	createTestTempDir,
@@ -77,6 +82,8 @@ interface Driver {
 	restart(): void;
 	/** Whether the last Pi pass was allowed to apply pending operations. */
 	lastPiPermission(): boolean | undefined;
+	/** Waits for startup tag-owner indexing that can still hold the SQLite writer. */
+	waitForTagOwnerWarmup(): Promise<void>;
 	db: ReturnType<typeof createTestDb>;
 	sessionId: string;
 	close(): void;
@@ -184,6 +191,7 @@ function piDriver(label: string): Driver {
 			}
 		},
 		flush: () => signalPiPendingMaterialization(sessionId, "user_flush"),
+		async waitForTagOwnerWarmup() {},
 		restart() {
 			clearContextHandlerSession(sessionId);
 			resetLkgSlotsForTest();
@@ -202,7 +210,15 @@ function piDriver(label: string): Driver {
 function openCodeDriver(host: "opencode" | "opencode2", label: string): Driver {
 	_resetHarnessForTesting();
 	const { dir } = createTestTempDir("confirmation-713-oc-");
-	const db = createTestDb(join(dir, "context.db"));
+	const oldTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+	const oldXdgDataHome = process.env.XDG_DATA_HOME;
+	process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
+	process.env.XDG_DATA_HOME = dir;
+	setHarness(host);
+	const storageDir = join(dir, "cortexkit", "magic-context");
+	mkdirSync(storageDir, { recursive: true });
+	const db = openDatabase(join(storageDir, "context.db"));
+	if (!db) throw new Error("Could not open isolated OpenCode test database");
 	const sessionId = `confirmation-713-${host}-${label}`;
 	const model = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 	const modelKey = `${model.providerID}/${model.modelID}`;
@@ -373,6 +389,13 @@ function openCodeDriver(host: "opencode" | "opencode2", label: string): Driver {
 				sessionId,
 				"user_flush",
 			),
+		async waitForTagOwnerWarmup() {
+			await prewarmTagOwners(
+				db,
+				sessionId,
+				sessionDecisionCalibration(db, sessionId).proseRatio,
+			);
+		},
 		restart() {
 			deps.tagger = createTagger();
 			deps.lastHeuristicsTurnId?.clear();
@@ -382,7 +405,11 @@ function openCodeDriver(host: "opencode" | "opencode2", label: string): Driver {
 		lastPiPermission: () => undefined,
 		close() {
 			clearLkgMeasuredRequest(sessionId);
-			db.close();
+			closeDatabase();
+			if (oldTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = oldTestDataDir;
+			if (oldXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+			else process.env.XDG_DATA_HOME = oldXdgDataHome;
 			cleanupTestTempDir(dir);
 			_resetHarnessForTesting();
 		},
@@ -398,6 +425,9 @@ const drivers: Record<Host, (label: string) => Driver> = {
 /** Queues a drop on the first user message, then optionally serves one degraded pass. */
 async function queueDrop(driver: Driver, degraded: boolean) {
 	const initial = await driver.pass();
+	// The first pass starts a background tag-owner warm-up. Wait for its actual
+	// completion before the separate flush pass so the test does not race its writer.
+	await driver.waitForTagOwnerWarmup();
 	const target = getTagsBySession(driver.db, driver.sessionId).find(
 		(tag) => tag.type === "message" && tag.tagNumber === 1,
 	);
