@@ -42,12 +42,13 @@ const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 // `§N">§` are already gone) and BEFORE the stray-`§` pass.
 //
 // Two precision guards so we don't mangle real content:
-//   - `(?!\.\d)` — a `§` + digits + DECIMAL (`§5.1` = a section citation) is NOT
-//     a dangling tag; leave it for the stray-`§` pass (`§5.1` → `5.1`).
+//   - `(?!\d)(?!\.\d)` — the first guard makes the digit run whole (without it,
+//     the regex can backtrack from `§12.3` to `§1`); the second means a `§` +
+//     digits + DECIMAL (`§5.1` = a section citation) is NOT a dangling tag.
 //   - closer excludes `\w` AND `.` — never eats a following letter
 //     (`§42important` → `important`) or a sentence period; whitespace is excluded
 //     so content after a space survives (`§42 files` → ` files`).
-const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?/g;
+const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?/g;
 // Do not change the leading variant without a rebuild gate. OpenCode tool
 // outputs and Pi text parts and tool results are re-prefixed from the host's own
 // text on every pass (nothing saved, no epoch), so any change to what it strips
@@ -55,7 +56,7 @@ const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?/g;
 // prompt cache from that block on. It does eat a leading section reference
 // (`§5 of the contract` → `of the contract`); fixing that is cosmetic and only
 // safe on a pass that is already rebuilding.
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
+const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
 
 /** Well-formed `§N§` pairs anywhere (persistence cargo-cult cleanup). */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;

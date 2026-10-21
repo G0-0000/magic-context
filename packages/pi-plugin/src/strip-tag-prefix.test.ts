@@ -60,6 +60,22 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 	});
 
 	describe("cargo-culted § mid-text (models mimicking MC notation)", () => {
+		it("preserves decimal section references at the start and inside assistant text", () => {
+			const msg = {
+				role: "assistant",
+				content: [
+					{
+						type: "text",
+						text: "§12.3 cites the specification; see §123.45.",
+					},
+				],
+			};
+			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+			expect((msg.content[0] as { type: string; text: string }).text).toBe(
+				"12.3 cites the specification; see 123.45.",
+			);
+		});
+
 		it("removes mid-text §N§ pair entirely (cargo-cult defense)", () => {
 			const msg = {
 				role: "assistant",
