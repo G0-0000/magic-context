@@ -54,6 +54,7 @@ import { logTemperatureDecision } from "@magic-context/core/shared/subagent-temp
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
 import { OPENCODE_OUTPUT_CAP } from "@magic-context/core/shared/window-geometry";
 import {
+	HISTORIAN_CACHE_TAIL_ENV,
 	HISTORIAN_MAX_OUTPUT_TOKENS_ENV,
 	SUBAGENT_OUTPUT_CEILING_ENV,
 } from "./historian-calibration-extension";
@@ -1560,6 +1561,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			delete parentEnv.MAGIC_CONTEXT_HISTORIAN_TEMPERATURE;
 			delete parentEnv[HISTORIAN_MAX_OUTPUT_TOKENS_ENV];
 			delete parentEnv[SUBAGENT_OUTPUT_CEILING_ENV];
+			delete parentEnv[HISTORIAN_CACHE_TAIL_ENV];
 			try {
 				child = inRootAsyncContext(() =>
 					this.spawnImpl(
@@ -1575,6 +1577,12 @@ export class PiSubagentRunner implements SubagentRunner {
 								...parentEnv,
 								[MAGIC_CONTEXT_PI_SUBAGENT_ENV]: "1",
 								MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE: systemPromptPath,
+								[HISTORIAN_CACHE_TAIL_ENV]:
+									/^(magic-context-)?historian(?:-recomp)?$/.test(
+										options.agent,
+									) && options.accountingSubagent !== "historian_editor"
+										? options.cacheTail
+										: undefined,
 								MAGIC_CONTEXT_SUBAGENT_BUDGET_GUARD_FILE: budgetGuardFile,
 								MAGIC_CONTEXT_SUBAGENT_PROVENANCE_ONLY:
 									/^(magic-context-)?historian(?:-recomp|-editor)?$/.test(

@@ -1135,6 +1135,13 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(attemptedModels(runner)).toEqual(["test/model", "test/model"]);
+			expect(
+				(
+					runner.run as unknown as {
+						mock: { calls: Array<[{ cacheTail?: string }]> };
+					}
+				).mock.calls.map(([options]) => options.cacheTail),
+			).toEqual(["skip", "write"]);
 			expect(getCompartments(db, "ses-historian")).toHaveLength(1);
 		} finally {
 			closeQuietly(db);
@@ -1153,6 +1160,13 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(attemptedModels(runner)).toEqual(["test/model", "fallback/model"]);
+			expect(
+				(
+					runner.run as unknown as {
+						mock: { calls: Array<[{ cacheTail?: string }]> };
+					}
+				).mock.calls.map(([options]) => options.cacheTail),
+			).toEqual(["skip", "skip"]);
 			expect(getCompartments(db, "ses-historian")).toHaveLength(1);
 		} finally {
 			closeQuietly(db);

@@ -48,10 +48,15 @@ export function createPiHistorianClient(args: {
 		// override is present, let the override own the model and disable the
 		// runner-level chain for this call (the shared layer owns iteration).
 		const modelOverride = readBodyModel(body);
+		const cacheTail =
+			input && typeof input === "object" && "cacheTail" in input
+				? input.cacheTail
+				: undefined;
 		const result = await args.runner.run({
 			agent: "magic-context-historian",
 			systemPrompt: args.systemPrompt,
 			userMessage: promptText,
+			...(cacheTail === "write" || cacheTail === "skip" ? { cacheTail } : {}),
 			model: modelOverride?.model ?? args.model,
 			fallbackModels: modelOverride ? undefined : args.fallbackModels,
 			timeoutMs: args.timeoutMs,

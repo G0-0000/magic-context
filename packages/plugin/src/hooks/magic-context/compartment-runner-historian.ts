@@ -302,6 +302,8 @@ export async function runValidatedHistorianPass(args: {
     parentSessionId: string;
     sessionDirectory: string;
     prompt: string;
+    /** Use `write` to retain message-block cache markers for a later conversational turn. */
+    cacheTail?: import("../../shared/historian-cache").HistorianCacheTail;
     chunk: HistorianValidationChunk;
     priorCompartments: StoredCompartmentRange[];
     sequenceOffset: number;
@@ -379,6 +381,7 @@ export async function runValidatedHistorianPass(args: {
     );
     const repairRun = await runHistorianPrompt({
         ...args,
+        cacheTail: "skip",
         prompt: repairPrompt,
         dumpLabel: `${args.dumpLabelBase}-repair`,
         modelOverride: args.model,
@@ -530,6 +533,8 @@ async function runHistorianPrompt(args: {
     dumpLabel?: string;
     language?: string;
     modelOverride?: ModelInput;
+    /** Use `write` to retain cache markers when a later turn can reuse the complete user block. */
+    cacheTail?: import("../../shared/historian-cache").HistorianCacheTail;
     /** Agent identifier to route the request to. Defaults to HISTORIAN_AGENT.
      *  Use HISTORIAN_EDITOR_AGENT for the second pass in two-pass mode. */
     agentId?: string;
@@ -685,6 +690,7 @@ async function runHistorianPrompt(args: {
                     client,
                     {
                         path: { id: agentSessionId },
+                        cacheTail: retryIndex > 0 ? "write" : (args.cacheTail ?? "skip"),
                         query: { directory: sessionDirectory },
                         body: {
                             // Use the specified agent (HISTORIAN_AGENT by default, or

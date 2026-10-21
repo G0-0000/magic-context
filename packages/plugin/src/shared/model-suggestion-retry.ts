@@ -41,6 +41,8 @@ export type PromptBody = {
 export type PromptArgs = {
     path: { id: string };
     body: PromptBody;
+    /** Controls hidden historian message-block cache markers; never serialized in the prompt body. */
+    cacheTail?: import("./historian-cache").HistorianCacheTail;
     signal?: AbortSignal;
     [key: string]: unknown;
 };

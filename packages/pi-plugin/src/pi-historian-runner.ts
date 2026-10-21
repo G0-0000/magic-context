@@ -286,6 +286,8 @@ async function runHistorianSubagentWithTransientRetriesGuarded(args: {
 			args.onDispatch?.();
 			result = await args.runner.run({
 				...args.options,
+				cacheTail:
+					retryIndex > 0 ? "write" : (args.options.cacheTail ?? "skip"),
 				// The historian runner owns fallback iteration because every candidate's
 				// output must be parsed and validated before the chain can stop.
 				fallbackModels: undefined,

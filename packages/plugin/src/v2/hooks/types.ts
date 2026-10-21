@@ -203,6 +203,14 @@ export interface V2Context {
             }) => Promise<void>,
         ): Promise<unknown>;
         hook(
+            name: "http.request",
+            callback: (draft: {
+                sessionID: string;
+                kind: string;
+                request: Request;
+            }) => Promise<void>,
+        ): Promise<unknown>;
+        hook(
             name: "context" | "compaction" | "generate",
             callback: (draft: SessionContext) => Promise<void>,
         ): Promise<unknown>;

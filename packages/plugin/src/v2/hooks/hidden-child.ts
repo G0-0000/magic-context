@@ -22,6 +22,7 @@ import {
     TOOL_USE_DISABLED,
     withBlockedReadInstruction,
 } from "../../shared/hidden-zen-read";
+import { withoutHistorianTailCache } from "../../shared/historian-cache";
 import { log } from "../../shared/logger";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
@@ -234,6 +235,7 @@ export interface HiddenChildAttempt {
     budget?: ReturnType<typeof createDreamTokenBudget>;
     observedMessages?: SessionContext["messages"];
     marker?: string;
+    wireRequests?: number;
 }
 
 /** Last user text on a context draft. 2.0.5 may use a string body, extra parts, or input_text. */
@@ -413,6 +415,7 @@ export class HiddenChildHook {
     private readonly childIDs = new Map<string, string | undefined>();
     private readonly attempts = new Map<string, HiddenChildAttempt>();
     private readonly active = new Map<string, HiddenChildAttempt>();
+    private readonly cacheWarnings = new Set<string>();
 
     constructor(private readonly note: (message: string) => void = log) {}
 
@@ -442,6 +445,45 @@ export class HiddenChildHook {
 
     owns(sessionID: string): boolean {
         return this.childIDs.has(sessionID);
+    }
+
+    /** Runs on the final outbound HTTP request, after the SDK inserts automatic cache markers. */
+    async cacheRequest(draft: {
+        sessionID: string;
+        kind: string;
+        request: Request;
+    }): Promise<void> {
+        const attempt = this.active.get(draft.sessionID);
+        if (
+            !this.owns(draft.sessionID) ||
+            !attempt ||
+            attempt.identity.kind !== "historian" ||
+            draft.kind !== "primary" ||
+            attempt.request.cacheTail !== "skip"
+        )
+            return;
+        // Leave subsequent transport requests unchanged so retries keep their cache markers.
+        if ((attempt.wireRequests ?? 0) > 0) return;
+        attempt.wireRequests = 1;
+        try {
+            const original = await draft.request.clone().text();
+            const body = withoutHistorianTailCache(original);
+            if (body === original) return;
+            const headers = new Headers(draft.request.headers);
+            headers.delete("content-length");
+            draft.request = new Request(draft.request, { body, headers });
+        } catch (error) {
+            if (!this.cacheWarnings.has(draft.sessionID)) {
+                this.cacheWarnings.add(draft.sessionID);
+                try {
+                    this.note(
+                        `Historian cache optimization skipped for ${draft.sessionID}: ${String(error)}`,
+                    );
+                } catch {
+                    // Diagnostic failures must not prevent the original request.
+                }
+            }
+        }
     }
 
     /**

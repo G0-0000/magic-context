@@ -750,6 +750,7 @@ export class HistorianHostRunner {
                 undefined as never,
                 {
                     path: { id: handle.id },
+                    cacheTail: "skip",
                     query: { directory: sessionDirectory },
                     body: {
                         agent: "historian",
