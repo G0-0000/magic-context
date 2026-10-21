@@ -98,6 +98,8 @@ Both hosts open the same `context.db`, but each keeps its own cached copy of the
 
 After each Magic Context release, update both hosts before using either one, so neither is left behind the database.
 
+---
+
 ## Historian failures
 
 **Symptom:** You see a recurring warning about the historian failing, or the historian progress in `/ctx-status` shows repeated retries.
