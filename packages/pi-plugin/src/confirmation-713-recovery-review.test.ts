@@ -24,6 +24,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
+import { sessionDecisionCalibration } from "@magic-context/core/features/magic-context/session-decision-calibration";
 import {
 	closeDatabase,
 	getPendingOps,
@@ -32,8 +33,6 @@ import {
 	queuePendingOp,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
-import { sessionDecisionCalibration } from "@magic-context/core/features/magic-context/session-decision-calibration";
-import { prewarmTagOwners } from "@magic-context/core/hooks/magic-context/tag-owner-warmup";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
 	beginV2LkgRequest,
@@ -42,13 +41,17 @@ import {
 } from "@magic-context/core/hooks/magic-context/lkg-measured-request";
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { requestPendingMaterialization } from "@magic-context/core/hooks/magic-context/pending-materialization";
+import { prewarmTagOwners } from "@magic-context/core/hooks/magic-context/tag-owner-warmup";
 import {
 	createTransform,
 	type TransformDeps,
 } from "@magic-context/core/hooks/magic-context/transform";
 import * as transformOperations from "@magic-context/core/hooks/magic-context/transform-operations";
 import { createMessagesTransformHandler } from "@magic-context/core/plugin/messages-transform";
-import { _resetHarnessForTesting, setHarness } from "@magic-context/core/shared/harness";
+import {
+	_resetHarnessForTesting,
+	setHarness,
+} from "@magic-context/core/shared/harness";
 import {
 	cleanupTestTempDir,
 	createTestTempDir,
@@ -406,7 +409,8 @@ function openCodeDriver(host: "opencode" | "opencode2", label: string): Driver {
 		close() {
 			clearLkgMeasuredRequest(sessionId);
 			closeDatabase();
-			if (oldTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			if (oldTestDataDir === undefined)
+				delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 			else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = oldTestDataDir;
 			if (oldXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
 			else process.env.XDG_DATA_HOME = oldXdgDataHome;
