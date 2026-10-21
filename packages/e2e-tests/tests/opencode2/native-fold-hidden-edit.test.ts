@@ -54,7 +54,12 @@ test("a hidden row edited in place expires cold fold provenance and rebuilds onc
         const edited = await turn("first continuation after in-place edit");
         expect(JSON.stringify(edited.body.input)).toContain("AFTER_HIDDEN_EDIT");
         expect(JSON.stringify(edited.body.input)).not.toContain("BEFORE_EDIT_0");
-        expect(host.pluginLog().slice(offset)).toMatch(/m\[0\] HARD fold decision:.*executed=true bustsServedPrefix=true/);
+        // The plugin buffers log writes for up to half a second, so the fold
+        // decision logged during the turn just awaited may not be on disk yet.
+        const foldDecision = /m\[0\] HARD fold decision:.*executed=true bustsServedPrefix=true/;
+        const logDeadline = Date.now() + 5_000;
+        while (!foldDecision.test(host.pluginLog().slice(offset)) && Date.now() < logDeadline) await Bun.sleep(100);
+        expect(host.pluginLog().slice(offset)).toMatch(foldDecision);
         const defer = await turn("defer after edited history rebuild");
         expect(JSON.stringify((defer.body.input as unknown[]).slice(0, (edited.body.input as unknown[]).length))).toBe(JSON.stringify(edited.body.input));
         await host.stopHost();
