@@ -1174,6 +1174,7 @@ function ConfigForm(props: {
                       <button
                         type="button"
                         class={`tab-pill ${backgroundHarness() === harness ? "active" : ""}`}
+                        aria-pressed={backgroundHarness() === harness}
                         onClick={() => setBackgroundHarness(harness)}
                       >
                         {harness === "opencode" ? "OpenCode" : harness === "pi" ? "Pi" : "OMP"}
@@ -1280,6 +1281,7 @@ function ConfigForm(props: {
                       <button
                         type="button"
                         class={`tab-pill ${dreamerHarness() === "opencode" ? "active" : ""}`}
+                        aria-pressed={dreamerHarness() === "opencode"}
                         onClick={() => setDreamerHarness("opencode")}
                       >
                         OpenCode
@@ -1287,6 +1289,7 @@ function ConfigForm(props: {
                       <button
                         type="button"
                         class={`tab-pill ${dreamerHarness() === "pi" ? "active" : ""}`}
+                        aria-pressed={dreamerHarness() === "pi"}
                         onClick={() => setDreamerHarness("pi")}
                       >
                         Pi
@@ -1294,6 +1297,7 @@ function ConfigForm(props: {
                       <button
                         type="button"
                         class={`tab-pill ${dreamerHarness() === "omp" ? "active" : ""}`}
+                        aria-pressed={dreamerHarness() === "omp"}
                         onClick={() => setDreamerHarness("omp")}
                       >
                         OMP
@@ -2213,6 +2217,7 @@ export default function ConfigEditor(props: {
         <button
           type="button"
           class={`tab-pill ${configTarget() === "user" ? "active" : ""}`}
+          aria-pressed={configTarget() === "user"}
           onClick={() => selectConfigTarget("user")}
         >
           User Config
@@ -2220,6 +2225,7 @@ export default function ConfigEditor(props: {
         <button
           type="button"
           class={`tab-pill ${configTarget() === "projects" ? "active" : ""}`}
+          aria-pressed={configTarget() === "projects"}
           onClick={() => selectConfigTarget("projects")}
         >
           Project Configs
