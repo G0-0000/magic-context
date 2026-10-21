@@ -6,6 +6,7 @@ import {
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { getHarness, type HarnessId } from "../../shared/harness";
+import { removeTaskNotifications } from "../../shared/search-text";
 import {
     type Database,
     type Statement as PreparedStatement,
@@ -588,6 +589,7 @@ export function getIndexableContent(role: string, parts: unknown[]): string {
         }
 
         return extractTexts(parts)
+            .map(removeTaskNotifications)
             .map(cleanUserText)
             .map(normalizeIndexText)
             .filter((text) => text.length > 0)
@@ -596,6 +598,7 @@ export function getIndexableContent(role: string, parts: unknown[]): string {
 
     if (role === "assistant") {
         return extractTexts(parts)
+            .map(removeTaskNotifications)
             .map(removeSystemReminders)
             .map(normalizeIndexText)
             .filter((text) => text.length > 0)
