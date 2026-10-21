@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(198);
+        expect(validation.files.length).toBe(199);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -32,7 +32,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(78);
+        expect(ts).toHaveLength(79);
         expect(rust).toHaveLength(59);
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
         expect(rust).toContain("tests/rust-tool-attachment-upgrade.test.ts");
@@ -80,7 +80,9 @@ describe("mode manifest validator", () => {
         }
         // OMP hashes each request into its system header, breaking within-session byte identity
         // in cache-stability and long-running-session; their manifest entries declare the omission.
-        expect(filesForMode(validation, "ts", "omp")).toHaveLength(22);
+        expect(filesForMode(validation, "ts", "omp")).toHaveLength(23);
+        expect(filesForMode(validation, "ts", "omp")).toContain("tests/omp-compaction-marker.test.ts");
+        expect(filesForMode(validation, "ts", "pi")).not.toContain("tests/omp-compaction-marker.test.ts");
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
