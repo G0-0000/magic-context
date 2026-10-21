@@ -40,7 +40,12 @@ import {
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
-import { autoEmbedAttemptedBySession, clearEmbedSessionState } from "./embed-session-state";
+import {
+    autoEmbedAttemptedBySession,
+    autoEmbedRetryAfterBySession,
+    clearEmbedSessionState,
+    embedRunStateBySession,
+} from "./embed-session-state";
 import { createMagicContextHook, type MagicContextDeps } from "./hook";
 import { createLiveSessionState } from "./live-session-state";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -694,12 +699,19 @@ describe("magic-context hook", () => {
                     ] as never,
                 },
             );
-            const deadline = Date.now() + 3_000;
-            const embedded = () =>
-                getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session.embedded;
-            while (embedded() < 3 && Date.now() < deadline) {
+            // The drain runs in the background after the transform returns. Its
+            // finally block releases the session's run claim and then either
+            // latches completion or schedules a retry, so wait for that outcome
+            // rather than a fixed deadline, which a loaded machine can overrun.
+            const drainSettled = () =>
+                !embedRunStateBySession.has(sessionId) &&
+                (autoEmbedAttemptedBySession.has(sessionId) ||
+                    autoEmbedRetryAfterBySession.has(sessionId));
+            while (!drainSettled()) {
                 await new Promise((resolve) => setTimeout(resolve, 10));
             }
+            // A retry instead of a latch means the drain stopped short.
+            expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
             await new Promise((resolve) => setTimeout(resolve, 30));
 
             expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
