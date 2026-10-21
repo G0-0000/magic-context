@@ -288,6 +288,7 @@ describe("pending drop writer admission", () => {
             env: { FLUSH_LOCK_DB: databasePath!, PATH: process.env.PATH ?? "" },
             stdout: "pipe",
             stderr: "pipe",
+            windowsHide: true,
         });
         const stdout = locker.stdout;
         if (!stdout) throw new Error("writer lock helper did not expose stdout");
