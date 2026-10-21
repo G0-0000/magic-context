@@ -336,7 +336,9 @@ export type TagTarget = {
     inputStringBytes?: () => number | null;
     /** Non-mutating: would removing this call leave the request ending on an
      * assistant turn (given what this pass already removed)? */
-    wouldStrandConversationEnd?: () => boolean;
+    wouldStrandConversationEnd?: (plannedRemovals?: ReadonlySet<unknown>) => boolean;
+    /** Project a full removal for later decisions without changing the transcript. */
+    notePlannedRemoval?: (plannedRemovals: Set<unknown>) => void;
     /** Non-mutating: the host adapter cannot remove this call structurally, so
      * drop() would keep a paired shell instead. A new drop then keeps the real
      * arguments (skeletonReal) rather than any placeholder. */

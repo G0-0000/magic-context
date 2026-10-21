@@ -1408,7 +1408,6 @@ export async function registerContext(context: V2Context) {
                             error,
                         );
                     }
-
                 }
             } catch (error) {
                 if (!usageController.signal.aborted)

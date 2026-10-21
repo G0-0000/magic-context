@@ -84,8 +84,6 @@ export interface DeleteSessionScopedRowsOptions {
     readonly rustModuleCleanupAcknowledged?: boolean;
     /** Keep tag-change counters when a session may resume; remove them only after host deletion is confirmed. */
     readonly preserveTagRevisionTombstones?: boolean;
-    /** The caller clears filesystem fences after the session-deletion transaction commits. */
-    readonly deferRecoveryFenceCleanup?: boolean;
 }
 
 const cleanupStatements = new WeakMap<Database, Map<string, Statement>>();

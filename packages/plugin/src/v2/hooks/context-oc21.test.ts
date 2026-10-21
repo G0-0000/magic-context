@@ -15,8 +15,8 @@ import {
     isLocalCheckpoint,
     NativeFoldReplay,
 } from "../fold/native-replay";
-import * as readerModule from "../store-reader";
 import type { StoreRow } from "../store-reader";
+import * as readerModule from "../store-reader";
 import { registerContext } from "./context";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context, V2Message } from "./types";

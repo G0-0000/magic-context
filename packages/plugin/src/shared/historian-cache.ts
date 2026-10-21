@@ -1,4 +1,4 @@
-import { type Node, parseTree } from "jsonc-parser";
+import { type Node, parseTree } from "jsonc-parser/lib/esm/main.js";
 
 export type HistorianCacheTail = "write" | "skip";
 

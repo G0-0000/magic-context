@@ -381,7 +381,6 @@ export async function runValidatedHistorianPass(args: {
     );
     const repairRun = await runHistorianPrompt({
         ...args,
-        cacheTail: "skip",
         prompt: repairPrompt,
         dumpLabel: `${args.dumpLabelBase}-repair`,
         modelOverride: args.model,
@@ -568,6 +567,10 @@ async function runHistorianPrompt(args: {
         sessionDirectory,
         "historian",
     );
+    // OpenCode 1 keeps the host's historical cache behavior; OpenCode 2 can
+    // omit the one-shot body tail while still caching its configured system prompt.
+    const cacheTail =
+        args.cacheTail ?? (executor.capabilities.harness === "opencode2" ? "skip" : undefined);
     let promptSettled = false;
     let hadUnsettledPrompt = false;
     const startedAt = Date.now();
@@ -690,7 +693,9 @@ async function runHistorianPrompt(args: {
                     client,
                     {
                         path: { id: agentSessionId },
-                        cacheTail: retryIndex > 0 ? "write" : (args.cacheTail ?? "skip"),
+                        ...(cacheTail !== undefined
+                            ? { cacheTail: retryIndex > 0 ? "write" : cacheTail }
+                            : {}),
                         query: { directory: sessionDirectory },
                         body: {
                             // Use the specified agent (HISTORIAN_AGENT by default, or

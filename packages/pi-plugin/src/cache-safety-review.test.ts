@@ -174,19 +174,14 @@ for (const lane of ["pi", "oc1", "oc2"] as const)
 					live.commit();
 					const partialBytes = JSON.stringify(raw);
 					expect(getPendingOps(db, session).map((o) => o.tagId)).toEqual(
-						toolTags.slice(position).map((t) => t.tagNumber),
+						toolTags.map((t) => t.tagNumber),
 					);
 					expect(
 						getTagsBySession(db, session)
 							.filter((t) => t.type === "tool")
 							.map((t) => t.status),
-					).toEqual(
-						Array.from({ length: 6 }, (_, i) =>
-							i < position ? "dropped" : "active",
-						),
-					);
-					if (position === 0) expect(raw).toEqual(taggedRaw);
-					else expect(raw).not.toEqual(taggedRaw);
+					).toEqual(Array.from({ length: 6 }, () => "active"));
+					expect(raw).toEqual(taggedRaw);
 
 					db.close();
 					db = createTestDb(path);

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
-import { getSourceContents } from "../../features/magic-context/storage-source";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { getSourceContents } from "../../features/magic-context/storage-source";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { adaptPayload } from "../../v2/hooks/payload";

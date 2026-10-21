@@ -183,7 +183,7 @@ describe("applyPendingOperations with protection window set form", () => {
 });
 
 describe("pending tool drop persistence", () => {
-    it("commits the first drop and stops before the failed second and untouched third", () => {
+    it("rolls back the whole drop batch before any wire mutation on a write failure", () => {
         useTempDataHome("apply-write-failure-");
         const db = openDatabase()!;
         const applied: number[] = [];
@@ -208,18 +208,19 @@ describe("pending tool drop persistence", () => {
         expect(() => applyPendingOperations(SES, db, targets, new Set())).toThrow(
             "abort second drop",
         );
-        expect(applied).toEqual([1]);
+        expect(applied).toEqual([]);
         expect([1, 2, 3].map((n) => getTagById(db, SES, n)?.status)).toEqual([
-            "dropped",
+            "active",
             "active",
             "active",
         ]);
         expect([1, 2, 3].map((n) => getTagById(db, SES, n)?.dropMode)).toEqual([
-            "skeleton_real",
+            "full",
             "full",
             "full",
         ]);
         expect(db.prepare("SELECT tag_id FROM pending_ops ORDER BY tag_id").all()).toEqual([
+            { tag_id: 1 },
             { tag_id: 2 },
             { tag_id: 3 },
         ]);

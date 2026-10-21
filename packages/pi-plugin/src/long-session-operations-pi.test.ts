@@ -28,7 +28,7 @@ import {
 	userMessage,
 } from "./test-utils.test";
 
-test("pending drops use one tag update and commit each decision before wire mutation", () => {
+test("pending drops use one tag update each and one batch commit before wire mutation", () => {
 	const db = createTestDb();
 	try {
 		const insert = db.prepare(
@@ -70,7 +70,7 @@ test("pending drops use one tag update and commit each decision before wire muta
 					getInputStringBytes: () => 10_000,
 					drop: () => {
 						expect(db.inTransaction).toBe(false);
-						expect(commits).toBe(mutations + 2);
+						expect(commits).toBe(1);
 						expect(
 							getTagsBySession(db, "s").find((t) => t.tagNumber === n)
 								?.dropMode,
@@ -84,7 +84,7 @@ test("pending drops use one tag update and commit each decision before wire muta
 		try {
 			expect(applyPendingOperations("s", db, targets, new Set())).toBe(true);
 			expect(updates).toBe(2);
-			expect(commits).toBe(3);
+			expect(commits).toBe(1);
 			expect(mutations).toBe(2);
 		} finally {
 			statements.mockRestore();
