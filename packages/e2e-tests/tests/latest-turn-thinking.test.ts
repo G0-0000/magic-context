@@ -15,13 +15,17 @@ const thinking = (n: number) => ({
 	signature: `signed-${n}`,
 });
 
-test("mock rejects edited, missing and reordered latest-turn thinking across tool results", async () => {
+test("mock rejects edited, missing and reordered latest-turn thinking across tool results, and accepts removing all of it", async () => {
 	const mock = new MockProvider();
 	const { baseURL } = await mock.start({
 		thinkingScope: () => "negative-control",
 	});
 	mock.setDefault({
-		content: [thinking(1), { type: "redacted_thinking", data: "opaque-1" }],
+		content: [
+			thinking(1),
+			{ type: "redacted_thinking", data: "opaque-1" },
+			thinking(2),
+		],
 		usage: { input_tokens: 10, output_tokens: 10 },
 	});
 	const send = (messages: unknown[]) =>
@@ -33,6 +37,7 @@ test("mock rejects edited, missing and reordered latest-turn thinking across too
 	const returned = [
 		thinking(1),
 		{ type: "redacted_thinking", data: "opaque-1" },
+		thinking(2),
 	];
 	const result = {
 		role: "user",
@@ -41,10 +46,12 @@ test("mock rejects edited, missing and reordered latest-turn thinking across too
 	try {
 		expect((await send([user])).status).toBe(200);
 		for (const content of [
-			[{ ...thinking(1), thinking: "edited" }, returned[1]],
-			[returned[0]],
+			[{ ...thinking(1), thinking: "edited" }, returned[1], returned[2]],
+			// A middle gap.
+			[returned[0], returned[2]],
+			[returned[0], returned[1]],
+			[returned[1], returned[2]],
 			[...returned].reverse(),
-			[],
 		]) {
 			const rejected = await send([
 				user,
@@ -56,11 +63,13 @@ test("mock rejects edited, missing and reordered latest-turn thinking across too
 				"latest assistant message cannot be modified",
 			);
 		}
+		// Rewording the prompt does not start a new turn, so a partial set is
+		// still rejected.
 		expect(
 			(
 				await send([
 					{ ...user, content: "edited prompt" },
-					{ role: "assistant", content: [] },
+					{ role: "assistant", content: [returned[0]] },
 					result,
 				])
 			).status,
@@ -69,6 +78,11 @@ test("mock rejects edited, missing and reordered latest-turn thinking across too
 		expect(
 			(await send([user, { role: "assistant", content: returned }, result]))
 				.status,
+		).toBe(200);
+		// Removing every block of the turn is accepted (Opus 5.5 accepted it
+		// live); a middle gap is not.
+		expect(
+			(await send([user, { role: "assistant", content: [] }, result])).status,
 		).toBe(200);
 		expect(
 			(
