@@ -165,6 +165,7 @@ import {
     createV2HiddenCompletionExecutor,
     type V2HiddenCompletionExecutor,
 } from "../hidden-completion";
+import { HiddenModelActivity } from "../hidden-model-activity";
 import { gaDatabasePath, type V2StoreReader, V2StoreReaderPool } from "../store-reader";
 import {
     clearSyntheticCandidates,
@@ -705,6 +706,7 @@ export async function registerContext(context: V2Context) {
     const queriedModels = new Set<string>();
     const rawLimits = new Map<string, { context: number; input?: number; output?: number }>();
     const hiddenSessionErrors = new Map<string, unknown>();
+    const hiddenModelActivity = new HiddenModelActivity();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
@@ -870,6 +872,8 @@ export async function registerContext(context: V2Context) {
         return createV2HiddenCompletionExecutor(
             {
                 ...context.session,
+                watchModelActivity: (sessionID, onOutput) =>
+                    hiddenModelActivity.watch(sessionID, onOutput),
                 get: async (input) => {
                     const session = await context.session.get(input);
                     const error = hiddenSessionErrors.get(input.sessionID);
@@ -1337,6 +1341,7 @@ export async function registerContext(context: V2Context) {
                         data?: { sessionID?: string; error?: unknown };
                     };
                     try {
+                        hiddenModelActivity.observe(event);
                         // A provider or model reload can change the limit for the same
                         // model key. Drop the one-time catalog reads so the next pass
                         // re-reads the live limit.

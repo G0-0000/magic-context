@@ -357,7 +357,7 @@ async function promptWithTimeout(
                   // Only a transport that watches the child can say the model is silent.
                   if (!activity.monitored || activity.received) return;
                   silent = true;
-                  controller.abort();
+                  controller.abort(new ModelProducedNoOutputError(firstOutputTimeoutMs));
               }, firstOutputTimeoutMs)
             : undefined;
     const timeoutError = () =>

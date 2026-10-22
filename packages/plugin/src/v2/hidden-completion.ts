@@ -2,6 +2,7 @@ import {
     createDreamTokenBudget,
     DreamTokenBudgetExceeded,
 } from "../features/magic-context/dreamer/token-budget";
+import { recordChildInvocation } from "../features/magic-context/subagent-token-capture";
 import type {
     HiddenCompletion,
     HiddenCompletionExecutor,
@@ -14,6 +15,11 @@ import { recordHiddenVariantWarning } from "../shared/hidden-variant-warnings";
 import { needsBlockedRead } from "../shared/hidden-zen-read";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
+import {
+    ModelProducedNoOutputError,
+    noteModelActivityMonitored,
+    noteModelOutputReceived,
+} from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import { runTokenLog } from "../shared/run-token-log";
 import type { Database } from "../shared/sqlite";
@@ -654,6 +660,7 @@ export async function createV2HiddenCompletionExecutor(
             }
         },
         async attempt(handle, request) {
+            const startedAt = Date.now();
             const run = runs.get(handle);
             if (!run) throw new Error("Unknown hidden completion run");
             const refuseDisposed = (): void => {
@@ -807,6 +814,27 @@ export async function createV2HiddenCompletionExecutor(
                 abortReject = reject;
             });
             const onAbort = () => {
+                const reason = request.signal?.reason;
+                if (
+                    reason instanceof ModelProducedNoOutputError &&
+                    run.identity.kind === "dreamer-task"
+                ) {
+                    // The outer task records its result after fallback, not the first model's
+                    // no-output timeout. Keep that failed attempt separately so it is not lost.
+                    recordChildInvocation({
+                        db: options.db,
+                        parentSessionId: run.identity.parentSessionId ?? options.projectIdentity,
+                        parentInvocationId: run.identity.parentInvocationId,
+                        harness: "opencode2",
+                        subagent: "dreamer",
+                        task: run.identity.title.replace(/^magic-context-dream-/, ""),
+                        startedAt,
+                        status: "timed_out",
+                        error: reason,
+                        providerId: requested.providerID,
+                        modelId: requested.modelID,
+                    });
+                }
                 void interruptAndRetire(run, "prompt-aborted").finally(() =>
                     abortReject(new Error("Hidden completion prompt aborted")),
                 );
@@ -846,6 +874,10 @@ export async function createV2HiddenCompletionExecutor(
                 }),
             };
             inFlight.add(entry);
+            const stopWatching = host.watchModelActivity?.(run.child.id, () =>
+                noteModelOutputReceived(request.signal),
+            );
+            if (stopWatching) noteModelActivityMonitored(request.signal);
             try {
                 await Promise.race([
                     host.prompt({ sessionID: run.child.id, text: marker }),
@@ -978,6 +1010,7 @@ export async function createV2HiddenCompletionExecutor(
                 }
                 throw error;
             } finally {
+                stopWatching?.();
                 clearTimeout(deadlineTimer);
                 if (budgetPoll) clearInterval(budgetPoll);
                 request.signal?.removeEventListener("abort", onAbort);

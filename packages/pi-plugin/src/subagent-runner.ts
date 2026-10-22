@@ -38,6 +38,7 @@ import {
 } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { ResolvedModelEntry } from "@magic-context/core/shared/model-resolution";
+import { ModelProducedNoOutputError } from "@magic-context/core/shared/model-suggestion-retry";
 import { piHarnessKindFromExecutable } from "@magic-context/core/shared/pi-executable";
 import {
 	formatRunTokenLog,
@@ -2260,10 +2261,14 @@ export class PiSubagentRunner implements SubagentRunner {
 			const onAbort = () => {
 				if (settled) return;
 				terminateChild(child);
+				const silentCut =
+					options.signal?.reason instanceof ModelProducedNoOutputError
+						? options.signal.reason
+						: undefined;
 				settle({
 					ok: false,
-					reason: "abort",
-					error: "pi subagent aborted by caller",
+					reason: silentCut ? "timeout" : "abort",
+					error: silentCut?.message ?? "pi subagent aborted by caller",
 					durationMs: Date.now() - startTime,
 				});
 			};
