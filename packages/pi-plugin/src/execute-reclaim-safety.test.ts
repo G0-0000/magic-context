@@ -109,10 +109,10 @@ test("state-write failure preserves Pi bytes when a last-good replay is unavaila
 	}
 });
 
-test("native marker failure prevents execute admissions until authorization succeeds", async () => {
+function nativeHarness(count = 6) {
 	const db = createTestDb();
 	const fake = createFakePi();
-	const id = "native-deferred-drop";
+	const id = `native-deferred-drop-${count}`;
 	const nativeModel = {
 		id: "native-upgrade-codex",
 		api: "openai-codex-responses",
@@ -125,7 +125,7 @@ test("native marker failure prevents execute admissions until authorization succ
 		| ReturnType<typeof assistantMessage>
 		| ReturnType<typeof toolResultMessage>
 	> = [userMessage("first", 1)];
-	for (let i = 0; i < 6; i++) {
+	for (let i = 0; i < count; i++) {
 		raw.push(
 			assistantMessage("visible answer", 2 + i * 4, {
 				api: nativeModel.api,
@@ -195,6 +195,11 @@ test("native marker failure prevents execute admissions until authorization succ
 		if (!result) throw new Error("Missing native context result");
 		return result.messages;
 	};
+	return { db, id, pass };
+}
+
+test("native marker failure prevents execute admissions until authorization succeeds", async () => {
+	const { db, id, pass } = nativeHarness();
 	let busts = 0;
 	const restore = __test.setPipelineResultObserverForTests(
 		(session, result) => {
@@ -323,3 +328,133 @@ test("failure to clear execute state serves the prepared drop and stable defer",
 		h.close();
 	}
 });
+
+for (const [count, busy] of [
+	[1, false],
+	[50, false],
+	[50, true],
+] as const) {
+	test(`native execute estimate takes one writer for ${count} queued candidates${busy ? " when BEGIN is busy" : ""}`, async () => {
+		const { db, id, pass } = nativeHarness(count);
+		const originalEstimate = executeModule.estimateExecuteReclaimTokens;
+		const observations: Array<{
+			candidates: number;
+			begins: number;
+			rollbacks: number;
+			commits: number;
+			writes: number;
+			tokens: number;
+			elapsedMs: number;
+		}> = [];
+		const spy = spyOn(
+			executeModule,
+			"estimateExecuteReclaimTokens",
+		).mockImplementation((args) => {
+			if (args.sessionId !== id) return originalEstimate(args);
+			const exec = db.exec.bind(db);
+			const prepare = db.prepare.bind(db);
+			const document = () =>
+				prepare(
+					"SELECT trailing_blank_decisions FROM session_meta WHERE session_id=?",
+				).get(id);
+			const before = document();
+			const observation = {
+				candidates: 0,
+				begins: 0,
+				rollbacks: 0,
+				commits: 0,
+				writes: 0,
+				tokens: 0,
+				elapsedMs: 0,
+			};
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE") {
+					observation.begins++;
+					if (busy)
+						throw Object.assign(new Error("database is locked"), {
+							code: "SQLITE_BUSY",
+						});
+				}
+				if (sql === "ROLLBACK") observation.rollbacks++;
+				if (sql === "COMMIT") observation.commits++;
+				return exec(sql);
+			}) as typeof db.exec;
+			db.prepare = ((sql: string) => {
+				const statement = prepare(sql);
+				if (
+					!sql.startsWith(
+						"UPDATE session_meta SET trailing_blank_decisions = ?",
+					)
+				)
+					return statement;
+				return new Proxy(statement, {
+					get(target, key) {
+						const value = Reflect.get(target, key);
+						if (key === "run")
+							return (...values: unknown[]) => {
+								observation.writes++;
+								return (value as (...values: unknown[]) => unknown).apply(
+									target,
+									values,
+								);
+							};
+						return typeof value === "function" ? value.bind(target) : value;
+					},
+				});
+			}) as typeof db.prepare;
+			const start = performance.now();
+			try {
+				observation.tokens = originalEstimate({
+					...args,
+					probePreparation: (targets) => {
+						observation.candidates = targets.size;
+						if (!args.probePreparation)
+							throw new Error("Missing native preparation probe");
+						return args.probePreparation(targets);
+					},
+				});
+				return observation.tokens;
+			} finally {
+				observation.elapsedMs = performance.now() - start;
+				db.exec = exec;
+				db.prepare = prepare;
+				expect(document()).toEqual(before);
+				observations.push(observation);
+			}
+		});
+		try {
+			await pass(40);
+			const tags = getTagsBySession(db, id).filter(
+				(tag) => tag.type === "tool",
+			);
+			expect(tags).toHaveLength(count);
+			for (const tag of tags) queuePendingOp(db, id, tag.tagNumber, "drop");
+			observations.length = 0;
+			await pass(76);
+			expect(observations).toHaveLength(1);
+			const [observed] = observations;
+			if (!observed) throw new Error("Missing execute estimate observation");
+			expect(observed.candidates).toBe(count);
+			expect(observed.begins).toBe(1);
+			expect(observed.commits).toBe(0);
+			expect(observed.rollbacks).toBe(busy ? 0 : 1);
+			expect(observed.writes).toBe(busy ? 0 : count);
+			if (busy) {
+				expect(observed.tokens).toBe(0);
+				expect(getPendingOps(db, id)).toHaveLength(count);
+				expect(
+					getTagsBySession(db, id).filter((tag) => tag.status === "dropped"),
+				).toHaveLength(0);
+			} else expect(observed.tokens).toBeGreaterThan(0);
+			// Timings are evidence only; deterministic lock/write counts are the CI guard.
+			console.log(
+				"NATIVE_ESTIMATE_COST",
+				JSON.stringify({ count, busy, ...observed }),
+			);
+		} finally {
+			spy.mockRestore();
+			clearContextHandlerSession(id);
+			db.close();
+		}
+	});
+}

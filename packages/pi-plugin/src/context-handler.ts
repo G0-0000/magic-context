@@ -9959,23 +9959,25 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				...protectedTagNumbersForPass,
 				...protectedToolTags,
 			]),
-			probePreparation: (target) => {
+			probePreparation: (targets) => {
 				const saved = nativeRemovalInputs;
 				const rollback = Symbol("execute removal probe");
-				let allowed = false;
+				const allowed = new Set<number>();
 				try {
-					// Exercise the drain's real marker write under the writer lock,
+					// Exercise every candidate's marker write under one writer lock,
 					// then roll back the document write and restore nativeRemovalInputs.
 					nativeRemovalInputs = saved && new Map(saved);
 					probingExecuteRemoval = true;
 					args.db
 						.transaction(() => {
-							allowed = target.prepareDrop?.() !== false;
+							for (const [number, target] of targets) {
+								if (target.prepareDrop?.() !== false) allowed.add(number);
+							}
 							throw rollback;
 						})
 						.immediate();
 				} catch (error) {
-					if (error !== rollback) allowed = false;
+					if (error !== rollback) allowed.clear();
 				} finally {
 					nativeRemovalInputs = saved;
 					probingExecuteRemoval = false;

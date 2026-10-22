@@ -96,20 +96,34 @@ export function estimateExecuteReclaimTokens(args: {
     tags: readonly TagEntry[];
     targets: ReadonlyMap<number, TagTarget>;
     protectedTagIds: ReadonlySet<number>;
-    /** Host dry run of prepareDrop; it must leave durable state and wire bytes unchanged. */
-    probePreparation?: (target: TagTarget) => boolean;
+    /** Batch dry run of prepareDrop; it must leave durable state and wire bytes unchanged. */
+    probePreparation?: (targets: ReadonlyMap<number, TagTarget>) => ReadonlySet<number>;
 }): number {
     const eligible = capturePendingDropEligibility(args.targets, args.protectedTagIds);
     const queued = new Set(
         args.pendingOps.filter((op) => op.operation === "drop").map((op) => op.tagId),
     );
-    const seed = sessionDecisionCalibration(args.db, args.sessionId);
-    return args.tags.reduce((total, tag) => {
-        if (tag.status !== "active" || !queued.has(tag.tagNumber) || !eligible.has(tag.tagNumber))
-            return total;
+    const candidates = args.tags.filter(
+        (tag) =>
+            tag.status === "active" && queued.has(tag.tagNumber) && eligible.has(tag.tagNumber),
+    );
+    const preparationTargets = new Map<number, TagTarget>();
+    for (const tag of candidates) {
         const target = args.targets.get(tag.tagNumber);
-        if (target?.prepareDrop && !(args.probePreparation?.(target) ?? target.prepareDrop()))
-            return total;
+        if (target?.prepareDrop) preparationTargets.set(tag.tagNumber, target);
+    }
+    const prepared =
+        preparationTargets.size === 0
+            ? new Set<number>()
+            : (args.probePreparation?.(preparationTargets) ??
+              new Set(
+                  [...preparationTargets]
+                      .filter(([, target]) => target.prepareDrop?.() !== false)
+                      .map(([number]) => number),
+              ));
+    const seed = sessionDecisionCalibration(args.db, args.sessionId);
+    return candidates.reduce((total, tag) => {
+        if (preparationTargets.has(tag.tagNumber) && !prepared.has(tag.tagNumber)) return total;
         const ratio = tag.type === "tool" ? seed.toolsRatio : seed.proseRatio;
         return total + Math.max(0, (tag.tokenCount ?? Math.ceil(tag.byteSize / 4)) * ratio);
     }, 0);
