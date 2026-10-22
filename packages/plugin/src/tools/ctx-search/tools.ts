@@ -224,6 +224,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     // message lane on a worker so the serving thread stays free.
                     searchMessageHistory: (request) =>
                         searchMessageHistoryOffThread(deps.db, request),
+                    // The history-chunk pool is still built on this thread. A
+                    // cancelled call stops building it between batches instead
+                    // of finishing it for nobody.
+                    signal: toolContext.abort,
                     ...dateRange,
                 },
             );

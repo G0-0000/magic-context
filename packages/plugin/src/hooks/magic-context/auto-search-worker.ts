@@ -1,4 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
+import type { UnifiedSearchStepTimings } from "../../features/magic-context/search";
 import type { Database as DatabaseHandle } from "../../shared/sqlite";
 import { exitOnWorkerClose } from "../../shared/worker-shutdown";
 import type {
@@ -23,6 +24,7 @@ const [
     { getMemoriesByProject },
     { installProjectEmbeddingSearchBridge },
     { searchMessageHistory, unifiedSearch },
+    { getLastCompartmentChunkPoolWarm, maintainCompartmentChunkSearchPools },
     { setEmbeddingSessionBusy },
     { getHarness, setHarness },
     { Database, registerSqliteDiagnosticSink },
@@ -33,6 +35,7 @@ const [
     import("../../features/magic-context/memory/storage-memory"),
     import("../../features/magic-context/project-embedding-registry"),
     import("../../features/magic-context/search"),
+    import("../../features/magic-context/compartment-chunk-embedding"),
     import("../../shared/embedding-activity"),
     import("../../shared/harness"),
     import("../../shared/sqlite"),
@@ -75,6 +78,37 @@ db.exec("PRAGMA busy_timeout = 250");
 // closed here, before the thread ends, or Bun 1.4.4's teardown blocks the
 // owner's next write (see worker-shutdown.ts).
 const { closePort } = exitOnWorkerClose(port, () => db.close());
+
+/**
+ * How often a pooled search worker checks whether the sessions it searched have
+ * new or changed history-chunk vectors, and decodes them into its pool. This is
+ * what keeps the pool warm between turns: after a compartment is published or
+ * its vectors are written, the next check picks the rows up, so the next hint
+ * finds the pool warm. A check that finds nothing new costs one index-only count
+ * per session.
+ */
+const CHUNK_POOL_MAINTENANCE_INTERVAL_MS = 5_000;
+let maintenanceTimer: ReturnType<typeof setInterval> | undefined;
+let maintaining = false;
+function maintainChunkPools(): void {
+    if (maintaining) return;
+    maintaining = true;
+    void maintainCompartmentChunkSearchPools(db)
+        .catch(() => {})
+        .finally(() => {
+            maintaining = false;
+        });
+}
+/** Start the periodic check once this worker has served a search, and run one now. */
+function scheduleChunkPoolMaintenance(): void {
+    if (!persistent) return;
+    if (!maintenanceTimer) {
+        maintenanceTimer = setInterval(maintainChunkPools, CHUNK_POOL_MAINTENANCE_INTERVAL_MS);
+        // Never keep the worker alive on its own; the owner decides its lifetime.
+        maintenanceTimer.unref?.();
+    }
+    setTimeout(maintainChunkPools, 0);
+}
 
 async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
     input = jobInput;
@@ -144,6 +178,8 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
             const outcome = searchMessageHistory(db, input.messageRequest);
             port.postMessage({ kind: "messages", outcome } satisfies AutoSearchWorkerReply);
         } else {
+            const jobStarted = performance.now();
+            const steps: UnifiedSearchStepTimings = {};
             const results = await unifiedSearch(
                 db,
                 input.sessionId,
@@ -157,9 +193,19 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
                     embedQuery: async (text) =>
                         (await request({ kind: "query", text })).result ?? null,
                     isEmbeddingRuntimeEnabled: () => input.embeddingRuntimeEnabled,
+                    stepTimings: steps,
                 },
             );
-            port.postMessage({ kind: "result", results } satisfies AutoSearchWorkerReply);
+            port.postMessage({
+                kind: "result",
+                results,
+                timings: {
+                    steps,
+                    jobMs: performance.now() - jobStarted,
+                    lastPoolWarm: getLastCompartmentChunkPoolWarm(),
+                },
+            } satisfies AutoSearchWorkerReply);
+            scheduleChunkPoolMaintenance();
         }
     } catch (error) {
         port.postMessage({
@@ -177,8 +223,10 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
     }
 }
 
-// The client leases one job at a time and discards the worker on abort, so live
-// jobs never share the module-level input, query dimensions or embedding bridge.
+// The client leases one job at a time. When the owner stops waiting at a
+// deadline it keeps the lease until this job has replied, so live jobs never
+// share the module-level input, query dimensions or embedding bridge. Pool
+// maintenance reads only the connection and its own arguments.
 port.on("message", (message: { kind?: string; input?: AutoSearchWorkerInput }) => {
     if (message.kind === "run" && message.input) void run(message.input);
 });
