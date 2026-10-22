@@ -19,7 +19,7 @@ port.postMessage({ kind: "accepted" } satisfies RawOrdinalWarmupReply);
 // connection open (see worker-shutdown.ts). The request is read between awaits;
 // a synchronous scan finishes first.
 const openConnections = new Set<{ close(): void }>();
-const stopListeningForClose = exitOnWorkerClose(port, () => {
+const { closePort } = exitOnWorkerClose(port, () => {
     for (const connection of openConnections) {
         try {
             connection.close();
@@ -212,8 +212,7 @@ async function main(): Promise<void> {
     }
     // Release SQLite before publishing: the host may stop the worker on receipt.
     port.postMessage(reply);
-    // Bun 1.3.14 keeps the thread alive after port.close() while the close
-    // listener is still installed.
-    stopListeningForClose();
-    port.close();
+    // Removes the close listener before closing the port: Bun 1.3.14 keeps the
+    // thread alive otherwise.
+    closePort();
 }

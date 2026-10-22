@@ -37,14 +37,18 @@ export function isWorkerCloseMessage(message: unknown): boolean {
  * thread, on Node and on Bun. Other `message` listeners in the worker see the
  * same message and must ignore its kind.
  *
- * Returns a function that removes the listener. A worker that finishes by
- * closing its port must call it first: on Bun 1.3.14 a worker whose parent port
- * still has a `message` listener does not exit after `port.close()`.
+ * On Bun 1.3.14 a worker whose parent port still has a `message` listener does
+ * not exit after `port.close()`, so this listener must never outlive the port.
+ * A worker that installs it closes its port only through the returned
+ * `closePort`, which removes the listener first (on the next timer turn). The port's own `close()`
+ * cannot be wrapped instead: on Bun 1.3.14 it is a read-only, non-configurable
+ * property. `worker-shutdown-fence.test.ts` rejects any direct port close in a
+ * file that calls this function.
  */
 export function exitOnWorkerClose(
-    port: MessagePort | null,
+    port: WorkerClosePort | null,
     closeConnections: () => void,
-): () => void {
+): { closePort(): void } {
     const listener = (message: unknown) => {
         if (!isWorkerCloseMessage(message)) return;
         try {
@@ -55,11 +59,26 @@ export function exitOnWorkerClose(
             process.exit(0);
         }
     };
-    port?.on("message", listener);
-    return () => {
-        port?.off("message", listener);
+    if (!port) return { closePort() {} };
+    port.on("message", listener);
+    let closed = false;
+    return {
+        closePort() {
+            if (closed) return;
+            closed = true;
+            // Close from a timer, after the worker's entry module has finished
+            // evaluating: on Bun 1.3.14 a port closed while an entry module with
+            // a top-level await is still evaluating does not end the thread.
+            setTimeout(() => {
+                port.off("message", listener);
+                port.close();
+            });
+        },
     };
 }
+
+/** The parts of a worker's parent port that {@link exitOnWorkerClose} uses. */
+export type WorkerClosePort = Pick<MessagePort, "on" | "off" | "close">;
 
 export interface WorkerShutdown {
     /**

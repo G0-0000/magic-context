@@ -1,16 +1,22 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { createTestTempDir } from "./test-temp-dir";
-import { createWorkerShutdown, getWorkerShutdownStats } from "./worker-shutdown";
+import {
+    createWorkerShutdown,
+    exitOnWorkerClose,
+    getWorkerShutdownStats,
+    type WorkerClosePort,
+} from "./worker-shutdown";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
     for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-async function start(mode: "cooperative" | "deaf") {
+async function start(mode: "cooperative" | "deaf" | "finish") {
     const { dir, cleanup } = createTestTempDir("mc-worker-shutdown-");
     cleanups.push(cleanup);
     const path = join(dir, "store.db");
@@ -74,4 +80,48 @@ test("closing twice shares one shutdown, and closing an exited worker is a no-op
     await exited.exitCode;
     await late.close();
     expect(counts(site)).toEqual({ graceful: before.graceful + 1, forced: before.forced });
+});
+
+/** A port that records how many message listeners were attached when it closed. */
+function recordingPort() {
+    const events = new EventEmitter();
+    const closedWith: number[] = [];
+    const port = {
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+            events.on(event, listener);
+            return port;
+        },
+        off: (event: string, listener: (...args: unknown[]) => void) => {
+            events.off(event, listener);
+            return port;
+        },
+        close: () => {
+            closedWith.push(events.listenerCount("message"));
+        },
+    };
+    return { port: port as unknown as WorkerClosePort, events, closedWith };
+}
+
+test("closePort removes the close listener before the port closes", async () => {
+    const { port, events, closedWith } = recordingPort();
+    const { closePort } = exitOnWorkerClose(port, () => {});
+    expect(events.listenerCount("message")).toBe(1);
+    closePort();
+    // Closing again does not close the port twice.
+    closePort();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // Bun 1.3.14 never ends a worker whose port closes with a listener attached.
+    expect(closedWith).toEqual([0]);
+});
+
+test("a worker that closes its own port through closePort exits by itself", async () => {
+    const { worker, exitCode } = await start("finish");
+    const outcome = await Promise.race([
+        exitCode,
+        new Promise<string>((resolve) => setTimeout(() => resolve("no exit"), 5_000)),
+    ]);
+    // Terminate only a worker that is still running: on Bun 1.3.14,
+    // terminate() on a worker that has already exited never settles.
+    if (outcome === "no exit") await worker.terminate();
+    expect(outcome).toBe(0);
 });

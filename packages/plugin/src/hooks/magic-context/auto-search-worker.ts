@@ -74,7 +74,7 @@ db.exec("PRAGMA busy_timeout = 250");
 // The owner disposes this worker by asking it to close: the connection must be
 // closed here, before the thread ends, or Bun 1.4.4's teardown blocks the
 // owner's next write (see worker-shutdown.ts).
-exitOnWorkerClose(port, () => db.close());
+const { closePort } = exitOnWorkerClose(port, () => db.close());
 
 async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
     input = jobInput;
@@ -170,7 +170,9 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
         setEmbeddingSessionBusy(input.sessionId, false);
         if (!persistent) {
             db.close();
-            port?.close();
+            // Removes the close listener before closing the port: Bun 1.3.14
+            // keeps the thread alive otherwise.
+            closePort();
         }
     }
 }
