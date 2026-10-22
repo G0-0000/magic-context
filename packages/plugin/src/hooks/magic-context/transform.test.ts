@@ -1535,14 +1535,25 @@ describe("createTransform", () => {
             },
         ];
 
+        // Reconciliation runs in the background, so wait for its own completion
+        // flag instead of a fixed number of timer ticks: a loaded runner can need
+        // more than two ticks. The bound still fails the test if it never runs.
+        const waitForReconciled = async (sessionId: string): Promise<void> => {
+            const deadline = Date.now() + 5_000;
+            while (!isSessionReconciled(sessionId)) {
+                if (Date.now() > deadline) {
+                    throw new Error(`session ${sessionId} was never reconciled within 5 s`);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+        };
+
         await transform({}, { messages });
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitForReconciled("ses-reconcile");
         expect(isSessionReconciled("ses-reconcile")).toBe(true);
 
         await transform({}, { messages });
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitForReconciled("ses-reconcile");
         expect(isSessionReconciled("ses-reconcile")).toBe(true);
     });
 
