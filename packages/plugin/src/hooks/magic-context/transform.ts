@@ -112,6 +112,7 @@ import {
     resolveModelKey,
     resolveTrustedContextLimit,
 } from "./event-resolvers";
+import { maintainExecuteFloorMark } from "./execute-reclaim";
 import { omitIncompleteFileTokenTotals } from "./file-token-coverage";
 import {
     createFinalWireUsageTracker,
@@ -1962,6 +1963,13 @@ export function createTransform(deps: TransformDeps) {
             },
         );
         let _boundarySnapshotCache: ProtectedTailBoundarySnapshot | null | undefined;
+        if (fullFeatureMode && !compactionOff)
+            maintainExecuteFloorMark(
+                db,
+                sessionId,
+                currentTurnId,
+                boundaryUsageForProtectedTail.percentage < boundaryExecuteThreshold,
+            );
         const getRunnableBoundaryForCompartment = (
             emergencyTailScale?: 0.5 | 0.25,
         ): ProtectedTailBoundarySnapshot | null => {
@@ -2335,6 +2343,7 @@ export function createTransform(deps: TransformDeps) {
                         },
                     },
                     pendingDropEligibility.read(sessionId, dropProjectionKey()),
+                    schedulerDecision === "execute",
                 );
                 if (triggerResult.shouldFire) {
                     sessionLog(

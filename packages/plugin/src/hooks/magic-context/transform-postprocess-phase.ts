@@ -132,6 +132,12 @@ import {
     EmergencyFailClosedError,
     outgoingContextRefusal,
 } from "./emergency-fail-closed";
+import {
+    clearExecuteReclaimState,
+    estimateExecuteReclaimTokens,
+    originateExecuteReclaim,
+    readExecuteReclaimState,
+} from "./execute-reclaim";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
@@ -2491,6 +2497,7 @@ export async function runPostTransformPhase(
     const idleExpiryRebuild =
         (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
+        executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold:
             rewritingSignedPrefix ||
@@ -2521,6 +2528,35 @@ export async function runPostTransformPhase(
                     (args.pendingCompartmentInjection?.compartmentCount ?? 0) > 0 &&
                     legacyPublishedHeadChanged(args))),
     };
+    const protectedToolTags = protectedToolTagNumbers(args.tags, args.protectedTools);
+    rideSignals.executeReclaim =
+        !compactionOff &&
+        originateExecuteReclaim({
+            db: args.db,
+            sessionId: args.sessionId,
+            primaryExecute:
+                args.fullFeatureMode &&
+                args.schedulerDecision === "execute" &&
+                args.contextUsage.percentage < args.forceMaterializationPercentage,
+            alreadyBusting: Object.values(rideSignals).some(Boolean) || args.historyRebuiltThisPass,
+            summaryCanCome:
+                compartmentRunning ||
+                args.sessionMeta.compartmentInProgress ||
+                ((prefixPreflightFailed || freezeM0M1 || activeThinkingPrefixHold) &&
+                    (args.deferredHistoryRefreshSessions.has(args.sessionId) ||
+                        args.deferredMaterializationSessions.has(args.sessionId) ||
+                        args.historyRefreshSessions?.has(args.sessionId) === true)) ||
+                readExecuteReclaimState(args.db, args.sessionId).floorOrdinal !== null,
+            reclaimableTokens: estimateExecuteReclaimTokens({
+                db: args.db,
+                sessionId: args.sessionId,
+                pendingOps,
+                tags: args.tags,
+                targets: newTargets,
+                protectedTagIds: new Set([...args.protectedTagIds, ...protectedToolTags]),
+            }),
+            usableWindow: args.usableWindow,
+        });
     // Warm-cache thinking holds defer every new prefix edit. First render, idle
     // expiry and pressure relief can admit work, but the target guards still
     // forbid changes before any retained signature. A genuine prefix rewrite
@@ -2538,6 +2574,7 @@ export async function runPostTransformPhase(
     const shouldRunHeuristics =
         publishedWorkDrainAllowed &&
         (rideSignals.publishedHistory ||
+            rideSignals.executeReclaim ||
             materializationRequested ||
             forceMaterialization ||
             // The off-wire fold changed the served prefix, so the prefix already
@@ -2818,7 +2855,6 @@ export async function runPostTransformPhase(
     let explicitMaterializedSuccessfully = false;
     let deferredMaterializedSuccessfully = false;
     let pendingOpsDidMutate = false;
-    const protectedToolTags = protectedToolTagNumbers(args.tags, args.protectedTools);
     // First application is an edit; restoring the same frozen choice from raw
     // history is replay. Telemetry and signed-thinking invalidation consume the
     // same edit record so a strip cannot silently escape either accounting lane.
@@ -4923,6 +4959,7 @@ export async function runPostTransformPhase(
     }
 
     logTransformTiming(args.sessionId, "pp.tailGuard", tTailGuard);
+    if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
     return {
         explicitMaterializedSuccessfully,
         deferredMaterializedSuccessfully,
