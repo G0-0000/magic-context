@@ -56,6 +56,11 @@ import {
     type SynapseLaneDescriptor,
 } from "./memory/embedding-synapse";
 import {
+    getCachedLocalEmbeddingPooling,
+    logLocalEmbeddingPoolingDecisionOnce,
+    logLocalEmbeddingPoolingUnavailableOnce,
+} from "./memory/local-embedding-pooling";
+import {
     getMemoryEmbedCoverage,
     saveEmbeddingIfHashMatches,
 } from "./memory/storage-memory-embeddings";
@@ -1356,6 +1361,37 @@ export function registerProjectEmbedding(
     sourceDirectory: string,
 ): ProjectEmbeddingRegistrationSnapshot {
     const resolvedConfig = resolveEmbeddingConfig(config);
+    if (resolvedConfig.provider === "local") {
+        const pooling = getCachedLocalEmbeddingPooling(
+            resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+        );
+        if (pooling) {
+            logLocalEmbeddingPoolingDecisionOnce(
+                resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+                pooling,
+                log,
+            );
+        } else {
+            logLocalEmbeddingPoolingUnavailableOnce(
+                resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+                "pooling metadata has not been resolved by the background embedding bootstrap",
+                log,
+            );
+        }
+        // Keep the project's embedding provider inactive until pooling metadata is known;
+        // while waiting, leave persisted identities unchanged and retry from the background bootstrap.
+        if (pooling?.status !== "ready") {
+            return registerProjectInObservationMode(
+                db,
+                projectIdentity,
+                sourceDirectory,
+                resolvedConfig,
+                pooling
+                    ? `local model pooling is unsupported: ${pooling.reason}`
+                    : "local model pooling metadata has not been resolved",
+            );
+        }
+    }
     const providerIdentity = getEmbeddingProviderIdentity(resolvedConfig);
     const runtimeFingerprint = getRuntimeFingerprint(resolvedConfig);
     const chunkModelId = getChunkEmbeddingModelId(resolvedConfig, providerIdentity);

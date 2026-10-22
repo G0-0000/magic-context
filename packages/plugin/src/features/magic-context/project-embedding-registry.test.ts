@@ -26,6 +26,7 @@ import {
     SynapseEmbeddingProvider,
     type SynapseLaneMetadata,
 } from "./memory/embedding-synapse";
+import { __setLocalEmbeddingPoolingForTests } from "./memory/local-embedding-pooling";
 import { insertMemory } from "./memory/storage-memory";
 import {
     getStoredModelId,
@@ -486,6 +487,60 @@ describe("project embedding registry", () => {
             memory: defaultEndpoint.modelId,
             chunk: defaultEndpoint.chunkModelId,
         });
+    });
+
+    it("does not persist or expose a local identity before pooling metadata resolves", () => {
+        const db = useTempDb();
+        const model = "fixture/pending-local-pooling";
+        __setLocalEmbeddingPoolingForTests(model, null);
+
+        const pending = registerProjectEmbedding(
+            db,
+            "pending-local-pooling",
+            localConfig(model),
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/repo",
+        );
+        expect(pending.modelId).toBe("off");
+        expect(pending.chunkModelId).toBe("off");
+        expect(
+            countRows(
+                db,
+                "SELECT count(*) AS count FROM embedding_identity_active WHERE project_path = ?",
+                "pending-local-pooling",
+            ),
+        ).toBe(0);
+        expect(
+            countRows(
+                db,
+                "SELECT count(*) AS count FROM embedding_registrations WHERE project_path = ?",
+                "pending-local-pooling",
+            ),
+        ).toBe(0);
+
+        __setLocalEmbeddingPoolingForTests(model, {
+            status: "ready",
+            pooling: "cls",
+            normalize: true,
+            declared: true,
+            reason: "fixture CLS pooling",
+        });
+        const resolved = registerProjectEmbedding(
+            db,
+            "pending-local-pooling",
+            localConfig(model),
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/repo",
+        );
+        expect(resolved.modelId).not.toBe("off");
+        expect(resolved.chunkModelId).not.toBe("off");
+        expect(
+            countRows(
+                db,
+                "SELECT count(*) AS count FROM embedding_identity_active WHERE project_path = ?",
+                "pending-local-pooling",
+            ),
+        ).toBeGreaterThan(0);
     });
 
     it("pins provider and runtime identity goldens", () => {
