@@ -1,7 +1,6 @@
 /// <reference types="bun-types" />
 // Witnesses from an independent cache-safety review of the bounded
-// signed-thinking hold (issue 729). The last-good replay witnesses are skipped
-// unless MC_REVIEW_729=1.
+// signed-thinking hold (issue 729).
 //
 // Every scenario drives the real OpenCode transform on a prefix-bound model
 // (Opus 5.5) with a strict-binding oracle: a signed thinking block is valid
@@ -36,7 +35,6 @@ import { resetLkgSlotsForTest } from "./lkg-slot";
 import { providerVisiblePart } from "./provider-visible-parts";
 import { createTransform } from "./transform";
 
-const ENABLED = process.env.MC_REVIEW_729 === "1";
 const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 const BULK = "ROW value = compute(input, options); // generated line\n".repeat(40);
 
@@ -448,35 +446,31 @@ async function harness(
 }
 
 for (const host of ["opencode1", "opencode2"] as const) {
-    it.skipIf(!ENABLED)(
-        `${host}: after a last-good replay, a held idle-expiry pass tags the replayed step's tool result in front of kept signed thinking`,
-        async () => {
-            const h = await harness(host, `review-729-lkgidle-${host}`);
-            h.user("long task");
-            await h.serve();
-            // A heavy-reasoning step (2,400 tokens), so the pass is held.
-            h.step(1, 2_400);
-            await h.serve();
-            // The pass fails and the wrapper replays the last good request with
-            // the new step appended as the host sent it (no tag on its result).
-            h.failNextPass();
-            h.step(2, 200);
-            await h.serve();
-            h.step(3, 200);
-            await h.serve();
-            // The cache expires while the turn is still held.
-            h.idle();
-            h.step(4, 200);
-            const out = await h.serve();
-            const tools = out
-                .flatMap((m) => m.parts)
-                .filter((p) => p.type === "tool")
-                .map((p) => String((p.state as { output?: string }).output).slice(0, 6));
-            console.log(
-                `[review-729] ${host} lkg then held idle: kept=${JSON.stringify(signedSignatures(out))} tools=${JSON.stringify(tools)} problems=${JSON.stringify(h.problems)} logs=${JSON.stringify(h.logs.filter((l) => /hold|frozen|WILL|strip|fold decision|lkg/.test(l)))}`,
-            );
-            expect(h.problems).toEqual([]);
-        },
-        60_000,
-    );
+    it(`${host}: after a last-good replay, a held idle-expiry pass tags the replayed step's tool result in front of kept signed thinking`, async () => {
+        const h = await harness(host, `review-729-lkgidle-${host}`);
+        h.user("long task");
+        await h.serve();
+        // A heavy-reasoning step (2,400 tokens), so the pass is held.
+        h.step(1, 2_400);
+        await h.serve();
+        // The pass fails and the wrapper replays the last good request with
+        // the new step appended as the host sent it (no tag on its result).
+        h.failNextPass();
+        h.step(2, 200);
+        await h.serve();
+        h.step(3, 200);
+        await h.serve();
+        // The cache expires while the turn is still held.
+        h.idle();
+        h.step(4, 200);
+        const out = await h.serve();
+        const tools = out
+            .flatMap((m) => m.parts)
+            .filter((p) => p.type === "tool")
+            .map((p) => String((p.state as { output?: string }).output).slice(0, 6));
+        console.log(
+            `[review-729] ${host} lkg then held idle: kept=${JSON.stringify(signedSignatures(out))} tools=${JSON.stringify(tools)} problems=${JSON.stringify(h.problems)} logs=${JSON.stringify(h.logs.filter((l) => /hold|frozen|WILL|strip|fold decision|lkg/.test(l)))}`,
+        );
+        expect(h.problems).toEqual([]);
+    }, 60_000);
 }

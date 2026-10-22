@@ -2530,8 +2530,16 @@ export async function runPostTransformPhase(
     // Keep recovery bytes until the shared permission allows a cache rewrite
     // (for example, a user flush or pressure relief). Normalize before applying
     // drops so the saved drop state and the request sent to the provider agree.
-    if (args.normalizeRecoveryTail && isCacheBustingPass) {
+    // Normalizing tags the messages appended after a last-good replay, which
+    // lie in front of thinking signed after it. A held pass keeps that thinking
+    // (idle expiry or a first render can admit it without stripping), so it
+    // keeps replaying the recovered prefix instead; the next pass that strips
+    // the turn or ends the hold normalizes. Until then the replay serves the
+    // recorded prefix byte for byte.
+    let recoveryTailNormalizedThisPass = false;
+    if (args.normalizeRecoveryTail && isCacheBustingPass && !activeThinkingPrefixHold) {
         args.normalizeRecoveryTail();
+        recoveryTailNormalizedThisPass = true;
         args.tags = getTagsBySession(args.db, args.sessionId);
         newTargets = protectNewTagMutations(
             args.messages,
@@ -4544,6 +4552,8 @@ export async function runPostTransformPhase(
         todoAnchorMovedThisPass ||
         autoSearchHintAppendedThisPass ||
         dropModeSwitchesThisPass ||
+        // Re-tagging a replayed tail is an edit in front of newer thinking.
+        recoveryTailNormalizedThisPass ||
         firstApplicationEdits.beforeNewerThinking;
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
     if (
