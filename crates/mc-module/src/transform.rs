@@ -20758,6 +20758,13 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn strip_leading_tag_imitations_preserves_decimal_section_references() {
+        for reference in ["§12.3", "§5.1", "§12.3 of the spec"] {
+            assert_eq!(strip_leading_tag_imitations(reference), reference);
+        }
+    }
+
+    #[test]
     fn assistant_tag_imitations_strip_on_later_lines_but_not_code() {
         let value = "preamble\n\u{a7}22\u{a7} Delta\n`\u{a7}23\u{a7} inline`\n```rust\n\u{a7}24\u{a7} fenced\n```\n\u{a7}25\u{a7} Echo";
         assert_eq!(
