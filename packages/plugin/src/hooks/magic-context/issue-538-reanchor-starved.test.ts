@@ -162,7 +162,13 @@ describe("issue 538 claim 3: the two paths read one array in sequence", () => {
         // One transform pass in production order: injection preparation first,
         // then m[0]/m[1] delivery on the same, already-cut array.
         const pass = (messages: MessageLike[], isCacheBusting: boolean) => {
-            const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, isCacheBusting, []);
+            const prepared = prepareCompartmentInjection(
+                db,
+                SESSION_ID,
+                messages,
+                isCacheBusting,
+                [],
+            );
             const delivered = injectM0M1({
                 db,
                 sessionId: SESSION_ID,
@@ -270,8 +276,12 @@ describe("issue 538 claim 1: the degraded-pass count that gates the re-anchor", 
 
     it("control: two back-to-back busting preparations re-anchor on the second", () => {
         const db = seedDegraded();
-        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(false);
-        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(true);
+        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(
+            false,
+        );
+        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(
+            true,
+        );
     });
 
     it("the busting delivery's cache clear resets the count, so consecutive busting passes never re-anchor", () => {
@@ -304,6 +314,8 @@ describe("issue 538 claim 1: the degraded-pass count that gates the re-anchor", 
 
         // The next busting preparation runs before that pass's cache clear and
         // sees a count of 3.
-        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(true);
+        expect(reanchored(prepareCompartmentInjection(db, SESSION_ID, window(), true, []))).toBe(
+            true,
+        );
     });
 });
