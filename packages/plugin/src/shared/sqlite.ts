@@ -1283,7 +1283,7 @@ export async function withAsyncPrivilegedWriter<T>(
     operation: () => T,
     options: {
         signal?: AbortSignal;
-        beforeRetry?: (error: SqliteAcquisitionBusyError) => void;
+        beforeRetry?: (error: SqliteAcquisitionBusyError) => void | Promise<void>;
         jitter?: boolean;
         budgetMs?: number;
         assertCurrentPass?: () => void;
@@ -1326,7 +1326,9 @@ export async function withAsyncPrivilegedWriter<T>(
             if (entered || !(error instanceof SqliteAcquisitionBusyError)) throw error;
             // Adapters may serve a validated saved request instead of waiting.
             // This runs only after a failed BEGIN, never after callback writes.
-            options.beforeRetry?.(error);
+            // It may read asynchronously (OpenCode 2 reads its host store to
+            // rebuild the transform input); the retry waits for it.
+            await options.beforeRetry?.(error);
             const elapsed = performance.now() - started;
             if (elapsed >= budgetMs) {
                 reportSqliteDiagnostic(
