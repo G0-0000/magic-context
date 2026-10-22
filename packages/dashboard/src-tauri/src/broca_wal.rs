@@ -101,7 +101,10 @@ const GATED_VERSION: u8 = 3;
 /// (on `RunStarted` and queued sends); this reader never reads tools.
 /// `runner-tags/v2` adds `computed_tags` (a tag checkpoint) to a run's config
 /// and a `tag_checkpoint` with its cut to a compaction Setup message; this
-/// reader uses neither.
+/// reader uses neither. `structured-output-paragraph/v1` adds a boolean
+/// `instructions_paragraph_break` to a run's frozen structured-output render
+/// config (on `RunStarted` and `RunConfigRefrozen`); it affects only how the
+/// schema instructions are rendered, so this reader ignores it.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -133,6 +136,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "chatgpt-codex-wire/v1",
     "tool-reply/v1",
     "runner-tags/v2",
+    "structured-output-paragraph/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1870,6 +1874,7 @@ pub(crate) mod tests {
             "chatgpt-codex-wire/v1",
             "tool-reply/v1",
             "runner-tags/v2",
+            "structured-output-paragraph/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1891,6 +1896,22 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("tool-reply/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `structured-output-paragraph/v1` marks a structured-output run whose
+    /// schema instructions start a new paragraph; such a run still yields its
+    /// steps.
+    #[test]
+    fn a_structured_output_paragraph_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["config"]["frozen_render_config"] =
+            json!({"structured_output": {"instructions_paragraph_break": true}});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["structured-output-paragraph/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("structured-output-paragraph/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
