@@ -30,9 +30,12 @@ const bytes = (value: unknown) =>
 	);
 const sha = (value: unknown) =>
 	createHash("sha256").update(bytes(value)).digest("hex");
+// Every step is heavy: OpenCode 2 records no reasoning-token count, so the
+// thinking text itself must estimate above 1,500 tokens for the bounded
+// signed-thinking hold to apply at 66% (below the 75% cap).
 const thinking = (n: number) => ({
 	type: "thinking",
-	thinking: `Thought ${n}`,
+	thinking: `Thought ${n} ${"weighing the next step carefully ".repeat(400)}`,
 	signature: `sig-${n}`,
 });
 type Body = {
