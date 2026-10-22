@@ -2488,6 +2488,7 @@ export async function registerContext(context: V2Context) {
             }
         },
         storageDir,
+        getDebugMemoryHolders: () => ({ generateReplay: generateReplay.stats() }),
     });
     // The v2 TUI reaches manual dreaming through RPC because this host has no
     // command-template path. The run continues in the background and reports its

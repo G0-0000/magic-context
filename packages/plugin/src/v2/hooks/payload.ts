@@ -112,15 +112,55 @@ function containsHostInstance(value: unknown): boolean {
 /** Deep copy that keeps class instances by reference, so a pipeline edit to the copy cannot
  * reach the host's draft while the host's own objects survive the round trip. */
 export function clonePreservingInstances<T>(value: T): T {
-    if (isHostInstance(value)) return value;
-    if (Array.isArray(value)) return value.map(clonePreservingInstances) as T;
+    return cloneCounting(value, undefined);
+}
+
+/** {@link clonePreservingInstances} that also estimates the heap the copy keeps alive, in
+ * the same walk. Strings are charged at two bytes per UTF-16 code unit, as the other
+ * process-local caches charge them; arrays and objects get a base allowance plus one per
+ * element or property; class instances kept by reference are charged for the data they
+ * reach. An estimate for cache budgets, not an exact heap measurement. */
+export function clonePreservingInstancesMeasured<T>(value: T): { copy: T; bytes: number } {
+    const meter = { bytes: 0 };
+    const copy = cloneCounting(value, meter);
+    return { copy, bytes: meter.bytes };
+}
+
+function cloneCounting<T>(value: T, meter: { bytes: number } | undefined): T {
+    if (isHostInstance(value)) {
+        if (meter) meter.bytes += instanceBytes(value, new WeakSet());
+        return value;
+    }
+    if (Array.isArray(value)) {
+        if (meter) meter.bytes += 16 + 8 * value.length;
+        return value.map((entry) => cloneCounting(entry, meter)) as T;
+    }
     if (value && typeof value === "object") {
         const copy: Part = {};
-        for (const [key, entry] of Object.entries(value))
-            copy[key] = clonePreservingInstances(entry);
+        if (meter) meter.bytes += 32;
+        for (const [key, entry] of Object.entries(value)) {
+            if (meter) meter.bytes += 16;
+            copy[key] = cloneCounting(entry, meter);
+        }
         return copy as T;
     }
+    if (meter) meter.bytes += typeof value === "string" ? 2 * value.length : 8;
     return value;
+}
+
+/** Estimated bytes a shared class instance reaches: binary buffers at their byte length,
+ * strings and other values as in {@link clonePreservingInstancesMeasured}, plus object and
+ * field allowances. Each object is charged once. */
+function instanceBytes(value: unknown, seen: WeakSet<object>): number {
+    if (typeof value === "string") return 2 * value.length;
+    if (!value || typeof value !== "object") return 8;
+    if (seen.has(value)) return 0;
+    seen.add(value);
+    if (ArrayBuffer.isView(value)) return value.byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    let bytes = 32;
+    for (const entry of Object.values(value)) bytes += 16 + instanceBytes(entry, seen);
+    return bytes;
 }
 
 /** Content key that ignores prototypes and toJSON, so a part and its structuredClone agree. */
