@@ -77,6 +77,8 @@ When and how aggressively Magic Context manages the session's context window. Pe
 | `keep_reasoning_tokens` | integer (0–1000000) \| map<string, integer (0–1000000)> | — | Reasoning tokens to keep on rebuilding passes. Number or per-model object; exact, shorter model keys, provider/\*, then default. Omitted: fixed 10,000. 0 removes all eligible historical reasoning; newest and exempt steps always stay. |
 | `history_budget_percentage` | number (0.05–0.5) | `0.15` | Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15) |
 
+If `cache_ttl` is shorter than the provider's real cache lifetime (for example, a locally hosted model whose prefix cache doesn't expire), idle expiry rebuilds the prompt onto a cache that is still warm and pays for the rewrite for nothing. Set `cache_ttl` to match the provider, or to `"never"` for a cache that doesn't expire.
+
 ## Model profiles
 
 Named user-owned model-selection overlays. A project may select a profile name but cannot define or alter profile contents.

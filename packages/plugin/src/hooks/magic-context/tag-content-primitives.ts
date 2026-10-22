@@ -56,12 +56,13 @@ const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\d)(?!\.\d)[^\s\u00a7\w.]?/g;
 // and rewrites the prompt cache from that block on, so weigh every change here
 // against that cost.
 //
-// The `(?!\d)` guard was added here without a rebuild gate, on purpose. Before
-// it, a part starting with a multi-digit decimal section reference lost its
-// leading digit (`§12.3` → `2.3`). A session holding such a part has its cache
-// rewritten once, from that part on, the first time a build with the guard
-// serves it. That is rare and happens once, so per-session state for a gate is
-// not worth it.
+// A rebuild gate would keep each existing session on the old stripping (saved
+// per session) until a pass that rewrites the cache anyway. The `(?!\d)` guard
+// was added here without one, on purpose. Before it, a part starting with a
+// multi-digit decimal section reference lost its leading digit (`§12.3` →
+// `2.3`). A session holding such a part has its cache rewritten once, from that
+// part on, the first time a build with the guard serves it. That is rare and
+// happens once, so the per-session state a gate needs is not worth it.
 //
 // The variant still eats a leading whole-number section reference
 // (`§5 of the contract` → `of the contract`). Fixing that is cosmetic and would
