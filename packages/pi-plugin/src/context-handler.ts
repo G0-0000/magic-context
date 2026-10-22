@@ -8480,19 +8480,38 @@ async function runCompactionOffPipeline(
 ): Promise<RunPipelineResult> {
 	let injectionResult: PiInjectionResult | null = null;
 	if (args.injection) {
+		const state: PiM0M1State = {
+			sessionId: args.sessionId,
+			projectIdentity: args.projectIdentity,
+			projectDirectory: args.projectDirectory,
+			memoryEnabled: args.injection.memoryEnabled,
+			injectDocs: args.injection.injectDocs,
+			injectionBudgetTokens: args.injection.injectionBudgetTokens,
+			historyBudgetTokens: args.injection.historyBudgetTokens,
+			historyBudgetPolicyIdentity: args.injection.historyBudgetPolicyIdentity,
+			muralEnabled: args.injection.muralEnabled === true,
+			compactionOff: true,
+		};
+		// Compaction-off has no bust permission, so nothing can strip signed
+		// thinking here. An open signed turn on a prefix-bound model keeps
+		// replaying its cached m[0]/m[1] until it ends, so a fold (a project
+		// memory change, for example) cannot re-render the head in front of its
+		// kept thinking. With no cached pair yet the first render proceeds.
+		if (
+			args.reasoningClearing?.prefixBound === true &&
+			hasActiveAnthropicThinkingTurn(
+				args.messages,
+				args.resolvedProviderID,
+				args.resolvedModelID,
+			)
+		)
+			state.preparedPrefix = prepareCachedM0M1PiReplay(
+				state,
+				args.db,
+				args.injectionPassSnapshot?.cachedRow,
+			);
 		injectionResult = injectM0M1Pi(
-			{
-				sessionId: args.sessionId,
-				projectIdentity: args.projectIdentity,
-				projectDirectory: args.projectDirectory,
-				memoryEnabled: args.injection.memoryEnabled,
-				injectDocs: args.injection.injectDocs,
-				injectionBudgetTokens: args.injection.injectionBudgetTokens,
-				historyBudgetTokens: args.injection.historyBudgetTokens,
-				historyBudgetPolicyIdentity: args.injection.historyBudgetPolicyIdentity,
-				muralEnabled: args.injection.muralEnabled === true,
-				compactionOff: true,
-			},
+			state,
 			args.db,
 			args.messages as Parameters<typeof injectM0M1Pi>[2],
 			args.entryIds,
