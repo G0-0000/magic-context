@@ -122,6 +122,7 @@ import {
 } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { degradedPassError } from "./degraded-pass-refusal";
+import { diagnosticStateChanged } from "./diagnostic-log-state";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import {
     type DroppedTokenReduction,
@@ -2761,6 +2762,23 @@ export async function runPostTransformPhase(
             );
         }
     }
+    const heuristicsLogChanged = diagnosticStateChanged(
+        args.sessionId,
+        "heuristics",
+        JSON.stringify([
+            shouldRunHeuristics,
+            shouldRunHeuristics ? null : args.schedulerDeferReason,
+        ]),
+    );
+    const pendingLogChanged = diagnosticStateChanged(
+        args.sessionId,
+        "pending-ops",
+        JSON.stringify([
+            shouldApplyPendingOps,
+            shouldApplyPendingOps ? null : args.schedulerDeferReason,
+            shouldApplyPendingOps ? null : (getPendingOpsCount(args.db, args.sessionId) ?? 0) > 0,
+        ]),
+    );
     if (shouldRunHeuristics) {
         const subagentRerun =
             !args.fullFeatureMode &&
@@ -2783,7 +2801,11 @@ export async function runPostTransformPhase(
             args.sessionId,
             `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=${args.currentTurnId}`,
         );
-    } else if (args.schedulerDeferReason !== undefined && args.schedulerDeferReason !== null) {
+    } else if (
+        heuristicsLogChanged &&
+        args.schedulerDeferReason !== undefined &&
+        args.schedulerDeferReason !== null
+    ) {
         sessionLog(args.sessionId, `heuristics WILL NOT RUN — reason=${args.schedulerDeferReason}`);
     }
     // Only show "skipping" log for primary sessions — subagents bypass the
@@ -2801,6 +2823,7 @@ export async function runPostTransformPhase(
     }
     if (
         !shouldApplyPendingOps &&
+        pendingLogChanged &&
         args.schedulerDeferReason !== undefined &&
         args.schedulerDeferReason !== null
     ) {

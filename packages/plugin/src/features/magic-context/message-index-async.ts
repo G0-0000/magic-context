@@ -1,3 +1,4 @@
+import { takeLkgRecoveryLockSweepPage } from "../../hooks/magic-context/lkg-recovery-fence";
 import { runSessionWarmupWorker } from "../../hooks/magic-context/raw-ordinal-warmup";
 import type {
     RawMessage,
@@ -471,6 +472,11 @@ export async function sweepOrphanedOpenCodeMessageIndexesOffThread(
     openSource: () => Database | null,
     options: MessageHistoryOrphanSweepOptions = {},
 ): Promise<MessageHistoryOrphanSweepResult> {
+    if (getHarness() === "opencode" || getHarness() === "opencode2")
+        options = {
+            ...options,
+            fenceLockNames: options.fenceLockNames ?? takeLkgRecoveryLockSweepPage(),
+        };
     // The legacy opener validates v1 tables and rejects a native OC2 store.
     // Its path must be resolved independently; the sweep validates session_v2
     // through V2StoreReader before treating any context row as orphaned.

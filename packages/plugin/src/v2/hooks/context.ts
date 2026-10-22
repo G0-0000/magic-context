@@ -1384,7 +1384,7 @@ export async function registerContext(context: V2Context) {
                             transform?.clearSessionLogState(sessionID);
                             if (db) {
                                 markSessionCleanupPending(db, sessionID);
-                                clearSession(db, sessionID);
+                                clearSession(db, sessionID, false, true);
                             }
                             rawProviders.get(sessionID)?.();
                             rawProviders.delete(sessionID);

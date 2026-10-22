@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as recoveryFence from "../../hooks/magic-context/lkg-recovery-fence";
@@ -465,6 +465,49 @@ describe("message history orphan sweep on OpenCode 2", () => {
         ).run(sessionId);
     }
 
+    test("OC2 upgrades an obsolete future park and retains new source-unavailable parks", () => {
+        setHarness("opencode2");
+        const db = createStoreDb();
+        const now = 2_000_000_000_000;
+        const source = createMigratedStore(["live"]);
+        try {
+            db.prepare(
+                "INSERT INTO tags(session_id,tag_number,harness) VALUES ('orphan',1,'opencode2')",
+            ).run();
+            clearSession(db, "orphan");
+            db.prepare("INSERT INTO message_history_orphan_sweep VALUES ('opencode2','',?)").run(
+                now + 86_400_000,
+            );
+            const result = sweepOrphanedOpenCodeMessageIndexes(db, () => new Database(source), {
+                now,
+                safetyAgeMs: 0,
+            });
+            expect(result).toMatchObject({ status: "swept", deleted: 1 });
+            expect(
+                db
+                    .prepare(
+                        "SELECT key FROM schema_migrations_meta WHERE key IN (?, ?) OR (key >= ? AND key < ?)",
+                    )
+                    .all(
+                        tagIdentityRevisionKey("orphan"),
+                        tagRevisionKey("orphan"),
+                        ...tagTombstoneOwnerRange("orphan"),
+                    ),
+            ).toEqual([]);
+            const later = now + MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS + 1;
+            expect(sweepOrphanedOpenCodeMessageIndexes(db, () => null, { now: later }).status).toBe(
+                "source_unavailable",
+            );
+            const open = spyOn({ open: () => new Database(source) }, "open");
+            expect(sweepOrphanedOpenCodeMessageIndexes(db, open, { now: later + 1 }).status).toBe(
+                "cooldown",
+            );
+            expect(open).not.toHaveBeenCalled();
+        } finally {
+            db.close();
+        }
+    });
+
     test("OC2 sweeps old missing sessions while retaining live and recently indexed sessions", () => {
         setHarness("opencode2");
         const db = createStoreDb();
@@ -544,6 +587,14 @@ describe("message history orphan sweep on OpenCode 2", () => {
         host.exec("DROP TABLE session; DROP TABLE message; DROP TABLE part");
         host.close();
         const original = process.env.OPENCODE_DB;
+        const originalStorage = process.env.MAGIC_CONTEXT_STORAGE_DIR;
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = directory;
+        const lock = (id: string) => `${recoveryFence.lkgRecoveryFencePath(id)}.locks`;
+        for (const id of ["gone-with-no-rows", "live", "pi-only"])
+            mkdirSync(lock(id), { recursive: true });
+        db.prepare(
+            "INSERT INTO tags(session_id,tag_number,harness) VALUES ('pi-only',1,'pi')",
+        ).run();
         process.env.OPENCODE_DB = source;
         resetOpenCodeDbPathStateForTesting();
         try {
@@ -557,7 +608,13 @@ describe("message history orphan sweep on OpenCode 2", () => {
             expect(result).toMatchObject({ status: "swept", deleted: 1 });
             expect(countRows(db, "compartments", "orphan")).toBe(0);
             expect(countRows(db, "compartments", "live")).toBe(1);
+            expect(existsSync(lock("gone-with-no-rows"))).toBe(false);
+            expect(existsSync(lock("live"))).toBe(true);
+            expect(existsSync(lock("pi-only"))).toBe(true);
         } finally {
+            recoveryFence.closeLkgLockSweepDirectory();
+            if (originalStorage === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+            else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorage;
             if (original === undefined) delete process.env.OPENCODE_DB;
             else process.env.OPENCODE_DB = original;
             resetOpenCodeDbPathStateForTesting();

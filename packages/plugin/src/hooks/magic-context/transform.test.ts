@@ -930,15 +930,16 @@ describe("createTransform", () => {
             b.messages.findIndex((m) => m.info.id === "msg_0bedb7d8f001FvFOQdZoGqywkr") + 1,
         );
     });
-    it("logs both nudge gate verdicts on every evaluable TypeScript pass", async () => {
+    it("logs stable nudge verdicts and tag-floor fallback only once across TypeScript passes", async () => {
         useTempDataHome("context-transform-nudge-observability-");
         const sessionId = "ses-nudge-observability";
         const sessionLog = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        const db = openDatabase();
         const transform = createTransform({
             tagger: createTagger(),
             scheduler: { shouldExecute: () => "defer" },
             contextUsageMap: new Map(),
-            db: openDatabase(),
+            db,
             historyRefreshSessions: new Set(),
             pendingMaterializationSessions: new Set(),
             lastHeuristicsTurnId: new Map(),
@@ -974,8 +975,9 @@ describe("createTransform", () => {
                 .map((call) => String(call[1]));
             const channel1 = lines.filter((line) => line.startsWith("channel1 evaluation:"));
             const channel2 = lines.filter((line) => line.startsWith("channel2 evaluation:"));
-            expect(channel1).toHaveLength(2);
-            expect(channel2).toHaveLength(2);
+            expect(channel1).toHaveLength(1);
+            expect(channel2).toHaveLength(1);
+            expect(lines.filter((line) => line.includes("(full-scan fallback)"))).toHaveLength(1);
             for (const line of [...channel1, ...channel2]) {
                 expect(line).toContain(" U=");
                 expect(line).toContain(" T=");
@@ -990,6 +992,23 @@ describe("createTransform", () => {
             );
             expect(channel1.every((line) => line.includes("dampening="))).toBe(true);
             expect(channel2.every((line) => line.includes("lease="))).toBe(true);
+            db.prepare("UPDATE tags SET tag_number=tag_number+10000 WHERE session_id=?").run(
+                sessionId,
+            );
+            await transform({}, { messages: structuredClone(messages) });
+            expect(
+                sessionLog.mock.calls.filter(
+                    (call) => call[0] === sessionId && String(call[1]).includes("(scoped load)"),
+                ),
+            ).toHaveLength(1);
+            db.prepare("DELETE FROM tags WHERE session_id=?").run(sessionId);
+            await transform({}, { messages: structuredClone(messages) });
+            expect(
+                sessionLog.mock.calls.filter(
+                    (call) =>
+                        call[0] === sessionId && String(call[1]).includes("(full-scan fallback)"),
+                ),
+            ).toHaveLength(2);
         } finally {
             sessionLog.mockRestore();
         }

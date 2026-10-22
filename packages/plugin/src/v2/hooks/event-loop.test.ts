@@ -10,6 +10,11 @@ import {
 } from "../../features/magic-context/message-index";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
+import {
+    tagIdentityRevisionKey,
+    tagRevisionKey,
+    tagTombstoneOwnerRange,
+} from "../../features/magic-context/storage-tag-identity-revision";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import * as transformModule from "../../hooks/magic-context/transform";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
@@ -181,6 +186,36 @@ async function fixture(
         },
     };
 }
+
+test("v2 permanent session deletion retires tag revisions and owner keys", async () => {
+    const ready = Promise.withResolvers<void>();
+    let consumed = false;
+    const f = await fixture(async function* () {
+        await ready.promise;
+        yield deleted;
+        consumed = true;
+    });
+    const id = deleted.data.sessionID;
+    const epochs = () =>
+        f.db
+            .prepare(
+                "SELECT key FROM schema_migrations_meta WHERE key IN (?, ?) OR (key >= ? AND key < ?)",
+            )
+            .all(tagIdentityRevisionKey(id), tagRevisionKey(id), ...tagTombstoneOwnerRange(id));
+    try {
+        await f.start();
+        f.db
+            .prepare("INSERT INTO tags(session_id,tag_number,harness) VALUES (?,1,'opencode2')")
+            .run(id);
+        expect(epochs().length).toBeGreaterThan(0);
+        ready.resolve();
+        await until(() => consumed);
+        expect(epochs()).toEqual([]);
+    } finally {
+        ready.resolve();
+        await f.cleanup();
+    }
+});
 
 for (const failDeletion of [false, true]) {
     test(`v2 records usage after ${failDeletion ? "a throwing" : "a normal"} deletion handler`, async () => {
