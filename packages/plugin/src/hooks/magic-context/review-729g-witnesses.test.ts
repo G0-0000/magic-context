@@ -1,9 +1,12 @@
 /// <reference types="bun-types" />
-// Independent review witnesses for four signed-thinking fixes on prefix-bound
-// models (GitHub issue 729): the strip on a compaction-off fold, the strip on a
-// mode switch, the system date persisted across a restart, and the date that
-// waits while signed thinking is served. Skipped unless MC_REVIEW_729G=1. A red
-// case documents a finding of the review; each case says what it shows.
+// Witnesses for the system date in front of signed thinking on prefix-bound
+// models (Opus 5.5 and its family, which reject a signed thinking block when
+// any byte in front of it changed, the system prompt included). The cases
+// cover a held idle-expired pass on the Anthropic API and on Bedrock, a
+// compaction-off session over several days and restarts, and a simulated
+// store-generation rebase. Skipped unless MC_REVIEW_729G=1. A failing case
+// means invalid signed thinking was served, or (the multi-day case) that the
+// served date fell days behind; each case's comment says which.
 //
 // The harness is a copy of the one in review-729f-witnesses.test.ts with two
 // additions: the session can run on another route of a prefix-bound model
@@ -633,8 +636,11 @@ for (const host of HOSTS)
             60_000,
         );
 
-// ── Pre-existing (base breaks the same way), made far more reachable by the
-// date that now stays frozen in compaction-off. The date is protected only
+// ── A store-generation rebase clears the saved prompt hash before the system
+// hook runs, which lets the live date become the new baseline while signed
+// thinking is still served. Revision e580f68672 (before the frozen date was
+// persisted) fails this case too; it matters more now because compaction-off
+// keeps a frozen date for days (case above). The date is protected only
 // while the session has a persisted system-prompt hash. OpenCode 2 rebases a
 // converted session before the system hook (v2/hooks/context.ts,
 // "Rebase before it so a converted session initializes the new host's prompt
