@@ -412,9 +412,11 @@ for (const { band, mode } of [{ band: 76, mode: "drops" }, { band: 85, mode: "dr
 				).filter(part => part.type === "thinking");
 				expect(signedBlocks).toEqual(Array.from({ length: lastPass - 1 }, (_, index) => thinking(index + 1)));
 				expect(h.contextDb().query("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(childId)).toContainEqual({ tag_id: tag });
-				expect(readFileSync(logPath, "utf8").slice(beforeUserLog)).toContain(
-					"pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false",
-				);
+				// The plugin buffers log writes for up to half a second; wait for the line.
+				// A missing line still fails on the assertion below.
+				const heldLine = "pending ops held — reason=no originating cache-bust opportunity; scheduler=execute, historianRunning=false";
+				await h.waitFor(() => readFileSync(logPath, "utf8").slice(beforeUserLog).includes(heldLine), { timeoutMs: 5000, label: "pending ops held log line" }).catch(() => undefined);
+				expect(readFileSync(logPath, "utf8").slice(beforeUserLog)).toContain(heldLine);
 				// An explicit flush supplies the shared rebuild permission and releases the queue.
 				const response = await fetch(`${h.serverUrl}/session/${childId}/command?directory=${encodeURIComponent(h.workdir)}`, {
 					method: "POST",
