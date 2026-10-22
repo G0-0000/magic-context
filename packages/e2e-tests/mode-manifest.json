@@ -11,10 +11,10 @@
             "hosts": ["omp"]
         },
         {
-            "path": "tests/issue-756-tool-surface.test.ts",
+            "path": "tests/pi-context-tool-surface.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Real OMP and Pi provider requests capture their exact tool-list bytes across two turns; host PID lsof proves all stores stay under the issue-756 throwaway root.",
+            "rationale": "Real OMP and Pi provider requests capture their exact tool-list bytes across two turns; host PID lsof proves all stores stay under the dedicated throwaway root.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["omp", "pi"]
         },

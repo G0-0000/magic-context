@@ -23,7 +23,10 @@ function hash(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
-/** Captured from Pi 0.87.1 and OMP 18.12.3 before enabling essential tools. */
+/**
+ * Tool-list hashes captured from Pi 0.87.1 and OMP 18.12.3 before enabling
+ * the context tools listed below.
+ */
 const PRE_CHANGE_TOOL_BYTES_SHA256 = {
 	omp: "76a6eb5bf46e2fc43a9ab84640ed7257bc5d1c63b2242f3f464cf3cec8a8280b",
 	pi: "d328ca0086de3c301d0e1901d0ea20cf242251dfdf8f8953e0efeb53ea05d0b1",
@@ -153,7 +156,7 @@ forEachHost(import.meta.url, null, (host) => {
 				await Bun.file(invocation.packageJson).text(),
 			) as { version: string };
 			expect(hostVersion.version).toBe(host === "omp" ? "18.12.3" : "0.87.1");
-			console.log(`[issue-756] real host ${host} ${hostVersion.version}`);
+			console.log(`[real host] ${host} ${hostVersion.version}`);
 			harness = await PiTestHarness.create({
 				host,
 				...(host === "omp"
@@ -166,8 +169,8 @@ forEachHost(import.meta.url, null, (host) => {
 			});
 			const session = await harness.createSession();
 			const prompts = [
-				"issue-756 first ordinary turn",
-				"issue-756 second ordinary turn",
+				"ordinary first turn for Pi context tools",
+				"ordinary second turn for Pi context tools",
 			];
 			const captured: CapturedRequest[] = [];
 			for (const prompt of prompts) {
@@ -258,7 +261,7 @@ forEachHost(import.meta.url, null, (host) => {
 				);
 			}
 			console.log(
-				`[issue-756 wire capture] ${JSON.stringify({
+				`[tool wire capture] ${JSON.stringify({
 					host,
 					version: hostVersion.version,
 					turns: captured.map((request, index) => ({
