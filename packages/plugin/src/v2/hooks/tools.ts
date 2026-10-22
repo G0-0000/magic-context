@@ -54,7 +54,11 @@ export async function registerTools(
                   ...(rustToolBackends ? { rustToolBackends } : {}),
               })
             : {}),
-        ...createCtxExpandTools({ db, expandTools: config.historian?.expand_tools }),
+        ...createCtxExpandTools({
+            db,
+            expandTools: config.historian?.expand_tools,
+            transformMode: config.transform_mode,
+        }),
         ...createCtxNoteTools({
             ...project,
             dreamerEnabled: isDreamerRunnable(config),
