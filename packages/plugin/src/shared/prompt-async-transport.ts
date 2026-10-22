@@ -7,7 +7,10 @@ import {
     releaseBudgetFinalizeChild,
     TOKEN_BUDGET_FINALIZE_MESSAGE,
 } from "../features/magic-context/dreamer/token-budget";
-import { sumTokensFromChildMessages } from "../features/magic-context/subagent-token-capture";
+import {
+    annotateSubagentInvocationError,
+    sumTokensFromChildMessages,
+} from "../features/magic-context/subagent-token-capture";
 import { describeAssistantError } from "./assistant-message-extractor";
 import { sessionLog } from "./logger";
 import type { PromptArgs, PromptTransport } from "./model-suggestion-retry";
@@ -60,6 +63,7 @@ export interface PromptAsyncWaitOptions {
     pollIntervalMs?: number;
     startGraceMs?: number;
     tokenBudget?: number;
+    modelConfigKey?: string;
     /** Shared across retries of one child session. */
     budgetGuard?: ReturnType<typeof createDreamTokenBudget>;
     onBudgetUpdate?: (
@@ -91,6 +95,19 @@ export function isHostSessionError(error: unknown): boolean {
         typeof error === "object" &&
         (error as { [HOST_SESSION_ERROR]?: unknown })[HOST_SESSION_ERROR] === true
     );
+}
+
+/** Return the original host error carried by a marked child-session failure. */
+export function hostSessionErrorOf(error: unknown): unknown {
+    if (!isHostSessionError(error)) return undefined;
+    return (error as { hostError?: unknown }).hostError;
+}
+
+function requestModelRef(request: PromptArgs): string | undefined {
+    const model = request.body?.model;
+    if (model && typeof model.providerID === "string" && typeof model.modelID === "string")
+        return `${model.providerID}/${model.modelID}`;
+    return undefined;
 }
 
 /** True when the host client can send without waiting and report session status. */
@@ -339,11 +356,32 @@ export async function promptAsyncAndWaitForIdle(
     // retains that provider/model error while this child is actively awaited.
     activeSessionErrors.set(sessionId, undefined);
     try {
-        const sent = await session.promptAsync?.(request);
+        let sent: unknown;
+        try {
+            sent = await session.promptAsync?.(request);
+        } catch (error) {
+            annotateSubagentInvocationError(error, {
+                attemptedModel: requestModelRef(request),
+                modelConfigKey: options.modelConfigKey,
+                hostError: error,
+            });
+            throw error;
+        }
         if (sent && typeof sent === "object" && "error" in sent) {
             const rejection = (sent as { error?: unknown }).error;
             if (rejection) {
-                throw new Error(`prompt_async was rejected: ${describeRejection(rejection)}`);
+                const error = new Error(
+                    `prompt_async was rejected: ${describeRejection(rejection)}`,
+                    {
+                        cause: rejection,
+                    },
+                );
+                annotateSubagentInvocationError(error, {
+                    attemptedModel: requestModelRef(request),
+                    modelConfigKey: options.modelConfigKey,
+                    hostError: rejection,
+                });
+                throw error;
             }
         }
         let sentAt = Date.now();
@@ -364,6 +402,12 @@ export async function promptAsyncAndWaitForIdle(
                     name: "DreamerProviderOutputFailureError",
                     transient: true,
                     [HOST_SESSION_ERROR]: true,
+                    hostError,
+                });
+                annotateSubagentInvocationError(error, {
+                    attemptedModel: requestModelRef(request),
+                    modelConfigKey: options.modelConfigKey,
+                    hostError,
                 });
                 throw error;
             }

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { parsePluginConfig } from "../config";
 import { parseMapMemoriesCompletion } from "../features/magic-context/dreamer/map-memories";
 import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
-import { closeDatabase } from "../features/magic-context/storage";
+import { closeDatabase, openDatabase } from "../features/magic-context/storage";
+import { getSubagentInvocations } from "../features/magic-context/storage-subagent-invocations";
 import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
 import {
     HiddenCompletionRefusal,
@@ -453,6 +454,64 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
+    test("records the dispatched model and terminal host error when no assistant row exists", async () => {
+        const { dir: dataHome, cleanup } = createTestTempDir("v2-model-refusal-");
+        const previous = process.env.XDG_DATA_HOME;
+        process.env.XDG_DATA_HOME = dataHome;
+        const state = await setup();
+        try {
+            const db = openDatabase();
+            if (!db) throw new Error("invocation test database did not open");
+            const model = "mock/missing";
+            const suggestion = "mock/available";
+            state.setTerminalOutcome("failed");
+            state.setTerminalRowType("idle");
+            state.setEventSessionError({
+                type: "provider.error",
+                name: "ProviderModelNotFoundError",
+                data: {
+                    providerID: "mock",
+                    modelID: "missing",
+                    message: `Model not found: ${model}. Did you mean: ${suggestion}?`,
+                    suggestions: [suggestion],
+                },
+            });
+
+            await runValidatedHistorianPass({
+                client: undefined,
+                hiddenCompletionExecutor: state.executor,
+                db: state.db,
+                parentSessionId: "v2-model-refusal-parent",
+                sessionDirectory: "/project",
+                prompt: "Summarize history",
+                chunk: {
+                    startIndex: 1,
+                    endIndex: 1,
+                    lines: [{ ordinal: 1, messageId: "m1" }],
+                },
+                priorCompartments: [],
+                sequenceOffset: 0,
+                dumpLabelBase: "v2-model-refusal",
+                model: { model, sourceConfigKey: "historian.opencode.model" },
+            });
+
+            const [row] = getSubagentInvocations(db, "v2-model-refusal-parent");
+            expect(row).toMatchObject({
+                providerId: "mock",
+                modelId: "missing",
+                status: "failed",
+            });
+            expect(row?.error).toContain("No reply: OpenCode 2 refused the model");
+            expect(row?.error).toContain(suggestion);
+        } finally {
+            state.db.close();
+            closeDatabase();
+            if (previous === undefined) delete process.env.XDG_DATA_HOME;
+            else process.env.XDG_DATA_HOME = previous;
+            cleanup();
+        }
+    });
+
     for (const stage of ["initial", "repair", "fallback", "editor"] as const) {
         test(`OpenCode 2 historian rejects unconfigured model suggestions during ${stage}`, async () => {
             const { dir: dataHome, cleanup } = createTestTempDir("v2-historian-suggestion-");

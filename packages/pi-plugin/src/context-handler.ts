@@ -1515,6 +1515,8 @@ export interface PiHistorianOptions {
 	runner: SubagentRunner;
 	/** Historian provider/model id (e.g. `anthropic/claude-haiku-4-5`). */
 	model: string;
+	/** Config key that selected the historian model for host refusal diagnostics. */
+	modelConfigKey?: string;
 	/** Optional ordered fallback chain, retaining each entry's Pi thinking level. */
 	fallbackModels?: readonly ModelInput[];
 	/** Historian chunk budget derived from its context window. */
@@ -7483,6 +7485,7 @@ function spawnPiHistorianRun(args: {
 					runner: historian.runner,
 					signal: controller.signal,
 					historianModel: historian.model,
+					modelConfigKey: historian.modelConfigKey,
 					fallbackModels: historian.fallbackModels,
 					fallbackModelId,
 					historianChunkTokens: historian.historianChunkTokens,

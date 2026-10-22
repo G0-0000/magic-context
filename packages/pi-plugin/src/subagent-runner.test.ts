@@ -1382,6 +1382,74 @@ describe("subagent-runner pure helpers", () => {
 });
 
 describe("PiSubagentRunner spawn lifecycle", () => {
+	for (const targetHarness of ["pi", "omp"] as const) {
+		it(`${targetHarness} records a refused model without an assistant reply`, async () => {
+			__setPiHarnessKindForTesting(targetHarness);
+			const child = createMockChild();
+			const { runner } = runnerWith(child, {
+				invocation: { command: targetHarness, prefixArgs: [], targetHarness },
+			});
+			const testDataDir = createTestTempDirFromPath(
+				join(tmpdir(), `mc-${targetHarness}-model-refusal-`),
+			);
+			const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			const previousXdgDataHome = process.env.XDG_DATA_HOME;
+			process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
+			process.env.XDG_DATA_HOME = testDataDir;
+			closeDatabase();
+			try {
+				const model = "unknown-provider/model-not-installed";
+				const suggestion = "unknown-provider/model-available";
+				const resultPromise = runner.run({
+					...baseOptions,
+					model,
+					accountingSessionId: `${targetHarness}-model-refusal`,
+					accountingSubagent: "historian",
+					accountingModelConfigKey: `historian.${targetHarness}.model`,
+				});
+				const errorMessage = `ProviderModelNotFoundError: Model not found: ${model}. Did you mean: ${suggestion}?`;
+				const assistant = {
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage,
+				};
+				child.writeStdoutLine({ type: "message_end", message: assistant });
+				child.writeStdoutLine(agentEnd([assistant]));
+				child.emitClose(0);
+
+				await expect(resultPromise).resolves.toMatchObject({
+					ok: false,
+					reason: "no_assistant",
+				});
+				const db = openDatabase();
+				if (!db) throw new Error("accounting test database did not open");
+				const [row] = getSubagentInvocations(
+					db,
+					`${targetHarness}-model-refusal`,
+				);
+				expect(row).toMatchObject({
+					harness: targetHarness,
+					providerId: "unknown-provider",
+					modelId: "model-not-installed",
+					status: "empty",
+				});
+				expect(row?.error).toContain(
+					`${targetHarness === "omp" ? "Oh My Pi" : "Pi"} refused the model`,
+				);
+				expect(row?.error).toContain(suggestion);
+			} finally {
+				closeDatabase();
+				if (previousTestDataDir === undefined)
+					delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+				else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = previousTestDataDir;
+				if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+				else process.env.XDG_DATA_HOME = previousXdgDataHome;
+				rmSync(testDataDir, { recursive: true, force: true });
+			}
+		});
+	}
+
 	it("records OMP usage and message provider for an unqualified model ref", async () => {
 		__setPiHarnessKindForTesting("omp");
 		const child = createMockChild();
