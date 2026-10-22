@@ -158,8 +158,8 @@ export function systemDateRefreshPermission(
 }
 /**
  * Whether the paired messages pass reported that it left signed thinking on
- * the wire; undefined until that pass has finished, or when the pairing is
- * ambiguous.
+ * the wire; undefined until that pass has finished, when the pairing is
+ * ambiguous, or when the pass could not report it.
  */
 export function systemDateSignedThinkingKept(
     history: Set<string>,

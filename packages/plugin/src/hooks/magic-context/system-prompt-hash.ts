@@ -27,16 +27,16 @@ import { currentLkgRequestIdentity } from "./lkg-measured-request";
 import { requestPendingMaterialization } from "./pending-materialization";
 import { estimateTokens } from "./read-session-formatting";
 import { systemPromptDates } from "./system-prompt-dates";
-import {
-    persistSystemPromptStickyDate,
-    readPersistedSystemPromptStickyDate,
-} from "./system-prompt-sticky-date";
 import { isHeldHeadForRequest, recordSystemPromptForRequest } from "./system-prompt-delivery";
 import {
     describeSystemPromptChange,
     type SystemPromptSnapshot,
     snapshotSystemPrompt,
 } from "./system-prompt-diagnostics";
+import {
+    persistSystemPromptStickyDate,
+    readPersistedSystemPromptStickyDate,
+} from "./system-prompt-sticky-date";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
@@ -531,8 +531,8 @@ export function createSystemPromptHashHandler(deps: {
                 );
             }
         }
-        // Keep the in-memory sticky date and its persisted record in step, so a
-        // restart resumes with the date this process last froze.
+        // Record every change of the sticky date, so a restart can restore the
+        // latest date that was saved successfully.
         const setStickyDate = (value: string) => {
             stickyDateBySession.set(sessionId, value);
             if (value !== recordedStickyDate(sessionId)) {
@@ -552,16 +552,18 @@ export function createSystemPromptHashHandler(deps: {
         // An idle-expired request rewrites the provider cache, but a signed
         // thinking block the messages pass kept on the wire stays bound to every
         // byte in front of it, the system date included. On a prefix-bound model
-        // the date therefore moves only when the messages pass served no signed
-        // thinking (it stripped it or there was none), as on any other bust.
+        // the date therefore stays frozen while the messages pass reports that
+        // it served signed thinking, as on any other bust.
         const signedThinkingKept = systemDateSignedThinkingKept(
             deps.historyRefreshSessions,
             dateRequest,
         );
         // The one rule for moving the date: the request must be allowed to
         // rewrite the prefix (a permitted rebuild, or an expired provider cache)
-        // and its messages pass must have served no signed thinking. A held pass
-        // keeps that thinking even when it is permitted to apply other work.
+        // and its messages pass must not report that it served signed thinking.
+        // A pass that cannot report it (an ambiguous pairing, the Rust transform)
+        // counts as not kept, as before. A held pass keeps that thinking even
+        // when it is permitted to apply other work, so its date stays frozen.
         const systemDateMayMove = (rewrite: boolean, keptSignedThinking: boolean | undefined) =>
             (rewrite || idleCacheExpired) && keptSignedThinking !== true;
         const prefixBoundModel = isPrefixBoundThinkingModel(
