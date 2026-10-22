@@ -47,6 +47,8 @@ import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
     clearEmergencyDropSample,
+    compactionOffFrozenThinkingIds,
+    compactionOffThinkingFrozenId,
     demoteTrailingBlankKeepDecisions,
     getDeferredClearedCompactionMarkerState,
     getEmergencyInputSample,
@@ -571,6 +573,8 @@ export function freezeReasoningOnBustingPass(args: {
     messages: MessageLike[];
     protectedMessages?: ReadonlySet<MessageLike>;
     alreadyFrozen: ReadonlySet<string>;
+    /** Also record the strip for compaction-off, which replays only its own strips. */
+    compactionOff?: boolean;
 }): { strip: ProactiveThinkingStrip | null; persistenceFailed: boolean } {
     const protectedMessages = args.protectedMessages ?? new Set<MessageLike>();
     const messageIds = findReasoningBearingAssistantIds(
@@ -579,11 +583,10 @@ export function freezeReasoningOnBustingPass(args: {
     if (messageIds.length === 0) return { strip: null, persistenceFailed: false };
     let persisted = false;
     try {
-        persisted = addMergedReasoningStrippedIds(
-            args.db,
-            args.sessionId,
-            messageIds.map(thinkingBindingRecoveryFrozenId),
-        );
+        persisted = addMergedReasoningStrippedIds(args.db, args.sessionId, [
+            ...messageIds.map(thinkingBindingRecoveryFrozenId),
+            ...(args.compactionOff ? messageIds.map(compactionOffThinkingFrozenId) : []),
+        ]);
     } catch (error) {
         sessionLog(args.sessionId, "proactive thinking strip: persistence threw:", error);
     }
@@ -1951,14 +1954,14 @@ export function finalizeMessageRepresentation(
             );
         }
     }
-    const bindingRecoveryParts = options?.skipMergedReasoningStrip
-        ? 0
-        : stripReasoningFromAssistantIds(
-              messages,
-              resolvedProviderID,
-              options?.frozenThinkingBindingMessageIds ?? new Set(),
-              restoredMessages,
-          );
+    // Compaction-off skips the merged-reasoning strip but still replays the
+    // binding strips it is given (its own, see COMPACTION_OFF_THINKING_FROZEN_PREFIX).
+    const bindingRecoveryParts = stripReasoningFromAssistantIds(
+        messages,
+        resolvedProviderID,
+        options?.frozenThinkingBindingMessageIds ?? new Set(),
+        restoredMessages,
+    );
     const mergedReasoningParts =
         bindingRecoveryParts +
         (options?.skipMergedReasoningStrip
@@ -2127,13 +2130,23 @@ export async function runPostTransformPhase(
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
     const frozenThinking = new Set(
-        args.activeThinkingTurn ? getMergedReasoningStrippedIds(args.db, args.sessionId) : [],
+        args.activeThinkingTurn || compactionOff
+            ? getMergedReasoningStrippedIds(args.db, args.sessionId)
+            : [],
     );
-    const bindingThinking = new Set(
-        [...frozenThinking]
-            .filter((id) => id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
-            .map((id) => id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length)),
-    );
+    // Compaction-off replays only the thinking strips it chose itself (see
+    // COMPACTION_OFF_THINKING_FROZEN_PREFIX): it never applied the managed
+    // mode's binding-mismatch entries, so the blocks they name stay on its wire.
+    const compactionOffFrozenThinking = compactionOff
+        ? compactionOffFrozenThinkingIds(frozenThinking)
+        : new Set<string>();
+    const bindingThinking = compactionOff
+        ? new Set(compactionOffFrozenThinking)
+        : new Set(
+              [...frozenThinking]
+                  .filter((id) => id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX))
+                  .map((id) => id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length)),
+          );
     const retainedThinking = args.activeThinkingTurn
         ? retainedActiveThinkingParts({
               messages: args.messages,
@@ -2170,15 +2183,22 @@ export async function runPostTransformPhase(
     let freezeM0M1 = args.freezeM0M1 === true || activeThinkingPrefixHold;
     let rewritingSignedPrefix = false;
     let thinkingReleasedForFit = false;
-    const releaseThinkingForRewrite = (forFit = false) => {
+    // `stripInCompactionOff` makes a compaction-off pass remove the frozen
+    // blocks from its own wire too (it otherwise only records them), for a
+    // release whose head change compaction-off cannot avoid.
+    const releaseThinkingForRewrite = (forFit = false, stripInCompactionOff = false) => {
+        const stripOffWire = compactionOff && stripInCompactionOff;
         const stripped = freezeReasoningOnBustingPass({
             db: args.db,
             sessionId: args.sessionId,
             messages: args.messages,
             alreadyFrozen: bindingThinking,
+            compactionOff: stripOffWire,
         });
         if (stripped.persistenceFailed)
             throw new Error("Cannot persist signed thinking omission before prefix rewrite");
+        if (stripOffWire)
+            for (const id of stripped.strip?.messageIds ?? []) compactionOffFrozenThinking.add(id);
         retainedThinking.clear();
         protectedThinkingMessages.clear();
         activeThinkingTurn = false;
@@ -2333,7 +2353,10 @@ export async function runPostTransformPhase(
             });
             preparedPrefix = foldResult;
             if (activeThinkingPrefixHold && firstRenderBust && committedFoldBustsServedPrefix) {
-                releaseThinkingForRewrite();
+                // Compaction-off holds every open signed turn, but a first render
+                // has no cached head to replay: the new head goes out, so the
+                // turn's thinking must leave the wire with it.
+                releaseThinkingForRewrite(false, true);
             }
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
             foldExecutedThisPass = foldExecutesThisPass(
@@ -4263,7 +4286,9 @@ export async function runPostTransformPhase(
     // Keep them separate from merged-part choices and anchored recovery ids.
     const frozenThinkingBindingMessageIds = new Set<string>();
     let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
-    if (!compactionOff) {
+    if (compactionOff) {
+        for (const id of compactionOffFrozenThinking) frozenThinkingBindingMessageIds.add(id);
+    } else {
         try {
             for (const id of mergedReasoningStrippedIds) {
                 if (id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) {
