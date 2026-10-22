@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
-// Witnesses from a second independent cache-safety review of the bounded
-// signed-thinking hold (issue 729), after its first fix round. Skipped unless
-// MC_REREVIEW_729=1.
+// Cache-safety witnesses for the bounded signed-thinking hold (issue 729):
+// whether signed thinking is ever served behind provider-visible bytes that
+// changed since it was produced. Skipped unless MC_REREVIEW_729=1.
 //
 // Every scenario drives the real OpenCode transform, through the production
 // messages-transform wrapper (so a failed pass replays the last good request),
@@ -10,7 +10,8 @@
 // is valid only while every provider-visible byte in front of it equals the
 // request that produced it, except that a gap-free run of the oldest thinking
 // blocks may be removed. Each case asserts the oracle finds nothing, so a red
-// case is a finding. Cases print a one-line summary for the review report.
+// case means invalid signed thinking was served. Each case prints a one-line
+// summary of what was served and logged.
 //
 // At the reviewed revision these cases are red, and equally red on the
 // revision before the bounded hold: the compaction-off first renders with no
@@ -98,7 +99,11 @@ function firstDiff(a: string[], b: string[]): string {
     return "same";
 }
 
-/** Null when `now` is a valid prefix for a block born behind `birth`. */
+/**
+ * Null when `now` (the bytes now served in front of a signed block) still
+ * matches `birth` (the bytes in front of it when it was produced), allowing
+ * only a gap-free run of the oldest thinking blocks to be missing.
+ */
 function bindingProblem(birth: View[], now: View[]): string | null {
     if (birth.length !== now.length)
         return `prefix has ${now.length} messages, birth had ${birth.length}`;
@@ -257,7 +262,10 @@ function session(host: "opencode1" | "opencode2", sessionId: string, options: Se
         failNextPass() {
             failNext = true;
         },
-        /** A process restart: in-memory last-good slots and every handler are gone. */
+        /**
+         * Simulates a process restart: clears the in-memory last-good slots,
+         * reopens the database and rebuilds every handler.
+         */
         restart() {
             resetLkgSlotsForTest();
             closeDatabase();
@@ -418,7 +426,8 @@ const report = (label: string, s: ReturnType<typeof session>, extra: Record<stri
     );
 
 // ── Compaction-off: the blanket hold must keep every head change away from an
-// open signed turn. Light steps only, so the bounded rule alone would not hold.
+// open signed turn. Light steps only, so without compaction-off the turn would
+// not be held (no step above 1,500 reasoning tokens).
 for (const host of HOSTS) {
     it.skipIf(!ENABLED)(
         `${host}: compaction-off, a dashboard memory edit mid-turn keeps m[0] in front of kept thinking`,
@@ -555,8 +564,9 @@ for (const host of HOSTS) {
                     const s = session(host, `rr729-lkg-unheld-${replays}-${withDrop}-${host}`);
                     await heldAfterReplay(s, replays);
                     const deferred = s.relevantLogs();
-                    // Above the cap (75%): unheld. A user flush is a lift-only bust
-                    // (no head change). With nothing queued, the deferred tail
+                    // Above the cap (75%): unheld. A user flush busts the cache
+                    // without changing the cached head, which lifts latest-turn
+                    // protection only. With nothing queued, the deferred tail
                     // normalization is the pass's only edit in front of the thinking.
                     s.setUsage(80);
                     s.flush();

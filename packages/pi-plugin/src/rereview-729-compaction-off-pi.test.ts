@@ -1,11 +1,13 @@
-// Witness from a second independent cache-safety review of the bounded
-// signed-thinking hold (issue 729). Skipped unless MC_REREVIEW_729=1.
+// Cache-safety witness for the bounded signed-thinking hold (issue 729).
+// Skipped unless MC_REREVIEW_729=1.
 //
 // Pi compaction-off now replays the cached m[0]/m[1] for an open signed turn on
-// a prefix-bound model. With no cached pair (cleared by a store rebase, a
+// a prefix-bound model (its signatures stay valid only while every byte in
+// front of them is unchanged). With no cached pair (cleared by a store rebase, a
 // history repair or a migration) the first render proceeds, and compaction-off
 // has no strip, so new head content would land in front of the turn's kept
-// signed thinking. The case asserts that does not happen, so red is a finding.
+// signed thinking. The case asserts that does not happen, so a red run means
+// invalid signed thinking was served.
 import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";

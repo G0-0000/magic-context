@@ -1,12 +1,13 @@
 /// <reference types="bun-types" />
-// Witnesses from a second independent cache-safety review of the bounded
-// signed-thinking hold (issue 729): the narrowed signed-fit retry and refusal.
+// Bounded signed-thinking hold (issue 729): how an over-window request is
+// retried or refused once its signed thinking cannot be kept (the signed fit).
 // Skipped unless MC_REREVIEW_729=1. Copy into another checkout to compare.
 //
 // Setup as in issue-731-refused-fit-review.test.ts: a 16k learned window, one
 // over-window tool result at 70% usage. The cases print what each pass did:
-// - a held turn refuses, the process restarts, the same input is retried
-//   (issue 731's durable refused-fit marker must still refuse or fit);
+// - a held turn refuses, a restart is simulated (the database is reopened and
+//   the transform rebuilt), and the same input is retried: the durable
+//   refusal marker must make it refuse again or fit, never serve it unchanged;
 // - after that refusal the turn becomes unheld (usage above the cap) and is
 //   still over the window: whether that unheld pass refuses on the estimate.
 import { expect, test } from "bun:test";
@@ -198,7 +199,8 @@ for (const host of ["oc1", "oc2"] as const)
             console.log(`[rereview-729] fit ${host} sonnet: ${sonnet.join(" | ")}`);
             // After a restart, a held retry never serves the same over-window result.
             expect(opus[1]).not.toMatch(/keepsResult=true/);
-            // An unheld pass behaves like a model without prefix-bound thinking.
+            // On the unheld pass Opus must refuse exactly when Sonnet (a model
+            // without prefix-bound thinking) refuses.
             expect(opus[2]!.startsWith("unheld 80%: refused")).toBe(
                 sonnet[2]!.startsWith("unheld 80%: refused"),
             );
