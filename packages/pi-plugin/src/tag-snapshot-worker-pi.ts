@@ -220,59 +220,69 @@ async function stream(kind: PiHydrationStream) {
 	await send({ ...envelope(), type: "end", stream: kind, rows: rowsSent });
 }
 
-try {
-	if (request.test?.openDelayMs) await delay(request.test.openDelayMs);
-	db = new Database(request.path, { readonly: true });
-	opened = true;
-	db.exec(
-		"PRAGMA query_only = ON; PRAGMA busy_timeout = 50; PRAGMA cache_size = -1024",
-	);
-	generationStatement = db.prepare(`SELECT
+// The job runs outside module evaluation on purpose. Every packet waits for
+// the parent's ACK, and some Bun releases (1.3.14 confirmed) deliver no
+// parent-to-worker message until the worker's entry module has finished
+// evaluating. A top-level `await` on this job would therefore wait forever
+// for its first ACK. Starting the job without awaiting it lets evaluation
+// end immediately; run() catches its own failures and reports them.
+const run = async () => {
+	try {
+		if (request.test?.openDelayMs) await delay(request.test.openDelayMs);
+		db = new Database(request.path, { readonly: true });
+		opened = true;
+		db.exec(
+			"PRAGMA query_only = ON; PRAGMA busy_timeout = 50; PRAGMA cache_size = -1024",
+		);
+		generationStatement = db.prepare(`SELECT
 		COALESCE((SELECT value FROM schema_migrations_meta WHERE key = ?), '0') AS revision,
 		COALESCE((SELECT tags_version FROM session_meta WHERE session_id = ?), 0) AS durable`);
-	const version = getPersistedSchemaVersion(db);
-	persistedVersion = version;
-	if (version > LATEST_SUPPORTED_VERSION)
-		throw new UnsupportedSchema(
-			`shared database schema v${version} is newer than this build supports (v${LATEST_SUPPORTED_VERSION}); update and restart this host`,
-		);
-	await stream("tags");
-	await stream("fallback");
-	if (request.test?.crash === "before-end")
-		throw new Error("injected worker crash before completion");
-	const final = sample(db);
-	if (
-		final.revision !== generation.revision ||
-		final.durable !== generation.durable
-	)
-		throw new StaleGeneration("session tags changed after final page");
-	db.close();
-	db = undefined;
-	port.postMessage({
-		...envelope(),
-		type: "done",
-		maxReadTransactionMs,
-		packetCount,
-		packetBytes,
-	} satisfies PiHydrationMessage);
-	if (request.test?.crash === "after-end") process.exitCode = 1;
-} catch (error) {
-	port.postMessage({
-		...envelope(),
-		type: "failed",
-		code:
-			error instanceof StaleGeneration
-				? "stale"
-				: error instanceof UnsupportedSchema
-					? "schema"
-					: opened
-						? "failed"
-						: "open",
-		persistedVersion,
-		supportedVersion: LATEST_SUPPORTED_VERSION,
-		reason: error instanceof Error ? error.message : String(error),
-	} satisfies PiHydrationMessage);
-} finally {
-	db?.close();
-	port.close();
-}
+		const version = getPersistedSchemaVersion(db);
+		persistedVersion = version;
+		if (version > LATEST_SUPPORTED_VERSION)
+			throw new UnsupportedSchema(
+				`shared database schema v${version} is newer than this build supports (v${LATEST_SUPPORTED_VERSION}); update and restart this host`,
+			);
+		await stream("tags");
+		await stream("fallback");
+		if (request.test?.crash === "before-end")
+			throw new Error("injected worker crash before completion");
+		const final = sample(db);
+		if (
+			final.revision !== generation.revision ||
+			final.durable !== generation.durable
+		)
+			throw new StaleGeneration("session tags changed after final page");
+		db.close();
+		db = undefined;
+		port.postMessage({
+			...envelope(),
+			type: "done",
+			maxReadTransactionMs,
+			packetCount,
+			packetBytes,
+		} satisfies PiHydrationMessage);
+		if (request.test?.crash === "after-end") process.exitCode = 1;
+	} catch (error) {
+		port.postMessage({
+			...envelope(),
+			type: "failed",
+			code:
+				error instanceof StaleGeneration
+					? "stale"
+					: error instanceof UnsupportedSchema
+						? "schema"
+						: opened
+							? "failed"
+							: "open",
+			persistedVersion,
+			supportedVersion: LATEST_SUPPORTED_VERSION,
+			reason: error instanceof Error ? error.message : String(error),
+		} satisfies PiHydrationMessage);
+	} finally {
+		db?.close();
+		port.close();
+	}
+};
+
+void run();

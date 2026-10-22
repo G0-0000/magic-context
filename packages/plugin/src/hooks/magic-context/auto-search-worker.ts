@@ -175,4 +175,15 @@ async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
 port.on("message", (message: { kind?: string; input?: AutoSearchWorkerInput }) => {
     if (message.kind === "run" && message.input) void run(message.input);
 });
-await run(input);
+// Start the first job without awaiting it so this module finishes evaluating.
+// run() waits for parent embedding replies, and some Bun releases (1.3.14
+// confirmed) deliver no parent message to a worker whose entry module is still
+// evaluating, so a top-level `await` here would wait forever for the first
+// reply. A failure is rethrown from a timer so it still reaches the parent as
+// the worker's "error" event, as a rejected top-level await did. (A microtask
+// rethrow aborts the whole process on Bun 1.3.14.)
+run(input).catch((error: unknown) => {
+    setTimeout(() => {
+        throw error;
+    });
+});
