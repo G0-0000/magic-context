@@ -2440,9 +2440,11 @@ export function createTransform(deps: TransformDeps) {
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
+        // A recovery prefix is always normalized once a pass may rewrite it,
+        // even with nothing untagged: until then every pass re-serves its bytes.
         const untaggedReplayTailServed =
-            untaggedReplayIds.size > 0 &&
-            (!!recovery.prefix ||
+            !!recovery.prefix ||
+            (untaggedReplayIds.size > 0 &&
                 messages.some((message) => untaggedReplayIds.has(message.info.id ?? "")));
         const normalizeRecoveryTail = untaggedReplayTailServed
             ? () => {
