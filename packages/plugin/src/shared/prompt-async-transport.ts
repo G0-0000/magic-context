@@ -11,6 +11,7 @@ import { sumTokensFromChildMessages } from "../features/magic-context/subagent-t
 import { describeAssistantError } from "./assistant-message-extractor";
 import { sessionLog } from "./logger";
 import type { PromptArgs, PromptTransport } from "./model-suggestion-retry";
+import { noteModelActivityMonitored, noteModelOutputReceived } from "./model-suggestion-retry";
 
 type Client = ReturnType<typeof createOpencodeClient> | undefined;
 
@@ -202,6 +203,29 @@ function isTerminalAssistant(message: unknown): boolean {
     );
 }
 
+/**
+ * True when an assistant row shows the model has answered: any token usage, or a
+ * non-empty text or reasoning part, or a tool call. A row the host creates before
+ * the provider responds carries none of these.
+ */
+function showsModelOutput(message: unknown): boolean {
+    if (infoOf(message).role !== "assistant") return false;
+    const tokens = sumTokensFromChildMessages([message]);
+    if (tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite > 0) return true;
+    const parts = (message as { parts?: unknown } | null)?.parts;
+    if (!Array.isArray(parts)) return false;
+    return parts.some((part) => {
+        if (!part || typeof part !== "object") return false;
+        const { type, text } = part as { type?: unknown; text?: unknown };
+        if (type === "tool") return true;
+        return (
+            (type === "text" || type === "reasoning") &&
+            typeof text === "string" &&
+            text.trim().length > 0
+        );
+    });
+}
+
 function unwrapData(response: unknown): unknown {
     if (response && typeof response === "object" && "data" in response) {
         return (response as { data?: unknown }).data;
@@ -324,6 +348,10 @@ export async function promptAsyncAndWaitForIdle(
         }
         let sentAt = Date.now();
         let sawBusy = false;
+        // From here on this wait reports whether the model has produced anything,
+        // which lets the model chain tell a silent model from a slow answer.
+        noteModelActivityMonitored(signal);
+        let sawOutput = false;
 
         for (;;) {
             await sleep(pollIntervalMs, signal);
@@ -341,6 +369,17 @@ export async function promptAsyncAndWaitForIdle(
             }
             const status = await readStatus(session, sessionId, dir, signal);
             const messages = await readMessages(session, sessionId, dir, signal);
+            if (
+                !sawOutput &&
+                messages.some((message) => {
+                    const id = messageId(message);
+                    // Rows from before this send belong to an earlier attempt.
+                    return id !== null && !initialBaseline.has(id) && showsModelOutput(message);
+                })
+            ) {
+                sawOutput = true;
+                noteModelOutputReceived(signal);
+            }
             if (budget) {
                 const latest = messages.at(-1);
                 const latestId = messageId(latest);

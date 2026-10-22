@@ -32877,6 +32877,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn classify_primary_that_times_out_with_no_answer_advances_to_the_fallback() {
+        // A model that stops answering times out on its await and again on the
+        // recovery read. The module walks its own chain, so the next model must
+        // still get a turn rather than the whole classify run failing.
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .await_results
+            .lock()
+            .expect("await results mutex")
+            .extend([
+                Err(HistorianProducerError::TimedOut),
+                Err(HistorianProducerError::TimedOut),
+                Ok(ProducerOutput {
+                    text: "<classify></classify>".to_string(),
+                    length_capped: false,
+                    usage: None,
+                }),
+            ]);
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let route_root = project.to_str().unwrap();
+        handler.bind_route(7, binding(route_root, "ses"));
+        activate_module_authority(&store, "context", "git:identity", route_root, "memories");
+
+        let outcome = handler
+            .handle_dreamer_run_task(
+                7,
+                &json!({
+                    "v": 1,
+                    "session_id": "ses",
+                    "task": CLASSIFY_TASK,
+                    "command_id": "timed-out-then-fallback",
+                    "model_chain": ["test/first", "test/second"],
+                    "payload": { "prompt_body": "classify", "items": [] },
+                }),
+            )
+            .await;
+        let response = match outcome {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("the fallback attempt must produce a manifest: {other:?}"),
+        };
+
+        assert_eq!(
+            producer.models.lock().expect("models mutex").as_slice(),
+            ["test/first", "test/second"]
+        );
+        assert_eq!(response["diagnostics"]["model"], json!("test/second"));
+        assert_eq!(response["diagnostics"]["attempts"], json!(2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn classify_failure_names_every_attempt_not_only_the_last() {
         let producer = Arc::new(ProducerState::default());
         producer

@@ -10,6 +10,16 @@ import type { PromptArgs } from "../../../shared/model-suggestion-retry";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import { formatRunTokenLog, runTokenLog } from "../../../shared/run-token-log";
 
+/**
+ * How long a Dreamer model may stay completely silent (nothing streamed, no
+ * tokens) before the model chain gives up on it and moves to the next
+ * configured model. A free or overloaded model that stops answering otherwise
+ * holds the whole task slice, up to 20 minutes, before failing. Healthy models
+ * start streaming within seconds, so this only trips on a model that is not
+ * answering at all.
+ */
+export const DREAMER_FIRST_OUTPUT_TIMEOUT_MS = 90_000;
+
 export interface HiddenSingleShotArgs<T> {
     executor: HiddenCompletionExecutor;
     parentSessionId: string | undefined;
@@ -26,6 +36,8 @@ export interface HiddenSingleShotArgs<T> {
     fallbackModels?: readonly ModelInput[];
     language?: string;
     timeoutMs: number;
+    /** See `PromptRetryOptions.firstOutputTimeoutMs`. Undefined = no first-output deadline. */
+    firstOutputTimeoutMs?: number;
     signal?: AbortSignal;
     metadata?: Record<string, unknown>;
     privacySensitive?: boolean;
@@ -117,6 +129,9 @@ export async function runHiddenSingleShotPrompt<T>(
                     { childSessionId: handle.childSessionId },
                 ),
                 timeoutMs: args.timeoutMs,
+                ...(args.firstOutputTimeoutMs !== undefined
+                    ? { firstOutputTimeoutMs: args.firstOutputTimeoutMs }
+                    : {}),
                 ...(args.signal ? { signal: args.signal } : {}),
                 fallbackModels: args.fallbackModels,
                 callContext: args.callContext,
