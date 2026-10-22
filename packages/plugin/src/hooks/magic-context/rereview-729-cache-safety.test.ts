@@ -14,10 +14,10 @@
 // case means invalid signed thinking was served. Each case prints a one-line
 // summary of what was served and logged.
 //
-// Always run: the compaction-off first renders with no cached m[0]/m[1], the
+// Always run, because each guards a case that once served invalid signed
+// thinking: the compaction-off first renders with no cached m[0]/m[1], the
 // restart together with a new real user after a last-good replay, and the date
-// rollover on a held idle-expiry pass. Each was red at 91993af810 and on the
-// revision before the bounded hold.
+// rollover on a held idle-expiry pass.
 //
 // To compare with another revision, copy this file into that checkout and run
 // it there with the same environment variable.
@@ -816,8 +816,8 @@ for (const host of HOSTS) {
         await s.pass();
         s.step(1, 200);
         await s.pass();
-        // A strip managed mode recorded before the session switched off: the
-        // compaction-off wire never applied it, so it must keep serving sig-1.
+        // Seed the ledger with a binding-mismatch entry, as managed mode would
+        // write it. Compaction-off never applied it, so it must keep serving sig-1.
         addMergedReasoningStrippedIds(s.db, sessionId, ["binding_mismatch:step-1"]);
         s.step(2, 200);
         const out = await s.pass();
