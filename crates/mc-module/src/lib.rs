@@ -13149,7 +13149,9 @@ impl McHandler {
             return invalid_params_error("ctx_reduce arguments must be an object");
         };
         let Some(raw_drop) = non_empty_string_arg(&args, "drop") else {
-            return tool_error_result("Error: 'drop' must be provided.".to_string());
+            return tool_error_result(
+                r#"Error: 'drop' must be provided as a string of tag numbers, for example {"drop": "3-5,8"}."#.to_string(),
+            );
         };
         let requested = match parse_tag_range_string(raw_drop) {
             Ok(requested) => requested,
@@ -41673,7 +41675,10 @@ mod tests {
         let omitted = tool_text(call_facade(&handler, "ctx_reduce", json!({})).await);
         let empty = tool_text(call_facade(&handler, "ctx_reduce", json!({"drop": ""})).await);
         assert_eq!(empty, omitted);
-        assert!(empty.contains("'drop' must be provided"), "{empty}");
+        assert_eq!(
+            empty,
+            r#"Error: 'drop' must be provided as a string of tag numbers, for example {"drop": "3-5,8"}."#
+        );
         assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
 
         let append = handler.handle_agent_drops_value(

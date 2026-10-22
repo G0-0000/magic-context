@@ -11,6 +11,14 @@
             "hosts": ["omp"]
         },
         {
+            "path": "tests/issue-756-tool-surface.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OMP and Pi provider requests capture their exact tool-list bytes across two turns; host PID lsof proves all stores stay under the issue-756 throwaway root.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["omp", "pi"]
+        },
+        {
             "path": "tests/opencode2/native-fold-hidden-edit.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

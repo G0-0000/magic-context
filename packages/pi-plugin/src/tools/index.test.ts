@@ -14,6 +14,7 @@ import {
 	FULL_PARAMETER_DESCRIPTIONS,
 	LIGHT_PARAMETER_DESCRIPTIONS,
 } from "@magic-context/core/tools/parameter-descriptions";
+import { __setPiHarnessKindForTesting } from "../pi-harness-kind";
 import { createTestDb } from "../test-utils.test";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./index";
 
@@ -97,6 +98,44 @@ describe("registerMagicContextTools", () => {
 				]),
 			);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("marks every ctx_* tool essential only for OMP", () => {
+		const db = createTestDb();
+		const registerFor = (kind: "pi" | "omp") => {
+			__setPiHarnessKindForTesting(kind);
+			const registered = new Map<string, { name: string; loadMode?: string }>();
+			const pi = {
+				registerTool: (tool: { name: string; loadMode?: string }) =>
+					registered.set(tool.name, tool),
+				registerCommand: () => undefined,
+			} as never;
+			registerMagicContextTools(pi, { db, allowDreamerActions: true });
+			return [...registered.values()].filter((tool) =>
+				tool.name.startsWith("ctx_"),
+			);
+		};
+
+		try {
+			const expectedNames = [
+				"ctx_expand",
+				"ctx_memory",
+				"ctx_memory_list",
+				"ctx_note",
+				"ctx_reduce",
+				"ctx_search",
+			];
+			const ompTools = registerFor("omp");
+			expect(ompTools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+			for (const tool of ompTools) expect(tool.loadMode).toBe("essential");
+
+			const piTools = registerFor("pi");
+			expect(piTools.map((tool) => tool.name).sort()).toEqual(expectedNames);
+			for (const tool of piTools) expect(tool).not.toHaveProperty("loadMode");
+		} finally {
+			__setPiHarnessKindForTesting(undefined);
 			closeQuietly(db);
 		}
 	});
