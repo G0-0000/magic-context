@@ -380,9 +380,8 @@ export async function runAutoSearchHint(args: {
             } catch (error) {
                 if (lifecycleSignal.aborted) return AUTO_SEARCH_OK;
                 if (error instanceof AutoSearchBusyError) {
-                    // An earlier search of this session (one whose deadline passed)
-                    // is still finishing. Serve this turn without a hint and freeze
-                    // that, exactly as a timeout does.
+                    // An earlier search of this session is still running. Serve this
+                    // turn without a hint and freeze that decision, as a timeout does.
                     sessionLog(
                         sessionId,
                         "auto-search: an earlier search of this session is still running, skipping hint for this turn",

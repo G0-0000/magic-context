@@ -1466,12 +1466,20 @@ function trackSearchPool(db: Database, sessionId: string, projectPath: string, m
 
 /** Outcome and timings of one background warm. Counts and durations only, no content. */
 export interface CompartmentChunkPoolWarmReport extends CompartmentChunkPoolRefreshTimings {
-    outcome: "current" | "in-progress" | "refreshed" | "failed";
+    /** too-large: the decoded pool does not fit the decoded-pool memory budget. */
+    outcome: "current" | "in-progress" | "refreshed" | "too-large" | "failed";
     totalMs: number;
     finishedAtUnixMs: number;
 }
 
 let lastChunkPoolWarm: CompartmentChunkPoolWarmReport | null = null;
+/**
+ * Scopes whose decoded pool was not retained after a background warm (it is
+ * larger than DECODED_SEARCH_POOL_CACHE_MAX_BYTES), with the session signature
+ * at that time. Until the session's rows change, a warm of such a scope does
+ * nothing, so periodic maintenance never rebuilds a pool that cannot be kept.
+ */
+const unretainedSearchPools = new WeakMap<Database, Map<string, SessionChunkSignature>>();
 
 /** The last background warm that refreshed (or failed to refresh) a pool on this thread. */
 export function getLastCompartmentChunkPoolWarm(): CompartmentChunkPoolWarmReport | null {
@@ -1528,6 +1536,12 @@ export async function warmCompartmentChunkSearchPool(
     const key = searchPoolKey(sessionId, projectPath, modelId);
     try {
         if (pendingSearchPools.get(db)?.has(key)) return report("in-progress");
+        const unretained = unretainedSearchPools.get(db)?.get(key);
+        if (
+            unretained &&
+            sameSessionSignature(readSessionChunkSignature(db, sessionId), unretained)
+        )
+            return report("too-large");
         const entry = getDecodedSearchPool(db).get(key);
         const fullProbeDue =
             entry !== undefined &&
@@ -1539,10 +1553,23 @@ export async function warmCompartmentChunkSearchPool(
             sameSessionSignature(readSessionChunkSignature(db, sessionId), entry.sessionSignature)
         )
             return report("current");
+        const signature = readSessionChunkSignature(db, sessionId);
         await refreshSearchPoolOnce(db, sessionId, projectPath, modelId, {
             background: !fullProbeDue,
             timings,
         });
+        let unretainedPools = unretainedSearchPools.get(db);
+        if (!getDecodedSearchPool(db).has(key)) {
+            if (!unretainedPools) {
+                unretainedPools = new Map();
+                unretainedSearchPools.set(db, unretainedPools);
+            }
+            unretainedPools.set(key, signature);
+            const tooLarge = report("too-large");
+            lastChunkPoolWarm = tooLarge;
+            return tooLarge;
+        }
+        unretainedPools?.delete(key);
         const refreshed = report("refreshed");
         lastChunkPoolWarm = refreshed;
         return refreshed;

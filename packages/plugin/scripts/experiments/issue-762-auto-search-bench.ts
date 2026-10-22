@@ -28,6 +28,13 @@ const MESSAGES = 30_000;
 const turns = Number(
     process.argv.find((value) => value.startsWith("--turns="))?.slice("--turns=".length) ?? 40,
 );
+// The first query answers this fast, so the first turn has a query vector while
+// no pool is loaded yet: the cold-pool case.
+const firstLatencyMs = Number(
+    process.argv
+        .find((value) => value.startsWith("--first-latency-ms="))
+        ?.slice("--first-latency-ms=".length) ?? 20,
+);
 const gapMs = Number(
     process.argv.find((value) => value.startsWith("--gap-ms="))?.slice("--gap-ms=".length) ?? 300,
 );
@@ -95,12 +102,14 @@ function unitVector(seedVector?: Float32Array, noise = 1): Float32Array {
 const queryVector = unitVector();
 const queryEmbedding = Array.from(queryVector);
 const providerLatencies: number[] = [];
+let forcedLatencyMs: number | undefined;
 const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
         const body = (await request.json()) as { input: string[] };
-        const latency = sampleLatency();
+        const latency =
+            forcedLatencyMs ?? (providerLatencies.length === 0 ? firstLatencyMs : sampleLatency());
         providerLatencies.push(latency);
         await Bun.sleep(latency);
         return Response.json({
@@ -188,6 +197,9 @@ db.transaction(() => {
         }
     }
 }).immediate();
+// Fold the fixture's write-ahead log into the database now, so the first
+// turn's decision write does not pay for checkpointing the whole fixture.
+db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 const fixtureMs = performance.now() - fixtureStarted;
 
 interface TurnSample {
@@ -245,6 +257,37 @@ try {
         await Bun.sleep(gapMs);
     }
     const warm = samples.slice(1);
+    // A compartment is published (ten new chunk rows) and the next turns come
+    // at once with a fast query vector, so they find the loaded pool stale.
+    const published = insertCompartment.run(
+        sessionId,
+        CHUNKS,
+        MESSAGES - 10,
+        MESSAGES,
+        `Historian cache wiring compartment ${CHUNKS}`,
+        "fixture summary",
+        1_700_000_000_000,
+    );
+    for (let window = 0; window < WINDOWS_PER_COMPARTMENT; window++) {
+        const vector = unitVector(queryVector, 0.03);
+        insertChunk.run(
+            published.lastInsertRowid,
+            sessionId,
+            projectPath,
+            window,
+            MESSAGES - 10,
+            MESSAGES,
+            `hash-published-${window}`,
+            snapshot.chunkModelId,
+            DIMS,
+            Buffer.from(vector.buffer),
+            1_700_000_000_000,
+        );
+    }
+    forcedLatencyMs = 20;
+    const stale: TurnSample[] = [];
+    for (let index = 0; index < 5; index++) stale.push(await turn(turns + 1 + index));
+    forcedLatencyMs = undefined;
     // The same cold pool build the search worker does, timed on this thread.
     const buildStarted = performance.now();
     const pool = await loadCompartmentChunkEmbeddingsForSearch(
@@ -258,6 +301,25 @@ try {
         rows: pool.length,
         probeMs: Math.round(_getCompartmentChunkSearchCacheStatsForTests().probeMs),
     };
+    // What a hint turn pays to learn whether the pool is warm (absent on base).
+    const chunkModule = (await import(
+        "../../src/features/magic-context/compartment-chunk-embedding"
+    )) as { peekCompartmentChunkSearchPool?: (...args: unknown[]) => unknown };
+    let warmCheckMs: number | null = null;
+    if (chunkModule.peekCompartmentChunkSearchPool) {
+        const checks: number[] = [];
+        for (let index = 0; index < 20; index++) {
+            const started = performance.now();
+            chunkModule.peekCompartmentChunkSearchPool(
+                db,
+                sessionId,
+                projectPath,
+                snapshot.chunkModelId,
+            );
+            checks.push(performance.now() - started);
+        }
+        warmCheckMs = Number(percentile(checks, 50).toFixed(2));
+    }
     console.log(
         JSON.stringify(
             {
@@ -275,9 +337,14 @@ try {
                     p90Ms: Math.round(percentile(providerLatencies, 90)),
                 },
                 coldPoolBuild: coldBuild,
+                warmCheckP50Ms: warmCheckMs,
                 coldTurn: samples[0],
                 afterIdle: summarize(warm),
                 afterIdleFirstFive: warm.slice(0, 5).map((row) => Math.round(row.ms)),
+                stalePoolTurnsFastVector: stale.map((row) => ({
+                    ms: Math.round(row.ms),
+                    chunkHit: row.chunkHit,
+                })),
             },
             null,
             2,

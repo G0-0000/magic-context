@@ -300,9 +300,10 @@ const MAX_IDLE_SEARCH_WORKERS = 4;
 const SEARCH_WORKER_IDLE_MS = 5 * 60_000;
 /**
  * How long a search may keep running after its caller's deadline before its
- * worker is disposed anyway. A search that has not answered by then is stuck
- * in a statement, and every later turn of its session would be skipped behind
- * it.
+ * worker is disposed anyway. A search that has not answered by then is still
+ * holding the worker (in a long statement, or waiting on a provider that
+ * ignores cancellation), and every later turn of its session would otherwise
+ * be skipped behind it.
  */
 const DETACHED_SEARCH_LIMIT_MS = 30_000;
 /**
@@ -347,8 +348,8 @@ async function acquireSearchWorker(
         let slot = pool.get(key);
         if (slot?.busy) {
             // Never queue a search behind one whose caller has stopped waiting,
-            // or behind another search of the same session: the earlier one
-            // finishes in the background, and this turn goes without a hint.
+            // or behind another search of the same session. Report busy, and
+            // this turn goes without a hint.
             if (input.job === "search" && (slot.detached || slot.busySessionId === input.sessionId))
                 return "busy";
             const current = slot;
