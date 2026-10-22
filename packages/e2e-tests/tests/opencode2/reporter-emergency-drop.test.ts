@@ -159,7 +159,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         // The copied tool row retains its original (pre-warmup) completion time.
         // The stale-reading guard correctly refuses to record its copied 820k
         // usage again. Check the provider-proven reading saved before the
-        // restart, while the restarted host has not yet reset its in-memory usage.
+        // restart, before the host starts again.
         const usageDb = new Database(fixture.contextDbPath, { readonly: true });
         try {
             const usage = usageDb.prepare(`SELECT last_input_tokens AS inputTokens,
@@ -267,10 +267,12 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         // The reporter pass is the first priced pass after the restart. Its
         // reading is the provider's own, saved by the re-prime request above
         // (same model and limit, cache still warm), so that 820k reading, above
-        // the usable window, is what puts the pass in the emergency band. A
-        // count of the converted wire is not used: counted with calibrated
-        // ratios it reads about half the window, and only the doubled fit
-        // envelope a pressure reading no longer uses priced it above.
+        // the usable window, is what puts the pass in the emergency band. The
+        // pass still counts the converted wire, but only to check whether the
+        // request grew past the saved reading: counted with calibrated ratios
+        // it reads about half the window, so it does not override the reading.
+        // Only the doubled fit envelope, which pressure sizing no longer uses,
+        // priced that wire above the window.
         const pricedReadings = [...log.matchAll(
             /using saved provider reading for priced pass inputTokens=(\d+) percentage=([\d.]+)/g,
         )].map((match) => ({ inputTokens: Number(match[1]), percentage: Number(match[2]) }));
