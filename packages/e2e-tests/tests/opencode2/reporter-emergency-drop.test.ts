@@ -158,8 +158,8 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         } finally { contextDb.close(); }
         // The copied tool row retains its original (pre-warmup) completion time.
         // The stale-reading guard correctly refuses to record its copied 820k
-        // usage again. Check the provider-proven reading before the restarted
-        // host resets first-pass pressure and prices the converted wire instead.
+        // usage again. Check the provider-proven reading saved before the
+        // restart, while the restarted host has not yet reset its in-memory usage.
         const usageDb = new Database(fixture.contextDbPath, { readonly: true });
         try {
             const usage = usageDb.prepare(`SELECT last_input_tokens AS inputTokens,
@@ -264,11 +264,18 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         try {
             expect(drained.prepare("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(sessionID)).toHaveLength(0);
         } finally { drained.close(); }
-        // Restart discards the stale provider reading, so the seeded tool outputs
-        // themselves must price above the usable window without opaque signatures.
-        const pricedInputs = [...log.matchAll(/using wire estimate for priced pass inputTokens=(\d+) .*trusted=true/g)]
-            .map((match) => Number(match[1]));
-        expect(Math.max(...pricedInputs)).toBeGreaterThan(CONTEXT_LIMIT - 1_024);
+        // The reporter pass is the first priced pass after the restart. Its
+        // reading is the provider's own, saved by the re-prime request above
+        // (same model and limit, cache still warm), so that 820k reading, above
+        // the usable window, is what puts the pass in the emergency band. A
+        // count of the converted wire is not used: counted with calibrated
+        // ratios it reads about half the window, and only the doubled fit
+        // envelope a pressure reading no longer uses priced it above.
+        const pricedReadings = [...log.matchAll(
+            /using saved provider reading for priced pass inputTokens=(\d+) percentage=([\d.]+)/g,
+        )].map((match) => ({ inputTokens: Number(match[1]), percentage: Number(match[2]) }));
+        expect(Math.max(...pricedReadings.map((reading) => reading.inputTokens))).toBeGreaterThan(CONTEXT_LIMIT - 1_024);
+        expect(Math.max(...pricedReadings.map((reading) => reading.percentage))).toBeGreaterThan(100);
         // Private paths and tool definitions can move the final selected tag across
         // the reclaim boundary. Assert the reclaimed budget, not an exact tag count.
         const v1Log = readFileSync(fixture.logPath("v1-reporter"), "utf8");
