@@ -96,7 +96,9 @@ const GATED_VERSION: u8 = 3;
 /// step's `error`; this reader never reads errors, so it needs no handling.
 /// `chatgpt-codex-wire/v1` adds a frozen `chatgpt_wire` profile to `RunStarted`
 /// (and to a refreeze record) and transport fields to model-attempt records;
-/// usage, steps and timestamps are unchanged.
+/// usage, steps and timestamps are unchanged. `tool-reply/v1` adds a `reply`
+/// object with an integer `max_ms` to tools in a run's frozen `tools` list
+/// (on `RunStarted` and queued sends); this reader never reads tools.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -126,6 +128,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "turn-directives/v1",
     "google-rpc-error-details/v1",
     "chatgpt-codex-wire/v1",
+    "tool-reply/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1861,6 +1864,7 @@ pub(crate) mod tests {
             "turn-directives/v1",
             "google-rpc-error-details/v1",
             "chatgpt-codex-wire/v1",
+            "tool-reply/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1869,6 +1873,20 @@ pub(crate) mod tests {
             let runs = decode(&bytes).unwrap_or_else(|e| panic!("{feature}: {e}"));
             assert_eq!(step_ids(&runs), [("r1".to_string(), 1)], "{feature}");
         }
+    }
+
+    /// `tool-reply/v1` adds a `reply` deadline to a long-running tool in the
+    /// run's frozen tool list; a run that carries one still yields its steps.
+    #[test]
+    fn a_tool_reply_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["tools"] = json!([{"name": "research", "reply": {"max_ms": 120000}}]);
+        let bytes = wal_bytes(&[
+            json!({"requires": ["tool-reply/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("tool-reply/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
     /// `structured-output/v1` adds the frozen schema settings to `RunStarted`
