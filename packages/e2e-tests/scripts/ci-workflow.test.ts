@@ -38,6 +38,25 @@ test("summary rejects failed, cancelled, skipped and missing legs", () => {
     expect(() => failedRequiredJobs([], {})).toThrow();
 });
 
+test("dists publish before independent checks without removing preflight gates", () => {
+    const preflight = workflow.jobs.preflight!;
+    const publish = preflight.steps.findIndex((step) => step.uses === "actions/upload-artifact@v4");
+    expect(publish).toBeGreaterThan(preflight.steps.findIndex((step) => step.name === "Check compiled contracts"));
+    for (const name of ["Layout, manifest and shard contracts", "Format check", "TypeScript typecheck", "Lint"]) {
+        const index = preflight.steps.findIndex((step) => step.name === name);
+        expect(index).toBeGreaterThan(publish);
+        expect(preflight.steps[index]!.if).toBe("${{ !cancelled() }}");
+    }
+    expect(workflow.jobs["ci-summary"]!.needs).toContain("preflight");
+});
+
+test("native producers start without waiting for unrelated preflight checks", () => {
+    for (const id of ["rust-clippy", "rust-lib-archive", "e2e-rust-hermetic-build"]) {
+        expect(workflow.jobs[id]!.needs).toBeUndefined();
+        expect(workflow.jobs["ci-summary"]!.needs).toContain(id);
+    }
+});
+
 test("artifact consumers start setup immediately and gate tests on artifacts", () => {
     for (const id of ["unit-plugin", "unit-pi-plugin", "check-plugin-compat", "e2e-opencode", "e2e-opencode2", "e2e-pi", "e2e-omp", "e2e-host-opencode", "e2e-host-opencode2", "e2e-host-pi", "e2e-host-omp", "rust-mc-module-integration", "rust-workspace-crates", "rust-mc-module-lib", "rust-mc-module-parity", "e2e-rust-hermetic"]) {
         const job = workflow.jobs[id]!;

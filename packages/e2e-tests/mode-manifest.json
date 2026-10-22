@@ -2090,6 +2090,14 @@
             ]
         },
         {
+            "path": "tests/rust-compaction-marker-catchup.test.ts",
+            "tier": "rust-only",
+            "invocation": { "ts": false, "rust": true },
+            "rationale": "Mixed-history render epochs catch up lagging markers only on admitted rebuilds, preserving frozen provider bytes on byte-preserving HARD and subsequent SOFT+ turns.",
+            "contract_refs": ["RUST-E2E"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/rust-ctx-reduce-roundtrip.test.ts",
             "tier": "rust-only",
             "invocation": {
