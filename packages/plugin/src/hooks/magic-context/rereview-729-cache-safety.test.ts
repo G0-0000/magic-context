@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 // Cache-safety witnesses for the bounded signed-thinking hold (issue 729):
 // whether signed thinking is ever served behind provider-visible bytes that
-// changed since it was produced. Skipped unless MC_REREVIEW_729=1.
+// changed since it was produced. Cases that guard a fixed gap always run; the
+// others are skipped unless MC_REREVIEW_729=1.
 //
 // Every scenario drives the real OpenCode transform, through the production
 // messages-transform wrapper (so a failed pass replays the last good request),
@@ -13,11 +14,10 @@
 // case means invalid signed thinking was served. Each case prints a one-line
 // summary of what was served and logged.
 //
-// At the reviewed revision these cases are red, and equally red on the
-// revision before the bounded hold: the compaction-off first renders with no
-// cached m[0]/m[1], the restart together with a new real user after a
-// last-good replay, and the date rollover on a held idle-expiry pass. The
-// others are green.
+// Always run: the compaction-off first renders with no cached m[0]/m[1], the
+// restart together with a new real user after a last-good replay, and the date
+// rollover on a held idle-expiry pass. Each was red at 91993af810 and on the
+// revision before the bounded hold.
 //
 // To compare with another revision, copy this file into that checkout and run
 // it there with the same environment variable.
@@ -35,12 +35,17 @@ import {
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import {
+    addMergedReasoningStrippedIds,
+    getMergedReasoningStrippedIds,
+} from "../../features/magic-context/storage-meta-persisted";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import { readPersistedLkgUntaggedInputIds } from "./lkg-recovery-prefix";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { requestPendingMaterialization } from "./pending-materialization";
 import { providerVisiblePart } from "./provider-visible-parts";
@@ -349,7 +354,15 @@ function session(host: "opencode1" | "opencode2", sessionId: string, options: Se
         cachedM0() {
             return getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString() ?? null;
         },
-        async pass(date?: string): Promise<{ messages: Message[] | null; prompt?: string }> {
+        /**
+         * Serves one request. With a date the system-prompt hook runs after the
+         * messages transform (OpenCode 2's order), or before it with
+         * `systemFirst`; both stages share one request identity.
+         */
+        async pass(
+            date?: string,
+            order: { systemFirst?: boolean } = {},
+        ): Promise<{ messages: Message[] | null; prompt?: string }> {
             passNumber++;
             logs.length = 0;
             const log = spyOn(loggerModule, "sessionLog").mockImplementation(
@@ -362,21 +375,31 @@ function session(host: "opencode1" | "opencode2", sessionId: string, options: Se
                 const output = { messages };
                 const identity = {};
                 bindSystemDateRequestIdentity(output, identity);
+                const system =
+                    date === undefined
+                        ? undefined
+                        : {
+                              system: [
+                                  `Base instructions\n<plugin-env>\n  Date: ${date}\n</plugin-env>`,
+                              ],
+                          };
+                const runSystem = async () => {
+                    if (system)
+                        await systemHandler(
+                            { sessionID: sessionId, dateRefreshRequest: identity },
+                            system,
+                        );
+                };
+                if (order.systemFirst) await runSystem();
                 try {
                     await handler({}, output);
                 } catch (error) {
                     logs.push(`REFUSED ${(error as Error).message}`);
                     return { messages: null };
                 }
+                if (!order.systemFirst) await runSystem();
                 let prompt: string | undefined;
-                if (date !== undefined) {
-                    const system = {
-                        system: [`Base instructions\n<plugin-env>\n  Date: ${date}\n</plugin-env>`],
-                    };
-                    await systemHandler(
-                        { sessionID: sessionId, dateRefreshRequest: identity },
-                        system,
-                    );
+                if (system) {
                     prompt = system.system.join("\n");
                     servedDate = /Date: (\S+)/.exec(prompt)?.[1];
                 }
@@ -483,55 +506,47 @@ for (const host of HOSTS) {
         60_000,
     );
 
-    it.skipIf(!ENABLED)(
-        `${host}: compaction-off, the first render after a restart (no cached m[0]/m[1]) with changed docs`,
-        async () => {
-            const s = session(host, `rr729-off-first-${host}`, { compactionOff: true });
-            s.user("run some bash commands");
+    it(`${host}: compaction-off, the first render after a restart (no cached m[0]/m[1]) with changed docs`, async () => {
+        const s = session(host, `rr729-off-first-${host}`, { compactionOff: true });
+        s.user("run some bash commands");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
             await s.pass();
-            for (let n = 1; n <= 3; n++) {
-                s.step(n, 200);
-                await s.pass();
-            }
-            // The cached pair is gone (a store rebase, a history repair or a
-            // migration clears it) and the process restarts; the docs changed.
-            s.clearHead();
-            s.editDocs("v2");
-            s.restart();
-            s.step(4, 200);
-            const out = await s.pass();
-            report(`${host} off first-render-after-restart`, s, {
-                kept: signedSignatures(out.messages ?? []),
-                head: String(out.messages?.[0]?.parts?.[0]?.text ?? "").slice(0, 160),
-                logs: s.relevantLogs(),
-            });
-            expect(s.problems).toEqual([]);
-        },
-        60_000,
-    );
+        }
+        // The cached pair is gone (a store rebase, a history repair or a
+        // migration clears it) and the process restarts; the docs changed.
+        s.clearHead();
+        s.editDocs("v2");
+        s.restart();
+        s.step(4, 200);
+        const out = await s.pass();
+        report(`${host} off first-render-after-restart`, s, {
+            kept: signedSignatures(out.messages ?? []),
+            head: String(out.messages?.[0]?.parts?.[0]?.text ?? "").slice(0, 160),
+            logs: s.relevantLogs(),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
 
-    it.skipIf(!ENABLED)(
-        `${host}: compaction-off, a first render in the same process (no cached m[0]/m[1]) with changed docs`,
-        async () => {
-            const s = session(host, `rr729-off-first-warm-${host}`, { compactionOff: true });
-            s.user("run some bash commands");
+    it(`${host}: compaction-off, a first render in the same process (no cached m[0]/m[1]) with changed docs`, async () => {
+        const s = session(host, `rr729-off-first-warm-${host}`, { compactionOff: true });
+        s.user("run some bash commands");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
             await s.pass();
-            for (let n = 1; n <= 3; n++) {
-                s.step(n, 200);
-                await s.pass();
-            }
-            s.clearHead();
-            s.editDocs("v2");
-            s.step(4, 200);
-            const out = await s.pass();
-            report(`${host} off first-render-warm`, s, {
-                kept: signedSignatures(out.messages ?? []),
-                logs: s.relevantLogs(),
-            });
-            expect(s.problems).toEqual([]);
-        },
-        60_000,
-    );
+        }
+        s.clearHead();
+        s.editDocs("v2");
+        s.step(4, 200);
+        const out = await s.pass();
+        report(`${host} off first-render-warm`, s, {
+            kept: signedSignatures(out.messages ?? []),
+            logs: s.relevantLogs(),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
 }
 
 // ── Last-good replays and the deferred tail normalization.
@@ -645,34 +660,30 @@ for (const host of HOSTS) {
 }
 
 for (const host of HOSTS) {
-    it.skipIf(!ENABLED)(
-        `${host}: a restart together with a new real user after a last-good replay re-tags the replayed result in front of kept thinking`,
-        async () => {
-            const s = session(host, `rr729-lkg-restart-user-${host}`);
-            s.user("long task");
-            await s.pass();
-            s.step(1, 2_400);
-            await s.pass();
-            s.failNextPass();
-            s.step(2, 200);
-            await s.pass();
-            s.step(3, 200);
-            await s.pass();
-            // The turn ends with a new real user, and the process restarts before
-            // the next request. The randomized driver (review-729-driver.test.ts,
-            // MC_REVIEW_729_SEED=5150) reaches the same shape.
-            s.user("next task");
-            s.restart();
-            const out = await s.pass();
-            report(`${host} lkg -> user+restart`, s, {
-                kept: signedSignatures(out.messages ?? []),
-                tools: toolHeads(out.messages ?? []),
-                logs: s.relevantLogs(),
-            });
-            expect(s.problems).toEqual([]);
-        },
-        60_000,
-    );
+    it(`${host}: a restart together with a new real user after a last-good replay re-tags the replayed result in front of kept thinking`, async () => {
+        const s = session(host, `rr729-lkg-restart-user-${host}`);
+        s.user("long task");
+        await s.pass();
+        s.step(1, 2_400);
+        await s.pass();
+        s.failNextPass();
+        s.step(2, 200);
+        await s.pass();
+        s.step(3, 200);
+        await s.pass();
+        // The turn ends with a new real user, and the process restarts before
+        // the next request. The randomized driver (review-729-driver.test.ts,
+        // MC_REVIEW_729_SEED=5150) reaches the same shape.
+        s.user("next task");
+        s.restart();
+        const out = await s.pass();
+        report(`${host} lkg -> user+restart`, s, {
+            kept: signedSignatures(out.messages ?? []),
+            tools: toolHeads(out.messages ?? []),
+            logs: s.relevantLogs(),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
 }
 
 // ── System date across a day rollover.
@@ -760,4 +771,123 @@ for (const host of HOSTS) {
         },
         60_000,
     );
+}
+
+// ── Guards for the fixes of the gaps above. Always run.
+const ledger = (s: ReturnType<typeof session>, sessionId: string) =>
+    [...getMergedReasoningStrippedIds(s.db, sessionId)].sort();
+
+for (const host of HOSTS) {
+    it(`${host}: compaction-off keeps replaying the strip of a first render on later passes and after a restart`, async () => {
+        const sessionId = `rr729-off-first-replay-${host}`;
+        const s = session(host, sessionId, { compactionOff: true });
+        s.user("run some bash commands");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        s.clearHead();
+        s.editDocs("v2");
+        s.step(4, 200);
+        const stripped = await s.pass();
+        expect(signedSignatures(stripped.messages ?? [])).toEqual([]);
+        // The strip is recorded for compaction-off itself and for managed mode.
+        expect(ledger(s, sessionId)).toEqual(
+            expect.arrayContaining([
+                "binding_mismatch:step-1",
+                "compaction_off_thinking:step-1",
+                "compaction_off_thinking:step-4",
+            ]),
+        );
+        // Later steps keep their own thinking; the stripped blocks never return,
+        // also after a restart (the oracle reports a block coming back).
+        s.step(5, 200);
+        const later = await s.pass();
+        expect(signedSignatures(later.messages ?? [])).toEqual(["sig-5"]);
+        s.restart();
+        s.step(6, 200);
+        const restarted = await s.pass();
+        expect(signedSignatures(restarted.messages ?? [])).toEqual(["sig-5", "sig-6"]);
+        report(`${host} off first-render strip replay`, s, { logs: s.relevantLogs() });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+    it(`${host}: compaction-off never applies the binding strips managed mode recorded`, async () => {
+        const sessionId = `rr729-off-managed-ledger-${host}`;
+        const s = session(host, sessionId, { compactionOff: true });
+        s.user("run some bash commands");
+        await s.pass();
+        s.step(1, 200);
+        await s.pass();
+        // A strip managed mode recorded before the session switched off: the
+        // compaction-off wire never applied it, so it must keep serving sig-1.
+        addMergedReasoningStrippedIds(s.db, sessionId, ["binding_mismatch:step-1"]);
+        s.step(2, 200);
+        const out = await s.pass();
+        expect(signedSignatures(out.messages ?? [])).toEqual(["sig-1", "sig-2"]);
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+    it(`${host}: after a restart and a new real user the replayed result stays untagged until a bust strips`, async () => {
+        const sessionId = `rr729-lkg-restart-user-flush-${host}`;
+        const s = session(host, sessionId);
+        s.user("long task");
+        await s.pass();
+        s.step(1, 2_400);
+        await s.pass();
+        s.failNextPass();
+        s.step(2, 200);
+        await s.pass();
+        s.step(3, 200);
+        await s.pass();
+        // The pass after the replay recorded which messages it served untagged.
+        expect(readPersistedLkgUntaggedInputIds(s.db, sessionId).length).toBeGreaterThan(0);
+        s.user("next task");
+        s.restart();
+        await s.pass();
+        // Defer passes of the new turn keep call-2 untagged.
+        s.step(4, 200);
+        const deferred = await s.pass();
+        expect(toolHeads(deferred.messages ?? [])[1]?.startsWith("2\n")).toBe(true);
+        // A user flush may rewrite the prefix: call-2 is tagged and every signed
+        // block in front of the change is stripped; the record is cleared.
+        s.flush();
+        s.step(5, 200);
+        const flushed = await s.pass();
+        expect(toolHeads(flushed.messages ?? [])[1]?.startsWith("§")).toBe(true);
+        expect(readPersistedLkgUntaggedInputIds(s.db, sessionId)).toEqual([]);
+        s.step(6, 200);
+        await s.pass();
+        report(`${host} lkg -> user+restart -> flush`, s, {
+            tools: toolHeads(flushed.messages ?? []),
+            kept: signedSignatures(flushed.messages ?? []),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+    for (const held of [true, false])
+        it(`${host}: a date rollover on ${held ? "a held" : "an unheld"} idle-expiry pass when the system hook runs first`, async () => {
+            const sessionId = `rr729-date-idle-first-${held}-${host}`;
+            const s = session(host, sessionId);
+            s.user("long task");
+            await s.pass("2026-10-21", { systemFirst: true });
+            s.step(1, held ? 2_400 : 200);
+            await s.pass("2026-10-21", { systemFirst: true });
+            s.step(2, 200);
+            await s.pass("2026-10-21", { systemFirst: true });
+            s.systemPromptRefreshSessions.add(sessionId);
+            s.idle();
+            s.step(3, 200);
+            const out = await s.pass("2026-10-22", { systemFirst: true });
+            report(`${host} date idle system-first held=${held}`, s, {
+                prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                kept: signedSignatures(out.messages ?? []),
+                logs: s.relevantLogs(),
+            });
+            // Held: the turn's thinking stays, so the date holds. Unheld: the
+            // idle bust strips the turn, so the date advances as before.
+            expect(out.prompt).toContain(held ? "Date: 2026-10-21" : "Date: 2026-10-22");
+            expect(s.problems).toEqual([]);
+        }, 60_000);
 }

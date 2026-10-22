@@ -8479,6 +8479,10 @@ async function runCompactionOffPipeline(
 	args: RunPipelineArgs,
 ): Promise<RunPipelineResult> {
 	let injectionResult: PiInjectionResult | null = null;
+	// The transcript before any head is injected: the thinking strip below
+	// addresses its entries by their index in this array.
+	const transcript = [...(args.messages as unknown[])];
+	let headChangedUnderSignedTurn = false;
 	if (args.injection) {
 		const state: PiM0M1State = {
 			sessionId: args.sessionId,
@@ -8492,24 +8496,31 @@ async function runCompactionOffPipeline(
 			muralEnabled: args.injection.muralEnabled === true,
 			compactionOff: true,
 		};
-		// Compaction-off has no bust permission, so nothing can strip signed
-		// thinking here. An open signed turn on a prefix-bound model keeps
-		// replaying its cached m[0]/m[1] until it ends, so a fold (a project
-		// memory change, for example) cannot re-render the head in front of its
-		// kept thinking. With no cached pair yet the first render proceeds.
-		if (
+		// Compaction-off has no bust permission. An open signed turn on a
+		// prefix-bound model keeps replaying its cached m[0]/m[1] until it ends,
+		// so a fold (a project memory change, for example) cannot re-render the
+		// head in front of its kept thinking.
+		const signedTurnHoldsHead =
 			args.reasoningClearing?.prefixBound === true &&
 			hasActiveAnthropicThinkingTurn(
 				args.messages,
 				args.resolvedProviderID,
 				args.resolvedModelID,
-			)
-		)
+			);
+		if (signedTurnHoldsHead)
 			state.preparedPrefix = prepareCachedM0M1PiReplay(
 				state,
 				args.db,
 				args.injectionPassSnapshot?.cachedRow,
 			);
+		// With no cached pair (a store rebase, a history repair, a migration or
+		// the switch to compaction-off cleared it) the first render proceeds.
+		// Unless it reproduces the head the last request carried, the turn's
+		// signed thinking is no longer valid behind it and is stripped below.
+		const servedBeforeFirstRender =
+			signedTurnHoldsHead && !state.preparedPrefix
+				? (args.readLastServedMessages?.() ?? null)
+				: undefined;
 		injectionResult = injectM0M1Pi(
 			state,
 			args.db,
@@ -8518,7 +8529,40 @@ async function runCompactionOffPipeline(
 			false,
 			args.injectionPassSnapshot,
 		);
+		if (servedBeforeFirstRender !== undefined) {
+			const headCount = injectionResult?.syntheticLeadingCount ?? 0;
+			const head = JSON.stringify(
+				(args.messages as unknown[]).slice(0, headCount),
+			);
+			headChangedUnderSignedTurn =
+				servedBeforeFirstRender === null ||
+				JSON.stringify(servedBeforeFirstRender.slice(0, headCount)) !== head;
+		}
 	}
+	// The head changed in front of an open signed turn: strip every signed block
+	// on the wire, the turn's included (removing every block is always
+	// accepted). The entries are persisted first; the binding-mismatch replay at
+	// the end of every pass, compaction-off included, keeps them stripped.
+	if (headChangedUnderSignedTurn)
+		applyPiProactiveThinkingStrip({
+			db: args.db,
+			sessionId: args.sessionId,
+			messages: transcript,
+			entryIds: transcript.map((message, index) =>
+				resolvePiRealStableId(
+					message,
+					index,
+					args.entryIds,
+					args.entryIdByRef ?? undefined,
+				),
+			),
+			provider: args.resolvedProviderID,
+			model: args.resolvedModelID,
+			cacheBustingPass: true,
+			stripActiveTurn: true,
+			requirePersistence: true,
+			report: (line) => sessionLog(args.sessionId, line),
+		});
 	return {
 		messages: args.messages as unknown[],
 		prefixBustPermitted: false,

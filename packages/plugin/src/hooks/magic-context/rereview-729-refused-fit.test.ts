@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 // Bounded signed-thinking hold (issue 729): how an over-window request is
 // retried or refused once its signed thinking cannot be kept (the signed fit).
-// Skipped unless MC_REREVIEW_729=1. Copy into another checkout to compare.
+// Copy into another checkout to compare.
 //
 // Setup as in issue-731-refused-fit-review.test.ts: a 16k learned window, one
 // over-window tool result at 70% usage. The cases print what each pass did:
@@ -27,8 +27,6 @@ import { clearInjectionCache } from "./inject-compartments";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-messages";
 import { createTransform } from "./transform";
-
-const ENABLED = process.env.MC_REREVIEW_729 === "1";
 
 async function run(host: "oc1" | "oc2", modelID: string) {
     const home = createTestTempDir("rr729-fit-");
@@ -190,20 +188,16 @@ async function run(host: "oc1" | "oc2", modelID: string) {
 }
 
 for (const host of ["oc1", "oc2"] as const)
-    test.skipIf(!ENABLED)(
-        `${host}: signed-fit refusal across a restart and after the hold lifts`,
-        async () => {
-            const opus = await run(host, "claude-opus-5-5");
-            const sonnet = await run(host, "claude-sonnet-5");
-            console.log(`[rereview-729] fit ${host} opus: ${opus.join(" | ")}`);
-            console.log(`[rereview-729] fit ${host} sonnet: ${sonnet.join(" | ")}`);
-            // After a restart, a held retry never serves the same over-window result.
-            expect(opus[1]).not.toMatch(/keepsResult=true/);
-            // On the unheld pass Opus must refuse exactly when Sonnet (a model
-            // without prefix-bound thinking) refuses.
-            expect(opus[2]!.startsWith("unheld 80%: refused")).toBe(
-                sonnet[2]!.startsWith("unheld 80%: refused"),
-            );
-        },
-        60_000,
-    );
+    test(`${host}: signed-fit refusal across a restart and after the hold lifts`, async () => {
+        const opus = await run(host, "claude-opus-5-5");
+        const sonnet = await run(host, "claude-sonnet-5");
+        console.log(`[rereview-729] fit ${host} opus: ${opus.join(" | ")}`);
+        console.log(`[rereview-729] fit ${host} sonnet: ${sonnet.join(" | ")}`);
+        // After a restart, a held retry never serves the same over-window result.
+        expect(opus[1]).not.toMatch(/keepsResult=true/);
+        // On the unheld pass Opus must refuse exactly when Sonnet (a model
+        // without prefix-bound thinking) refuses.
+        expect(opus[2]!.startsWith("unheld 80%: refused")).toBe(
+            sonnet[2]!.startsWith("unheld 80%: refused"),
+        );
+    }, 60_000);

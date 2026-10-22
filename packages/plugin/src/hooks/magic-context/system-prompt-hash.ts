@@ -1,4 +1,5 @@
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import {
     type ContextDatabase,
@@ -489,17 +490,33 @@ export function createSystemPromptHashHandler(deps: {
             deps.historyRefreshSessions,
             dateRequest,
         );
+        // An idle-expired request rewrites the provider cache, but a signed
+        // thinking block of the open turn that the messages pass kept on the wire
+        // stays bound to every byte in front of it, the system date included. On
+        // a prefix-bound model the date therefore advances on such a request only
+        // when the messages pass left no open-turn signed thinking (it stripped
+        // the turn or there was none), as on any other bust.
+        const signedThinkingKept = systemDateSignedThinkingKept(
+            deps.historyRefreshSessions,
+            dateRequest,
+        );
+        const idleDateMayAdvance = idleCacheExpired && signedThinkingKept !== true;
+        const prefixBoundModel = isPrefixBoundThinkingModel(
+            liveModel?.providerID,
+            liveModel?.modelID,
+        );
         // A queued refresh alone cannot change the prompt before an assistant's
         // encrypted thinking that still requires its original earlier messages.
         // If the system hook runs first, wait for a permitted messages rebuild;
         // if the messages hook ran first, use its completed rebuild decision.
+        // On a prefix-bound model an idle-expired request waits the same way,
+        // for the messages pass to say whether it kept the open turn's thinking.
         let deferredDateRefresh = false;
         if (
             currentDate &&
             stickyDate &&
             currentDate !== stickyDate &&
-            isCacheBusting &&
-            !idleCacheExpired &&
+            (idleCacheExpired ? prefixBoundModel : isCacheBusting) &&
             !contentOrPresetChanged &&
             !requestMessagesFinal
         ) {
@@ -507,8 +524,8 @@ export function createSystemPromptHashHandler(deps: {
             deferredDateRefresh = waitForSystemDateRefresh(
                 deps.historyRefreshSessions,
                 dateRequest,
-                (permitted) => {
-                    if (!permitted) {
+                (permitted, keptSignedThinking) => {
+                    if (!permitted && !(idleCacheExpired && keptSignedThinking !== true)) {
                         deps.systemPromptRefreshSessions.add(sessionId);
                         return;
                     }
@@ -540,7 +557,7 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
         const dateMayAdvance =
-            idleCacheExpired ||
+            (idleDateMayAdvance && !deferredDateRefresh) ||
             contentOrPresetChanged ||
             (isCacheBusting &&
                 !deferredDateRefresh &&
@@ -754,5 +771,6 @@ import {
     type SystemDateRequestIdentity,
     systemDateRefreshPermission,
     systemDateRequestForOutput,
+    systemDateSignedThinkingKept,
     waitForSystemDateRefresh,
 } from "./system-date-refresh";
