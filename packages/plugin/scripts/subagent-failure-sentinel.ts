@@ -25,11 +25,14 @@ const DEFAULT_SETTLE_MS = 5 * 60_000;
 // and starts between 5 seconds before and this long after the primary ends.
 const FALLBACK_START_WINDOW_MS = 120_000;
 // Failures a working fallback makes routine: an exhausted or rate-limited
-// provider, and the summarizer refusing before sending because the prompt is
-// larger than that model's window (no model call was made). Any other failure
-// stays eligible for the alert rules even when a fallback recovered it.
+// provider; the summarizer refusing before sending because the prompt is
+// larger than that model's window (no model call was made); and a primary that
+// never answered before the prompt deadline (a model that is down). A timeout
+// counts only when a fallback then completed the same work, so a prompt too slow
+// for every model in the chain still alerts. Any other failure stays eligible for
+// the alert rules even when a fallback recovered it.
 const RECOVERABLE_ERROR =
-    /account pool has no account|quota|rate[ _-]?limit|too many requests|\b429\b|resource_exhausted|usage limit|producer_prompt_exceeds_window/i;
+    /account pool has no account|quota|rate[ _-]?limit|too many requests|\b429\b|resource_exhausted|usage limit|producer_prompt_exceeds_window|prompt timed out after/i;
 
 type Row = {
     id: number;
