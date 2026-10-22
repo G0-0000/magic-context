@@ -681,7 +681,8 @@ function createChainClock(options: PromptRetryOptions, timeoutMs: number) {
                 : { timeoutMs: attemptTimeoutMs };
         },
         settle(error: unknown, startedAt: number): void {
-            if (error instanceof ModelProducedNoOutputError) silentSpentMs += Date.now() - startedAt;
+            if (error instanceof ModelProducedNoOutputError)
+                silentSpentMs += Date.now() - startedAt;
         },
     };
 }

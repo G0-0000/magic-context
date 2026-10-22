@@ -384,7 +384,8 @@ async function classifyOneChunk(
                         { childSessionId: opened.childSessionId },
                     ),
                     timeoutMs: sliceMs,
-                    firstOutputTimeoutMs: args.firstOutputTimeoutMs ?? DREAMER_FIRST_OUTPUT_TIMEOUT_MS,
+                    firstOutputTimeoutMs:
+                        args.firstOutputTimeoutMs ?? DREAMER_FIRST_OUTPUT_TIMEOUT_MS,
                     signal,
                     fallbackModels: args.fallbackModels,
                     callContext: "dreamer:classify-memories",
