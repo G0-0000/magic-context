@@ -153,7 +153,9 @@ import {
     lkgDirtyRevision,
     noteLkgHealthyPrefix,
     noteUncertifiedNormalLkg,
+    persistLkgUntaggedInputIds,
     readLkgRecoveryPrefix,
+    readPersistedLkgUntaggedInputIds,
 } from "./lkg-recovery-prefix";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
@@ -851,6 +853,19 @@ export function createTransform(deps: TransformDeps) {
             deps.compactionOff || deps.transformMode === "rust"
                 ? {}
                 : readLkgRecoveryPrefix(sessionId, lkgInput, messages, deps.db);
+        // Messages an earlier last-good replay served untagged that still go out
+        // untagged: the in-memory recovery prefix's set and, after a restart, the
+        // durable record of it. Ordinary tagging skips them until a pass allowed
+        // to rewrite the prefix tags them (normalizeRecoveryTail below), so a pass
+        // that must not change served bytes keeps them byte-identical.
+        const persistedUntaggedInputIds =
+            deps.compactionOff || deps.transformMode === "rust"
+                ? []
+                : readPersistedLkgUntaggedInputIds(deps.db, sessionId);
+        const untaggedReplayIds = new Set<string>([
+            ...(recovery.prefix?.untaggedInputIds ?? []),
+            ...persistedUntaggedInputIds,
+        ]);
         logTransformTiming(
             sessionId,
             "lkg.entryProjection",
@@ -2436,11 +2451,17 @@ export function createTransform(deps: TransformDeps) {
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
-        const normalizeRecoveryTail = recovery.prefix
+        // A recovery prefix is always normalized once a pass may rewrite it,
+        // even with nothing untagged: until then every pass re-serves its bytes.
+        const untaggedReplayTailServed =
+            !!recovery.prefix ||
+            (untaggedReplayIds.size > 0 &&
+                messages.some((message) => untaggedReplayIds.has(message.info.id ?? "")));
+        const normalizeRecoveryTail = untaggedReplayTailServed
             ? () => {
                   if (recoveryNormalized) return;
                   const tail = messages.filter((message) =>
-                      recovery.prefix?.untaggedInputIds.has(message.info.id ?? ""),
+                      untaggedReplayIds.has(message.info.id ?? ""),
                   );
                   const tagged = tagMessages(sessionId, tail, deps.tagger, db, {
                       skipPrefixInjection: !ctxReduceCallable,
@@ -2499,10 +2520,9 @@ export function createTransform(deps: TransformDeps) {
                     : createPreAdoptionToolSweepResolver(db, sessionId);
                 const result = tagMessages(
                     sessionId,
-                    recovery.prefix
+                    untaggedReplayIds.size > 0
                         ? messagesForTagging.filter(
-                              (message) =>
-                                  !recovery.prefix?.untaggedInputIds.has(message.info.id ?? ""),
+                              (message) => !untaggedReplayIds.has(message.info.id ?? ""),
                           )
                         : messagesForTagging,
                     deps.tagger,
@@ -3166,8 +3186,13 @@ export function createTransform(deps: TransformDeps) {
         // A persisted latch is cleared by the off-transition, never consumed
         // here; overflow propagates to native compaction instead of blocking.
         const finalWireTail = describeFinalWireTail(messages);
+        // The durable refusal marker remembers, across restarts, that a held
+        // signed turn could not be made to fit. It applies only to a held pass:
+        // an unheld pass strips and drains like any model without prefix-bound
+        // thinking, so it is estimated and refused exactly as such a model is.
         const signedFitPreviouslyRefused =
             !compactionOff &&
+            activeThinkingPrefixHold &&
             getMergedReasoningStrippedIds(db, sessionId).has(SIGNED_FIT_REFUSED_MARKER);
         let finalWireEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
         if (postTransformResult.bustedThisPass) {
@@ -3509,10 +3534,26 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
+        // Keep the durable untagged-message record equal to what this pass serves
+        // untagged, before the pass is served: a restart then keeps serving them
+        // untagged. It empties once a pass tagged them (or none is left to serve).
+        // A failed write fails the pass, so the last good request is replayed.
+        if (!compactionOff) {
+            const stillUntagged =
+                untaggedReplayTailServed && !recoveryNormalized ? [...untaggedReplayIds] : [];
+            if (
+                JSON.stringify([...new Set(stillUntagged)].sort()) !==
+                    JSON.stringify([...new Set(persistedUntaggedInputIds)].sort()) &&
+                !persistLkgUntaggedInputIds(db, sessionId, stillUntagged)
+            )
+                throw new Error("Cannot persist the last-good untagged-message record");
+        }
         // The system date rides a bust, but on a prefix-bound model only one
         // that leaves no open-turn signed thinking behind the system prompt: an
         // unheld bust that kept the turn's thinking (it edited nothing in front
-        // of it) must not change the system prompt in front of it either.
+        // of it) must not change the system prompt in front of it either. The
+        // last argument carries the same fact to an idle-expired request, whose
+        // date would otherwise advance without asking for permission.
         finishSystemDateRefresh(
             deps.historyRefreshSessions,
             dateRequest,
@@ -3520,6 +3561,7 @@ export function createTransform(deps: TransformDeps) {
                 !activeThinkingPrefixHold &&
                 postTransformResult.openTurnSignedThinkingKept !== true) ||
                 postTransformResult.thinkingReleasedForFit === true,
+            postTransformResult.openTurnSignedThinkingKept === true,
         );
         if (
             activeThinkingPrefixHold &&

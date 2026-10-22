@@ -2684,6 +2684,32 @@ export function thinkingBindingRecoveryFrozenId(messageId: string): string {
     return `${THINKING_BINDING_RECOVERY_FROZEN_PREFIX}${messageId}`;
 }
 
+/**
+ * Ledger entry naming an OpenCode message whose signed thinking a
+ * compaction-off pass removed from the wire. OpenCode's compaction-off never
+ * applies the binding-mismatch entries above (managed mode wrote them, and
+ * compaction-off served those blocks unstripped), so it replays only these.
+ * The same id is also written as a binding-mismatch entry, so a session that
+ * returns to managed mode keeps the strip. (Pi replays its binding-mismatch
+ * entries in compaction-off too, so it needs no entry of this kind.)
+ */
+export const COMPACTION_OFF_THINKING_FROZEN_PREFIX = "compaction_off_thinking:";
+
+export function compactionOffThinkingFrozenId(messageId: string): string {
+    return `${COMPACTION_OFF_THINKING_FROZEN_PREFIX}${messageId}`;
+}
+
+/** The message ids named by compaction-off thinking strips in a ledger. */
+export function compactionOffFrozenThinkingIds(ledger: Iterable<string>): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of ledger) {
+        if (!entry.startsWith(COMPACTION_OFF_THINKING_FROZEN_PREFIX)) continue;
+        const id = entry.slice(COMPACTION_OFF_THINKING_FROZEN_PREFIX.length);
+        if (id.length > 0) ids.add(id);
+    }
+    return ids;
+}
+
 export function getThinkingBindingRecoveryTarget(db: Database, sessionId: string): string | null {
     const row = db
         .prepare("SELECT thinking_binding_recovery_target FROM session_meta WHERE session_id = ?")
