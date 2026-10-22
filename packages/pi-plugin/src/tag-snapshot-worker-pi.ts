@@ -10,6 +10,7 @@ import {
 	TAG_SELECT_COLUMNS,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database, type Statement } from "@magic-context/core/shared/sqlite";
+import { exitOnWorkerClose } from "@magic-context/core/shared/worker-shutdown";
 import { encodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	PI_FALLBACK_ROW_COLUMNS,
@@ -36,6 +37,16 @@ let sampledGeneration = false;
 let generationStatement: Statement;
 let opened = false;
 let persistedVersion = 0;
+
+// A cancelled job closes its connection before the thread ends instead of
+// being terminated with it open (see worker-shutdown.ts). The owner has already
+// discarded the job by then, so a packet-credit listener that also reads the
+// close request and fails the job changes nothing.
+exitOnWorkerClose(port, () => {
+	const connection = db;
+	db = undefined;
+	connection?.close();
+});
 
 class StaleGeneration extends Error {}
 class UnsupportedSchema extends Error {}

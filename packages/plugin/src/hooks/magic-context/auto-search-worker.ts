@@ -1,5 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import type { Database as DatabaseHandle } from "../../shared/sqlite";
+import { exitOnWorkerClose } from "../../shared/worker-shutdown";
 import type {
     AutoSearchEmbeddingReply,
     AutoSearchWorkerInput,
@@ -70,6 +71,10 @@ function request(
 // embedding snapshot and reset its query dimensions before running search.
 db = new Database(input.path, input.job === "backfill" ? undefined : { readonly: true });
 db.exec("PRAGMA busy_timeout = 250");
+// The owner disposes this worker by asking it to close: the connection must be
+// closed here, before the thread ends, or Bun 1.4.4's teardown blocks the
+// owner's next write (see worker-shutdown.ts).
+exitOnWorkerClose(port, () => db.close());
 
 async function run(jobInput: AutoSearchWorkerInput): Promise<void> {
     input = jobInput;

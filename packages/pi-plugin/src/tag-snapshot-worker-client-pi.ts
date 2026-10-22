@@ -2,6 +2,7 @@ import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 import { createFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
 import { inRootAsyncContext } from "@magic-context/core/shared/sqlite";
+import { createWorkerShutdown } from "@magic-context/core/shared/worker-shutdown";
 import { decodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	createPiTagSnapshotCandidate,
@@ -314,6 +315,11 @@ export function startPiTagSnapshotWorker(
 	const worker = inRootAsyncContext(
 		() => new Worker(entry, { workerData: request }),
 	);
+	// The worker reads a close request between pages, while it waits for a
+	// packet's credit. One page is a read transaction of at most 256 rows on a
+	// connection with a 50 ms busy timeout, so a cancelled job exits well within
+	// this; one that has not is terminated, as every cancelled job was before.
+	const shutdown = createWorkerShutdown(worker, "pi-tag-snapshot", 1_000);
 	let exited = false;
 	let settled = false;
 	let consumption = Promise.resolve();
@@ -397,7 +403,7 @@ export function startPiTagSnapshotWorker(
 		settled = true;
 		clearTimeout(timer);
 		rejectResult(error);
-		if (!exited) void worker.terminate().catch(() => {});
+		if (!exited) void shutdown.close();
 	}
 	const timer = inRootAsyncContext(() =>
 		setTimeout(

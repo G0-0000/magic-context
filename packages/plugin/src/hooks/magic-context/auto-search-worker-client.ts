@@ -31,6 +31,7 @@ import {
     getSqliteDatabasePath,
     isTransientSqliteError,
 } from "../../shared/sqlite";
+import { createWorkerShutdown, type WorkerShutdown } from "../../shared/worker-shutdown";
 import {
     AUTO_SEARCH_TIMEOUT_MS,
     AUTO_SEARCH_VECTOR_TIMEOUT_MS,
@@ -263,6 +264,14 @@ const searchWorkers = new WeakMap<Database, Map<string, SearchWorkerSlot>>();
 const liveSearchWorkers = new Set<SearchWorkerSlot>();
 const MAX_IDLE_SEARCH_WORKERS = 4;
 const SEARCH_WORKER_IDLE_MS = 5 * 60_000;
+/**
+ * How long a disposed pool worker may take to close its connection and exit
+ * before it is terminated. It reads the close request between statements; its
+ * longest synchronous SQLite work is a backfill write transaction (up to its
+ * 250 ms busy timeout plus at most 50 vector rows) or one ranking pass of a
+ * search, both well under this.
+ */
+const AUTO_SEARCH_WORKER_CLOSE_DEADLINE_MS = 2_000;
 let workersCreated = 0;
 let workersReused = 0;
 
@@ -303,13 +312,18 @@ async function acquireSearchWorker(
             const worker = inRootAsyncContext(
                 () => new Worker(entry, { workerData: { ...input, persistent: true } }),
             );
+            const shutdown = createWorkerShutdown(
+                worker,
+                "auto-search",
+                AUTO_SEARCH_WORKER_CLOSE_DEADLINE_MS,
+            );
             slot = {
                 worker,
                 dispose() {
                     clearTimeout(this.idleTimer);
                     if (pool.get(key) === this) pool.delete(key);
                     liveSearchWorkers.delete(this);
-                    void worker.terminate();
+                    void shutdown.close();
                     worker.unref();
                 },
             };
@@ -604,6 +618,13 @@ function defaultAutoSearchWorkerEntry(): URL {
 const MESSAGE_WORKER_ACCEPT_TIMEOUT_MS = 400;
 /** How long an accepted message-search worker may take to answer. */
 const MESSAGE_WORKER_RESULT_TIMEOUT_MS = 30_000;
+/**
+ * How long a finished or abandoned message-search worker may take to close its
+ * read-only connection and exit before it is terminated. One FTS statement of
+ * a large session's history can run for seconds; a worker still inside one when
+ * this passes is terminated, as every message-search worker was before.
+ */
+const MESSAGE_SEARCH_WORKER_CLOSE_DEADLINE_MS = 2_000;
 
 export type MessageSearchWorkerFallbackReason =
     | "no-file"
@@ -676,6 +697,7 @@ export function searchMessageHistoryOffThread(
     return new Promise((resolve) => {
         let settled = false;
         let worker: Worker | undefined;
+        let shutdown: WorkerShutdown | undefined;
         let deadline: ReturnType<typeof setTimeout> | undefined;
         const finish = (
             outcome: MessageHistorySearchOutcome | null,
@@ -686,7 +708,7 @@ export function searchMessageHistoryOffThread(
             settled = true;
             clearTimeout(deadline);
             if (reason) fallback(reason, detail);
-            void worker?.terminate();
+            void shutdown?.close();
             worker?.unref();
             resolve(outcome);
         };
@@ -697,6 +719,11 @@ export function searchMessageHistoryOffThread(
         };
         try {
             worker = inRootAsyncContext(() => new Worker(entry, { workerData: input }));
+            shutdown = createWorkerShutdown(
+                worker,
+                "message-search",
+                MESSAGE_SEARCH_WORKER_CLOSE_DEADLINE_MS,
+            );
         } catch (error) {
             finish(null, "start-failed", error);
             return;
