@@ -211,6 +211,7 @@ import {
     loadContextUsage,
     resolveSchedulerDecision,
     resolveUnknownUsageFromWireEstimate,
+    savedProviderReadingForPass,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -2873,26 +2874,90 @@ export function createTransform(deps: TransformDeps) {
             bustReason: calibrationBustReason,
             onAdopt: (message) => sessionLog(sessionId, message),
         });
-        // A cache-busting pass can lack input-token usage for the selected model
-        // after a switch or overflow. Estimate from the transformed payload so
-        // emergency tool-output reclaim does not skip the pass as unknown usage.
+        // A cache-busting pass can lack input-token usage for the selected model:
+        // the first pass after a process restart resets the reading, and a model
+        // switch clears it. Emergency tool-output reclaim needs a reading, so
+        // size the pass here. This is a pressure reading, not a fit check: the
+        // over-window first-pass check, the overflow-recovery bump and the final
+        // refusal check stay the fit guards.
+        //
+        // The request is counted with calibrated ratios (`pressureTokens`): an
+        // unseeded model counts neutrally. The fit envelope (`tokens`) doubles
+        // an unseeded model's count; read as pressure it put healthy sessions
+        // in the force band after a restart.
+        //
+        // The provider's own last reading, saved in session_meta, is preferred
+        // when it is for this model and limit and the cache is still warm. The
+        // one exception is a count at or past the 95% emergency line while the
+        // saved reading is lower: the request grew after that reading was taken
+        // (a long paste or tool output while the host was down), and waiting for
+        // the provider would send a request that may not fit.
+        let contextUsageFromEstimate = false;
         if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
+            // Overflow recovery sizes the request the provider just rejected, so
+            // the saved reading (the last accepted request, which predates it) is
+            // never used here, and the request is counted with the fit envelope
+            // as before: recovery is a fit decision, and the emergency planner
+            // must plan its reclaim against the whole rejected request.
+            const overflowRecoveryPass = usagePercentageSynthetic || emergencyRecoveryArmed;
+            const savedProviderReading = overflowRecoveryPass
+                ? null
+                : savedProviderReadingForPass({
+                      persisted: persistedUsageBeforeResets,
+                      currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
+                      contextLimit: resolvedContextLimit,
+                      lastResponseTime: sessionMeta.lastResponseTime,
+                      cacheExpired: hardCacheExpired,
+                  });
+            let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
-                const pressureEstimate = estimateFinalWireInputTokens({
+                pressureEstimate = estimateFinalWireInputTokens({
                     messages,
                     systemPromptTokens: sessionMeta.systemPromptTokens,
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
                 });
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
+                );
+            }
+            const usableHard = windowGeometry?.usableHard;
+            const countPercentage =
+                pressureEstimate?.pressureTokens !== undefined &&
+                Number.isFinite(pressureEstimate.pressureTokens) &&
+                typeof usableHard === "number" &&
+                usableHard > 0
+                    ? (pressureEstimate.pressureTokens / usableHard) * 100
+                    : 0;
+            const grewPastSavedReading =
+                savedProviderReading !== null &&
+                countPercentage >= 95 &&
+                countPercentage > savedProviderReading.percentage;
+            if (savedProviderReading && !grewPastSavedReading) {
+                // Never lower a reading this pass already raised (the overflow-recovery bump).
+                contextUsage = {
+                    inputTokens: savedProviderReading.inputTokens,
+                    percentage: Math.max(contextUsage.percentage, savedProviderReading.percentage),
+                };
+                sessionLog(
+                    sessionId,
+                    `transform: unknown provider usage; using saved provider reading for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} countPercentage=${countPercentage.toFixed(1)}`,
+                );
+            } else if (pressureEstimate) {
+                const percentageBeforeEstimate = contextUsage.percentage;
                 contextUsage = resolveUnknownUsageFromWireEstimate({
                     usage: contextUsage,
                     pricedPass: true,
-                    wireEstimateTokens: pressureEstimate.tokens,
+                    wireEstimateTokens: overflowRecoveryPass
+                        ? pressureEstimate.tokens
+                        : pressureEstimate.pressureTokens,
                     wireEstimateTrusted: pressureEstimate.trusted,
                     providerProvenInputTokens: providerProvenInputForRecovery,
                     providerProvenLimitTokens: providerProvenLimitForRecovery,
-                    usableHardLimit: windowGeometry?.usableHard,
+                    usableHardLimit: usableHard,
                 });
                 if (contextUsage.inputTokens > 0) {
                     const usedProviderInput =
@@ -2900,16 +2965,18 @@ export function createTransform(deps: TransformDeps) {
                         providerProvenLimitForRecovery !== undefined &&
                         providerProvenInputForRecovery !== undefined &&
                         contextUsage.inputTokens >= providerProvenInputForRecovery;
+                    // A reading raised only by the local count, with no provider
+                    // measurement and no overflow latch behind it.
+                    contextUsageFromEstimate =
+                        !overflowRecoveryPass &&
+                        !usedProviderInput &&
+                        !usagePercentageSynthetic &&
+                        contextUsage.percentage > percentageBeforeEstimate;
                     sessionLog(
                         sessionId,
-                        `transform: unknown provider usage; using ${usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens}`,
+                        `transform: unknown provider usage; using ${usedProviderInput ? "provider-proven input" : "wire estimate"} for priced pass inputTokens=${contextUsage.inputTokens} percentage=${contextUsage.percentage.toFixed(1)} trusted=${pressureEstimate.trusted} wireTokens=${pressureEstimate.tokens} pressureTokens=${pressureEstimate.pressureTokens}${grewPastSavedReading ? ` grewPastSavedReading=${savedProviderReading?.percentage.toFixed(1)}` : ""}`,
                     );
                 }
-            } catch (error) {
-                sessionLog(
-                    sessionId,
-                    `transform: wire-estimate pressure fallback unavailable: ${getErrorMessage(error)}`,
-                );
             }
         }
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
@@ -2974,6 +3041,7 @@ export function createTransform(deps: TransformDeps) {
             // A fit retry permits rebuilding signed thinking, not yielding the
             // protected tool tail. Only real pressure may open the 95% drop lane.
             contextUsage,
+            contextUsageFromEstimate,
             usableWindow: resolvedContextLimit ?? 0,
             schedulerDecision,
             schedulerDeferReason,
