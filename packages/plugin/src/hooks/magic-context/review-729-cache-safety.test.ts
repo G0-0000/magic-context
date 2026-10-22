@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 // Witnesses from an independent cache-safety review of the bounded
-// signed-thinking hold (issue 729). Skipped unless MC_REVIEW_729=1.
+// signed-thinking hold (issue 729). The last-good replay witnesses are skipped
+// unless MC_REVIEW_729=1.
 //
 // Every scenario drives the real OpenCode transform on a prefix-bound model
 // (Opus 5.5) with a strict-binding oracle: a signed thinking block is valid
@@ -146,149 +147,143 @@ function signedSignatures(messages: Message[]): string[] {
 }
 
 for (const host of ["opencode1", "opencode2"] as const) {
-    it.skipIf(!ENABLED)(
-        `${host}: compaction-off, unheld signed turn, idle-expiry fold re-renders m[0] in front of kept signed thinking`,
-        async () => {
-            const logs: string[] = [];
-            const log = spyOn(loggerModule, "sessionLog").mockImplementation(
-                (...args: unknown[]) => {
-                    logs.push(args.slice(1).map(String).join(" "));
+    it(`${host}: compaction-off, unheld signed turn, idle-expiry fold re-renders m[0] in front of kept signed thinking`, async () => {
+        const logs: string[] = [];
+        const log = spyOn(loggerModule, "sessionLog").mockImplementation((...args: unknown[]) => {
+            logs.push(args.slice(1).map(String).join(" "));
+        });
+        const sessionId = `review-729-off-${host}`;
+        const dataHome = createTestTempDir("mc-r729-data-").dir;
+        const sessionDirectory = createTestTempDir("mc-r729-session-").dir;
+        tempDirs.push(dataHome, sessionDirectory);
+        process.env.XDG_DATA_HOME = dataHome;
+        writeFileSync(join(sessionDirectory, "ARCHITECTURE.md"), "# Architecture\n\nv1\n");
+        const db = openDatabase();
+        try {
+            getOrCreateSessionMeta(db, sessionId);
+            updateSessionMeta(db, sessionId, { cacheTtl: "5m", lastResponseTime: Date.now() });
+            const usage = new Map([
+                [
+                    sessionId,
+                    {
+                        usage: { percentage: 40, inputTokens: 40_000 },
+                        updatedAt: Date.now(),
+                        hasUsageTokens: true,
+                    },
+                ],
+            ]);
+            const transform = createTransform({
+                db,
+                tagger: createTagger(),
+                scheduler: createScheduler({ executeThresholdPercentage: 65 }),
+                contextUsageMap: usage,
+                historyRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map(),
+                liveModelBySession: new Map([[sessionId, MODEL]]),
+                protectedTokens: 2000,
+                protectedTools: { bash: 0 },
+                historianRunnable: false,
+                compactionOff: true,
+                injectDocs: true,
+                directory: sessionDirectory,
+                sessionDirectoryBySession: new Map([[sessionId, sessionDirectory]]),
+                ...(host === "opencode2"
+                    ? {
+                          storeGeneration: "v2" as const,
+                          hostCleanupCompactionMarkers: () => ({
+                              verified: true,
+                              removedLineages: 0,
+                              removedRows: 0,
+                              retainedLineages: 0,
+                          }),
+                      }
+                    : {}),
+            } as never);
+            const source: Message[] = [
+                {
+                    info: {
+                        id: "u-task",
+                        role: "user",
+                        sessionID: sessionId,
+                        time: { created: 1 },
+                    },
+                    parts: [{ type: "text", text: "run some bash commands" }],
                 },
-            );
-            const sessionId = `review-729-off-${host}`;
-            const dataHome = createTestTempDir("mc-r729-data-").dir;
-            const sessionDirectory = createTestTempDir("mc-r729-session-").dir;
-            tempDirs.push(dataHome, sessionDirectory);
-            process.env.XDG_DATA_HOME = dataHome;
-            writeFileSync(join(sessionDirectory, "ARCHITECTURE.md"), "# Architecture\n\nv1\n");
-            const db = openDatabase();
-            try {
-                getOrCreateSessionMeta(db, sessionId);
-                updateSessionMeta(db, sessionId, { cacheTtl: "5m", lastResponseTime: Date.now() });
-                const usage = new Map([
-                    [
-                        sessionId,
+            ];
+            const oracle = new StrictBinding();
+            const problems: string[] = [];
+            let served: Message[] = [];
+            const serve = async () => {
+                const messages = structuredClone(source);
+                await transform({}, { messages } as never);
+                problems.push(...oracle.check(messages).map((p) => `pass ${pass}: ${p}`));
+                served = messages;
+            };
+            let pass = 0;
+            const step = (n: number) => {
+                source.push({
+                    info: {
+                        id: `step-${n}`,
+                        role: "assistant",
+                        sessionID: sessionId,
+                        time: { created: 10 + n },
+                        finish: "tool-calls",
+                        ...MODEL,
+                        // A light step: no recent heavy reasoning, so never held.
+                        tokens: { input: 0, output: 300, reasoning: 200 },
+                    },
+                    parts: [
                         {
-                            usage: { percentage: 40, inputTokens: 40_000 },
-                            updatedAt: Date.now(),
-                            hasUsageTokens: true,
+                            type: "reasoning",
+                            text: `step ${n}: run the next command`,
+                            metadata: { anthropic: { signature: `sig-${n}` } },
+                        },
+                        {
+                            type: "tool",
+                            callID: `call-${n}`,
+                            tool: "bash",
+                            state: {
+                                status: "completed",
+                                input: { command: `seq ${n}` },
+                                output: `${n}\n${BULK}`,
+                            },
                         },
                     ],
-                ]);
-                const transform = createTransform({
-                    db,
-                    tagger: createTagger(),
-                    scheduler: createScheduler({ executeThresholdPercentage: 65 }),
-                    contextUsageMap: usage,
-                    historyRefreshSessions: new Set<string>(),
-                    pendingMaterializationSessions: new Set<string>(),
-                    lastHeuristicsTurnId: new Map(),
-                    liveModelBySession: new Map([[sessionId, MODEL]]),
-                    protectedTokens: 2000,
-                    protectedTools: { bash: 0 },
-                    historianRunnable: false,
-                    compactionOff: true,
-                    injectDocs: true,
-                    directory: sessionDirectory,
-                    sessionDirectoryBySession: new Map([[sessionId, sessionDirectory]]),
-                    ...(host === "opencode2"
-                        ? {
-                              storeGeneration: "v2" as const,
-                              hostCleanupCompactionMarkers: () => ({
-                                  verified: true,
-                                  removedLineages: 0,
-                                  removedRows: 0,
-                                  retainedLineages: 0,
-                              }),
-                          }
-                        : {}),
-                } as never);
-                const source: Message[] = [
-                    {
-                        info: {
-                            id: "u-task",
-                            role: "user",
-                            sessionID: sessionId,
-                            time: { created: 1 },
-                        },
-                        parts: [{ type: "text", text: "run some bash commands" }],
-                    },
-                ];
-                const oracle = new StrictBinding();
-                const problems: string[] = [];
-                let served: Message[] = [];
-                const serve = async () => {
-                    const messages = structuredClone(source);
-                    await transform({}, { messages } as never);
-                    problems.push(...oracle.check(messages).map((p) => `pass ${pass}: ${p}`));
-                    served = messages;
-                };
-                let pass = 0;
-                const step = (n: number) => {
-                    source.push({
-                        info: {
-                            id: `step-${n}`,
-                            role: "assistant",
-                            sessionID: sessionId,
-                            time: { created: 10 + n },
-                            finish: "tool-calls",
-                            ...MODEL,
-                            // A light step: no recent heavy reasoning, so never held.
-                            tokens: { input: 0, output: 300, reasoning: 200 },
-                        },
-                        parts: [
-                            {
-                                type: "reasoning",
-                                text: `step ${n}: run the next command`,
-                                metadata: { anthropic: { signature: `sig-${n}` } },
-                            },
-                            {
-                                type: "tool",
-                                callID: `call-${n}`,
-                                tool: "bash",
-                                state: {
-                                    status: "completed",
-                                    input: { command: `seq ${n}` },
-                                    output: `${n}\n${BULK}`,
-                                },
-                            },
-                        ],
-                    });
-                    oracle.born(`sig-${n}`, served);
-                };
-                await serve();
-                for (pass = 1; pass <= 3; pass++) {
-                    step(pass);
-                    await serve();
-                }
-                const before = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString();
-                // Simulate a cache expiry (as after a tool call longer than the
-                // TTL) and change the project docs before the next pass.
-                writeFileSync(join(sessionDirectory, "ARCHITECTURE.md"), "# Architecture\n\nv2\n");
-                // The head was materialized before the last response, which
-                // finished more than one TTL ago (the idle-expiry fold's own
-                // condition that makes an idle-expiry fold eligible).
-                db.prepare(
-                    "UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?",
-                ).run(Date.now() - 20 * 60 * 1000, sessionId);
-                updateSessionMeta(db, sessionId, {
-                    lastResponseTime: Date.now() - 10 * 60 * 1000,
                 });
-                step(4);
-                pass = 4;
+                oracle.born(`sig-${n}`, served);
+            };
+            await serve();
+            for (pass = 1; pass <= 3; pass++) {
+                step(pass);
                 await serve();
-                const after = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString();
-                const kept = signedSignatures(served);
-                console.log(
-                    `[review-729] ${host} compaction-off idle fold: m0Changed=${before !== after} keptSigned=${JSON.stringify(kept)} problems=${JSON.stringify(problems)} fold=${JSON.stringify(logs.filter((l) => l.includes("HARD fold decision")))}`,
-                );
-                expect(problems).toEqual([]);
-            } finally {
-                log.mockRestore();
             }
-        },
-        60_000,
-    );
+            const before = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString();
+            // Simulate a cache expiry (as after a tool call longer than the
+            // TTL) and change the project docs before the next pass.
+            writeFileSync(join(sessionDirectory, "ARCHITECTURE.md"), "# Architecture\n\nv2\n");
+            // The head was materialized before the last response, which
+            // finished more than one TTL ago (the idle-expiry fold's own
+            // condition that makes an idle-expiry fold eligible).
+            db.prepare(
+                "UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?",
+            ).run(Date.now() - 20 * 60 * 1000, sessionId);
+            updateSessionMeta(db, sessionId, {
+                lastResponseTime: Date.now() - 10 * 60 * 1000,
+            });
+            step(4);
+            pass = 4;
+            await serve();
+            const after = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString();
+            const kept = signedSignatures(served);
+            console.log(
+                `[review-729] ${host} compaction-off idle fold: m0Changed=${before !== after} keptSigned=${JSON.stringify(kept)} problems=${JSON.stringify(problems)} fold=${JSON.stringify(logs.filter((l) => l.includes("HARD fold decision")))}`,
+            );
+            expect(problems).toEqual([]);
+        } finally {
+            log.mockRestore();
+        }
+    }, 60_000);
 }
 
 /** A small OpenCode session on a prefix-bound model with the strict-binding oracle. */

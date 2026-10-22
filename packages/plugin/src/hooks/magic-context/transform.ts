@@ -1785,7 +1785,13 @@ export function createTransform(deps: TransformDeps) {
                   },
               })
             : null;
-        activeThinkingPrefixHold = signedThinkingHold?.held === true;
+        // Compaction-off has no bust permission, so nothing could strip a turn
+        // whose prefix changes (an idle-expiry or memory fold still re-renders
+        // m[0] there). It keeps the blanket hold for every open signed turn, as
+        // before the hold was bounded; it has no history reclaim for the hold to
+        // delay.
+        activeThinkingPrefixHold =
+            signedThinkingPrefixBound && (compactionOff || signedThinkingHold?.held === true);
         freezeM0M1 ||= activeThinkingPrefixHold;
         const prefixHoldLogKey = signedThinkingHold
             ? `${currentTurnId}:${signedThinkingHold.reason}:${signedThinkingHold.heavyStepsBack ?? "none"}`
@@ -1802,7 +1808,9 @@ export function createTransform(deps: TransformDeps) {
             }
             if (freezeM0M1) {
                 const reason = activeThinkingPrefixHold
-                    ? "recent heavy reasoning in the active thinking turn (prefix-bound model)"
+                    ? compactionOff
+                        ? "active thinking turn in compaction-off mode (prefix-bound model)"
+                        : "recent heavy reasoning in the active thinking turn (prefix-bound model)"
                     : "session directory unresolved";
                 sessionLog(
                     sessionId,
