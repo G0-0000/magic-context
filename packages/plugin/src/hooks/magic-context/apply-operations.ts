@@ -611,12 +611,19 @@ export function applyPendingOperations(
                             }
                         } else if (target) {
                             const replacement = buildReplacementContent(pendingOp.tagId);
-                            persistDrop();
                             mutations.push(() => {
                                 const priorContent = target.getContent?.();
-                                const changed = target.setContent(replacement);
-                                record(changed);
+                                // Acquire the writer before touching text, but persist a new
+                                // status only when the real setter accepted the replacement.
+                                const changed = db
+                                    .transaction(() => {
+                                        const changed = target.setContent(replacement);
+                                        if (changed) persistDrop();
+                                        return changed;
+                                    })
+                                    .immediate();
                                 if (changed) {
+                                    record(true);
                                     const originalCharacters =
                                         typeof priorContent === "string"
                                             ? priorContent.length

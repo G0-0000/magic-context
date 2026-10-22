@@ -9226,6 +9226,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// orphaning tags/source_contents/caveman/drop-state. Positional entryIds is
 	// exactly aligned here: tagging runs at transcript-build time, before any splice.
 	let nativeRemovalInputs: Map<string, string> | undefined;
+	let probingExecuteRemoval = false;
 	try {
 		nativeRemovalInputs = getNativeReplayState(
 			args.db,
@@ -9253,7 +9254,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					sessionId: args.sessionId,
 					callId,
 					saved: nativeRemovalInputs,
-					canApply: isCacheBustingPass,
+					canApply: isCacheBustingPass || probingExecuteRemoval,
 				}),
 			authorizeToolRemovals: (callIds) =>
 				preparePiToolRemovalMeasurements({
@@ -9958,6 +9959,29 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				...protectedTagNumbersForPass,
 				...protectedToolTags,
 			]),
+			probePreparation: (target) => {
+				const saved = nativeRemovalInputs;
+				const rollback = Symbol("execute removal probe");
+				let allowed = false;
+				try {
+					// Exercise the drain's real marker write under the writer lock,
+					// then roll back the document write and restore nativeRemovalInputs.
+					nativeRemovalInputs = saved && new Map(saved);
+					probingExecuteRemoval = true;
+					args.db
+						.transaction(() => {
+							allowed = target.prepareDrop?.() !== false;
+							throw rollback;
+						})
+						.immediate();
+				} catch (error) {
+					if (error !== rollback) allowed = false;
+				} finally {
+					nativeRemovalInputs = saved;
+					probingExecuteRemoval = false;
+				}
+				return allowed;
+			},
 		}),
 		usableWindow:
 			args.usableSoft ??

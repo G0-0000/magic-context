@@ -308,6 +308,8 @@ export type TagTarget = {
      * for every later thinking block.
      */
     setContent: (content: string, options?: { keepReasoning?: boolean }) => boolean;
+    /** Read-only counterpart to setContent, including partial-compartment fences. */
+    canSetContent?: (content: string) => boolean;
     getContent?: () => string | null;
     /**
      * Text targets: the `§N§ ` prefix this pass puts in front of the text, or
@@ -982,6 +984,13 @@ export function tagMessages(
                     dropReasoningParts: thinkingParts,
                     mutationParts: [{ message, part: textPart }],
                     textPrefix: skipPrefixInjection ? "" : prependTag(tagId, ""),
+                    canSetContent: (content) => {
+                        const partialEnd = messageId ? getPartialEnds().get(messageId) : undefined;
+                        return (
+                            textPart.text !== content &&
+                            (partialEnd === undefined || partIndex <= partialEnd)
+                        );
+                    },
                     setContent: (content, options) => {
                         if (textPart.text === content) return false;
                         const partialEnd = messageId ? getPartialEnds().get(messageId) : undefined;

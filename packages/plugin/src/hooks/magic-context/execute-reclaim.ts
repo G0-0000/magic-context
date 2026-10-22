@@ -1,6 +1,7 @@
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import { updateReplayDocument } from "../../features/magic-context/storage-replay-document";
 import type { PendingOp, TagEntry } from "../../features/magic-context/types";
+import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { capturePendingDropEligibility } from "./pending-drop-eligibility";
 import { postprocessReplaySnapshot } from "./postprocess-read-cache";
@@ -13,6 +14,7 @@ interface ExecuteReclaimState {
 }
 
 const NAMESPACE = "executeReclaim";
+const failedWrites = new WeakMap<Database, Set<string>>();
 
 export function readExecuteReclaimState(db: Database, sessionId: string): ExecuteReclaimState {
     return parseState(postprocessReplaySnapshot(db, sessionId).executeReclaim);
@@ -31,20 +33,33 @@ export function writeExecuteReclaimState(
     db: Database,
     sessionId: string,
     patch: Partial<ExecuteReclaimState>,
-): void {
-    const current = readExecuteReclaimState(db, sessionId);
-    if (JSON.stringify(current) === JSON.stringify({ ...current, ...patch })) return;
-    if (
-        !updateReplayDocument(db, sessionId, (doc) => {
-            const previous = parseState(doc[NAMESPACE]);
-            const state = { ...previous, ...patch };
-            if (JSON.stringify(previous) === JSON.stringify(state)) return false;
-            doc.version = 2;
-            doc[NAMESPACE] = state;
-            return true;
-        })
-    )
-        throw new Error("Could not persist execute reclaim state");
+): boolean {
+    if (failedWrites.get(db)?.has(sessionId)) return false;
+    try {
+        const current = readExecuteReclaimState(db, sessionId);
+        if (JSON.stringify(current) === JSON.stringify({ ...current, ...patch })) return true;
+        if (
+            !updateReplayDocument(db, sessionId, (doc) => {
+                const previous = parseState(doc[NAMESPACE]);
+                const state = { ...previous, ...patch };
+                if (JSON.stringify(previous) === JSON.stringify(state)) return false;
+                doc.version = 2;
+                doc[NAMESPACE] = state;
+                return true;
+            })
+        )
+            throw new Error("Could not persist execute reclaim state");
+        return true;
+    } catch (error) {
+        let failed = failedWrites.get(db);
+        if (!failed) failedWrites.set(db, (failed = new Set()));
+        failed.add(sessionId);
+        sessionLog(
+            sessionId,
+            `execute reclaim state persistence failed; retaining existing policy: ${String(error)}`,
+        );
+        return false;
+    }
 }
 
 export function clearExecuteReclaimState(db: Database, sessionId: string): void {
@@ -61,6 +76,9 @@ export function maintainExecuteFloorMark(
     promptId: string | null,
     belowExecute: boolean,
 ): void {
+    // Maintenance starts each primary pass. A failed prerequisite disables only
+    // this pass's optional admission; the next pass recomputes from durable state.
+    failedWrites.get(db)?.delete(sessionId);
     const state = readExecuteReclaimState(db, sessionId);
     if (
         state.floorOrdinal !== null &&
@@ -78,6 +96,8 @@ export function estimateExecuteReclaimTokens(args: {
     tags: readonly TagEntry[];
     targets: ReadonlyMap<number, TagTarget>;
     protectedTagIds: ReadonlySet<number>;
+    /** Host dry run of prepareDrop; it must leave durable state and wire bytes unchanged. */
+    probePreparation?: (target: TagTarget) => boolean;
 }): number {
     const eligible = capturePendingDropEligibility(args.targets, args.protectedTagIds);
     const queued = new Set(
@@ -86,6 +106,9 @@ export function estimateExecuteReclaimTokens(args: {
     const seed = sessionDecisionCalibration(args.db, args.sessionId);
     return args.tags.reduce((total, tag) => {
         if (tag.status !== "active" || !queued.has(tag.tagNumber) || !eligible.has(tag.tagNumber))
+            return total;
+        const target = args.targets.get(tag.tagNumber);
+        if (target?.prepareDrop && !(args.probePreparation?.(target) ?? target.prepareDrop()))
             return total;
         const ratio = tag.type === "tool" ? seed.toolsRatio : seed.proseRatio;
         return total + Math.max(0, (tag.tokenCount ?? Math.ceil(tag.byteSize / 4)) * ratio);
@@ -102,12 +125,13 @@ export function originateExecuteReclaim(args: {
     reclaimableTokens: number;
     usableWindow: number;
 }): boolean {
+    if (failedWrites.get(args.db)?.has(args.sessionId)) return false;
     const state = readExecuteReclaimState(args.db, args.sessionId);
     const heldPasses =
         args.primaryExecute && args.reclaimableTokens > 0 && !args.alreadyBusting
             ? state.heldPasses + 1
             : 0;
-    writeExecuteReclaimState(args.db, args.sessionId, { heldPasses });
+    if (!writeExecuteReclaimState(args.db, args.sessionId, { heldPasses })) return false;
     return (
         args.primaryExecute &&
         !args.alreadyBusting &&

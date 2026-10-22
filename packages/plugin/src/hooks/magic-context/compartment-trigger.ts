@@ -659,8 +659,12 @@ export function checkCompartmentTrigger(
         // A newer meaningful prompt releases the old head normally, rather than
         // spending the escape on the new prompt. Reminder-only user messages do
         // not advance the meaningful-user prompt's identity or ordinal.
-        writeExecuteReclaimState(db, sessionId, { floorOrdinal: null, floorPromptId: null });
+        const consumed = writeExecuteReclaimState(db, sessionId, {
+            floorOrdinal: null,
+            floorPromptId: null,
+        });
         if (
+            consumed &&
             mark === livePromptOrdinal &&
             markState.floorPromptId ===
                 tailInfo.boundarySnapshot?.diagnostics?.livePromptFloor.messageId &&
@@ -892,11 +896,15 @@ export function checkCompartmentTrigger(
                 true,
             );
             floorOnly = withoutFloor.hasProtectedEligibleHead && withoutFloor.isMeaningful;
-            if (floorOnly && primaryExecute && usage.percentage >= executeThresholdPercentage) {
+            if (
+                floorOnly &&
+                primaryExecute &&
+                usage.percentage >= executeThresholdPercentage &&
                 writeExecuteReclaimState(db, sessionId, {
                     floorOrdinal: floor.ordinal,
                     floorPromptId: floor.messageId ?? null,
-                });
+                })
+            ) {
                 sessionLog(
                     sessionId,
                     `compartment trigger: live-prompt floor mark set at ${floor.ordinal}`,
