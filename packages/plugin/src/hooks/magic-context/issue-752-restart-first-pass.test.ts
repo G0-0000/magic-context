@@ -43,6 +43,10 @@ import {
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import {
+    getEmergencyInputSample,
+    setEmergencyDropSample,
+} from "../../features/magic-context/storage-meta-persisted";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import * as logger from "../../shared/logger";
@@ -223,6 +227,8 @@ type PassOptions = {
      * process with it, as the next turn would.
      */
     providerReadingAfter?: number;
+    /** An emergency episode latched before the restart (its recorded input sample). */
+    latchedEmergencySample?: number;
 };
 
 /**
@@ -271,6 +277,9 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
     // The newest tool output sits in the protected tail; the oldest does not.
     const queued = target === "newest" ? newestTool : tools.at(-1)!;
     queuePendingOp(db, sessionId, queued.tagNumber, "drop");
+    if (options.latchedEmergencySample !== undefined) {
+        setEmergencyDropSample(db, sessionId, options.latchedEmergencySample);
+    }
 
     const bootUsage = new Map<string, unknown>();
     const pass = restarted
@@ -282,6 +291,7 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
     const spy = spyOn(logger, "sessionLog").mockImplementation((id: string, ...rest: unknown[]) => {
         if (id === sessionId) lines.push(rest.map(String).join(" "));
     });
+    let latchAfterFirst: number | null = null;
     let second: {
         pendingAfterFirst: number;
         pendingAfter: number;
@@ -290,6 +300,7 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
     } | null = null;
     try {
         await pass({}, { messages: sessionMessages(sessionId, measuredShape) });
+        latchAfterFirst = getEmergencyInputSample(db, sessionId);
         if (options.providerReadingAfter !== undefined) {
             const pendingAfterFirst = getPendingOps(db, sessionId).length;
             const now = Date.now();
@@ -338,6 +349,8 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
             (tag) => tag.type === "tool" && tag.status === "dropped",
         ).length,
         pendingAfter: getPendingOps(db, sessionId).length,
+        latchAfterFirst,
+        latchAfter: getEmergencyInputSample(db, sessionId),
         second,
         passLog: lines.filter((line) =>
             /over-window first pass|unknown provider usage|transform scheduler:|first pass reset|heuristics WILL|pending ops|emergency tiered drop/.test(
@@ -502,5 +515,26 @@ describe("issue 752: first pass after a restart", () => {
         expect(result.passLog.some((line) => /over-window first pass/.test(line))).toBe(true);
         expect(result.passLog.some((line) => /pending ops WILL APPLY/.test(line))).toBe(true);
         expect(result.pendingAfter).toBe(0);
+    });
+
+    // An emergency episode latched before the restart. The first pass after it
+    // is priced but has no usable saved reading (taken against another limit),
+    // so its reading is the local count, about 66%: below the band where the
+    // latch is released, but only a count. The latch survives that pass and is
+    // released on the next one, when the provider measures the session at 60%.
+    it("an estimate-sized first pass keeps a latched emergency episode until a provider reading releases it", async () => {
+        const result = await flushPass(true, {
+            origin: "boundary_repair",
+            target: "oldest",
+            savedReadingLimit: 40_000,
+            latchedEmergencySample: 17_000,
+            providerReadingAfter: 60,
+        });
+        console.log("ISSUE_752_UNIT boot-latched", JSON.stringify(result));
+        expect(result.passLog.some((line) => /using wire estimate/.test(line))).toBe(true);
+        expect(result.bootReading ?? 0).toBeGreaterThan(0);
+        expect(result.bootReading ?? 100).toBeLessThan(80);
+        expect(result.latchAfterFirst).toBe(17_000);
+        expect(result.latchAfter).toBe(0);
     });
 });

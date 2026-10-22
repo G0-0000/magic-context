@@ -2076,8 +2076,12 @@ export async function runPostTransformPhase(
         executePressureEligible &&
         routinePressureAppliedBySession.get(args.sessionId) === true;
     // Require five points below the force band so a batch-induced dip cannot
-    // immediately rearm another cache rewrite as the tail regrows.
+    // immediately rearm another cache rewrite as the tail regrows. Only a
+    // provider-measured reading may end the episode: a local count can read
+    // low (a provider tokenizer denser than the local one), and clearing on it
+    // would let the next real reading rearm a second rewrite.
     if (
+        args.contextUsageFromEstimate !== true &&
         args.contextUsage.percentage > 0 &&
         args.contextUsage.percentage < args.forceMaterializationPercentage - 5 &&
         getEmergencyInputSample(args.db, args.sessionId) > 0
