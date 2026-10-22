@@ -1,7 +1,7 @@
 // Worker for worker-shutdown.test.ts. "cooperative" closes its connection
 // when asked; "deaf" never reads parent messages, so only terminate() stops it.
-import { Database } from "bun:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
+import { Database } from "./sqlite";
 import { exitOnWorkerClose } from "./worker-shutdown";
 
 const { path, mode } = workerData as { path: string; mode: "cooperative" | "deaf" };
