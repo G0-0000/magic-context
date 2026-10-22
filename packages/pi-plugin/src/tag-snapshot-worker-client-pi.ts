@@ -316,9 +316,10 @@ export function startPiTagSnapshotWorker(
 		() => new Worker(entry, { workerData: request }),
 	);
 	// The worker reads a close request between pages, while it waits for a
-	// packet's credit. One page is a read transaction of at most 256 rows on a
-	// connection with a 50 ms busy timeout, so a cancelled job exits well within
-	// this; one that has not is terminated, as every cancelled job was before.
+	// packet's credit, and then exits at once. A page is one read transaction of
+	// at most 256 rows; the connection's 50 ms busy timeout bounds only its lock
+	// wait, not the query. A worker still in a page after this deadline is
+	// terminated, as every cancelled job was before.
 	const shutdown = createWorkerShutdown(worker, "pi-tag-snapshot", 1_000);
 	let exited = false;
 	let settled = false;

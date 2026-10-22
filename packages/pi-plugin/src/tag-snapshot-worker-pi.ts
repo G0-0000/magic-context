@@ -39,9 +39,10 @@ let opened = false;
 let persistedVersion = 0;
 
 // A cancelled job closes its connection before the thread ends instead of
-// being terminated with it open (see worker-shutdown.ts). The owner has already
-// discarded the job by then, so a packet-credit listener that also reads the
-// close request and fails the job changes nothing.
+// being terminated with it open (see worker-shutdown.ts). This listener is
+// registered before any packet-credit listener, so it closes the connection and
+// ends the thread before a credit listener could read the request; the owner
+// has already discarded the job.
 exitOnWorkerClose(port, () => {
 	const connection = db;
 	db = undefined;

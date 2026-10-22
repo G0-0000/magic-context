@@ -696,7 +696,8 @@ it("a cancelled job closes its connection and exits instead of being terminated"
 			graceful: 0,
 			forced: 0,
 		};
-		// The page delay holds the job between pages with its connection open.
+		// The page delay pauses the job before its first page read, with its
+		// connection already open.
 		const cancelled = startPiTagSnapshotWorker({
 			...requestFor(path),
 			test: { pageDelayMs: 500 },

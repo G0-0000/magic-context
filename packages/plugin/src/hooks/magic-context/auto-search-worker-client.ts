@@ -266,10 +266,13 @@ const MAX_IDLE_SEARCH_WORKERS = 4;
 const SEARCH_WORKER_IDLE_MS = 5 * 60_000;
 /**
  * How long a disposed pool worker may take to close its connection and exit
- * before it is terminated. It reads the close request between statements; its
- * longest synchronous SQLite work is a backfill write transaction (up to its
- * 250 ms busy timeout plus at most 50 vector rows) or one ranking pass of a
- * search, both well under this.
+ * before it is terminated. It reads the close request only between pieces of
+ * synchronous work. An idle worker, or one waiting for an embedding reply,
+ * exits at once; a backfill write transaction waits at most its 250 ms busy
+ * timeout and then writes at most 50 vector rows. A search still inside a long
+ * synchronous statement (a message-history FTS query on a large session can
+ * take seconds) is terminated when this passes, as every disposed worker was
+ * before.
  */
 const AUTO_SEARCH_WORKER_CLOSE_DEADLINE_MS = 2_000;
 let workersCreated = 0;
