@@ -264,7 +264,13 @@ async function runRebuildThenDefer(boundaryAbsent = false) {
                               },
                           },
                       ]),
-                      info: { ...msg("msg-live-tool", "assistant", []).info, finish: "tool-calls" },
+                      // A heavy step: below the 75% cap the bounded hold keeps the
+                      // turn, so the signed fit owns the over-window pass at 35%.
+                      info: {
+                          ...msg("msg-live-tool", "assistant", []).info,
+                          finish: "tool-calls",
+                          tokens: { input: 0, output: 1_600, reasoning: 1_600 },
+                      },
                   },
               ]
             : []),

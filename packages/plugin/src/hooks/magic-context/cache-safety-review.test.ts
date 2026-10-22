@@ -584,7 +584,12 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
                     state: { status: "completed", input: {}, output: toolOutput },
                 },
             ]),
-            info: { ...msg("msg06", "assistant").info, finish: "tool-calls" },
+            // A heavy step: below the 75% cap the bounded hold keeps the turn.
+            info: {
+                ...msg("msg06", "assistant").info,
+                finish: "tool-calls",
+                tokens: { input: 0, output: 1_600, reasoning: 1_600 },
+            },
         },
     ];
     const compartment = (sequence: number, start: number, end: number) => ({
@@ -616,8 +621,9 @@ it("review: 10:32:20 forced thinking release and 10:32:24 replay use one trim se
         decision = "execute";
         const at = Date.parse("2026-10-13T10:32:20Z");
         clock.mockReturnValue(at);
+        // Just below the hold cap (65% + 10), so the turn is still held.
         usage.set(sessionId, {
-            usage: { percentage: 75.4, inputTokens: 12_064 },
+            usage: { percentage: 74.9, inputTokens: 11_984 },
             updatedAt: at,
             hasUsageTokens: true,
         });

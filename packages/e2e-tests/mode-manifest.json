@@ -54,7 +54,7 @@
             "path": "tests/latest-turn-thinking.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Real OpenCode 1 task child and primary long tool loop at execute and force against a provider-side thinking oracle; negative controls reject edited, removed and reordered latest-turn blocks, a plain real user turn preserves the primary signed prefix and queued drop until explicit flush, accepted legacy strips replay unchanged, a provider rejection restores the original thinking once, and host PID lsof proves throwaway containment.",
+            "rationale": "Real OpenCode 1 task child and primary long tool loop at execute and force against a provider-side thinking oracle; negative controls reject edited, partly removed and reordered latest-turn blocks and accept removing all of them; above the bounded signed-thinking hold's cap the task and the primary force band apply the queued drop mid-turn and strip the turn's thinking, a task held for heavy reasoning below the cap preserves it, a plain real user turn preserves the primary signed prefix and queued drop until explicit flush, accepted legacy strips replay unchanged, a provider rejection restores the original thinking once, and host PID lsof proves throwaway containment.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
         },

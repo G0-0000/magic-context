@@ -12714,8 +12714,8 @@ it("fold preparation retries rather than overwriting a changed legacy tool tag",
 });
 
 // Observe each named edit's admission or persisted decision, plus served bytes.
-// An unfinished thinking tool loop must retain queued work until new user text
-// starts another turn, even when usage crosses the execute threshold.
+// A tool loop held for recent heavy reasoning must retain queued work while the
+// hold lasts, even when usage crosses the execute threshold.
 describe("active-thinking shared bust permission", () => {
     for (const lane of [
         "pending drain",
@@ -12776,6 +12776,9 @@ describe("active-thinking shared bust permission", () => {
                         tags: getActiveTagsBySession(db, sessionId),
                         freezeM0M1: true,
                         activeThinkingTurn: true,
+                        // The transform's bounded hold verdict: recent heavy reasoning
+                        // below the cap (66% < 75%).
+                        activeThinkingPrefixHold: true,
                         resolvedProviderID: "anthropic",
                         resolvedModelID: "claude-opus-5-5",
                         thinkingBindingRecoveryEnabledForModel: true,
@@ -12880,6 +12883,7 @@ describe("signed-prefix hold review", () => {
                 tags: getActiveTagsBySession(db, sessionId),
                 freezeM0M1: options.held,
                 activeThinkingTurn: options.held,
+                activeThinkingPrefixHold: options.held,
                 resolvedProviderID: "anthropic",
                 resolvedModelID: "claude-opus-5-5",
                 thinkingBindingRecoveryEnabledForModel: true,
@@ -12978,9 +12982,9 @@ describe("signed-prefix hold review", () => {
             } else if (roll < 0.55) {
                 deferred.add(sessionId);
             }
-            // Usage 20-83%: always below the 85% force band set by
-            // forceMaterializationPercentage, randomly crossing the 65% execute threshold.
-            const percentage = 20 + Math.floor(random() * 64);
+            // Usage 20-74%: always below the 75% hold cap (execute threshold plus
+            // 10 points), randomly crossing the 65% execute threshold.
+            const percentage = 20 + Math.floor(random() * 55);
             const held = await runHeld(sessionId, {
                 held: true,
                 percentage,

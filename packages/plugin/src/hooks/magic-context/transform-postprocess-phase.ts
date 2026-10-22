@@ -96,7 +96,7 @@ import {
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
-import { hasReclaimRide, reclaimRideLabel } from "./cache-busting-signals";
+import { reclaimRideLabel, reclaimRidePermitted } from "./cache-busting-signals";
 import type { CavemanWordRules } from "./caveman";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
@@ -1757,6 +1757,12 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
+    /**
+     * A prefix-bound model's open turn still serves signed thinking after this
+     * pass (it was neither stripped nor absent). Anything in front of it, the
+     * system prompt included, must not change on this pass.
+     */
+    openTurnSignedThinkingKept?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -2145,9 +2151,11 @@ export async function runPostTransformPhase(
         const tag = args.messageTagNumbers.get(message);
         if (tag && tag > 0) safeReasoningCutoff = Math.min(safeReasoningCutoff, tag - 1);
     }
-    let activeThinkingPrefixHold =
-        args.activeThinkingPrefixHold === true ||
-        (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true);
+    // The caller decides the hold (decideSignedThinkingHold): on a prefix-bound
+    // model it holds only right after heavy reasoning and below the cap. Any
+    // other pass of a signed turn busts like a pass of any other model, and
+    // strips the turn's signed thinking when it does (see below).
+    let activeThinkingPrefixHold = args.activeThinkingPrefixHold === true;
     let freezeM0M1 = args.freezeM0M1 === true || activeThinkingPrefixHold;
     let rewritingSignedPrefix = false;
     let thinkingReleasedForFit = false;
@@ -2172,7 +2180,11 @@ export async function runPostTransformPhase(
     // Fit proof authorizes rebuilding the signed prefix, independently of
     // pressure. Release before prefix preparation so it can refresh history
     // without pretending the protected tool window has reached 95% usage.
-    if (activeThinkingPrefixHold && args.forceSignedRebuildForFit) {
+    if (
+        args.forceSignedRebuildForFit &&
+        (activeThinkingPrefixHold ||
+            (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true))
+    ) {
         releaseThinkingForRewrite(true);
     }
     const foldDueDecision =
@@ -2416,8 +2428,12 @@ export async function runPostTransformPhase(
     const hasPendingUserOps = pendingOps.length > 0;
     // Preserve the requested application opportunity when thinking safety, not
     // cache policy, prevents this batch. The next real user releases the veto.
+    // Prefix-bound models request nothing: their queued drops ride the next
+    // bust of the turn, which strips the signed thinking that protected them,
+    // so a request here would originate a bust no other model takes.
     if (
         args.schedulerDecision === "execute" &&
+        args.thinkingBindingRecoveryEnabledForModel !== true &&
         pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
     )
         requestPendingMaterialization(
@@ -2469,13 +2485,15 @@ export async function runPostTransformPhase(
     // expiry and pressure relief can admit work, but the target guards still
     // forbid changes before any retained signature. A genuine prefix rewrite
     // first omits every signed block. The directory veto freezes injection only.
+    // The historian's redundancy skip applies the same predicate.
     const publishedWorkDrainAllowed =
         !compactionOff &&
-        (!activeThinkingPrefixHold ||
-            firstRenderBust ||
-            idleExpiryRebuild ||
-            emergencyDropEligible) &&
-        hasReclaimRide(rideSignals);
+        reclaimRidePermitted(rideSignals, {
+            signedThinkingHold: activeThinkingPrefixHold,
+            firstRender: firstRenderBust,
+            idleExpiry: idleExpiryRebuild,
+            emergency: emergencyDropEligible,
+        });
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
     const shouldRunHeuristics =
         publishedWorkDrainAllowed &&
@@ -2498,11 +2516,47 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    // An unheld bust of a prefix-bound model whose turn still keeps signed
+    // thinking lands like a bust on any other model: latest-turn protection is
+    // lifted so queued drops and cleanup in the turn apply on it. A bust that
+    // changes anything before the kept thinking must then strip every signed
+    // block, because those blocks no longer match their prefix:
+    // - a pass whose head changed (fold, first render, m[1] refresh) strips
+    //   now, before any lane edits, through the same persisted freeze a held
+    //   pass's release uses;
+    // - any other bust (flush, pressure, idle expiry, subagent execute) strips
+    //   at the end of the pass through the proactive strip, only if one of its
+    //   edits lies before newer thinking, so a bust with nothing to apply keeps
+    //   the turn's thinking.
+    let unheldSignedTurnBust = false;
+    if (
+        isCacheBustingPass &&
+        !activeThinkingPrefixHold &&
+        activeThinkingTurn &&
+        args.thinkingBindingRecoveryEnabledForModel === true
+    ) {
+        if (foldBustsServedPrefixThisPass || firstRenderBust || publishedM1RefreshedThisPass)
+            releaseThinkingForRewrite();
+        else {
+            unheldSignedTurnBust = true;
+            retainedThinking.clear();
+            protectedThinkingMessages.clear();
+            newTargets = args.targets;
+        }
+    }
     // Keep recovery bytes until the shared permission allows a cache rewrite
     // (for example, a user flush or pressure relief). Normalize before applying
     // drops so the saved drop state and the request sent to the provider agree.
-    if (args.normalizeRecoveryTail && isCacheBustingPass) {
+    // Normalizing tags the messages appended after a last-good replay, which
+    // lie in front of thinking signed after it. A held pass keeps that thinking
+    // (idle expiry or a first render can admit it without stripping), so it
+    // keeps replaying the recovered prefix instead; the next pass that strips
+    // the turn or ends the hold normalizes. Until then the replay serves the
+    // recorded prefix byte for byte.
+    let recoveryTailNormalizedThisPass = false;
+    if (args.normalizeRecoveryTail && isCacheBustingPass && !activeThinkingPrefixHold) {
         args.normalizeRecoveryTail();
+        recoveryTailNormalizedThisPass = true;
         args.tags = getTagsBySession(args.db, args.sessionId);
         newTargets = protectNewTagMutations(
             args.messages,
@@ -4541,6 +4595,8 @@ export async function runPostTransformPhase(
         todoAnchorMovedThisPass ||
         autoSearchHintAppendedThisPass ||
         dropModeSwitchesThisPass ||
+        // Re-tagging a replayed tail is an edit in front of newer thinking.
+        recoveryTailNormalizedThisPass ||
         firstApplicationEdits.beforeNewerThinking;
     let proactiveThinkingStrip: ProactiveThinkingStrip | null = null;
     if (
@@ -4563,7 +4619,14 @@ export async function runPostTransformPhase(
                 mergedReasoningStrippedIds.add(thinkingBindingRecoveryFrozenId(messageId));
             }
             bustedThisPass = true;
+            // The open turn's thinking went with it: its pre-rejection originals
+            // must not be restored over the strip.
+            if (unheldSignedTurnBust) rewritingSignedPrefix = true;
         } else if (outcome.persistenceFailed) {
+            // The open turn's edits are already applied in front of its kept
+            // thinking; serving them without the strip would be rejected.
+            if (unheldSignedTurnBust)
+                throw new Error("Cannot persist signed thinking omission after a mid-turn edit");
             failPass("proactive-thinking-strip-persistence-failure");
         }
     }
@@ -4847,6 +4910,10 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
+        openTurnSignedThinkingKept:
+            args.thinkingBindingRecoveryEnabledForModel === true &&
+            activeThinkingTurn &&
+            !rewritingSignedPrefix,
     };
 }
 

@@ -783,8 +783,10 @@ describe("Pi pressure guards", () => {
 			).replace(/\s+/g, " ");
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
+			// The permission is the shared predicate the historian's redundancy
+			// skip also uses.
 			expect(src).toContain(
-				"isCacheBustingPass = prefixMutationAllowed && hasReclaimRide(rideSignals)",
+				"isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate)",
 			);
 			expect(src).toContain("if (identityRebuild) {");
 			expect(src).toMatch(
@@ -9334,7 +9336,7 @@ describe("Pi proactive strip of invalidated thinking", () => {
 
 	// Strict binding does not permit removing an older block while a newer
 	// signature is kept. Only a real prefix rewrite can remove them together.
-	it("a pressure pass alone keeps every signed block; an actual prefix rewrite strips all of them", async () => {
+	it("an unheld pressure pass of an open signed turn strips every signed block, and a prefix rewrite after the turn strips them all", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-trim-only";
 		const fake = createFakePi();
@@ -9402,31 +9404,16 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			);
 			const strippedBefore = getMergedReasoningStrippedIds(db, sessionId);
 
-			// Pressure without a preceding-byte rewrite keeps all signed blocks.
+			// The open turn is above the hold cap (65% + 10), so it is not held,
+			// and its first bust (this 96% emergency pass) strips every signed
+			// block whatever it edits. Earlier revisions held the turn and kept
+			// every block on a pressure-only pass; an unheld bust of a prefix-bound
+			// signed turn is now always treated as a prefix rewrite.
 			const trim = await pass(10, 96);
-			const cleared = trim.filter(
-				(message, index) =>
-					index % 2 === 1 && index >= 4 && liveThinking(message) === 0,
-			);
-			expect(cleared.length).toBe(0);
-			// Cleared thinking is a contiguous oldest prefix of the kept turns...
-			const kept = trim
-				.map((message, index) => ({ index, thinking: liveThinking(message) }))
-				.filter(({ index }) => index % 2 === 1 && index >= 4)
-				.map(({ thinking }) => thinking);
-			expect(kept).toEqual([...kept].sort((a, b) => a - b));
-			expect(kept.at(-1)).toBe(1);
-			// ...and nothing newer was stripped: the newer turns are byte-identical.
-			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
-				strippedBefore,
-			);
-			const firstKept = trim.findIndex(
-				(message, index) =>
-					index >= 4 && index % 2 === 1 && liveThinking(message) === 1,
-			);
-			expect(sha256(trim.slice(firstKept))).toBe(
-				sha256(served.slice(firstKept)),
-			);
+			expect(trim.map(liveThinking).every((count) => count === 0)).toBe(true);
+			expect(
+				[...getMergedReasoningStrippedIds(db, sessionId)].length,
+			).toBeGreaterThan([...strippedBefore].length);
 
 			const defer = await pass(10, 10);
 			expect(sha256(defer)).toBe(sha256(trim));
