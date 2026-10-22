@@ -3427,10 +3427,16 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
+        // The system date rides a bust, but on a prefix-bound model only one
+        // that leaves no open-turn signed thinking behind the system prompt: an
+        // unheld bust that kept the turn's thinking (it edited nothing in front
+        // of it) must not change the system prompt in front of it either.
         finishSystemDateRefresh(
             deps.historyRefreshSessions,
             dateRequest,
-            (postTransformResult.bustedThisPass && !activeThinkingPrefixHold) ||
+            (postTransformResult.bustedThisPass &&
+                !activeThinkingPrefixHold &&
+                postTransformResult.openTurnSignedThinkingKept !== true) ||
                 postTransformResult.thinkingReleasedForFit === true,
         );
         if (

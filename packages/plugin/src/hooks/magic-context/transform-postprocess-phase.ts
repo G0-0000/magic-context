@@ -1746,6 +1746,12 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
+    /**
+     * A prefix-bound model's open turn still serves signed thinking after this
+     * pass (it was neither stripped nor absent). Anything in front of it, the
+     * system prompt included, must not change on this pass.
+     */
+    openTurnSignedThinkingKept?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -4867,6 +4873,10 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
+        openTurnSignedThinkingKept:
+            args.thinkingBindingRecoveryEnabledForModel === true &&
+            activeThinkingTurn &&
+            !rewritingSignedPrefix,
     };
 }
 
