@@ -105,6 +105,14 @@ const GATED_VERSION: u8 = 3;
 /// `instructions_paragraph_break` to a run's frozen structured-output render
 /// config (on `RunStarted` and `RunConfigRefrozen`); it affects only how the
 /// schema instructions are rendered, so this reader ignores it.
+/// `client-message-id/v1` adds a `client_message_id` member inside the
+/// `request_identity_digest` JSON of a `run_started`, `queued` or `steered`
+/// record; this reader never reads request identity. `compaction-ride-wait/v1`
+/// adds an optional `ride_wait_ms` to a compaction Setup message and two
+/// records, `compaction_ride_wait` and `compaction_ride_wait_ended`, written
+/// while a step waits for the compaction provider's answer before a prompt
+/// rewrite; this reader ignores all three
+/// and keeps the step's usage and timestamps.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -137,6 +145,8 @@ const KNOWN_FEATURES: &[&str] = &[
     "tool-reply/v1",
     "runner-tags/v2",
     "structured-output-paragraph/v1",
+    "client-message-id/v1",
+    "compaction-ride-wait/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1875,6 +1885,8 @@ pub(crate) mod tests {
             "tool-reply/v1",
             "runner-tags/v2",
             "structured-output-paragraph/v1",
+            "client-message-id/v1",
+            "compaction-ride-wait/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1896,6 +1908,37 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("tool-reply/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `client-message-id/v1` carries the sender's message id inside the run's
+    /// request identity digest; such a run still yields its steps.
+    #[test]
+    fn a_client_message_id_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["request_identity_digest"] = json!({"client_message_id": "msg-1", "digest": "00"});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["client-message-id/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("client-message-id/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `compaction-ride-wait/v1` records a step that waited for the compaction
+    /// provider's answer before a prompt rewrite; that step keeps its usage.
+    #[test]
+    fn a_compaction_ride_wait_keeps_the_step() {
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["compaction-ride-wait/v1"],
+                   "record": {"type": "compaction_ride_wait", "step_id": 1,
+                              "deadline_ms": 10_000}}),
+            json!({"requires": ["compaction-ride-wait/v1"],
+                   "record": {"type": "compaction_ride_wait_ended", "step_id": 1}}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("compaction-ride-wait/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
