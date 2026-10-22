@@ -12,6 +12,7 @@ import {
 	TAG_SELECT_COLUMNS,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { getWorkerShutdownStats } from "@magic-context/core/shared/worker-shutdown";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import { PiContextBudget } from "./pi-context-budget";
 import {
@@ -683,6 +684,33 @@ it("worker deadline and cancellation wait for release and never return a candida
 		cancelled.cancel();
 		await expect(cancelled.result).rejects.toThrow("cancelled");
 		await cancelled.released;
+	} finally {
+		close();
+	}
+});
+
+it("a cancelled job closes its connection and exits instead of being terminated", async () => {
+	const { db, path, close } = fixture();
+	try {
+		const before = getWorkerShutdownStats().get("pi-tag-snapshot") ?? {
+			graceful: 0,
+			forced: 0,
+		};
+		// The page delay holds the job between pages with its connection open.
+		const cancelled = startPiTagSnapshotWorker({
+			...requestFor(path),
+			test: { pageDelayMs: 500 },
+		});
+		cancelled.cancel();
+		await expect(cancelled.result).rejects.toThrow("cancelled");
+		await cancelled.released;
+		expect(getWorkerShutdownStats().get("pi-tag-snapshot")).toEqual({
+			graceful: before.graceful + 1,
+			forced: before.forced,
+		});
+		db.exec("PRAGMA busy_timeout=0");
+		db.exec("BEGIN IMMEDIATE");
+		db.exec("ROLLBACK");
 	} finally {
 		close();
 	}

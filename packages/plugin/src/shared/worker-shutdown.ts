@@ -61,12 +61,12 @@ export interface WorkerShutdown {
 
 const outcomes = new Map<string, { graceful: number; forced: number }>();
 
-/** How each site's workers ended after a close: by themselves, or terminated. */
+/** How each site's workers ended after a close, by themselves or terminated. A snapshot. */
 export function getWorkerShutdownStats(): ReadonlyMap<
     string,
-    { graceful: number; forced: number }
+    { readonly graceful: number; readonly forced: number }
 > {
-    return outcomes;
+    return new Map([...outcomes].map(([site, counts]) => [site, { ...counts }]));
 }
 
 /**
