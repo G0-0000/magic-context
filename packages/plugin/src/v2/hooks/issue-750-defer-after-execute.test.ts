@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import * as retention from "../../features/magic-context/storage-host-instruction-retention";
 import { setHostInstructionRetentionEnabledForTests } from "../../features/magic-context/storage-host-instruction-retention";
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
+import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as models from "../../shared/models-dev-cache";
 import {
     firstDivergence,
@@ -11,6 +12,7 @@ import {
     instructionTexts,
     lkgEvents,
     prose,
+    replayDifference,
 } from "./__tests__/oc2-context.fixture";
 
 // OpenCode 2 sends instruction-update rows as id-less system messages. The
@@ -363,6 +365,7 @@ for (const where of ["admission", "transform"] as const)
             f.respond();
             const before = await f.pass();
             f.respond();
+            const anchor = getSlot(f.session)?.lastInputMessageId;
             if (where === "admission") busy.state.busyNext = true;
             else failure.state.failNext = true;
             const failed = await f.attempt();
@@ -378,6 +381,11 @@ for (const where of ["admission", "transform"] as const)
                     failed.draft.messages.slice(0, before.draft.messages.length),
                 ),
             ).toBeNull();
+            // The whole served request, byte for byte: the saved request through
+            // its anchor, then every host message after the anchor (the tail),
+            // with the saved system and tool list.
+            expect(anchor).toBeDefined();
+            expect(replayDifference(failed, before, anchor!)).toBeNull();
         } finally {
             busy.restore();
             failure.restore();
@@ -415,6 +423,7 @@ for (const where of ["admission", "transform"] as const)
             f.respond();
             const before = await f.pass();
             f.respond();
+            const anchor = getSlot(f.session)?.lastInputMessageId;
             if (where === "admission") busy.state.busyNext = true;
             else failure.state.failNext = true;
             const failed = await f.attempt();
@@ -430,6 +439,11 @@ for (const where of ["admission", "transform"] as const)
                     failed.draft.messages.slice(0, before.draft.messages.length),
                 ),
             ).toBeNull();
+            // The whole served request, byte for byte: the saved request through
+            // its anchor, then every host message after the anchor (the tail),
+            // with the saved system and tool list.
+            expect(anchor).toBeDefined();
+            expect(replayDifference(failed, before, anchor!)).toBeNull();
         } finally {
             busy.restore();
             failure.restore();

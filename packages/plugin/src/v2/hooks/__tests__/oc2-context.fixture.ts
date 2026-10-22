@@ -265,12 +265,15 @@ export async function oc2ContextFixture(
         async pass() {
             const draft = inputDraft();
             const inputIds = draft.messages.flatMap((message) => (message.id ? [message.id] : []));
+            const input = structuredClone(draft.messages);
             const before = logs.mock.calls.length;
             await hooks.get("context")!(draft);
             lastDraft = structuredClone(draft);
             return {
                 draft,
                 inputIds,
+                /** The host's messages as handed to the hook. */
+                input,
                 bytes: JSON.stringify({ system: draft.system, messages: draft.messages }),
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
@@ -279,6 +282,7 @@ export async function oc2ContextFixture(
         async attempt() {
             const draft = inputDraft();
             const inputIds = draft.messages.flatMap((message) => (message.id ? [message.id] : []));
+            const input = structuredClone(draft.messages);
             const before = logs.mock.calls.length;
             let error: unknown;
             try {
@@ -289,6 +293,8 @@ export async function oc2ContextFixture(
             return {
                 draft,
                 inputIds,
+                /** The host's messages as handed to the hook. */
+                input,
                 error,
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
@@ -485,4 +491,44 @@ export function installTransientFailure() {
         return Object.assign(wrapped, real) as typeof real;
     }) as typeof realCreate);
     return { state, restore: () => spy.mockRestore() };
+}
+
+/** A pass (or attempt) as the fixture reports it. */
+type Served = {
+    draft: SessionContext;
+    inputIds: string[];
+    input: V2Message[];
+};
+
+/**
+ * The messages a saved request served through its anchor: everything it
+ * served except the host messages that came after the anchor message.
+ */
+export function savedPrefix(saved: Served, anchorId: string): V2Message[] {
+    const anchor = saved.inputIds.indexOf(anchorId);
+    if (anchor < 0) throw new Error(`anchor ${anchorId} not in the saved input`);
+    const after = new Set(saved.inputIds.slice(anchor + 1));
+    const first = saved.draft.messages.findIndex((message) => message.id && after.has(message.id));
+    return first < 0 ? saved.draft.messages : saved.draft.messages.slice(0, first);
+}
+
+/**
+ * Null when `replay` served the full request a replay of `saved` must serve,
+ * byte for byte: the saved request's system, tool list and messages through
+ * the anchor, then the host's messages after the anchor exactly as the host
+ * sent them, and nothing else. Otherwise where it differs.
+ */
+export function replayDifference(replay: Served, saved: Served, anchorId: string): string | null {
+    const bytes = (value: unknown) => JSON.stringify(value);
+    if (bytes(replay.draft.system) !== bytes(saved.draft.system))
+        return `system ${bytes(replay.draft.system).slice(0, 160)} !== ${bytes(saved.draft.system).slice(0, 160)}`;
+    if (bytes(replay.draft.tools) !== bytes(saved.draft.tools))
+        return `tools ${bytes(Object.keys(replay.draft.tools ?? {}))} !== ${bytes(Object.keys(saved.draft.tools ?? {}))}`;
+    const prefix = savedPrefix(saved, anchorId);
+    const anchor = replay.input.findIndex((message) => message.id === anchorId);
+    if (anchor < 0) return `anchor ${anchorId} not in the replayed input`;
+    const expected = [...prefix, ...replay.input.slice(anchor + 1)];
+    if (bytes(replay.draft.messages) !== bytes(expected))
+        return `messages ${firstDivergence(expected, replay.draft.messages) ?? "differ"}`;
+    return null;
 }

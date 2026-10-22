@@ -223,6 +223,12 @@ export function adaptPayload(
     draft: SessionContext,
     admittedIDs: ReadonlySet<string> = new Set(),
     messageTimes: ReadonlyMap<string, MessageLike["info"]["time"]> = new Map(),
+    /**
+     * Attach the times as a non-enumerable `info.time`: readable by the saved
+     * copy's anchor search, but left out of the content digests and of every
+     * copy of the message, as if the message carried no time.
+     */
+    hiddenTimes = false,
 ) {
     const existingHeads = new Map(
         draft.messages.filter((m) => HEAD_IDS.some((id) => m.id === id)).map((m) => [m.id, m]),
@@ -391,6 +397,16 @@ export function adaptPayload(
             },
             parts,
         };
+        if (hiddenTimes && mapped.info.time !== undefined) {
+            const time = mapped.info.time;
+            delete mapped.info.time;
+            Object.defineProperty(mapped.info, "time", {
+                value: time,
+                enumerable: false,
+                configurable: true,
+                writable: true,
+            });
+        }
         originals.set(mapped, message);
         // The transform decides whether a restored covered instruction is served.
         if (isCoveredInstructionRow(message)) markCoveredInstructionRow(mapped.info);

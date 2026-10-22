@@ -111,7 +111,11 @@ import {
     tryMessagesTransformLkgReplay,
 } from "../../plugin/messages-transform";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
-import { hideSubagentTools } from "../../plugin/subagent-tool-policy";
+import {
+    hideSubagentTools,
+    removePrimaryOnlyTools,
+    storedSubagentMode,
+} from "../../plugin/subagent-tool-policy";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
@@ -1630,13 +1634,29 @@ export async function registerContext(context: V2Context) {
             reader.close();
         }
     });
-    // TypeScript mode always gives the transform the stored message times, as
-    // OpenCode 1 messages always carry them: the saved last good request needs
-    // them to find its anchor when the latest assistant message is still
-    // working, and the same input must be rebuilt for a replay. Only temporal
-    // awareness renders anything from them. Rust mode keeps reading them only
-    // for temporal awareness, as its module input did before.
-    const readsMessageTimes = config.temporal_awareness === true || !rustModeModuleClient;
+    // Which stored message times a pass reads. With temporal awareness on, every
+    // message carries its time, as before: temporal markers render from them.
+    // With it off, TypeScript mode still needs a few, as OpenCode 1 messages
+    // always carry them: the saved last good request finds its anchor from the
+    // latest assistant message's time (and, while that message is still
+    // working, the times of the user messages after it). Only those are read,
+    // and they are kept out of the content digests (see adaptPayload), so the
+    // saved copy and its replay compare the same bytes whichever messages the
+    // rule picked. Rust mode reads times only for temporal awareness.
+    const temporalTimes = config.temporal_awareness === true;
+    const anchorTimesOnly = !temporalTimes && !rustModeModuleClient;
+    /** The ids of the messages whose stored times this pass reads. */
+    const timeIds = (messages: readonly V2Message[]): string[] => {
+        if (temporalTimes) return messages.flatMap((message) => (message.id ? [message.id] : []));
+        if (!anchorTimesOnly) return [];
+        // From the newest message back to the latest assistant message.
+        const ids: string[] = [];
+        for (const message of [...messages].reverse()) {
+            if (message.id) ids.push(message.id);
+            if (message.role === "assistant") break;
+        }
+        return ids;
+    };
     /**
      * The messages a pass works on after a local host checkpoint: the covered
      * instruction rows, the stored rows from the history boundary up to the
@@ -1798,6 +1818,24 @@ export async function registerContext(context: V2Context) {
         // The host's messages as this pass received them. A replay rebuilds the
         // transform input from these, never from a draft a failed pass reshaped.
         const hostMessagesAtEntry = [...draft.messages];
+        // Stored message times read during this pass, by id. They do not change
+        // while a pass runs, so the writer retries and the managed pass after
+        // them read each id from the store once.
+        const passTimes = new Map<string, { created?: number; completed?: number } | null>();
+        const readTimes = (reader: V2StoreReader, messages: readonly V2Message[]) => {
+            const ids = timeIds(messages);
+            const missing = ids.filter((id) => !passTimes.has(id));
+            if (missing.length > 0) {
+                const read = reader.messageTimes(draft.sessionID, missing);
+                for (const id of missing) passTimes.set(id, read.get(id) ?? null);
+            }
+            const times = new Map<string, { created?: number; completed?: number }>();
+            for (const id of ids) {
+                const time = passTimes.get(id);
+                if (time) times.set(id, time);
+            }
+            return times;
+        };
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
             modelID: draft.model.id,
@@ -1897,6 +1935,16 @@ export async function registerContext(context: V2Context) {
                         localCut && messages.find((message) => message.id === localCut.id);
                     if ((localCut && !incoming) || (cut && nativeFoldReplay)) return undefined;
                     checkpointAtEntry = incoming || null;
+                    // A replay serves the tool list a healthy pass would serve: in a
+                    // subagent session that is without the primary-only tools, which
+                    // the pass removes only after writer admission. Read without
+                    // writing; while the session's mode is not stored yet, no replay.
+                    const modeDb = db ?? storage.current();
+                    const subagent = modeDb
+                        ? storedSubagentMode(modeDb, draft.sessionID)
+                        : undefined;
+                    if (subagent === undefined) return undefined;
+                    if (subagent) removePrimaryOnlyTools(draft.tools);
                     if (!rustModeModuleClient) {
                         const candidates = syntheticCandidates(
                             context,
@@ -1922,11 +1970,7 @@ export async function registerContext(context: V2Context) {
                                 boundaryRepair: undefined,
                             });
                         else if (localCut) return undefined;
-                        if (readsMessageTimes)
-                            times = reader.messageTimes(
-                                draft.sessionID,
-                                messages.flatMap((message) => (message.id ? [message.id] : [])),
-                            );
+                        times = readTimes(reader, messages);
                     }
                 } finally {
                     reader.close();
@@ -1936,7 +1980,10 @@ export async function registerContext(context: V2Context) {
                 return undefined;
             }
             const replayDraft = { ...draft, messages };
-            return { draft: replayDraft, mapped: adaptPayload(replayDraft, admitted, times) };
+            return {
+                draft: replayDraft,
+                mapped: adaptPayload(replayDraft, admitted, times, anchorTimesOnly),
+            };
         };
         /** Serve a replay committed to a draft copy, with its saved checkpoint head. */
         const adoptReplay = (replayed: SessionContext) => {
@@ -2377,11 +2424,7 @@ export async function registerContext(context: V2Context) {
                         }),
                     );
                 }
-                if (readsMessageTimes)
-                    messageTimes = reader.messageTimes(
-                        draft.sessionID,
-                        draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
-                    );
+                messageTimes = readTimes(reader, draft.messages);
             } finally {
                 reader.close();
             }
@@ -2406,7 +2449,7 @@ export async function registerContext(context: V2Context) {
                     nativeFoldReplay.invalidate(draft.sessionID, true);
                 }
             }
-            const mapped = adaptPayload(draft, admitted, messageTimes);
+            const mapped = adaptPayload(draft, admitted, messageTimes, anchorTimesOnly);
             bindSystemDateRequestIdentity(mapped, draft);
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },

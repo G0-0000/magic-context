@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as models from "../../shared/models-dev-cache";
 import {
-    firstDivergence,
     type HostVersion,
     installBusyAdmission,
     installTransientFailure,
@@ -11,8 +10,8 @@ import {
     type Oc2ContextFixture,
     oc2ContextFixture,
     prose,
+    replayDifference,
 } from "./__tests__/oc2-context.fixture";
-import type { V2Message } from "./types";
 
 /*
  * OpenCode 2 in TypeScript mode, busy database: a turn replays the last good
@@ -40,38 +39,6 @@ const AREA = "oc2-replay";
 
 function bytes(value: unknown): string {
     return JSON.stringify(value);
-}
-
-/**
- * The messages a saved request served through its anchor: everything it
- * served except the host messages that came after the anchor message.
- */
-function savedPrefix(saved: Pass, anchorId: string): V2Message[] {
-    const anchor = saved.inputIds.indexOf(anchorId);
-    if (anchor < 0) throw new Error(`anchor ${anchorId} not in the saved input`);
-    const after = new Set(saved.inputIds.slice(anchor + 1));
-    const first = saved.draft.messages.findIndex((message) => message.id && after.has(message.id));
-    return first < 0 ? saved.draft.messages : saved.draft.messages.slice(0, first);
-}
-
-/**
- * Null when `replay` served exactly the saved request's system and messages
- * through the anchor, byte for byte, followed by the host's messages after the
- * anchor and nothing else; otherwise where it differs.
- */
-function replayDifference(replay: Attempt, saved: Pass, anchorId: string): string | null {
-    if (bytes(replay.draft.system) !== bytes(saved.draft.system))
-        return `system ${bytes(replay.draft.system).slice(0, 160)} !== ${bytes(saved.draft.system).slice(0, 160)}`;
-    const prefix = savedPrefix(saved, anchorId);
-    const served = replay.draft.messages.slice(0, prefix.length);
-    if (bytes(served) !== bytes(prefix))
-        return `prefix ${firstDivergence(prefix, served) ?? "length"}`;
-    const tail = replay.draft.messages
-        .slice(prefix.length)
-        .flatMap((message) => (message.id ? [message.id] : []));
-    const expected = replay.inputIds.slice(replay.inputIds.indexOf(anchorId) + 1);
-    if (bytes(tail) !== bytes(expected)) return `tail ${bytes(tail)} !== ${bytes(expected)}`;
-    return null;
 }
 
 function slotKey(session: string): string | undefined {
