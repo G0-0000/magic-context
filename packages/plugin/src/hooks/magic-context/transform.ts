@@ -231,6 +231,7 @@ import {
     defaultCompactionMarkerStrategy,
     evaluateEmergencyFailClosed,
     runPostTransformPhase,
+    servesThinkingBlock,
 } from "./transform-postprocess-phase";
 import { logTransformTiming, withTransformTimingSummary } from "./transform-stage-logger";
 import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
@@ -3560,19 +3561,23 @@ export function createTransform(deps: TransformDeps) {
                 throw new Error("Cannot persist the last-good untagged-message record");
         }
         // The system date rides a bust, but on a prefix-bound model only one
-        // that leaves no open-turn signed thinking behind the system prompt: an
-        // unheld bust that kept the turn's thinking (it edited nothing in front
-        // of it) must not change the system prompt in front of it either. The
-        // last argument carries the same fact to an idle-expired request, whose
-        // date would otherwise advance without asking for permission.
+        // that serves no signed thinking: every such block is bound to the
+        // system prompt in front of it, whether the bust kept it (it edited
+        // nothing in front of it) or a hold did. The served array, after every
+        // strip and any recovered prefix, is what decides. The last argument
+        // carries the same fact to an idle-expired request, whose date would
+        // otherwise advance without asking for permission.
+        const signedThinkingServed =
+            isPrefixBoundThinkingModel(modelForBudget?.providerID, modelForBudget?.modelID) &&
+            servesThinkingBlock(messages);
         finishSystemDateRefresh(
             deps.historyRefreshSessions,
             dateRequest,
             (postTransformResult.bustedThisPass &&
                 !activeThinkingPrefixHold &&
-                postTransformResult.openTurnSignedThinkingKept !== true) ||
+                !signedThinkingServed) ||
                 postTransformResult.thinkingReleasedForFit === true,
-            postTransformResult.openTurnSignedThinkingKept === true,
+            signedThinkingServed,
         );
         if (
             activeThinkingPrefixHold &&

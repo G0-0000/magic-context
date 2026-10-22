@@ -550,16 +550,20 @@ export function createSystemPromptHashHandler(deps: {
             dateRequest,
         );
         // An idle-expired request rewrites the provider cache, but a signed
-        // thinking block of the open turn that the messages pass kept on the wire
-        // stays bound to every byte in front of it, the system date included. On
-        // a prefix-bound model the date therefore advances on such a request only
-        // when the messages pass left no open-turn signed thinking (it stripped
-        // the turn or there was none), as on any other bust.
+        // thinking block the messages pass kept on the wire stays bound to every
+        // byte in front of it, the system date included. On a prefix-bound model
+        // the date therefore moves only when the messages pass served no signed
+        // thinking (it stripped it or there was none), as on any other bust.
         const signedThinkingKept = systemDateSignedThinkingKept(
             deps.historyRefreshSessions,
             dateRequest,
         );
-        const idleDateMayAdvance = idleCacheExpired && signedThinkingKept !== true;
+        // The one rule for moving the date: the request must be allowed to
+        // rewrite the prefix (a permitted rebuild, or an expired provider cache)
+        // and its messages pass must have served no signed thinking. A held pass
+        // keeps that thinking even when it is permitted to apply other work.
+        const systemDateMayMove = (rewrite: boolean, keptSignedThinking: boolean | undefined) =>
+            (rewrite || idleCacheExpired) && keptSignedThinking !== true;
         const prefixBoundModel = isPrefixBoundThinkingModel(
             liveModel?.providerID,
             liveModel?.modelID,
@@ -569,7 +573,7 @@ export function createSystemPromptHashHandler(deps: {
         // If the system hook runs first, wait for a permitted messages rebuild;
         // if the messages hook ran first, use its completed rebuild decision.
         // On a prefix-bound model an idle-expired request waits the same way,
-        // for the messages pass to say whether it kept the open turn's thinking.
+        // for the messages pass to say whether it served signed thinking.
         let deferredDateRefresh = false;
         if (
             currentDate &&
@@ -584,7 +588,7 @@ export function createSystemPromptHashHandler(deps: {
                 deps.historyRefreshSessions,
                 dateRequest,
                 (permitted, keptSignedThinking) => {
-                    if (!permitted && !(idleCacheExpired && keptSignedThinking !== true)) {
+                    if (!systemDateMayMove(permitted, keptSignedThinking)) {
                         deps.systemPromptRefreshSessions.add(sessionId);
                         return;
                     }
@@ -616,11 +620,13 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
         const dateMayAdvance =
-            (idleDateMayAdvance && !deferredDateRefresh) ||
             contentOrPresetChanged ||
-            (isCacheBusting &&
-                !deferredDateRefresh &&
-                (dateRequest ? rewritePermission === true : rewritePermission !== false));
+            (!deferredDateRefresh &&
+                systemDateMayMove(
+                    isCacheBusting &&
+                        (dateRequest ? rewritePermission === true : rewritePermission !== false),
+                    signedThinkingKept,
+                ));
 
         if (currentDate && !stickyDate) {
             setStickyDate(currentDate);
@@ -796,7 +802,9 @@ export function createSystemPromptHashHandler(deps: {
                 !currentDate ||
                 currentDate === stickyDate ||
                 !dateRequest ||
-                rewritePermission === true)
+                // A permitted pass that kept signed thinking left the date
+                // frozen; keep the refresh for the pass that can move it.
+                (rewritePermission === true && signedThinkingKept !== true))
         ) {
             deps.systemPromptRefreshSessions.delete(sessionId);
         }

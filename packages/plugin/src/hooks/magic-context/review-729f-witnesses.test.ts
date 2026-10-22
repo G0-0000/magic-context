@@ -15,6 +15,7 @@
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -347,6 +348,21 @@ function session(
         clearHead() {
             clearCachedM0M1(db, sessionId);
         },
+        /** Publish a history compartment covering the source up to `endIndex`. */
+        compartment(endIndex: number) {
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: endIndex + 1,
+                    startMessageId: String(source[0]!.info.id),
+                    endMessageId: String(source[endIndex]!.info.id),
+                    title: "history",
+                    content: "U: summarized the start of the task",
+                },
+            ]);
+            historyRefreshSessions.add(sessionId);
+        },
         cachedM0() {
             return getOrCreateSessionMeta(db, sessionId).cachedM0Bytes?.toString() ?? null;
         },
@@ -569,6 +585,50 @@ for (const host of HOSTS)
                     logs: s.relevantLogs(),
                 });
                 expect(s.problems).toEqual([]);
+            },
+            60_000,
+        );
+
+// ── Managed mode: an idle-expired pass that holds the open signed turn (heavy
+// reasoning a step back) keeps the turn's thinking on the wire, so the system
+// date in front of it must stay frozen after a day rollover until a pass strips
+// the thinking or the turn ends. The turn's opening user message is first
+// summarized into history and trimmed from the array, as in a long turn; the
+// thinking the hold keeps then follows no real user message in the array.
+for (const host of HOSTS)
+    for (const systemFirst of [true, false])
+        it.skipIf(!ENABLED)(
+            `${host}: a held idle-expired pass of a signed turn keeps the date frozen after a day rollover (system ${systemFirst ? "first" : "after messages"})`,
+            async () => {
+                const s = session(host, `r729f-date-held-idle-${host}-${systemFirst}`);
+                s.user("long task");
+                await s.pass("2026-10-21", { systemFirst });
+                for (let n = 1; n <= 2; n++) {
+                    s.step(n, 200);
+                    await s.pass("2026-10-21", { systemFirst });
+                }
+                // History covers the user message and the first step; a flush
+                // publishes it and trims them from the array.
+                s.compartment(1);
+                s.flush();
+                s.step(3, 200);
+                await s.pass("2026-10-21", { systemFirst });
+                s.step(4, 2_400);
+                await s.pass("2026-10-21", { systemFirst });
+                s.step(5, 200);
+                await s.pass("2026-10-22", { systemFirst });
+                s.idle();
+                s.step(6, 200);
+                const out = await s.pass("2026-10-22", { systemFirst });
+                report(`${host} date held idle systemFirst=${systemFirst}`, s, {
+                    prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                    kept: signedSignatures(out.messages ?? []),
+                    roles: (out.messages ?? []).map((m) => `${String(m.info.id)}`),
+                    logs: s.relevantLogs().filter((l) => /date|hold|frozen|strip/i.test(l)),
+                });
+                expect(s.problems).toEqual([]);
+                // The case only means something if the thinking is still served.
+                expect(signedSignatures(out.messages ?? []).length).toBeGreaterThan(0);
             },
             60_000,
         );

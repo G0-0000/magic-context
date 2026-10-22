@@ -649,6 +649,31 @@ function proactiveStripStartIndex(args: {
 }
 
 /**
+ * True when the array about to be served still carries a signed thinking
+ * block: a reasoning part with content and Anthropic metadata, or a redacted
+ * one. On a prefix-bound model such a block is bound to every byte in front of
+ * it, the system prompt included, so this is the fact that decides whether the
+ * system date may move. It reads the outcome of every strip the pass made
+ * instead of predicting it, so it also covers blocks of a turn whose opening
+ * user message was trimmed away.
+ */
+export function servesThinkingBlock(messages: readonly MessageLike[]): boolean {
+    for (const message of messages) {
+        if (message.info.role !== "assistant") continue;
+        for (const part of message.parts) {
+            if (!isRecord(part) || part.ignored === true) continue;
+            if (part.type === "redacted_thinking") return true;
+            if (part.type !== "reasoning" && part.type !== "thinking") continue;
+            const anthropic = isRecord(part.metadata) ? part.metadata.anthropic : undefined;
+            if (!isRecord(anthropic)) continue;
+            if (anthropic.redactedData !== undefined) return true;
+            if (typeof part.text === "string" && part.text !== "") return true;
+        }
+    }
+    return false;
+}
+
+/**
  * True for a part OpenCode's Anthropic adapter removes before the request is
  * sent: an empty text or reasoning part (see `modelAcceptsEmptyContent`). The
  * host's own empty sentinels rely on the same filter.
@@ -1775,12 +1800,6 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
-    /**
-     * A prefix-bound model's open turn still serves signed thinking after this
-     * pass (it was neither stripped nor absent). Anything in front of it, the
-     * system prompt included, must not change on this pass.
-     */
-    openTurnSignedThinkingKept?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -2237,6 +2256,7 @@ export async function runPostTransformPhase(
         args.compactionModeTransition === true &&
         args.thinkingBindingRecoveryEnabledForModel === true
     ) {
+        sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
         releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =
@@ -2404,6 +2424,10 @@ export async function runPostTransformPhase(
                 // prefix-bound model invalidates as well. That fold is the
                 // rewrite, so the blocks leave the wire on the same pass and
                 // stay stripped on every later one.
+                sessionLog(
+                    args.sessionId,
+                    "compaction-off fold changed the head: stripping signed thinking",
+                );
                 releaseThinkingForRewrite(false, true);
             }
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
@@ -5000,10 +5024,6 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
-        openTurnSignedThinkingKept:
-            args.thinkingBindingRecoveryEnabledForModel === true &&
-            activeThinkingTurn &&
-            !rewritingSignedPrefix,
     };
 }
 

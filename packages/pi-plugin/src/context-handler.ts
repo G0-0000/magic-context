@@ -8552,6 +8552,11 @@ async function runCompactionOffPipeline(
 				served === null ||
 				JSON.stringify(served.slice(0, headCount)) !==
 					JSON.stringify((args.messages as unknown[]).slice(0, headCount));
+			if (headChangedUnderSignedThinking)
+				sessionLog(
+					args.sessionId,
+					"compaction-off fold changed the head: stripping signed thinking",
+				);
 		}
 	}
 	// The head changed in front of signed thinking (an open signed turn's, or

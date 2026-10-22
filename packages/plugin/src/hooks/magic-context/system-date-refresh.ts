@@ -12,7 +12,7 @@ interface RequestState extends SystemDateRequest {
     systemDone: boolean;
     messagesSeen: boolean;
     permitted: boolean | undefined;
-    /** The messages pass left the open turn's signed thinking on the wire. */
+    /** The messages pass left signed thinking on the wire. */
     signedThinkingKept: boolean | undefined;
     ambiguous: boolean;
     waiting?: (permitted: boolean, signedThinkingKept: boolean | undefined) => void;
@@ -157,9 +157,9 @@ export function systemDateRefreshPermission(
     return current?.ambiguous ? undefined : current?.permitted;
 }
 /**
- * Whether the paired messages pass reported that it left the open turn's
- * signed thinking on the wire; undefined until that pass has finished, or when
- * the pairing is ambiguous.
+ * Whether the paired messages pass reported that it left signed thinking on
+ * the wire; undefined until that pass has finished, or when the pairing is
+ * ambiguous.
  */
 export function systemDateSignedThinkingKept(
     history: Set<string>,
@@ -193,8 +193,8 @@ function retire(history: Set<string>, current: RequestState): void {
 }
 /**
  * Records the messages pass's decision. `permitted` lets a queued date refresh
- * ride this pass's rebuild. `signedThinkingKept` says the pass left the open
- * turn's signed thinking on the wire, so nothing in front of it, the system
+ * ride this pass's rebuild. `signedThinkingKept` says the pass served signed
+ * thinking, so nothing in front of it, the system
  * date included, may change on this request even when the provider cache
  * expired; omit it when the pass cannot tell.
  */
