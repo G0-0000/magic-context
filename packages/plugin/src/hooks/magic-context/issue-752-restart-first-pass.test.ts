@@ -170,20 +170,27 @@ function newProcess(args: {
     pending: Set<string>;
     model: Model;
     liveUsage?: ContextUsage;
+    usageMap?: Map<string, unknown>;
 }) {
     return createTransform({
         tagger: createTagger(),
         scheduler: { shouldExecute: mock(() => "defer" as const) },
-        contextUsageMap: new Map(
-            args.liveUsage
-                ? [
-                      [
-                          args.sessionId,
-                          { usage: args.liveUsage, updatedAt: Date.now(), hasUsageTokens: true },
-                      ],
-                  ]
-                : [],
-        ),
+        contextUsageMap:
+            (args.usageMap as never) ??
+            new Map(
+                args.liveUsage
+                    ? [
+                          [
+                              args.sessionId,
+                              {
+                                  usage: args.liveUsage,
+                                  updatedAt: Date.now(),
+                                  hasUsageTokens: true,
+                              },
+                          ],
+                      ]
+                    : [],
+            ),
         db: args.db,
         liveModelBySession: new Map([[args.sessionId, args.model]]),
         historyRefreshSessions: new Set<string>(),
@@ -208,6 +215,14 @@ type PassOptions = {
     /** The provider's last reading, as a percentage of the usable window. */
     providerPercentage?: number;
     model?: Model;
+    /** The request the measured pass sees, when it grew while the host was down. */
+    measuredShape?: Shape;
+    /**
+     * After the measured pass, the provider's reading of that request (as a
+     * percentage of the usable window); a second pass then runs in the same
+     * process with it, as the next turn would.
+     */
+    providerReadingAfter?: number;
 };
 
 /**
@@ -257,14 +272,54 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
     const queued = target === "newest" ? newestTool : tools.at(-1)!;
     queuePendingOp(db, sessionId, queued.tagNumber, "drop");
 
-    const pass = restarted ? newProcess({ db, sessionId, pending, model }) : first;
+    const bootUsage = new Map<string, unknown>();
+    const pass = restarted
+        ? newProcess({ db, sessionId, pending, model, usageMap: bootUsage })
+        : first;
     requestPendingMaterialization(pending, sessionId, origin);
+    const measuredShape = options.measuredShape ?? shape;
     const lines: string[] = [];
     const spy = spyOn(logger, "sessionLog").mockImplementation((id: string, ...rest: unknown[]) => {
         if (id === sessionId) lines.push(rest.map(String).join(" "));
     });
+    let second: {
+        pendingAfterFirst: number;
+        pendingAfter: number;
+        droppedTools: number;
+        passLog: string[];
+    } | null = null;
     try {
-        await pass({}, { messages: sessionMessages(sessionId, shape) });
+        await pass({}, { messages: sessionMessages(sessionId, measuredShape) });
+        if (options.providerReadingAfter !== undefined) {
+            const pendingAfterFirst = getPendingOps(db, sessionId).length;
+            const now = Date.now();
+            // What the event handler records when the provider answers.
+            bootUsage.set(sessionId, {
+                usage: {
+                    percentage: options.providerReadingAfter,
+                    inputTokens: Math.round((liveLimit * options.providerReadingAfter) / 100),
+                },
+                updatedAt: now,
+                lastResponseTime: now,
+                hasUsageTokens: true,
+            });
+            updateSessionMeta(db, sessionId, { lastResponseTime: now });
+            const firstLines = lines.length;
+            await pass({}, { messages: sessionMessages(sessionId, measuredShape) });
+            second = {
+                pendingAfterFirst,
+                pendingAfter: getPendingOps(db, sessionId).length,
+                droppedTools: getTagsBySession(db, sessionId).filter(
+                    (tag) => tag.type === "tool" && tag.status === "dropped",
+                ).length,
+                passLog: lines
+                    .slice(firstLines)
+                    .filter((line) =>
+                        /transform scheduler:|heuristics WILL|pending ops/.test(line),
+                    ),
+            };
+            lines.splice(firstLines);
+        }
     } finally {
         spy.mockRestore();
     }
@@ -283,8 +338,9 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
             (tag) => tag.type === "tool" && tag.status === "dropped",
         ).length,
         pendingAfter: getPendingOps(db, sessionId).length,
+        second,
         passLog: lines.filter((line) =>
-            /unknown provider usage|transform scheduler:|first pass reset|heuristics WILL|pending ops|emergency tiered drop/.test(
+            /over-window first pass|unknown provider usage|transform scheduler:|first pass reset|heuristics WILL|pending ops|emergency tiered drop/.test(
                 line,
             ),
         ),
@@ -301,6 +357,10 @@ const MANY_SMALL_FORCE_BAND: Shape = { tools: 60, chars: 2_050 };
 // Sized so the calibrated local count reads inside the force band and below
 // 95% on the seeded model.
 const FORCE_BAND_SHAPE: Shape = { tools: 8, chars: 18_800 };
+// FEW_LARGE grown by three more tool outputs: about 90% by calibrated count.
+const GROWN_TO_FORCE_BAND: Shape = { tools: 11, chars: 12_000 };
+// FEW_LARGE grown to clearly past the window (over the 110% margin).
+const GROWN_PAST_WINDOW: Shape = { tools: 16, chars: 12_000 };
 const TWO_HOURS = 2 * 60 * 60 * 1000;
 
 describe("issue 752: first pass after a restart", () => {
@@ -401,5 +461,46 @@ describe("issue 752: first pass after a restart", () => {
         expect(result.bootReading ?? 0).toBeLessThan(95);
         expect(result.pendingAfter).toBe(1);
         expect(result.droppedTools).toBe(0);
+    });
+    // The session grew from 60% to about 90% while the host was down. On the
+    // first pass the reading comes from the local count alone (the saved one
+    // was taken against another limit), so the pending boundary repair prices
+    // the pass but nothing rewrites the cache: the queued drop waits. That
+    // request still fits the window. The provider then measures it at 90%, and
+    // the next pass, carrying that real reading, arms the force band and
+    // applies the queued drop.
+    it("a session that grew to about 90% during downtime waits for the provider's reading before force reclaims", async () => {
+        const result = await flushPass(true, {
+            origin: "boundary_repair",
+            target: "oldest",
+            savedReadingLimit: 40_000,
+            measuredShape: GROWN_TO_FORCE_BAND,
+            providerReadingAfter: 90,
+        });
+        console.log("ISSUE_752_UNIT boot-grown-force-band", JSON.stringify(result));
+        expect(result.bootReading ?? 0).toBeGreaterThanOrEqual(85);
+        expect(result.bootReading ?? 0).toBeLessThan(95);
+        expect(result.second?.pendingAfterFirst).toBe(1);
+        expect(result.second?.passLog.some((line) => /pending ops WILL APPLY/.test(line))).toBe(
+            true,
+        );
+        expect(result.pendingAfter).toBe(0);
+        expect(result.droppedTools).toBeGreaterThanOrEqual(1);
+    });
+
+    // A session Magic Context holds no state for, whose history grew clearly
+    // past the window while the host was down, is caught by the over-window
+    // first-pass check: it reads at least 95% and the force ride applies the
+    // queued drop on the same pass.
+    it("a session that grew past the window during downtime is still put in the emergency band on its first pass", async () => {
+        const result = await flushPass(true, {
+            origin: "boundary_repair",
+            target: "oldest",
+            measuredShape: GROWN_PAST_WINDOW,
+        });
+        console.log("ISSUE_752_UNIT boot-grown-over-window", JSON.stringify(result));
+        expect(result.passLog.some((line) => /over-window first pass/.test(line))).toBe(true);
+        expect(result.passLog.some((line) => /pending ops WILL APPLY/.test(line))).toBe(true);
+        expect(result.pendingAfter).toBe(0);
     });
 });
