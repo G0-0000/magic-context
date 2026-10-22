@@ -153,7 +153,11 @@ import {
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
 } from "./inject-compartments";
-import { protectNewTagMutations, retainedActiveThinkingParts } from "./latest-assistant-turn";
+import {
+    isAnthropicThinkingPart,
+    protectNewTagMutations,
+    retainedActiveThinkingParts,
+} from "./latest-assistant-turn";
 import { markNoteNudgeDelivered, observeNoteNudgeServe, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
@@ -173,6 +177,7 @@ import {
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
 import {
+    isAnthropicFamilyRoute,
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
     replaySentinelByMessageIds,
@@ -649,25 +654,33 @@ function proactiveStripStartIndex(args: {
 }
 
 /**
- * True when the array about to be served still carries a signed thinking
- * block: a reasoning part with content and Anthropic metadata, or a redacted
- * one. On a prefix-bound model such a block is bound to every byte in front of
- * it, the system prompt included, so this is the fact that decides whether the
- * system date may move. It reads the outcome of every strip the pass made
- * instead of predicting it, so it also covers blocks of a turn whose opening
- * user message was trimmed away.
+ * True when the array about to be served still carries signed thinking. A
+ * part counts by the same route rule that finds an open signed turn
+ * (`isAnthropicThinkingPart`): on an Anthropic-family route (Anthropic,
+ * Bedrock, Vertex, Copilot) every thinking part counts, whichever metadata key
+ * holds its signature. Parts that never reach the provider do not count: an
+ * ignored part, or an empty one that carries no redacted payload. On a
+ * prefix-bound model such a block is bound to every byte in front of it, the
+ * system prompt included, so this is the fact that decides whether the system
+ * date may move. It reads the outcome of every strip the pass made instead of
+ * predicting it, so it also covers blocks of a turn whose opening user message
+ * was trimmed away.
  */
-export function servesThinkingBlock(messages: readonly MessageLike[]): boolean {
+export function servesThinkingBlock(
+    messages: readonly MessageLike[],
+    providerID: string | undefined,
+    modelID: string | undefined,
+): boolean {
+    const familyRoute = isAnthropicFamilyRoute(providerID, modelID);
     for (const message of messages) {
         if (message.info.role !== "assistant") continue;
         for (const part of message.parts) {
-            if (!isRecord(part) || part.ignored === true) continue;
+            if (!isAnthropicThinkingPart(part, familyRoute) || part.ignored === true) continue;
             if (part.type === "redacted_thinking") return true;
-            if (part.type !== "reasoning" && part.type !== "thinking") continue;
-            const anthropic = isRecord(part.metadata) ? part.metadata.anthropic : undefined;
-            if (!isRecord(anthropic)) continue;
-            if (anthropic.redactedData !== undefined) return true;
             if (typeof part.text === "string" && part.text !== "") return true;
+            const records = isRecord(part.metadata) ? Object.values(part.metadata) : [];
+            if (records.some((record) => isRecord(record) && record.redactedData !== undefined))
+                return true;
         }
     }
     return false;

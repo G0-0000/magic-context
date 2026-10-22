@@ -6,7 +6,8 @@
 // compaction-off session over several days and restarts, and a simulated
 // store-generation rebase. Skipped unless MC_REVIEW_729G=1. A failing case
 // means invalid signed thinking was served, or (the multi-day case) that the
-// served date fell days behind; each case's comment says which.
+// served date did not follow its intended rule: frozen in compaction-off,
+// current in managed mode; each case's comment says why.
 //
 // The harness is a copy of the one in review-729f-witnesses.test.ts with two
 // additions: the session can run on another route of a prefix-bound model
@@ -593,20 +594,23 @@ for (const host of HOSTS)
                 60_000,
             );
 
-// ── Finding: the system date can stay frozen indefinitely. It now moves only on
-// a request that serves no signed thinking at all. Compaction-off never strips
-// earlier turns' thinking on its own (only a fold that changes m[0]/m[1], or a
-// mode switch, does), and the date is now restored after a restart, so a
-// compaction-off session on a prefix-bound model whose docs and memory do not
-// change keeps the date of its first request: here five days of one
-// idle-expired turn per day. Managed mode is run alongside for comparison: its
-// idle-expired request rebuilds the prefix and strips the earlier thinking, so
-// the date can follow. The case asserts that the date is current by the last
-// day; red means the model is told a date that is days old.
+// ── The system date can stay frozen for days. It moves only on a request that
+// serves no signed thinking at all. Compaction-off never strips earlier turns'
+// thinking on its own (only a fold that changes m[0]/m[1], or a mode switch,
+// does), and the date is restored after a restart, so a compaction-off session
+// on a prefix-bound model whose docs and memory do not change keeps the date
+// of its first request: here five days of one idle-expired turn per day. That
+// is the intended trade: a stale date only costs the model accuracy about
+// today, while a moved date in front of served signed thinking invalidates
+// that thinking and the provider rejects the request. So compaction-off
+// asserts the first day's date on every day. Managed mode is run alongside:
+// its idle-expired request rebuilds the prefix and strips the earlier
+// thinking, so its date follows the calendar and the case asserts the current
+// date by the last day.
 for (const host of HOSTS)
     for (const compactionOff of [true, false])
         it.skipIf(!ENABLED)(
-            `${host}: ${compactionOff ? "compaction-off" : "managed"}: one idle-expired turn a day for five days serves the current date by the last day`,
+            `${host}: ${compactionOff ? "compaction-off" : "managed"}: one idle-expired turn a day for five days serves ${compactionOff ? "the first day's frozen date throughout" : "the current date by the last day"}`,
             async () => {
                 const s = session(host, `r729g-date-days-${host}-${compactionOff}`, {
                     compactionOff,
@@ -631,7 +635,8 @@ for (const host of HOSTS)
                 }
                 report(`${host} off=${compactionOff} five days`, s, { served });
                 expect(s.problems).toEqual([]);
-                expect(served.at(-1)).toBe(days.at(-1));
+                if (compactionOff) expect(served).toEqual(days.map(() => days[0]));
+                else expect(served.at(-1)).toBe(days.at(-1));
             },
             60_000,
         );

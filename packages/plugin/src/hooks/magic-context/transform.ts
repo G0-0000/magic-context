@@ -3569,7 +3569,7 @@ export function createTransform(deps: TransformDeps) {
         // otherwise advance without asking for permission.
         const signedThinkingServed =
             isPrefixBoundThinkingModel(modelForBudget?.providerID, modelForBudget?.modelID) &&
-            servesThinkingBlock(messages);
+            servesThinkingBlock(messages, modelForBudget?.providerID, modelForBudget?.modelID);
         finishSystemDateRefresh(
             deps.historyRefreshSessions,
             dateRequest,

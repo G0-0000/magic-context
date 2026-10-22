@@ -500,11 +500,30 @@ export function createSystemPromptHashHandler(deps: {
         if (liveSystemContent.length === 0) return;
         const previousHash = sessionMetaEarly?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
-        // When the durable system-prompt hash is cleared, the new host must
-        // establish a new baseline. Discard the session's sticky date instead of
-        // reusing the date line frozen for the earlier host projection.
-        if (!hasPersistedHash) stickyDateBySession.delete(sessionId);
+        // When the durable system-prompt hash is cleared (a store-generation
+        // rebase, a host conversion), the request establishes a new baseline.
+        // Its date still sits in front of whatever signed thinking the request
+        // serves, so the previous sticky date stays in force and the new date is
+        // adopted only through the same rule as any other date change
+        // (`systemDateMayMove` below). The previous date is dropped only when the
+        // new prompt carries a different number of host date fields, so it
+        // cannot be applied position by position; the prompt layout changed
+        // then, and the date with it.
         let stickyDate = stickyDateBySession.get(sessionId);
+        if (!hasPersistedHash) {
+            const previous = stickyDate ?? recordedStickyDate(sessionId);
+            const live = systemPromptDates(liveSystemContent).live;
+            const fieldCount = (dates: string | undefined) =>
+                dates === undefined ? 0 : (JSON.parse(dates) as unknown[]).length;
+            stickyDate =
+                previous !== undefined &&
+                live !== undefined &&
+                fieldCount(previous) === fieldCount(live)
+                    ? previous
+                    : undefined;
+            if (stickyDate === undefined) stickyDateBySession.delete(sessionId);
+            else stickyDateBySession.set(sessionId, stickyDate);
+        }
         // A new process has no sticky date in memory. Restore the recorded one
         // when it reproduces the persisted hash: that is the date the session's
         // requests carried before the restart, and the signed thinking they
@@ -564,6 +583,12 @@ export function createSystemPromptHashHandler(deps: {
         // A pass that cannot report it (an ambiguous pairing, the Rust transform)
         // counts as not kept, as before. A held pass keeps that thinking even
         // when it is permitted to apply other work, so its date stays frozen.
+        // The date can therefore lag for days: compaction-off strips earlier
+        // turns' thinking only when a fold changes m[0]/m[1] or the mode
+        // switches, so a session whose docs and memory stay the same keeps its
+        // first date. That is deliberate. A stale date costs the model some
+        // accuracy about today; a moved date in front of served signed thinking
+        // invalidates it, and the provider rejects the request.
         const systemDateMayMove = (rewrite: boolean, keptSignedThinking: boolean | undefined) =>
             (rewrite || idleCacheExpired) && keptSignedThinking !== true;
         const prefixBoundModel = isPrefixBoundThinkingModel(
