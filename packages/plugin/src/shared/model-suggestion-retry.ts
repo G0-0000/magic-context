@@ -187,8 +187,7 @@ export function isHostTimeoutError(error: unknown): boolean {
  * The model chain cut this attempt short because the model had produced nothing
  * (no streamed text, reasoning, tool call, or token usage) by the first-output
  * deadline. A model that has not answered at all is treated like a provider
- * failure: the prompt itself never reached a point where it could be the
- * problem, so the next configured model gets the rest of the time.
+ * failure, so the next configured model gets the rest of the time.
  */
 export class ModelProducedNoOutputError extends Error {
     constructor(readonly waitedMs: number) {
@@ -460,9 +459,9 @@ async function abortChildRun(client: Client, sessionId: string): Promise<void> {
  *     level (e.g. historian's MAX_HISTORIAN_RETRIES loop). This covers an
  *     attempt that ran out its whole time, whether or not the model answered.
  *
- * A `ModelProducedNoOutputError` is the exception: the model never answered
- * before the first-output deadline, so the prompt cannot be what failed, and
- * the next model gets the time that is left.
+ * A `ModelProducedNoOutputError` is the exception: no output was observed
+ * before the first-output deadline, which points at the model rather than the
+ * prompt, so the chain gives the next model the time that is left.
  *
  * Everything else (auth errors, ProviderModelNotFoundError without suggestion,
  * rate limits, transient network failures, etc.) is considered retryable on a
