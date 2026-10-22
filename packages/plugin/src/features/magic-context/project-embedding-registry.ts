@@ -1365,22 +1365,22 @@ export function registerProjectEmbedding(
         const pooling = getCachedLocalEmbeddingPooling(
             resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
         );
-        if (pooling) {
+        if (pooling?.status === "unresolved" || !pooling) {
+            logLocalEmbeddingPoolingUnavailableOnce(
+                resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+                pooling?.reason ??
+                    "pooling metadata has not been resolved by the background embedding bootstrap",
+                log,
+            );
+        } else {
             logLocalEmbeddingPoolingDecisionOnce(
                 resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
                 pooling,
                 log,
             );
-        } else {
-            logLocalEmbeddingPoolingUnavailableOnce(
-                resolvedConfig.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
-                "pooling metadata has not been resolved by the background embedding bootstrap",
-                log,
-            );
         }
-        // Keep the project's embedding provider inactive until pooling metadata is known;
-        // while waiting, leave persisted identities unchanged and retry from the background bootstrap.
-        if (pooling?.status !== "ready") {
+        // Only a resolved, unsupported declaration stays inactive; unresolved metadata uses legacy mean vectors.
+        if (pooling?.status === "unsupported") {
             return registerProjectInObservationMode(
                 db,
                 projectIdentity,

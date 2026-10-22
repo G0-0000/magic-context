@@ -18,7 +18,10 @@ import {
     LocalEmbeddingProvider,
     resolveLocalEmbeddingRuntime,
 } from "./embedding-local";
-import { __setLocalEmbeddingPoolingForTests } from "./local-embedding-pooling";
+import {
+    __setLocalEmbeddingPoolingForTests,
+    preflightLocalEmbeddingPooling,
+} from "./local-embedding-pooling";
 
 const originalHfEndpoint = process.env.HF_ENDPOINT;
 
@@ -44,6 +47,7 @@ function missingNativeRuntimeError(): Error & { code: string } {
 function fakeTransformersModule(options?: {
     onPipeline?: (pipelineOptions: { dtype: string; device?: string }) => void;
     onInference?: (pipelineOptions: { pooling: string; normalize: boolean }) => void;
+    inferenceVectors?: Partial<Record<"mean" | "cls" | "last_token", number[]>>;
     env?: Record<string, unknown>;
 }): Record<string, unknown> {
     return {
@@ -60,7 +64,10 @@ function fakeTransformersModule(options?: {
                 inferenceOptions: { pooling: string; normalize: boolean },
             ) => {
                 options?.onInference?.(inferenceOptions);
-                return { data: new Float32Array([0, 1]), dims: [1, 2] };
+                const data = options?.inferenceVectors?.[
+                    inferenceOptions.pooling as "mean" | "cls" | "last_token"
+                ] ?? [0, 1];
+                return { data: new Float32Array(data), dims: [1, data.length] };
             };
         },
     };
@@ -343,22 +350,50 @@ describe("LocalEmbeddingProvider declared pooling", () => {
         }
     });
 
-    test("does not run inference until offline pooling metadata is resolved", async () => {
+    test("keeps legacy mean vectors and identity when pooling metadata fetch fails", async () => {
         const cacheDir = createTestTempDirFromPath(join(tmpdir(), "mc-pooling-offline-"));
         const model = "fixture/offline-pooling";
-        let pipelineCalls = 0;
+        const config = { provider: "local" as const, model };
+        const legacyIdentity = getEmbeddingProviderIdentity(config);
+        const calls: Array<{ pooling: string; normalize: boolean }> = [];
+        const baselineMeanVector = new Float32Array([0.6, 0.8]);
         __setLocalEmbeddingPoolingForTests(model, null);
         try {
+            const metadata = await preflightLocalEmbeddingPooling(model, {
+                modelCacheDir: cacheDir,
+                fetcher: async () => {
+                    throw new Error("network is unavailable");
+                },
+                logger: () => {},
+            });
+            expect(metadata).toMatchObject({
+                status: "unresolved",
+                pooling: "mean",
+                normalize: true,
+            });
+            expect(getEmbeddingProviderIdentity(config)).toBe(legacyIdentity);
+
             __setLocalEmbeddingTestHooks({
                 host: () => ({ isElectron: false, isBun: false }),
                 importTransformers: async () =>
-                    fakeTransformersModule({ onPipeline: () => pipelineCalls++ }),
+                    fakeTransformersModule({
+                        onInference: (options) => calls.push(options),
+                        inferenceVectors: {
+                            mean: Array.from(baselineMeanVector),
+                            cls: [0.9, 0.1],
+                        },
+                    }),
                 modelCacheDir: () => cacheDir,
                 log: () => {},
             });
             const provider = new LocalEmbeddingProvider(model);
-            expect(await provider.embed("must not be embedded")).toBeNull();
-            expect(pipelineCalls).toBe(0);
+            expect(provider.modelId).toBe(legacyIdentity);
+            const actual = await provider.embed("offline legacy content");
+            expect(actual).not.toBeNull();
+            expect(new Uint8Array(actual!.buffer)).toEqual(
+                new Uint8Array(baselineMeanVector.buffer),
+            );
+            expect(calls).toEqual([{ pooling: "mean", normalize: true }]);
             await provider.dispose();
         } finally {
             rmSync(cacheDir, { recursive: true, force: true });

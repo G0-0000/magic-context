@@ -8,7 +8,7 @@ import { writeStorageFileAsync } from "../../../shared/storage-permissions";
 export type LocalEmbeddingPoolingMethod = "mean" | "cls" | "last_token";
 
 export interface LocalEmbeddingPoolingMetadata {
-    status: "ready" | "unsupported";
+    status: "ready" | "unresolved" | "unsupported";
     pooling?: LocalEmbeddingPoolingMethod;
     normalize: boolean;
     declared: boolean;
@@ -19,8 +19,17 @@ export type LocalEmbeddingPoolingFetch = (url: string) => Promise<Response>;
 
 const decisionLogged = new Set<string>();
 const unavailableLogged = new Set<string>();
-const metadataByModel = new Map<string, LocalEmbeddingPoolingMetadata | null>();
+const metadataByCache = new Map<string, LocalEmbeddingPoolingMetadata>();
+const testMetadataByModel = new Map<string, LocalEmbeddingPoolingMetadata | null>();
 let testMetadataFallback: LocalEmbeddingPoolingMetadata | null | undefined;
+
+export const UNRESOLVED_LOCAL_EMBEDDING_POOLING: LocalEmbeddingPoolingMetadata = {
+    status: "unresolved",
+    pooling: "mean",
+    normalize: true,
+    declared: false,
+    reason: "pooling metadata is unavailable; preserving legacy mean pooling and normalization",
+};
 
 const LEGACY_MEAN_POOLING: LocalEmbeddingPoolingMetadata = {
     status: "ready",
@@ -160,6 +169,10 @@ function poolingFromFiles(
     };
 }
 
+function poolingMetadataCacheKey(model: string, modelCacheDir: string): string {
+    return JSON.stringify([model, modelCacheDir]);
+}
+
 function cachedMetadataPath(model: string, modelCacheDir: string): string {
     return join(metadataDirectory(model, modelCacheDir), "resolution.json");
 }
@@ -209,16 +222,18 @@ function readDirectoryMetadata(model: string): LocalEmbeddingPoolingMetadata {
     return poolingFromFiles(modulesText, configText, model);
 }
 
-/** Return metadata already available without network access. A local folder with no modules.json is known to use the legacy mean fallback. */
 export function getCachedLocalEmbeddingPooling(
     model: string,
     modelCacheDir = defaultModelCacheDir(),
 ): LocalEmbeddingPoolingMetadata | null {
-    if (metadataByModel.has(model)) return metadataByModel.get(model) ?? null;
+    if (testMetadataByModel.has(model)) return testMetadataByModel.get(model) ?? null;
+    const cacheKey = poolingMetadataCacheKey(model, modelCacheDir);
+    const cachedInMemory = metadataByCache.get(cacheKey);
+    if (cachedInMemory) return cachedInMemory;
     if (isModelDirectory(model)) {
         try {
             const metadata = readDirectoryMetadata(model);
-            metadataByModel.set(model, metadata);
+            metadataByCache.set(cacheKey, metadata);
             return metadata;
         } catch (error) {
             const metadata: LocalEmbeddingPoolingMetadata = {
@@ -227,7 +242,7 @@ export function getCachedLocalEmbeddingPooling(
                 declared: true,
                 reason: error instanceof Error ? error.message : String(error),
             };
-            metadataByModel.set(model, metadata);
+            metadataByCache.set(cacheKey, metadata);
             return metadata;
         }
     }
@@ -235,13 +250,19 @@ export function getCachedLocalEmbeddingPooling(
         const cached = parseCachedMetadata(
             readFileSync(cachedMetadataPath(model, modelCacheDir), "utf8"),
         );
-        if (cached) metadataByModel.set(model, cached);
-        if (cached) return cached;
+        if (cached) {
+            metadataByCache.set(cacheKey, cached);
+            return cached;
+        }
     } catch {
-        // Remote model metadata remains unknown until the background embedding bootstrap fetches it.
+        // A failed read of cached pooling metadata leaves it unresolved until preflight resolves it.
     }
-    if (testMetadataFallback !== undefined) return testMetadataFallback;
-    return null;
+    if (testMetadataFallback) {
+        metadataByCache.set(cacheKey, testMetadataFallback);
+        return testMetadataFallback;
+    }
+    metadataByCache.set(cacheKey, UNRESOLVED_LOCAL_EMBEDDING_POOLING);
+    return UNRESOLVED_LOCAL_EMBEDDING_POOLING;
 }
 
 export function logLocalEmbeddingPoolingDecisionOnce(
@@ -249,15 +270,16 @@ export function logLocalEmbeddingPoolingDecisionOnce(
     metadata: LocalEmbeddingPoolingMetadata,
     logger: (message: string, data?: unknown) => void = log,
 ): void {
-    if (decisionLogged.has(model)) return;
-    decisionLogged.add(model);
-    if (metadata.status === "ready") {
+    const decisionKey = `${model}:${metadata.status}:${metadata.pooling ?? "none"}:${metadata.normalize}`;
+    if (decisionLogged.has(decisionKey)) return;
+    decisionLogged.add(decisionKey);
+    if (metadata.status === "unsupported") {
         logger(
-            `[magic-context] local embedding pooling for ${model}: ${metadata.pooling} pooling, normalization ${metadata.normalize ? "enabled" : "disabled"} (${metadata.reason})`,
+            `[magic-context] local embedding pooling for ${model} is unsupported: ${metadata.reason}`,
         );
     } else {
         logger(
-            `[magic-context] local embedding pooling for ${model} is unsupported: ${metadata.reason}`,
+            `[magic-context] local embedding pooling for ${model}: ${metadata.pooling} pooling, normalization ${metadata.normalize ? "enabled" : "disabled"} (${metadata.reason})`,
         );
     }
 }
@@ -270,7 +292,7 @@ function logUnavailableOnce(
     if (unavailableLogged.has(model)) return;
     unavailableLogged.add(model);
     logger(
-        `[magic-context] local embedding pooling metadata for ${model} is not available: ${reason}; skipping embeddings until a later background bootstrap`,
+        `[magic-context] local embedding pooling metadata for ${model} is not available: ${reason}; using legacy mean pooling and retrying during a later background bootstrap`,
     );
 }
 
@@ -456,7 +478,6 @@ async function cacheRemoteFiles(
     await Promise.all(writes);
 }
 
-/** Resolve sentence-transformers metadata without downloading ONNX weights. Call only from background embedding bootstrap. */
 export async function preflightLocalEmbeddingPooling(
     model: string,
     options: {
@@ -464,18 +485,20 @@ export async function preflightLocalEmbeddingPooling(
         fetcher?: LocalEmbeddingPoolingFetch;
         logger?: (message: string, data?: unknown) => void;
     } = {},
-): Promise<LocalEmbeddingPoolingMetadata | null> {
+): Promise<LocalEmbeddingPoolingMetadata> {
     const cacheDir = options.modelCacheDir ?? defaultModelCacheDir();
     const logger = options.logger ?? log;
+    const cacheKey = poolingMetadataCacheKey(model, cacheDir);
     const cached = getCachedLocalEmbeddingPooling(model, cacheDir);
-    if (cached) {
+    if (cached && cached.status !== "unresolved") {
         logLocalEmbeddingPoolingDecisionOnce(model, cached, logger);
         return cached;
     }
     if (isModelDirectory(model)) {
         try {
             const metadata = readDirectoryMetadata(model);
-            metadataByModel.set(model, metadata);
+            metadataByCache.set(cacheKey, metadata);
+            testMetadataByModel.delete(model);
             logLocalEmbeddingPoolingDecisionOnce(model, metadata, logger);
             return metadata;
         } catch (error) {
@@ -486,7 +509,8 @@ export async function preflightLocalEmbeddingPooling(
                 declared: true,
                 reason,
             };
-            metadataByModel.set(model, metadata);
+            metadataByCache.set(cacheKey, metadata);
+            testMetadataByModel.delete(model);
             logLocalEmbeddingPoolingDecisionOnce(model, metadata, logger);
             return metadata;
         }
@@ -514,13 +538,16 @@ export async function preflightLocalEmbeddingPooling(
             JSON.stringify(metadata),
             true,
         );
-        metadataByModel.set(model, metadata);
+        metadataByCache.set(cacheKey, metadata);
+        testMetadataByModel.delete(model);
         logLocalEmbeddingPoolingDecisionOnce(model, metadata, logger);
         return metadata;
     } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
+        metadataByCache.set(cacheKey, UNRESOLVED_LOCAL_EMBEDDING_POOLING);
+        testMetadataByModel.delete(model);
         logUnavailableOnce(model, reason, logger);
-        return null;
+        return UNRESOLVED_LOCAL_EMBEDDING_POOLING;
     }
 }
 
@@ -536,7 +563,7 @@ export function __setLocalEmbeddingPoolingForTests(
     model: string,
     metadata: LocalEmbeddingPoolingMetadata | null,
 ): void {
-    metadataByModel.set(model, metadata);
+    testMetadataByModel.set(model, metadata);
 }
 
 export function __setLocalEmbeddingPoolingTestFallback(
@@ -546,7 +573,8 @@ export function __setLocalEmbeddingPoolingTestFallback(
 }
 
 export function __resetLocalEmbeddingPoolingForTests(): void {
-    metadataByModel.clear();
+    metadataByCache.clear();
+    testMetadataByModel.clear();
     decisionLogged.clear();
     unavailableLogged.clear();
     // Preserve the package preload's default for fake model IDs; clear only per-model overrides.

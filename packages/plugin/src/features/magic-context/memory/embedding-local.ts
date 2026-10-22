@@ -24,6 +24,7 @@ import {
     type LocalEmbeddingPoolingMetadata,
     logLocalEmbeddingPoolingDecisionOnce,
     logLocalEmbeddingPoolingUnavailableOnce,
+    UNRESOLVED_LOCAL_EMBEDDING_POOLING,
 } from "./local-embedding-pooling";
 import { configureTransformersRemoteHost } from "./transformers-remote-host";
 
@@ -918,16 +919,24 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 // can be inaccessible or non-writable, causing "Unable to get model file path
                 // or buffer" failures. Using our own storage dir survives plugin updates too.
                 const modelCacheDir = modelCacheDirForRuntime();
-                const poolingMetadata = getCachedLocalEmbeddingPooling(this.model, modelCacheDir);
-                if (!poolingMetadata) {
-                    const reason =
-                        "pooling metadata has not been resolved by the background embedding bootstrap";
-                    logLocalEmbeddingPoolingUnavailableOnce(this.model, reason, logForRuntime);
-                    throw new Error(`cannot embed local model '${this.model}': ${reason}`);
-                }
-                if (poolingMetadata.status !== "ready" || !poolingMetadata.pooling) {
+                const cachedPoolingMetadata = getCachedLocalEmbeddingPooling(
+                    this.model,
+                    modelCacheDir,
+                );
+                const poolingMetadata =
+                    cachedPoolingMetadata?.status === "unresolved" || !cachedPoolingMetadata
+                        ? UNRESOLVED_LOCAL_EMBEDDING_POOLING
+                        : cachedPoolingMetadata;
+                if (poolingMetadata.status === "unsupported" || !poolingMetadata.pooling) {
                     throw new Error(
                         `unsupported pooling for local model '${this.model}': ${poolingMetadata.reason}`,
+                    );
+                }
+                if (poolingMetadata.status === "unresolved") {
+                    logLocalEmbeddingPoolingUnavailableOnce(
+                        this.model,
+                        poolingMetadata.reason,
+                        logForRuntime,
                     );
                 }
                 this.poolingMetadata = poolingMetadata;

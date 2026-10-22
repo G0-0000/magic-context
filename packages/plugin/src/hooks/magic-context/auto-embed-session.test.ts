@@ -17,6 +17,11 @@ import {
 } from "../../features/magic-context/git-commits/sweep-coordinator";
 import type { EmbeddingProvider } from "../../features/magic-context/memory/embedding-provider";
 import {
+    __resetLocalEmbeddingPoolingForTests,
+    __setLocalEmbeddingPoolingForTests,
+    UNRESOLVED_LOCAL_EMBEDDING_POOLING,
+} from "../../features/magic-context/memory/local-embedding-pooling";
+import {
     backfillMessageFtsRowidMapBatch,
     recordMessageFtsRowid,
 } from "../../features/magic-context/message-fts-rowid-map";
@@ -53,6 +58,7 @@ let now = 1_800_000_000_000;
 let failures = 0;
 let calls = 0;
 let maxBatch = 0;
+let registrations = 0;
 let onCall = () => {};
 let logs: string[] = [];
 
@@ -64,6 +70,7 @@ function fixture(count = 27) {
     calls = 0;
     failures = 0;
     maxBatch = 0;
+    registrations = 0;
     onCall = () => {};
     logs = [];
     spyOn(logger, "log").mockImplementation((...args) => {
@@ -153,7 +160,9 @@ function fixture(count = 27) {
             {
                 db,
                 projectIdentity: project,
-                ensureRegistered: async () => {},
+                ensureRegistered: async () => {
+                    registrations += 1;
+                },
             },
             active,
         );
@@ -178,7 +187,15 @@ function fixture(count = 27) {
                 "UPDATE schema_migrations_meta SET value = json_set(value, '$.retryAt', 0) WHERE key LIKE 'chunk_embed_backoff:%'",
             )
             .run();
-    return { db, register, pass, coverage, restart, expireBackoff };
+    return {
+        db,
+        register,
+        pass,
+        coverage,
+        restart,
+        expireBackoff,
+        registrationCount: () => registrations,
+    };
 }
 
 async function settle(pass: () => void) {
@@ -196,6 +213,7 @@ afterEach(() => {
     clearEmbedSessionState(inactive);
     resetEmbeddingActivityForTests();
     _resetProjectEmbeddingRegistryForTests();
+    __resetLocalEmbeddingPoolingForTests();
     closeDatabase();
     if (originalXdg === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdg;
@@ -396,4 +414,18 @@ it("passive sweep does not carry old-model session activity across a model chang
     expect(await embedUnembeddedCompartmentChunksForProject(db, project)).toBe(0);
     expect(coverage()).toBe(0);
     expect(calls).toBe(0);
+});
+
+it("retries pooling preflight after the legacy history backfill already completed", async () => {
+    const { pass, registrationCount } = fixture(0);
+    await settle(pass);
+    expect(autoEmbedAttemptedBySession.has(active)).toBe(true);
+
+    __setLocalEmbeddingPoolingForTests("qwen-old", UNRESOLVED_LOCAL_EMBEDDING_POOLING);
+    const priorRegistrationCalls = registrationCount();
+    await settle(pass);
+
+    expect(registrationCount()).toBe(priorRegistrationCalls + 1);
+    expect(autoEmbedAttemptedBySession.has(active)).toBe(true);
+    expect(autoEmbedRetryAfterBySession.get(active)).toBeGreaterThan(Date.now());
 });

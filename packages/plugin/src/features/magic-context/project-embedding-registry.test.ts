@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { formatEmbedStatusText } from "../../hooks/magic-context/format-embed-status";
+import { getMagicContextStorageDir } from "../../shared/data-path";
 import { setEmbeddingSessionBusy } from "../../shared/embedding-activity";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
@@ -20,13 +21,18 @@ import {
 } from "./git-commits/storage-git-commit-embeddings";
 import { upsertCommits } from "./git-commits/storage-git-commits";
 import { acquireGitSweepLease, releaseGitSweepLease } from "./git-commits/sweep-coordinator";
+import { getEmbeddingProviderIdentity } from "./memory/embedding-identity";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import {
     getSynapseLaneIdentity,
     SynapseEmbeddingProvider,
     type SynapseLaneMetadata,
 } from "./memory/embedding-synapse";
-import { __setLocalEmbeddingPoolingForTests } from "./memory/local-embedding-pooling";
+import {
+    __resetLocalEmbeddingPoolingForTests,
+    __setLocalEmbeddingPoolingForTests,
+    preflightLocalEmbeddingPooling,
+} from "./memory/local-embedding-pooling";
 import { insertMemory } from "./memory/storage-memory";
 import {
     getStoredModelId,
@@ -271,6 +277,7 @@ describe("project embedding registry", () => {
 
     afterEach(() => {
         _resetProjectEmbeddingRegistryForTests();
+        __resetLocalEmbeddingPoolingForTests();
         closeDatabase();
         if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -489,58 +496,162 @@ describe("project embedding registry", () => {
         });
     });
 
-    it("does not persist or expose a local identity before pooling metadata resolves", () => {
+    it("keeps the legacy local identity active when pooling metadata fetch fails", async () => {
         const db = useTempDb();
-        const model = "fixture/pending-local-pooling";
+        const model = "fixture/offline-local-pooling";
+        const projectIdentity = "offline-local-pooling";
+        const modelCacheDir = join(getMagicContextStorageDir(), "models");
+        const config = localConfig(model);
+        const legacyIdentity = getEmbeddingProviderIdentity(config);
         __setLocalEmbeddingPoolingForTests(model, null);
 
-        const pending = registerProjectEmbedding(
+        const metadata = await preflightLocalEmbeddingPooling(model, {
+            modelCacheDir,
+            fetcher: async () => {
+                throw new Error("network is unavailable");
+            },
+            logger: () => {},
+        });
+        expect(metadata).toMatchObject({
+            status: "unresolved",
+            pooling: "mean",
+            normalize: true,
+        });
+
+        const registered = registerProjectEmbedding(
             db,
-            "pending-local-pooling",
-            localConfig(model),
+            projectIdentity,
+            config,
             { memoryEnabled: true, gitCommitEnabled: true },
             "/repo",
         );
-        expect(pending.modelId).toBe("off");
-        expect(pending.chunkModelId).toBe("off");
+        expect(registered.modelId).toBe(legacyIdentity);
+        expect(registered.chunkModelId).not.toBe("off");
         expect(
             countRows(
                 db,
                 "SELECT count(*) AS count FROM embedding_identity_active WHERE project_path = ?",
-                "pending-local-pooling",
+                projectIdentity,
             ),
-        ).toBe(0);
+        ).toBeGreaterThan(0);
         expect(
             countRows(
                 db,
                 "SELECT count(*) AS count FROM embedding_registrations WHERE project_path = ?",
-                "pending-local-pooling",
+                projectIdentity,
             ),
-        ).toBe(0);
+        ).toBeGreaterThan(0);
+    });
 
+    it("keeps a resolved unsupported local pooling declaration inactive", () => {
+        const db = useTempDb();
+        const model = "fixture/unsupported-local-pooling";
+        const projectIdentity = "unsupported-local-pooling";
         __setLocalEmbeddingPoolingForTests(model, {
-            status: "ready",
-            pooling: "cls",
-            normalize: true,
+            status: "unsupported",
+            normalize: false,
             declared: true,
-            reason: "fixture CLS pooling",
+            reason: "unsupported declared pooling mode pooling_mode_max_tokens",
         });
-        const resolved = registerProjectEmbedding(
+
+        const registered = registerProjectEmbedding(
             db,
-            "pending-local-pooling",
+            projectIdentity,
             localConfig(model),
             { memoryEnabled: true, gitCommitEnabled: true },
             "/repo",
         );
-        expect(resolved.modelId).not.toBe("off");
-        expect(resolved.chunkModelId).not.toBe("off");
+        expect(registered.modelId).toBe("off");
+        expect(registered.chunkModelId).toBe("off");
         expect(
             countRows(
                 db,
                 "SELECT count(*) AS count FROM embedding_identity_active WHERE project_path = ?",
-                "pending-local-pooling",
+                projectIdentity,
             ),
-        ).toBeGreaterThan(0);
+        ).toBe(0);
+    });
+
+    it("switches once from the legacy identity after a later CLS metadata fetch", async () => {
+        const db = useTempDb();
+        const model = "fixture/retry-local-pooling";
+        const projectIdentity = "retry-local-pooling";
+        const modelCacheDir = join(getMagicContextStorageDir(), "models");
+        const config = localConfig(model);
+        const legacyIdentity = getEmbeddingProviderIdentity(config);
+        __setLocalEmbeddingPoolingForTests(model, null);
+
+        expect(
+            await preflightLocalEmbeddingPooling(model, {
+                modelCacheDir,
+                fetcher: async () => {
+                    throw new Error("offline once");
+                },
+                logger: () => {},
+            }),
+        ).toMatchObject({ status: "unresolved", pooling: "mean", normalize: true });
+        const legacy = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            config,
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/repo",
+        );
+        expect(legacy.modelId).toBe(legacyIdentity);
+
+        const successfulFetch = async (url: string): Promise<Response> => {
+            if (url.endsWith("/modules.json")) {
+                return Response.json([
+                    {
+                        idx: 0,
+                        name: "pool",
+                        path: "1_Pooling",
+                        type: "sentence_transformers.models.Pooling",
+                    },
+                    {
+                        idx: 1,
+                        name: "normalize",
+                        path: "2_Normalize",
+                        type: "sentence_transformers.models.Normalize",
+                    },
+                ]);
+            }
+            if (url.endsWith("/1_Pooling/config.json")) {
+                return Response.json({
+                    pooling_mode_cls_token: true,
+                    pooling_mode_mean_tokens: false,
+                    pooling_mode_max_tokens: false,
+                    pooling_mode_lasttoken: false,
+                });
+            }
+            return new Response("not found", { status: 404 });
+        };
+        expect(
+            await preflightLocalEmbeddingPooling(model, {
+                modelCacheDir,
+                fetcher: successfulFetch,
+                logger: () => {},
+            }),
+        ).toMatchObject({ status: "ready", pooling: "cls", normalize: true });
+
+        const cls = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            config,
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/repo",
+        );
+        const repeated = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            config,
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/repo",
+        );
+        expect(cls.modelId).not.toBe(legacy.modelId);
+        expect(cls.chunkModelId).not.toBe(legacy.chunkModelId);
+        expect(repeated.modelId).toBe(cls.modelId);
+        expect(repeated.generation).toBe(cls.generation);
     });
 
     it("pins provider and runtime identity goldens", () => {

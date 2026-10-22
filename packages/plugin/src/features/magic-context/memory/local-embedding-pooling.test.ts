@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import {
@@ -174,27 +175,89 @@ describe("local sentence-transformers pooling metadata", () => {
         });
     });
 
-    test("offline metadata lookup remains unresolved rather than guessing mean", async () => {
+    test("offline lookup keeps a cached legacy mean fallback while metadata stays unavailable", async () => {
         const root = tempDirectory("mc-local-pooling-offline-");
+        const model = "org/offline-model";
+        const modelCacheDir = join(root, "models");
         const logs: string[] = [];
-        __setLocalEmbeddingPoolingForTests("org/offline-model", null);
-        const result = await preflightLocalEmbeddingPooling("org/offline-model", {
-            modelCacheDir: join(root, "models"),
+        const legacyIdentity = getEmbeddingProviderIdentity({ provider: "local", model });
+        __setLocalEmbeddingPoolingForTests(model, null);
+        const result = await preflightLocalEmbeddingPooling(model, {
+            modelCacheDir,
             fetcher: async () => {
                 throw new Error("network is unavailable");
             },
             logger: (message) => logs.push(message),
         });
 
-        expect(result).toBeNull();
-        expect(
-            getCachedLocalEmbeddingPooling("org/offline-model", join(root, "models")),
-        ).toBeNull();
+        expect(result).toMatchObject({
+            status: "unresolved",
+            pooling: "mean",
+            normalize: true,
+            declared: false,
+        });
+        expect(getCachedLocalEmbeddingPooling(model, modelCacheDir)).toBe(result);
+        expect(getEmbeddingProviderIdentity({ provider: "local", model })).toBe(legacyIdentity);
         expect(logs).toEqual([
             expect.stringContaining(
-                "network is unavailable; skipping embeddings until a later background bootstrap",
+                "network is unavailable; using legacy mean pooling and retrying during a later background bootstrap",
             ),
         ]);
+    });
+
+    test("retries unresolved metadata and switches to CLS identity after a successful fetch", async () => {
+        const model = "fixture/retry-pooling";
+        const modelCacheDir = join(getMagicContextStorageDir(), "models");
+        const config = { provider: "local" as const, model };
+        const legacyIdentity = getEmbeddingProviderIdentity(config);
+        __setLocalEmbeddingPoolingForTests(model, null);
+
+        const offline = await preflightLocalEmbeddingPooling(model, {
+            modelCacheDir,
+            fetcher: async () => {
+                throw new Error("offline once");
+            },
+            logger: () => {},
+        });
+        expect(offline.status).toBe("unresolved");
+        expect(getEmbeddingProviderIdentity(config)).toBe(legacyIdentity);
+
+        const successfulFetch = async (url: string): Promise<Response> => {
+            if (url.endsWith("/modules.json")) {
+                return Response.json([
+                    {
+                        idx: 0,
+                        name: "pool",
+                        path: "1_Pooling",
+                        type: "sentence_transformers.models.Pooling",
+                    },
+                    {
+                        idx: 1,
+                        name: "normalize",
+                        path: "2_Normalize",
+                        type: "sentence_transformers.models.Normalize",
+                    },
+                ]);
+            }
+            if (url.endsWith("/1_Pooling/config.json")) {
+                return Response.json({
+                    pooling_mode_cls_token: true,
+                    pooling_mode_mean_tokens: false,
+                    pooling_mode_max_tokens: false,
+                    pooling_mode_lasttoken: false,
+                });
+            }
+            return new Response("not found", { status: 404 });
+        };
+        const resolved = await preflightLocalEmbeddingPooling(model, {
+            modelCacheDir,
+            fetcher: successfulFetch,
+            logger: () => {},
+        });
+        expect(resolved).toMatchObject({ status: "ready", pooling: "cls", normalize: true });
+        const clsIdentity = getEmbeddingProviderIdentity(config);
+        expect(clsIdentity).not.toBe(legacyIdentity);
+        expect(getEmbeddingProviderIdentity(config)).toBe(clsIdentity);
     });
 
     test("refuses a declared but unsupported pooling mode by name", async () => {
