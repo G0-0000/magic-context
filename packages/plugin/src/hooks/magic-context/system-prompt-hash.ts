@@ -27,6 +27,10 @@ import { currentLkgRequestIdentity } from "./lkg-measured-request";
 import { requestPendingMaterialization } from "./pending-materialization";
 import { estimateTokens } from "./read-session-formatting";
 import { systemPromptDates } from "./system-prompt-dates";
+import {
+    persistSystemPromptStickyDate,
+    readPersistedSystemPromptStickyDate,
+} from "./system-prompt-sticky-date";
 import { isHeldHeadForRequest, recordSystemPromptForRequest } from "./system-prompt-delivery";
 import {
     describeSystemPromptChange,
@@ -248,6 +252,18 @@ export function createSystemPromptHashHandler(deps: {
     // and only update it on cache-busting passes. This prevents a midnight date
     // flip from causing an unnecessary flush + cache rebuild.
     const stickyDateBySession = new Map<string, string>();
+    // The sticky date as last read from or written to the session's persisted
+    // record (null: none recorded), so the record is read once per session and
+    // written only when the date it holds changes.
+    const recordedStickyDateBySession = new Map<string, string | null>();
+    const recordedStickyDate = (sessionId: string): string | undefined => {
+        let recorded = recordedStickyDateBySession.get(sessionId);
+        if (recorded === undefined) {
+            recorded = readPersistedSystemPromptStickyDate(deps.db, sessionId) ?? null;
+            recordedStickyDateBySession.set(sessionId, recorded);
+        }
+        return recorded ?? undefined;
+    };
     // Only the previous in-process prompt is retained for byte offsets. It is
     // never persisted; a cold handler explicitly reports an unknown baseline.
     const diagnosticPrompts = new Map<string, SystemPromptSnapshot>();
@@ -488,7 +504,42 @@ export function createSystemPromptHashHandler(deps: {
         // establish a new baseline. Discard the session's sticky date instead of
         // reusing the date line frozen for the earlier host projection.
         if (!hasPersistedHash) stickyDateBySession.delete(sessionId);
-        const stickyDate = stickyDateBySession.get(sessionId);
+        let stickyDate = stickyDateBySession.get(sessionId);
+        // A new process has no sticky date in memory. Restore the recorded one
+        // when it reproduces the persisted hash: that is the date the session's
+        // requests carried before the restart, and the signed thinking they
+        // produced is bound to it. Without this the first request after a
+        // restart past midnight would carry the new date in front of that
+        // thinking on a pass that may not rebuild the prompt.
+        if (stickyDate === undefined && hasPersistedHash) {
+            const recorded = recordedStickyDate(sessionId);
+            const live = systemPromptDates(liveSystemContent).live;
+            if (
+                recorded !== undefined &&
+                live !== undefined &&
+                recorded !== live &&
+                systemPromptFingerprint(
+                    systemPromptDates(liveSystemContent, recorded).stable,
+                    promptSurface.preset,
+                ) === previousHash
+            ) {
+                stickyDate = recorded;
+                stickyDateBySession.set(sessionId, recorded);
+                sessionLog(
+                    sessionId,
+                    `system prompt date restored after restart: real=${live}, using=${recorded}`,
+                );
+            }
+        }
+        // Keep the in-memory sticky date and its persisted record in step, so a
+        // restart resumes with the date this process last froze.
+        const setStickyDate = (value: string) => {
+            stickyDateBySession.set(sessionId, value);
+            if (value !== recordedStickyDate(sessionId)) {
+                if (persistSystemPromptStickyDate(deps.db, sessionId, value))
+                    recordedStickyDateBySession.set(sessionId, value);
+            }
+        };
         const dates = systemPromptDates(liveSystemContent, stickyDate);
         const currentDate = dates.live;
         const stableCandidate = dates.stable;
@@ -545,7 +596,7 @@ export function createSystemPromptHashHandler(deps: {
                             cachedM0SystemHash: hash,
                             systemPromptTokens: estimateTokens(content),
                         });
-                        stickyDateBySession.set(sessionId, currentDate);
+                        setStickyDate(currentDate);
                         output.system.splice(0, output.system.length, ...liveElements);
                         publishSystemDateOutput(output.system);
                         deps.systemPromptRefreshSessions.delete(sessionId);
@@ -572,10 +623,10 @@ export function createSystemPromptHashHandler(deps: {
                 (dateRequest ? rewritePermission === true : rewritePermission !== false));
 
         if (currentDate && !stickyDate) {
-            stickyDateBySession.set(sessionId, currentDate);
+            setStickyDate(currentDate);
         } else if (currentDate && stickyDate && currentDate !== stickyDate) {
             if (dateMayAdvance) {
-                stickyDateBySession.set(sessionId, currentDate);
+                setStickyDate(currentDate);
                 sessionLog(
                     sessionId,
                     `system prompt date updated: ${stickyDate} → ${currentDate} (cache-busting pass)`,
@@ -765,6 +816,7 @@ export function createSystemPromptHashHandler(deps: {
         handler,
         clearSession: (sessionId: string) => {
             diagnosticPrompts.delete(sessionId);
+            recordedStickyDateBySession.delete(sessionId);
             clearSystemDateRefresh(deps.historyRefreshSessions, sessionId);
             guidanceEpochs.clear(sessionId);
             clearSystemPromptHashSession(sessionId, {
