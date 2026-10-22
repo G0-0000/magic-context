@@ -360,7 +360,7 @@ async function acquireSearchWorker(
                 };
                 signal.addEventListener("abort", done, { once: true });
                 void current.busy?.then(done);
-                void current.detachedSignal?.then(done);
+                if (!current.detached) void current.detachedSignal?.then(done);
                 if (signal.aborted) done();
             });
             continue;
