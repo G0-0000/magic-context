@@ -99,6 +99,9 @@ const GATED_VERSION: u8 = 3;
 /// usage, steps and timestamps are unchanged. `tool-reply/v1` adds a `reply`
 /// object with an integer `max_ms` to tools in a run's frozen `tools` list
 /// (on `RunStarted` and queued sends); this reader never reads tools.
+/// `runner-tags/v2` adds `computed_tags` (a tag checkpoint) to a run's config
+/// and a `tag_checkpoint` with its cut to a compaction Setup message; this
+/// reader uses neither.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -129,6 +132,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "google-rpc-error-details/v1",
     "chatgpt-codex-wire/v1",
     "tool-reply/v1",
+    "runner-tags/v2",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1865,6 +1869,7 @@ pub(crate) mod tests {
             "google-rpc-error-details/v1",
             "chatgpt-codex-wire/v1",
             "tool-reply/v1",
+            "runner-tags/v2",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1887,6 +1892,26 @@ pub(crate) mod tests {
         ]);
         let runs = decode(&bytes).expect("tool-reply/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `runner-tags/v2` puts a tag checkpoint on every run Broca starts, so a
+    /// run that requires it (alone, or with `runner-tags/v1` when it renders
+    /// tags) must still yield its steps.
+    #[test]
+    fn a_computed_tags_run_keeps_its_steps() {
+        for requires in [
+            vec!["runner-tags/v2"],
+            vec!["runner-tags/v1", "runner-tags/v2"],
+        ] {
+            let mut record = run_started("r1", 1);
+            record["config"]["computed_tags"] = json!({"checkpoint": 41});
+            let bytes = wal_bytes(&[
+                json!({"requires": requires, "record": record}),
+                step_finished(1, usage(1, 2, 3, 4)),
+            ]);
+            let runs = decode(&bytes).expect("runner-tags/v2 run decodes");
+            assert_eq!(step_ids(&runs), [("r1".to_string(), 1)], "{requires:?}");
+        }
     }
 
     /// `structured-output/v1` adds the frozen schema settings to `RunStarted`
