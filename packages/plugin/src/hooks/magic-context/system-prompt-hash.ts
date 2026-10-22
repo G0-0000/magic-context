@@ -503,12 +503,13 @@ export function createSystemPromptHashHandler(deps: {
         // When the durable system-prompt hash is cleared (a store-generation
         // rebase, a host conversion), the request establishes a new baseline.
         // Its date still sits in front of whatever signed thinking the request
-        // serves, so the previous sticky date stays in force and the new date is
-        // adopted only through the same rule as any other date change
-        // (`systemDateMayMove` below). The previous date is dropped only when the
-        // new prompt carries a different number of host date fields, so it
-        // cannot be applied position by position; the prompt layout changed
-        // then, and the date with it.
+        // serves. If the new prompt has as many host date fields as the previous
+        // sticky date, that date stays in force and the new date is adopted only
+        // through the same rule as any other date change (`systemDateMayMove`
+        // below). If the counts differ, the previous date cannot be applied
+        // position by position: it is discarded and the new prompt's dates become
+        // the baseline unchecked, because the prompt layout itself changed in
+        // front of that thinking anyway.
         let stickyDate = stickyDateBySession.get(sessionId);
         if (!hasPersistedHash) {
             const previous = stickyDate ?? recordedStickyDate(sessionId);

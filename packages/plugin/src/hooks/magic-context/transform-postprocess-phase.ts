@@ -654,8 +654,8 @@ function proactiveStripStartIndex(args: {
 }
 
 /**
- * True when the array about to be served still carries signed thinking. A
- * part counts by the same route rule that finds an open signed turn
+ * True when the array about to be served still carries a thinking part that
+ * may be signed (its signature is not inspected). A part counts by the same route rule that finds an open signed turn
  * (`isAnthropicThinkingPart`): on an Anthropic-family route (Anthropic,
  * Bedrock, Vertex, Copilot) every thinking part counts, whichever metadata key
  * holds its signature. Parts that never reach the provider do not count: an

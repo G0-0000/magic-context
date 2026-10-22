@@ -594,8 +594,9 @@ for (const host of HOSTS)
                 60_000,
             );
 
-// ── The system date can stay frozen for days. It moves only on a request that
-// serves no signed thinking at all. Compaction-off never strips earlier turns'
+// ── The system date can stay frozen for days. With the prompt otherwise
+// unchanged, it moves only on a request that serves no signed thinking at all.
+// Compaction-off never strips earlier turns'
 // thinking on its own (only a fold that changes m[0]/m[1], or a mode switch,
 // does), and the date is restored after a restart, so a compaction-off session
 // on a prefix-bound model whose docs and memory do not change keeps the date
