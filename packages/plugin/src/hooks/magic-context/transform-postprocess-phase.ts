@@ -1593,6 +1593,13 @@ interface RunPostTransformPhaseArgs {
     activeAgent?: string;
     batch: { finalize: () => void } | null;
     contextUsage: { percentage: number; inputTokens: number };
+    /**
+     * True when `contextUsage` was raised by a local count of the request, not
+     * by a provider measurement or an overflow latch (the first pass after a
+     * restart, or after a model switch). Such a reading below 95% may not by
+     * itself grant the force ride.
+     */
+    contextUsageFromEstimate?: boolean;
     /** Usable tokens available for soft scheduling thresholds and usage-ratio calculation. */
     usableWindow: number;
     schedulerDecision: "execute" | "defer";
@@ -2436,10 +2443,16 @@ export async function runPostTransformPhase(
             foldBustsServedPrefixThisPass ||
             firstRenderBust ||
             idleExpiryRebuild,
+        // A reading that only a local count put in the force band is not
+        // evidence the session is there: the count can overstate the provider.
+        // Below 95% it waits for the provider's next measurement instead of
+        // rewriting the cache on its own. At 95% or more it still rides, since
+        // waiting there risks the next request not fitting.
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
-                getEmergencyInputSample(args.db, args.sessionId) === 0),
+                (args.contextUsageFromEstimate !== true &&
+                    getEmergencyInputSample(args.db, args.sessionId) === 0)),
         explicitFlush:
             isExplicitFlush &&
             hasPendingMaterializationOrigin(

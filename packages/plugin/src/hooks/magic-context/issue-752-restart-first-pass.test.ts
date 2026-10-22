@@ -1,22 +1,32 @@
 /// <reference types="bun-types" />
 
 /**
- * Reproduction for the first transform pass after a process restart (GitHub
- * issue 752). Skipped unless MC_REPRO_752=1.
+ * The first transform pass after a process restart (GitHub issue 752).
  *
  * Magic Context keeps live provider usage in memory. After a restart that map
  * is empty and the first pass resets the persisted usage reading, so a pass
- * that is already allowed to rewrite the prefix sizes the session from a local
- * estimate of the outgoing request instead. These cases compare that boot pass
- * with the same pass in a process that still holds the live reading.
+ * that is already allowed to rewrite the prefix has to size the session some
+ * other way. These cases compare that boot pass with the same pass in a
+ * process that still holds the live reading.
  *
  * The model is absent from the tokenizer calibration table, as any model Magic
- * Context has no measurements for is. The sizing cases request a /ctx-flush
- * with the scheduler deferring, on a session the provider last measured at 60%
- * of its usable window, with a drop queued on the newest tool output. At 60%
- * the protected tail keeps that output, so it must stay active on both the
- * warm pass and the first pass after a restart. Only a reading at 95% or more
- * lifts that protection.
+ * Context has no measurements for is. The fit checks count such a model at
+ * twice its local token count; that envelope must never be read as the
+ * session's pressure. The sizing cases request a /ctx-flush with the scheduler
+ * deferring, on a session the provider last measured at 60% of its usable
+ * window, with a drop queued on the newest tool output. At 60% the protected
+ * tail keeps that output, so it must stay active on both the warm pass and the
+ * first pass after a restart. Only a reading at 95% or more lifts that
+ * protection.
+ *
+ * The boot pass sizes the session in this order, and each order has a case
+ * that fails without it:
+ * - the provider's saved reading, when it is for this model and limit and the
+ *   cache is still warm ("prefers the saved provider reading");
+ * - otherwise a calibrated local count, neutral for an unseeded model ("an
+ *   expired restart sizes ... with calibrated counts");
+ * - and a reading from that count alone never grants the force ride below 95%
+ *   ("an estimate in the force band ... leaves the queued drop queued").
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
@@ -40,9 +50,10 @@ import { resolveContextLimit, resolveContextWindowGeometry } from "./event-resol
 import { requestPendingMaterialization } from "./pending-materialization";
 import { createTransform } from "./transform";
 
-const ENABLED = process.env.MC_REPRO_752 === "1";
-const MODEL = { providerID: "issue-752-provider", modelID: "issue-752-model" };
-const MODEL_KEY = `${MODEL.providerID}/${MODEL.modelID}`;
+type Model = { providerID: string; modelID: string };
+const MODEL: Model = { providerID: "issue-752-provider", modelID: "issue-752-model" };
+// A model in the tokenizer calibration table, with ratios close to 1.
+const SEEDED_MODEL: Model = { providerID: "google", modelID: "gemini-3.8-flash" };
 const TRUE_PERCENTAGE = 60;
 
 type TestMessage = {
@@ -77,6 +88,14 @@ beforeEach(async () => {
                             id: MODEL.providerID,
                             models: {
                                 [MODEL.modelID]: { limit: { context: 20_000, output: 2_000 } },
+                            },
+                        },
+                        {
+                            id: SEEDED_MODEL.providerID,
+                            models: {
+                                [SEEDED_MODEL.modelID]: {
+                                    limit: { context: 20_000, output: 2_000 },
+                                },
                             },
                         },
                     ],
@@ -147,6 +166,7 @@ function newProcess(args: {
     db: ReturnType<typeof openDatabase>;
     sessionId: string;
     pending: Set<string>;
+    model: Model;
     liveUsage?: ContextUsage;
 }) {
     return createTransform({
@@ -163,7 +183,7 @@ function newProcess(args: {
                 : [],
         ),
         db: args.db,
-        liveModelBySession: new Map([[args.sessionId, MODEL]]),
+        liveModelBySession: new Map([[args.sessionId, args.model]]),
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: args.pending,
         lastHeuristicsTurnId: new Map<string, string>(),
@@ -172,43 +192,59 @@ function newProcess(args: {
     });
 }
 
+type PassOptions = {
+    shape?: Shape;
+    origin?: "user_flush" | "boundary_repair";
+    target?: "newest" | "oldest";
+    /** How long before the measured pass the provider's last reply landed. */
+    lastResponseAgeMs?: number;
+    /**
+     * The limit the saved reading was taken against, when it differs from the
+     * model's current one (a catalog change while the host was down).
+     */
+    savedReadingLimit?: number;
+    /** The provider's last reading, as a percentage of the usable window. */
+    providerPercentage?: number;
+    model?: Model;
+};
+
 /**
  * Seeds a session in one process, then runs a pass carrying a materialization
  * request (a /ctx-flush unless stated) with one queued drop, either in that
  * same process (live usage present) or in a fresh one (the first pass after a
  * restart).
  */
-async function flushPass(
-    restarted: boolean,
-    shape: Shape = FEW_LARGE,
-    origin: "user_flush" | "boundary_repair" = "user_flush",
-    target: "newest" | "oldest" = "newest",
-) {
+async function flushPass(restarted: boolean, options: PassOptions = {}) {
+    const shape = options.shape ?? FEW_LARGE;
+    const origin = options.origin ?? "user_flush";
+    const target = options.target ?? "newest";
+    const providerPercentage = options.providerPercentage ?? TRUE_PERCENTAGE;
+    const model = options.model ?? MODEL;
     useTempDataHome(`issue-752-${restarted ? "boot" : "warm"}-`);
     const sessionId = `ses-issue-752-${restarted ? "boot" : "warm"}-${origin}`;
     const db = openDatabase();
-    const liveLimit = resolveContextLimit(MODEL.providerID, MODEL.modelID, {
+    const liveLimit = resolveContextLimit(model.providerID, model.modelID, {
         db,
         sessionID: sessionId,
     });
-    const usableHard = resolveContextWindowGeometry(MODEL.providerID, MODEL.modelID, {
+    const usableHard = resolveContextWindowGeometry(model.providerID, model.modelID, {
         db,
         sessionID: sessionId,
     })?.usableHard;
     const liveUsage = {
-        percentage: TRUE_PERCENTAGE,
-        inputTokens: Math.round((liveLimit * TRUE_PERCENTAGE) / 100),
+        percentage: providerPercentage,
+        inputTokens: Math.round((liveLimit * providerPercentage) / 100),
     };
     const pending = new Set<string>();
-    const first = newProcess({ db, sessionId, pending, liveUsage });
+    const first = newProcess({ db, sessionId, pending, model, liveUsage });
     await first({}, { messages: sessionMessages(sessionId, shape) });
     // What the event handler persists after the provider measured the last reply.
     updateSessionMeta(db, sessionId, {
         lastContextPercentage: liveUsage.percentage,
         lastInputTokens: liveUsage.inputTokens,
-        lastUsageContextLimit: liveLimit,
-        lastObservedModelKey: MODEL_KEY,
-        lastResponseTime: Date.now() - 60_000,
+        lastUsageContextLimit: options.savedReadingLimit ?? liveLimit,
+        lastObservedModelKey: `${model.providerID}/${model.modelID}`,
+        lastResponseTime: Date.now() - (options.lastResponseAgeMs ?? 60_000),
         cacheTtl: "1h",
     });
     const tools = getTagsBySession(db, sessionId)
@@ -219,7 +255,7 @@ async function flushPass(
     const queued = target === "newest" ? newestTool : tools.at(-1)!;
     queuePendingOp(db, sessionId, queued.tagNumber, "drop");
 
-    const pass = restarted ? newProcess({ db, sessionId, pending }) : first;
+    const pass = restarted ? newProcess({ db, sessionId, pending, model }) : first;
     requestPendingMaterialization(pending, sessionId, origin);
     const lines: string[] = [];
     const spy = spyOn(logger, "sessionLog").mockImplementation((id: string, ...rest: unknown[]) => {
@@ -233,9 +269,13 @@ async function flushPass(
     const after = getTagsBySession(db, sessionId).find(
         (tag) => tag.tagNumber === newestTool.tagNumber,
     );
+    const bootReading = lines
+        .map((line) => /unknown provider usage;.*percentage=([\d.]+)/.exec(line)?.[1])
+        .find((value) => value !== undefined);
     return {
         liveLimit,
         usableHard,
+        bootReading: bootReading === undefined ? null : Number(bootReading),
         newestToolStatus: after?.status,
         droppedTools: getTagsBySession(db, sessionId).filter(
             (tag) => tag.type === "tool" && tag.status === "dropped",
@@ -249,14 +289,22 @@ async function flushPass(
     };
 }
 
-describe.skipIf(!ENABLED)("issue 752: first pass after a restart", () => {
+// Sized so the calibrated local count of the request reads about 100% of the
+// usable window, while staying under the 110% margin of the over-window check.
+const NEAR_WINDOW: Shape = { tools: 8, chars: 17_600 };
+// Sized so the calibrated local count reads inside the force band (85% here)
+// and below 95% on the seeded model.
+const FORCE_BAND_SHAPE: Shape = { tools: 8, chars: 18_800 };
+const TWO_HOURS = 2 * 60 * 60 * 1000;
+
+describe("issue 752: first pass after a restart", () => {
     // The issue claims a materialization request that is not a user /ctx-flush
     // (here the compartment boundary repair a host replay can raise) lets queued
     // drops apply. It must not: only a user /ctx-flush, a fold that changes the
     // served prefix, freshly published history or a genuine force-band reading
     // authorizes them, so on a deferred pass the queued drop stays queued.
     it("a non-user materialization request on a defer pass leaves the queued drop queued", async () => {
-        const result = await flushPass(false, FEW_LARGE, "boundary_repair", "oldest");
+        const result = await flushPass(false, { origin: "boundary_repair", target: "oldest" });
         console.log("ISSUE_752_UNIT warm-boundary-repair", JSON.stringify(result));
         expect(result.pendingAfter).toBe(1);
         expect(result.droppedTools).toBe(0);
@@ -271,19 +319,67 @@ describe.skipIf(!ENABLED)("issue 752: first pass after a restart", () => {
     it("a /ctx-flush on the first pass after a restart keeps the protected newest tool output", async () => {
         const result = await flushPass(true);
         console.log("ISSUE_752_UNIT boot", JSON.stringify(result));
+        expect(result.bootReading ?? 0).toBeLessThan(85);
         expect(result.newestToolStatus).toBe("active");
     });
 
     it("control: a /ctx-flush with live usage over many tool outputs drops only what was queued", async () => {
-        const result = await flushPass(false, MANY_SMALL);
+        const result = await flushPass(false, { shape: MANY_SMALL });
         console.log("ISSUE_752_UNIT warm-many", JSON.stringify(result));
         expect(result.droppedTools).toBeLessThanOrEqual(1);
     });
 
     it("a /ctx-flush after a restart over many tool outputs runs no emergency tool drop", async () => {
-        const result = await flushPass(true, MANY_SMALL);
+        const result = await flushPass(true, { shape: MANY_SMALL });
         console.log("ISSUE_752_UNIT boot-many", JSON.stringify(result));
         expect(result.passLog.some((line) => /emergency tiered drop: /.test(line))).toBe(false);
         expect(result.droppedTools).toBeLessThanOrEqual(1);
+    });
+
+    // The provider measured this session at 60%, while the local count of the
+    // same request reads about 100%: a local tokenizer can overstate a
+    // provider. Inside the cache window the provider's reading is the truth, so
+    // the protected newest output stays protected.
+    it("the first pass after a restart prefers the saved provider reading over a local count", async () => {
+        const result = await flushPass(true, { shape: NEAR_WINDOW });
+        console.log("ISSUE_752_UNIT boot-saved-reading", JSON.stringify(result));
+        expect(result.bootReading).toBe(TRUE_PERCENTAGE);
+        expect(result.newestToolStatus).toBe("active");
+    });
+
+    // Two hours idle: the saved reading may be stale and the idle rebuild is
+    // owed, so the pass counts the request locally. A calibrated count of an
+    // unseeded model is its neutral local count, about 66% here; the fit
+    // envelope would read twice that and lift the protected tail.
+    it("an expired restart sizes a 60% session with calibrated counts, not the fit envelope", async () => {
+        const result = await flushPass(true, { lastResponseAgeMs: TWO_HOURS });
+        console.log("ISSUE_752_UNIT boot-expired", JSON.stringify(result));
+        expect(result.passLog.some((line) => /using wire estimate/.test(line))).toBe(true);
+        expect(result.bootReading ?? 0).toBeGreaterThan(0);
+        expect(result.bootReading ?? 0).toBeLessThan(85);
+        expect(result.newestToolStatus).toBe("active");
+    });
+
+    // The saved reading was taken against another limit, so it is not used, and
+    // the calibrated count reads inside the force band but below 95%. The
+    // pending boundary repair prices the pass but grants no cache rewrite of
+    // its own. A reading from a local count alone must not open one: the
+    // queued drop on the oldest (unprotected) tool output stays queued until
+    // the provider measures the session. The model is a seeded one, whose fit
+    // count and calibrated count agree, so this case holds the force-ride rule
+    // apart from the choice of count.
+    it("an estimate in the force band below 95% alone leaves the queued drop queued", async () => {
+        const result = await flushPass(true, {
+            shape: FORCE_BAND_SHAPE,
+            origin: "boundary_repair",
+            target: "oldest",
+            savedReadingLimit: 40_000,
+            model: SEEDED_MODEL,
+        });
+        console.log("ISSUE_752_UNIT boot-force-band-estimate", JSON.stringify(result));
+        expect(result.bootReading ?? 0).toBeGreaterThanOrEqual(85);
+        expect(result.bootReading ?? 0).toBeLessThan(95);
+        expect(result.pendingAfter).toBe(1);
+        expect(result.droppedTools).toBe(0);
     });
 });
