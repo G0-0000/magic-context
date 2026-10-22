@@ -722,30 +722,26 @@ for (const host of HOSTS) {
         60_000,
     );
 
-    it.skipIf(!ENABLED)(
-        `${host}: a date rollover on a held idle-expiry pass`,
-        async () => {
-            const s = session(host, `rr729-date-idle-${host}`);
-            s.user("long task");
-            await s.pass("2026-10-21");
-            s.step(1, 2_400);
-            await s.pass("2026-10-21");
-            s.step(2, 200);
-            await s.pass("2026-10-21");
-            // A tool call runs past the TTL and past midnight.
-            s.systemPromptRefreshSessions.add(`rr729-date-idle-${host}`);
-            s.idle();
-            s.step(3, 200);
-            const out = await s.pass("2026-10-22");
-            report(`${host} date held idle`, s, {
-                prompt: out.prompt?.match(/Date: \S+/)?.[0],
-                kept: signedSignatures(out.messages ?? []),
-                logs: s.relevantLogs(),
-            });
-            expect(s.problems).toEqual([]);
-        },
-        60_000,
-    );
+    it(`${host}: a date rollover on a held idle-expiry pass`, async () => {
+        const s = session(host, `rr729-date-idle-${host}`);
+        s.user("long task");
+        await s.pass("2026-10-21");
+        s.step(1, 2_400);
+        await s.pass("2026-10-21");
+        s.step(2, 200);
+        await s.pass("2026-10-21");
+        // A tool call runs past the TTL and past midnight.
+        s.systemPromptRefreshSessions.add(`rr729-date-idle-${host}`);
+        s.idle();
+        s.step(3, 200);
+        const out = await s.pass("2026-10-22");
+        report(`${host} date held idle`, s, {
+            prompt: out.prompt?.match(/Date: \S+/)?.[0],
+            kept: signedSignatures(out.messages ?? []),
+            logs: s.relevantLogs(),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
 
     it.skipIf(!ENABLED)(
         `${host}: a date rollover on an unheld idle-expiry bust that keeps the turn's thinking`,
