@@ -66,9 +66,11 @@ export function exitOnWorkerClose(
         closePort() {
             if (closed) return;
             closed = true;
-            // Close from a timer, after the worker's entry module has finished
-            // evaluating: on Bun 1.3.14 a port closed while an entry module with
-            // a top-level await is still evaluating does not end the thread.
+            // Close on a later timer turn, not synchronously: on Bun 1.3.14 a
+            // port closed while an entry module with a top-level await is still
+            // evaluating does not end the thread. Every current caller closes
+            // its port at the end of the module body or later, so the timer runs
+            // after evaluation has finished.
             setTimeout(() => {
                 port.off("message", listener);
                 port.close();
