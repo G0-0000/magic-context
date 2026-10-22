@@ -24,8 +24,12 @@ const DEFAULT_SETTLE_MS = 5 * 60_000;
 // primary's fallback when it has task `fallback`, the same subagent and session,
 // and starts between 5 seconds before and this long after the primary ends.
 const FALLBACK_START_WINDOW_MS = 120_000;
-const QUOTA_ERROR =
-    /account pool has no account|quota|rate[ _-]?limit|too many requests|\b429\b|resource_exhausted|usage limit/i;
+// Failures a working fallback makes routine: an exhausted or rate-limited
+// provider, and the summarizer refusing before sending because the prompt is
+// larger than that model's window (no model call was made). Any other failure
+// stays eligible for the alert rules even when a fallback recovered it.
+const RECOVERABLE_ERROR =
+    /account pool has no account|quota|rate[ _-]?limit|too many requests|\b429\b|resource_exhausted|usage limit|producer_prompt_exceeds_window/i;
 
 type Row = {
     id: number;
@@ -111,17 +115,16 @@ function key(alert: Alert): string {
 }
 
 /**
- * Ids of quota or rate-limit failures that a completed fallback attempt recovered.
- * The run produced its result on the fallback model, so the primary's quota error
- * is expected while that provider is exhausted and is not worth a wake. A fallback
- * that also fails leaves the primary unrecovered, so its failure stays eligible for
- * the alert rules.
+ * Ids of routine failures (see RECOVERABLE_ERROR) that a completed fallback attempt
+ * recovered. The run produced its result on the fallback model, so the primary's
+ * failure is expected and is not worth a wake. A fallback that also fails leaves the
+ * primary unrecovered, so its failure stays eligible for the alert rules.
  */
 export function recoveredByFallback(rows: Row[]): Set<number> {
     const recovered = new Set<number>();
     for (const row of rows) {
         if (row.status !== "failed" && row.status !== "timed_out") continue;
-        if (!QUOTA_ERROR.test(row.error ?? "")) continue;
+        if (!RECOVERABLE_ERROR.test(row.error ?? "")) continue;
         const fallbackCompleted = rows.some(
             (candidate) =>
                 candidate.status === "completed" &&

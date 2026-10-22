@@ -48,6 +48,15 @@ test("a quota failure recovered by a completed fallback raises no alert", async 
     expect((await run()).alerts).toHaveLength(0);
 });
 
+test("a pre-send window refusal recovered by a completed fallback raises no alert", async () => {
+    const WINDOW = "opencode/deepseek-v4.1-flash-free: producer_prompt_exceeds_window calibrated_tokens=287038 limit=162960 estimator_margin=0.03";
+    for (let i = 0; i < 8; i++) {
+        const primary = attempt({ session: `w-${i}`, status: "failed", time: NOW - 60_000 + i * 1_000, error: WINDOW });
+        attempt({ session: `w-${i}`, status: "completed", time: NOW - 30_000 + i * 1_000, task: "fallback", parent: primary });
+    }
+    expect((await run()).alerts).toHaveLength(0);
+});
+
 test("a quota failure whose fallback also failed still alerts", async () => {
     for (let i = 0; i < 8; i++) {
         const primary = attempt({ session: `s-${i}`, status: "failed", time: NOW - 60_000 + i * 1_000, error: QUOTA });
