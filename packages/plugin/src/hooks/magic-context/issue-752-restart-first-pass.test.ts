@@ -22,7 +22,9 @@
  * The boot pass sizes the session in this order, and each order has a case
  * that fails without it:
  * - the provider's saved reading, when it is for this model and limit and the
- *   cache is still warm ("prefers the saved provider reading");
+ *   cache is still warm ("prefers the saved provider reading"), unless the
+ *   local count is past the 95% emergency line ("a request that grew past the
+ *   emergency line");
  * - otherwise a calibrated local count, neutral for an unseeded model ("an
  *   expired restart sizes ... with calibrated counts");
  * - and a reading from that count alone never grants the force ride below 95%
@@ -289,11 +291,15 @@ async function flushPass(restarted: boolean, options: PassOptions = {}) {
     };
 }
 
-// Sized so the calibrated local count of the request reads about 100% of the
-// usable window, while staying under the 110% margin of the over-window check.
+// Sized so the calibrated local count of the request reads just under 100% of
+// the usable window, while staying under the 110% margin of the over-window
+// check.
 const NEAR_WINDOW: Shape = { tools: 8, chars: 17_600 };
-// Sized so the calibrated local count reads inside the force band (85% here)
-// and below 95% on the seeded model.
+// Many small tool outputs whose calibrated local count reads inside the force
+// band (85% here) and below 95% on the unseeded model.
+const MANY_SMALL_FORCE_BAND: Shape = { tools: 60, chars: 2_050 };
+// Sized so the calibrated local count reads inside the force band and below
+// 95% on the seeded model.
 const FORCE_BAND_SHAPE: Shape = { tools: 8, chars: 18_800 };
 const TWO_HOURS = 2 * 60 * 60 * 1000;
 
@@ -337,14 +343,28 @@ describe("issue 752: first pass after a restart", () => {
     });
 
     // The provider measured this session at 60%, while the local count of the
-    // same request reads about 100%: a local tokenizer can overstate a
-    // provider. Inside the cache window the provider's reading is the truth, so
-    // the protected newest output stays protected.
+    // same request reads inside the force band: a local tokenizer can
+    // overstate a provider. Inside the cache window the provider's reading is
+    // the truth, so the /ctx-flush drops only what was queued and no
+    // emergency tool drop rides it.
     it("the first pass after a restart prefers the saved provider reading over a local count", async () => {
-        const result = await flushPass(true, { shape: NEAR_WINDOW });
+        const result = await flushPass(true, { shape: MANY_SMALL_FORCE_BAND });
         console.log("ISSUE_752_UNIT boot-saved-reading", JSON.stringify(result));
         expect(result.bootReading).toBe(TRUE_PERCENTAGE);
-        expect(result.newestToolStatus).toBe("active");
+        expect(result.passLog.some((line) => /emergency tiered drop: /.test(line))).toBe(false);
+        expect(result.droppedTools).toBeLessThanOrEqual(1);
+    });
+
+    // The saved reading is warm, but the local count of this request is past
+    // the 95% emergency line: the request grew after the provider measured it
+    // (here the reading is simply lower than the request). The count wins, so
+    // the emergency path still reduces the request before it is sent.
+    it("a request that grew past the emergency line since the saved reading is still sized from its count", async () => {
+        const result = await flushPass(true, { shape: NEAR_WINDOW });
+        console.log("ISSUE_752_UNIT boot-grown", JSON.stringify(result));
+        expect(result.passLog.some((line) => /grewPastSavedReading=60\.0/.test(line))).toBe(true);
+        expect(result.bootReading ?? 0).toBeGreaterThanOrEqual(95);
+        expect(result.newestToolStatus).toBe("dropped");
     });
 
     // Two hours idle: the saved reading may be stale and the idle rebuild is
