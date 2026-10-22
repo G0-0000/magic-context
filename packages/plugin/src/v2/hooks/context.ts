@@ -1639,8 +1639,9 @@ export async function registerContext(context: V2Context) {
     // With it off, TypeScript mode still needs a few, as OpenCode 1 messages
     // always carry them: the saved last good request finds its anchor from the
     // latest assistant message's time (and, while that message is still
-    // working, the times of the user messages after it). Only those are read,
-    // and they are kept out of the content digests (see adaptPayload), so the
+    // working, the times of the user messages after it). Only the latest
+    // assistant message and the messages after it are read, and their times
+    // are kept out of the content digests (see adaptPayload), so the
     // saved copy and its replay compare the same bytes whichever messages the
     // rule picked. Rust mode reads times only for temporal awareness.
     const temporalTimes = config.temporal_awareness === true;
