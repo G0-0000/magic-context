@@ -46,6 +46,7 @@ export interface ChildInvocationRecordInput {
 
 const warnedUnknownModels = new Set<string>();
 const loggedModelReroutes = new Set<string>();
+export const MAX_SUBAGENT_INVOCATION_ERROR_CHARS = 1_000;
 
 export interface SubagentInvocationErrorDetails {
     attemptedModel?: string;
@@ -106,12 +107,15 @@ function splitModelRef(value: string | undefined): LastAssistantModel {
 }
 
 function cleanOneLine(value: string): string {
-    return sanitizeDiagnosticText(value)
+    const oneLine = sanitizeDiagnosticText(value)
         .replaceAll("\r", " ")
         .replaceAll("\n", " ")
         .replaceAll("\t", " ")
         .replace(/\s+/g, " ")
         .trim();
+    return oneLine.length <= MAX_SUBAGENT_INVOCATION_ERROR_CHARS
+        ? oneLine
+        : `${oneLine.slice(0, MAX_SUBAGENT_INVOCATION_ERROR_CHARS - 1)}…`;
 }
 
 function recordMessage(error: unknown): string {

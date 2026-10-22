@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Database } from "../../shared/sqlite";
-import { failedInvocationStatus, recordChildInvocation } from "./subagent-token-capture";
+import {
+    failedInvocationStatus,
+    MAX_SUBAGENT_INVOCATION_ERROR_CHARS,
+    recordChildInvocation,
+} from "./subagent-token-capture";
 
 test("records the attempted model before a child times out without an assistant message", () => {
     const inserts: unknown[][] = [];
@@ -162,6 +166,46 @@ describe("recordChildInvocation model identity", () => {
 
         expect(inserts[0]?.[4]).toBe("host-provider");
         expect(inserts[0]?.[5]).toBe("host-selected-model");
+    });
+
+    test("redacts credentials and home paths, flattens lines, and caps host errors", () => {
+        const inserts: unknown[][] = [];
+        const db = {
+            prepare: () => ({
+                run: (...parameters: unknown[]) => {
+                    inserts.push(parameters);
+                    return { lastInsertRowid: 11 };
+                },
+            }),
+        } as unknown as Database;
+        const bearer = "bearer-secret-value-123456";
+        const apiKey = "api-key-secret-value-123456";
+        const hostMessage =
+            `Authorization: Bearer ${bearer}; api_key=${apiKey}; ` +
+            "/Users/alice/private/project/file\n" +
+            "diagnostic ".repeat(200);
+
+        recordChildInvocation({
+            db,
+            parentSessionId: "fixture-redacted-host-error",
+            harness: "opencode",
+            subagent: "historian",
+            startedAt: 1,
+            endedAt: 2,
+            status: "failed",
+            attemptedModel: "provider/model",
+            error: new Error("provider failed"),
+            hostError: { name: "APIError", data: { message: hostMessage } },
+        });
+
+        const error = String(inserts[0]?.[13]);
+        expect(error).toContain("Authorization: Bearer <REDACTED:bearer>");
+        expect(error).toContain("api_key=<REDACTED:");
+        expect(error).toContain("/Users/<USER>/private/project/file");
+        expect(error).not.toContain(bearer);
+        expect(error).not.toContain(apiKey);
+        expect(error).not.toMatch(/[\r\n]/);
+        expect(error.length).toBeLessThanOrEqual(MAX_SUBAGENT_INVOCATION_ERROR_CHARS);
     });
 
     test("retains the no-output fallback text when there is no host error", () => {
