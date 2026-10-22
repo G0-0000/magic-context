@@ -58,5 +58,54 @@ class GateTests(unittest.TestCase):
                     gate.wait_ci(SHA, "train/check-pr-123", 23, 10)
 
 
+GREEN = {"id": 7, "status": "completed", "conclusion": "success"}
+
+
+class ReleaseRetryTests(unittest.TestCase):
+    """verify_release looks again for a run GitHub's list has not shown yet, and only for that."""
+
+    def verify(self, lookups):
+        calls = []
+        sleeps = []
+
+        def latest_run(sha, name):
+            calls.append(name)
+            return lookups(name, calls.count(name))
+
+        with patch.object(gate, "latest_run", side_effect=latest_run), \
+                patch.dict(gate.os.environ, {}, clear=False):
+            gate.os.environ.pop("CI_GATE_MISSING_RUN_RETRY_SECONDS", None)
+            try:
+                gate.verify_release(SHA, sleep=sleeps.append)
+                error = None
+            except RuntimeError as raised:
+                error = raised
+        return calls, sleeps, error
+
+    def test_run_missing_on_first_lookup_and_green_on_second_passes(self):
+        calls, sleeps, error = self.verify(
+            lambda name, attempt: None if name == "Mutations" and attempt == 1 else GREEN)
+        self.assertIsNone(error)
+        self.assertEqual(calls, ["CI", "Mutations", "Mutations", "Smoke"])
+        self.assertEqual(sleeps, [15])
+
+    def test_run_missing_every_time_refuses_after_the_retries(self):
+        calls, sleeps, error = self.verify(lambda name, attempt: None if name == "Smoke" else GREEN)
+        self.assertIsNotNone(error)
+        self.assertIn(f"Smoke for {SHA}: missing, not completed/success", str(error))
+        self.assertEqual(calls, ["CI", "Mutations"] + ["Smoke"] * 5)
+        self.assertEqual(sleeps, [15] * 4)
+
+    def test_present_but_unsuccessful_run_refuses_without_retry(self):
+        for status, conclusion in (("completed", "failure"), ("completed", "cancelled"), ("in_progress", None)):
+            with self.subTest(status=status, conclusion=conclusion):
+                run = {"id": 8, "status": status, "conclusion": conclusion}
+                calls, sleeps, error = self.verify(lambda name, attempt: run if name == "CI" else GREEN)
+                self.assertIsNotNone(error)
+                self.assertIn(f"CI for {SHA}: {status}/{conclusion}, not completed/success", str(error))
+                self.assertEqual(calls, ["CI"])
+                self.assertEqual(sleeps, [])
+
+
 if __name__ == "__main__":
     unittest.main()

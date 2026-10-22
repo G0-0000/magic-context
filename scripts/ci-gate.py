@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,9 +34,30 @@ def latest_run(sha, name, branch=None):
     return max(matches, key=lambda run: int(run["id"])) if matches else None
 
 
-def verify_release(sha):
+# GitHub's head_sha run list can briefly omit runs that have just finished, so
+# a missing run is looked up again a few times before the release is refused.
+# A run that is present but unfinished, failed or cancelled is never retried.
+MISSING_RUN_RETRIES = 4
+MISSING_RUN_RETRY_SECONDS = 15
+
+
+def missing_run_retry_seconds():
+    # Only the offline release-script tests set this, so a missing-run case
+    # does not spend a minute sleeping.
+    return float(os.environ.get("CI_GATE_MISSING_RUN_RETRY_SECONDS", MISSING_RUN_RETRY_SECONDS))
+
+
+def verify_release(sha, sleep=time.sleep):
+    delay = missing_run_retry_seconds()
     for name in ("CI", "Mutations", "Smoke"):
         run = latest_run(sha, name)
+        for attempt in range(MISSING_RUN_RETRIES):
+            if run:
+                break
+            print(f"{name} for {sha}: missing, looking again in {delay:g}s "
+                  f"(retry {attempt + 1}/{MISSING_RUN_RETRIES})", flush=True)
+            sleep(delay)
+            run = latest_run(sha, name)
         if not run or run.get("status") != "completed" or run.get("conclusion") != "success":
             state = f"{run.get('status')}/{run.get('conclusion')}" if run else "missing"
             raise RuntimeError(f"{name} for {sha}: {state}, not completed/success")

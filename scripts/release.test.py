@@ -29,7 +29,8 @@ class ReleaseTests(unittest.TestCase):
         self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         self.env.update(TEST_ROOT=str(self.root), REAL_GIT=str(REAL_GIT), REAL_BUN=str(REAL_BUN),
                         GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-                        PYTHONDONTWRITEBYTECODE="1", HOME=str(self.root / "home"))
+                        PYTHONDONTWRITEBYTECODE="1", HOME=str(self.root / "home"),
+                        CI_GATE_MISSING_RUN_RETRY_SECONDS="0")
         self.git("init", "-b", "master")
         self.git("config", "user.name", "Release Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
@@ -119,6 +120,10 @@ class ReleaseTests(unittest.TestCase):
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Smoke for " + self.base + ": missing", run.stderr)
+        # CI and Mutations are found at once; Smoke is looked up once and then
+        # retried four times before the release is refused.
+        lookups = [args for args in self.commands("gh") if any("/actions/runs?head_sha=" in arg for arg in args)]
+        self.assertEqual(len(lookups), 2 + 1 + 4)
         self.assert_no_publish()
 
     def test_newer_failed_run_cannot_reuse_older_success(self):
