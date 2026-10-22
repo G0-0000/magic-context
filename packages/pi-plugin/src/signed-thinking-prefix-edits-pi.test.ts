@@ -1,8 +1,9 @@
-// Cache-safety witnesses for signed thinking in Pi compaction-off mode
-// (GitHub issue 729). Skipped unless MC_REVIEW_729F=1. A red case documents a
-// gap. `withSession` below is copied from
+// Regression guards for signed thinking in Pi compaction-off mode on a
+// prefix-bound model: a fold must not change the head in front of kept signed
+// thinking. `withSession` below follows
 // compaction-off-first-render-strip-pi.test.ts, with a `user` helper added.
-// To compare with another revision, copy this file into that checkout.
+// Cases for defects that are still open run only with
+// MC_SIGNED_THINKING_OPEN_DEFECTS=1; each names its defect.
 import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,7 +45,7 @@ async function withSession(
 		editMemory: (content: string) => void;
 	}) => Promise<void>,
 ) {
-	const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-pi-r729f-"));
+	const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-pi-spe-"));
 	const originalXdg = process.env.XDG_DATA_HOME;
 	process.env.XDG_DATA_HOME = xdg;
 	const db = createTestDb();
@@ -163,53 +164,49 @@ const signatures = (messages: unknown[]) =>
 		...JSON.stringify(messages).matchAll(/"thinkingSignature":"(sig-\d+)"/g),
 	].map((match) => match[1]);
 
-const ENABLED = process.env.MC_REVIEW_729F === "1";
+/** Cases that witness a defect that is still open; see each case's comment. */
+const OPEN_DEFECTS = process.env.MC_SIGNED_THINKING_OPEN_DEFECTS === "1";
 const head = (messages: unknown[]) => JSON.stringify(messages.slice(0, 2));
 
 // A fold on a pass that holds nothing (the new turn has no signed thinking
 // yet) re-renders m[0] in front of the earlier turn's signed thinking, which
 // stays on the wire; Anthropic invalidates every kept block behind a changed
 // first user message.
-test.skipIf(!ENABLED)(
-	"Pi compaction-off: a dashboard memory edit folds m[0] at the next turn in front of the earlier turn's kept thinking",
-	async () => {
-		await withSession("pi-r729f-off-oldturn", async (s) => {
-			await s.pass();
-			s.step(1);
-			const first = await s.pass();
-			s.step(2);
-			await s.pass();
-			s.user("next task");
-			s.editMemory("R729F-MEMORY: keep functions small");
-			const out = await s.pass();
-			const kept = signatures(out);
-			const changed = head(out) !== head(first);
-			console.log(
-				`[review-729f] pi off old-turn fold kept=${JSON.stringify(kept)} headChanged=${changed}`,
-			);
-			expect(changed && kept.length > 0).toBe(false);
-		});
-	},
-);
+test("Pi compaction-off: a dashboard memory edit folds m[0] at the next turn in front of the earlier turn's kept thinking", async () => {
+	await withSession("pi-spe-off-oldturn", async (s) => {
+		await s.pass();
+		s.step(1);
+		const first = await s.pass();
+		s.step(2);
+		await s.pass();
+		s.user("next task");
+		s.editMemory("keep functions small");
+		const out = await s.pass();
+		const kept = signatures(out);
+		const changed = head(out) !== head(first);
+		// The edit must reach the head, or the case proves nothing.
+		expect(changed).toBe(true);
+		expect(kept).toEqual([]);
+	});
+});
 
 // A first render after a restart whose head is byte-identical to the served
 // one. The kept thinking is still valid, so the case expects it kept; it is red
 // when the pass strips it anyway (Pi keeps no compaction-off served array
 // across a restart, so it cannot prove the head unchanged).
-test.skipIf(!ENABLED)(
+// Open defect: after a restart Pi strips signed thinking on a compaction-off first render even when the head is unchanged.
+test.skipIf(!OPEN_DEFECTS)(
 	"Pi compaction-off: a first render after a restart with an unchanged head",
 	async () => {
-		await withSession("pi-r729f-off-restart-same-head", async (s) => {
+		await withSession("pi-spe-off-restart-same-head", async (s) => {
 			await s.pass();
 			s.step(1);
 			const before = await s.pass();
-			clearCachedM0M1(s.db, "pi-r729f-off-restart-same-head");
+			clearCachedM0M1(s.db, "pi-spe-off-restart-same-head");
 			s.restart();
 			s.step(2);
 			const out = await s.pass();
-			console.log(
-				`[review-729f] pi off restart same-head kept=${JSON.stringify(signatures(out))} headSame=${head(out) === head(before)}`,
-			);
+			expect(head(out)).toBe(head(before));
 			expect(signatures(out)).toEqual(["sig-1", "sig-2"]);
 		});
 	},

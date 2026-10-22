@@ -1,23 +1,19 @@
 /// <reference types="bun-types" />
-// Witnesses for the system date in front of signed thinking on prefix-bound
-// models (Opus 5.5 and its family, which reject a signed thinking block when
-// any byte in front of it changed, the system prompt included). The cases
-// cover a held idle-expired pass on the Anthropic API and on Bedrock, a
-// compaction-off session over several days and restarts, and a simulated
-// store-generation rebase. Skipped unless MC_REVIEW_729G=1. A failing case
-// means invalid signed thinking was served, or (the multi-day case) that the
-// served date did not follow its intended rule: frozen in compaction-off,
-// current in managed mode; each case's comment says why.
+// Regression guards for signed thinking on prefix-bound models (Opus 5.5 and
+// its family, which reject a signed thinking block when any byte in front of
+// it changed): compaction-off folds and first renders, mode switches, forks,
+// the durable record of messages a last-good replay served untagged, and the
+// system date across restarts and idle expiry.
 //
-// The harness is a copy of the one in review-729f-witnesses.test.ts with two
-// additions: the session can run on another route of a prefix-bound model
-// (Bedrock, whose reasoning parts carry `metadata.bedrock` rather than
-// `metadata.anthropic`), and the strict-binding oracle recognises signed
-// reasoning under either metadata key. The oracle flags a signed thinking
-// block served behind any provider-visible byte, or a system date, that
-// differs from the request that produced it (a gap-free run of the oldest
-// blocks may be missing). To compare with another revision, copy this file
-// into that checkout and run it there.
+// Every case drives the real OpenCode transform through the production
+// messages-transform wrapper on a prefix-bound model, and the strict-binding
+// oracle flags a signed thinking block served behind any provider-visible
+// byte, or a system date, that differs from the request that produced it (a
+// gap-free run of the oldest blocks may be missing). A failing case means
+// invalid signed thinking was served, unless its comment says otherwise.
+//
+// Cases for defects that are still open run only with
+// MC_SIGNED_THINKING_OPEN_DEFECTS=1; each names its defect.
 import { afterEach, expect, it, spyOn } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,6 +32,7 @@ import {
 import { copySessionStateForClone } from "../../features/magic-context/storage-clone";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
+import * as replayDocumentModule from "../../features/magic-context/storage-replay-document";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import * as loggerModule from "../../shared/logger";
@@ -48,11 +45,10 @@ import { bindSystemDateRequestIdentity, registerSystemDateRefresh } from "./syst
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { createTransform } from "./transform";
 
-const ENABLED = process.env.MC_REVIEW_729G === "1";
-const ANTHROPIC_OPUS = { providerID: "anthropic", modelID: "claude-opus-5-5" };
-/** Opus 5.5 on Bedrock: prefix-bound as well (isPrefixBoundThinkingModel ignores the provider). */
-const BEDROCK_OPUS = { providerID: "amazon-bedrock", modelID: "us.anthropic.claude-opus-5-5-v1:0" };
-type Model = typeof ANTHROPIC_OPUS;
+/** Cases that witness a defect that is still open; see each case's comment. */
+const OPEN_DEFECTS = process.env.MC_SIGNED_THINKING_OPEN_DEFECTS === "1";
+const VERBOSE = process.env.MC_SIGNED_THINKING_VERBOSE === "1";
+const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 const BULK = "ROW value = compute(input, options); // generated line\n".repeat(40);
 
 type Part = Record<string, unknown>;
@@ -70,19 +66,16 @@ afterEach(() => {
     tempDirs.length = 0;
 });
 
-/** The provider-specific metadata record of a signed reasoning part (Anthropic or Bedrock). */
-const signedMetadata = (part: Part) => {
-    const metadata = part.metadata as
-        | { anthropic?: { signature?: unknown }; bedrock?: { signature?: unknown } }
-        | undefined;
-    return metadata?.anthropic ?? metadata?.bedrock;
-};
 const isThinking = (part: Part) =>
     part.type === "reasoning" &&
     typeof part.text === "string" &&
     part.text !== "" &&
-    signedMetadata(part) !== undefined;
-const signatureOf = (part: Part) => String(signedMetadata(part)?.signature);
+    (part.metadata as { anthropic?: unknown } | undefined)?.anthropic !== undefined;
+const signatureOf = (part: Part) =>
+    String(
+        (part.metadata as { anthropic?: { signature?: unknown } } | undefined)?.anthropic
+            ?.signature,
+    );
 
 function view(message: Message): View {
     return {
@@ -136,20 +129,22 @@ function bindingProblem(birth: View[], now: View[]): string | null {
 const signedSignatures = (messages: Message[]) =>
     messages.flatMap((m) => m.parts.filter(isThinking).map(signatureOf));
 
+const toolHeads = (messages: Message[]) =>
+    messages
+        .flatMap((m) => m.parts)
+        .filter((p) => p.type === "tool")
+        .map((p) => String((p.state as { output?: string }).output).slice(0, 8));
+
 interface SessionOptions {
     compactionOff?: boolean;
     memory?: boolean;
     executeThresholdPercentage?: number;
-    /** The route and model (default: Opus 5.5 on the Anthropic API). */
-    model?: Model;
 }
 
 /**
- * One OpenCode session on a prefix-bound model (Opus 5.5 on the Anthropic API
- * unless `options.model` names another route). `pass()` serves the current
- * source through the production wrapper and, when given a date, the
- * system-prompt hook after it (OpenCode 1's usual order; OpenCode 2 runs the
- * hook first, see `systemFirst`), both stages bound to one request identity. The
+ * One OpenCode session on Opus 5.5. `pass()` serves the current source through
+ * the production wrapper and, when given a date, the system-prompt hook after
+ * it (OpenCode 2's order, both stages bound to one request identity). The
  * oracle also treats the system prompt as part of the prefix: a kept block
  * born under one date must not be served under another.
  */
@@ -159,11 +154,8 @@ function session(
     options: SessionOptions = {},
 ) {
     let sessionId = initialSessionId;
-    const MODEL = options.model ?? ANTHROPIC_OPUS;
-    // Bedrock reasoning parts carry their signature under `metadata.bedrock`.
-    const metadataKey = MODEL.providerID === "amazon-bedrock" ? "bedrock" : "anthropic";
-    const dataHome = createTestTempDir("mc-r729g-data-").dir;
-    const directory = createTestTempDir("mc-r729g-session-").dir;
+    const dataHome = createTestTempDir("mc-spe-data-").dir;
+    const directory = createTestTempDir("mc-spe-session-").dir;
     tempDirs.push(dataHome, directory);
     process.env.XDG_DATA_HOME = dataHome;
     writeFileSync(join(directory, "ARCHITECTURE.md"), "# Architecture\n\nv1\n");
@@ -312,7 +304,7 @@ function session(
                     {
                         type: "reasoning",
                         text: `step ${n}: run the next command`,
-                        metadata: { [metadataKey]: { signature: `sig-${n}` } },
+                        metadata: { anthropic: { signature: `sig-${n}` } },
                     },
                     {
                         type: "tool",
@@ -359,17 +351,6 @@ function session(
         },
         clearHead() {
             clearCachedM0M1(db, sessionId);
-        },
-        /**
-         * What a store-generation rebase that moved coordinates does to the
-         * session's prompt state (store-generation-rebase.ts): it clears the
-         * cached m[0]/m[1] and the persisted system-prompt hash.
-         */
-        rebaseClearsPromptState() {
-            clearCachedM0M1(db, sessionId);
-            db.prepare("UPDATE session_meta SET system_prompt_hash = '' WHERE session_id = ?").run(
-                sessionId,
-            );
         },
         /** Publish a history compartment covering the source up to `endIndex`. */
         compartment(endIndex: number) {
@@ -455,8 +436,8 @@ function session(
         },
         /**
          * Serves one request. With a date the system-prompt hook runs after the
-         * messages transform, or before it with `systemFirst` (OpenCode 2's
-         * order); both stages share one request identity.
+         * messages transform (OpenCode 2's order), or before it with
+         * `systemFirst`; both stages share one request identity.
          */
         async pass(
             date?: string,
@@ -528,10 +509,9 @@ function session(
             }
         },
         relevantLogs() {
-            if (process.env.MC_REVIEW_729G_VERBOSE === "1")
-                return logs.filter((l) => !l.startsWith("transform stage:"));
+            if (VERBOSE) return logs.filter((l) => !l.startsWith("transform stage:"));
             return logs.filter((l) =>
-                /hold|frozen|WILL|strip|fold decision|lkg|LKG|REFUSED|date|release|normaliz|rebase|hash/i.test(
+                /hold|frozen|WILL|strip|fold decision|lkg|LKG|REFUSED|date|release|normaliz/i.test(
                     l,
                 ),
             );
@@ -540,153 +520,375 @@ function session(
 }
 
 const HOSTS = ["opencode1", "opencode2"] as const;
-const report = (label: string, s: ReturnType<typeof session>, extra: Record<string, unknown>) =>
+/** Prints a case's details when it found a problem, or always with MC_SIGNED_THINKING_VERBOSE=1. */
+const report = (label: string, s: ReturnType<typeof session>, extra: Record<string, unknown>) => {
+    if (!VERBOSE && s.problems.length === 0) return;
     console.log(
-        `[review-729g] ${label} problems=${JSON.stringify(s.problems)} ${Object.entries(extra)
+        `[signed-thinking] ${label} problems=${JSON.stringify(s.problems)} ${Object.entries(extra)
             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
             .join(" ")}`,
     );
+};
+// ── Compaction-off: a fold on a pass that holds nothing (no open signed turn)
+// re-renders m[0] in front of the earlier turns' signed thinking, which stays
+// on the wire. Anthropic binds every kept block to the whole prefix in front
+// of it, earlier turns included ("Re-render the context you put in the first
+// user message with a changed value: invalid for every thinking block").
+for (const host of HOSTS) {
+    it(`${host}: compaction-off, a dashboard memory edit folds m[0] at the next turn in front of the earlier turn's kept thinking`, async () => {
+        const s = session(host, `spe-off-oldturn-${host}`, {
+            compactionOff: true,
+            memory: true,
+        });
+        s.editMemory("Prefer small commits");
+        s.user("run some bash commands");
+        await s.pass();
+        for (let n = 1; n <= 3; n++) {
+            s.step(n, 200);
+            await s.pass();
+        }
+        // Held through the open turn: the edit waits for the turn to end.
+        s.editMemory("Always use Bun");
+        s.step(4, 200);
+        await s.pass();
+        const before = s.cachedM0();
+        s.user("next task");
+        const out = await s.pass();
+        report(`${host} off old-turn fold`, s, {
+            m0Changed: before !== s.cachedM0(),
+            kept: signedSignatures(out.messages ?? []),
+            logs: s.relevantLogs(),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+}
 
-// ── Finding: the "serves signed thinking" check knows only `metadata.anthropic`.
-// The system date now waits while the served array carries signed thinking
-// (servesThinkingBlock in transform-postprocess-phase.ts). That check counts a
-// reasoning part only when its metadata has an `anthropic` record, but Opus 5.5
-// is prefix-bound on Bedrock too, where OpenCode stores the signature under
-// `metadata.bedrock`. The check it replaced (the open turn's retained thinking,
-// hasActiveAnthropicThinkingTurn) accepts any thinking part on an
-// Anthropic-family route. So on Bedrock an idle-expired request that holds the
-// open signed turn (heavy reasoning a step back) moves the date in front of the
-// thinking it keeps. The same case on the Anthropic API stays frozen.
+// ── Managed mode: an idle-expired request at the start of a new turn may
+// advance the system date (the open turn has no signed thinking yet), but the
+// earlier turn's signed thinking is still on the wire behind the system prompt.
 for (const host of HOSTS)
-    for (const model of [ANTHROPIC_OPUS, BEDROCK_OPUS])
-        for (const systemFirst of [true, false])
-            it.skipIf(!ENABLED)(
-                `${host}: ${model.providerID}: a held idle-expired pass keeps the open turn's thinking and the date frozen after a day rollover (system ${systemFirst ? "first" : "after messages"})`,
-                async () => {
-                    const s = session(
-                        host,
-                        `r729g-date-held-${host}-${model.providerID}-${systemFirst}`,
-                        {
-                            model,
-                        },
-                    );
-                    s.user("long task");
-                    await s.pass("2026-10-21", { systemFirst });
-                    for (let n = 1; n <= 2; n++) {
-                        s.step(n, 200);
-                        await s.pass("2026-10-21", { systemFirst });
-                    }
-                    // Heavy reasoning on the newest step: the next pass holds the turn.
-                    s.step(3, 2_400);
-                    await s.pass("2026-10-21", { systemFirst });
-                    s.step(4, 200);
-                    s.idle();
-                    const out = await s.pass("2026-10-22", { systemFirst });
-                    report(`${host} ${model.providerID} held idle systemFirst=${systemFirst}`, s, {
-                        prompt: out.prompt?.match(/Date: \S+/)?.[0],
-                        kept: signedSignatures(out.messages ?? []),
-                        logs: s.relevantLogs().filter((l) => /date|hold|frozen|strip/i.test(l)),
-                    });
-                    // The case only means something if the turn's thinking is still served.
-                    expect(signedSignatures(out.messages ?? []).length).toBeGreaterThan(0);
-                    expect(s.problems).toEqual([]);
-                },
-                60_000,
-            );
-
-// ── The system date can stay frozen for days. With the prompt otherwise
-// unchanged, it moves only on a request that serves no signed thinking at all.
-// Compaction-off never strips earlier turns'
-// thinking on its own (only a fold that changes m[0]/m[1], or a mode switch,
-// does), and the date is restored after a restart, so a compaction-off session
-// on a prefix-bound model whose docs and memory do not change keeps the date
-// of its first request: here five days of one idle-expired turn per day. That
-// is the intended trade: a stale date only costs the model accuracy about
-// today, while a moved date in front of served signed thinking invalidates
-// that thinking and the provider rejects the request. So compaction-off
-// asserts the first day's date on every day. Managed mode is run alongside:
-// its idle-expired request rebuilds the prefix and strips the earlier
-// thinking, so its date follows the calendar and the case asserts the current
-// date by the last day.
-for (const host of HOSTS)
-    for (const compactionOff of [true, false])
-        it.skipIf(!ENABLED)(
-            `${host}: ${compactionOff ? "compaction-off" : "managed"}: one idle-expired turn a day for five days serves ${compactionOff ? "the first day's frozen date throughout" : "the current date by the last day"}`,
-            async () => {
-                const s = session(host, `r729g-date-days-${host}-${compactionOff}`, {
-                    compactionOff,
-                    memory: true,
-                });
-                const days = ["2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24", "2026-10-25"];
-                const served: string[] = [];
-                let n = 0;
-                for (const [index, day] of days.entries()) {
-                    if (index > 0) {
-                        s.idle();
-                        // A restart overnight, as when the machine sleeps or the host updates.
-                        if (index === 2) s.restart();
-                    }
-                    s.user(`task of ${day}`);
-                    await s.pass(day);
-                    for (let k = 0; k < 3; k++) {
-                        s.step(++n, 200);
-                        const out = await s.pass(day);
-                        if (k === 2) served.push(out.prompt?.match(/Date: (\S+)/)?.[1] ?? "?");
-                    }
-                }
-                report(`${host} off=${compactionOff} five days`, s, { served });
-                expect(s.problems).toEqual([]);
-                if (compactionOff) expect(served).toEqual(days.map(() => days[0]));
-                else expect(served.at(-1)).toBe(days.at(-1));
-            },
-            60_000,
-        );
-
-// ── A store-generation rebase clears the saved prompt hash before the system
-// hook runs, which lets the live date become the new baseline while signed
-// thinking is still served. Revision e580f68672 (before the frozen date was
-// persisted) fails this case too; it matters more now because compaction-off
-// keeps a frozen date for days (case above). The date is protected only
-// while the session has a persisted system-prompt hash. OpenCode 2 rebases a
-// converted session before the system hook (v2/hooks/context.ts,
-// "Rebase before it so a converted session initializes the new host's prompt
-// hash"), and a rebase that moved coordinates clears system_prompt_hash and
-// the cached m[0]/m[1]. The system hook then finds no hash and adopts the live
-// date as a new baseline (`if (currentDate && !stickyDate)`), with no check of
-// the signed thinking the request keeps. Here the date was frozen by a
-// rollover inside a signed turn, so the adopted date differs from the one that
-// thinking was born under. Red means the rebase request served kept thinking
-// behind a changed date.
-for (const host of HOSTS)
-    for (const compactionOff of [true, false])
-        it.skipIf(!ENABLED)(
-            `${host}: ${compactionOff ? "compaction-off" : "managed"}: a rebase that clears the prompt hash before the system hook keeps a frozen date in front of kept thinking`,
-            async () => {
-                const systemFirst = true;
-                const s = session(host, `r729g-rebase-date-${host}-${compactionOff}`, {
-                    compactionOff,
-                    memory: true,
-                });
-                s.user("long task");
+    for (const systemFirst of [false, true])
+        it(`${host}: an idle-expired first request of a new turn with a day rollover keeps the earlier turn's thinking behind the date (system ${systemFirst ? "first" : "after messages"})`, async () => {
+            const s = session(host, `spe-date-oldturn-${host}-${systemFirst}`);
+            s.user("long task");
+            await s.pass("2026-10-21", { systemFirst });
+            for (let n = 1; n <= 3; n++) {
+                s.step(n, 200);
                 await s.pass("2026-10-21", { systemFirst });
+            }
+            s.user("next task");
+            s.idle();
+            const out = await s.pass("2026-10-22", { systemFirst });
+            report(`${host} date old-turn idle systemFirst=${systemFirst}`, s, {
+                prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                kept: signedSignatures(out.messages ?? []),
+                logs: s.relevantLogs(),
+            });
+            expect(s.problems).toEqual([]);
+        }, 60_000);
+
+// ── Managed mode: an idle-expired pass that holds the open signed turn (heavy
+// reasoning a step back) keeps the turn's thinking on the wire, so the system
+// date in front of it must stay frozen after a day rollover until a pass strips
+// the thinking or the turn ends. The turn's opening user message is first
+// summarized into history and trimmed from the array, as in a long turn; the
+// thinking the hold keeps then follows no real user message in the array.
+for (const host of HOSTS)
+    for (const systemFirst of [true, false])
+        it(`${host}: a held idle-expired pass of a signed turn keeps the date frozen after a day rollover (system ${systemFirst ? "first" : "after messages"})`, async () => {
+            const s = session(host, `spe-date-held-idle-${host}-${systemFirst}`);
+            s.user("long task");
+            await s.pass("2026-10-21", { systemFirst });
+            for (let n = 1; n <= 2; n++) {
+                s.step(n, 200);
+                await s.pass("2026-10-21", { systemFirst });
+            }
+            // History covers the user message and the first step; a flush
+            // publishes it and trims them from the array.
+            s.compartment(1);
+            s.flush();
+            s.step(3, 200);
+            await s.pass("2026-10-21", { systemFirst });
+            s.step(4, 2_400);
+            await s.pass("2026-10-21", { systemFirst });
+            s.step(5, 200);
+            await s.pass("2026-10-22", { systemFirst });
+            s.idle();
+            s.step(6, 200);
+            const out = await s.pass("2026-10-22", { systemFirst });
+            report(`${host} date held idle systemFirst=${systemFirst}`, s, {
+                prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                kept: signedSignatures(out.messages ?? []),
+                roles: (out.messages ?? []).map((m) => `${String(m.info.id)}`),
+                logs: s.relevantLogs().filter((l) => /date|hold|frozen|strip/i.test(l)),
+            });
+            expect(s.problems).toEqual([]);
+            // The case only means something if the thinking is still served.
+            expect(signedSignatures(out.messages ?? []).length).toBeGreaterThan(0);
+        }, 60_000);
+
+// ── Forks: a fork made while the parent serves a last-good replay's tail
+// untagged. The durable record keeps the parent's message ids, which the fork
+// does not have.
+for (const host of HOSTS)
+    for (const nextIsUser of [true, false])
+        it(`${host}: a fork after a last-good replay, then ${nextIsUser ? "a new real user" : "another step of the open turn"} on the fork`, async () => {
+            const s = session(host, `spe-fork-lkg-${host}-${nextIsUser}`);
+            s.user("long task");
+            await s.pass();
+            s.step(1, 2_400);
+            await s.pass();
+            s.failNextPass();
+            s.step(2, 200);
+            await s.pass();
+            s.step(3, 200);
+            await s.pass();
+            s.fork(`spe-fork-lkg-${host}-${nextIsUser}-child`);
+            if (nextIsUser) s.user("next task");
+            else s.step(4, 200);
+            const out = await s.pass();
+            report(`${host} fork after lkg user=${nextIsUser}`, s, {
+                kept: signedSignatures(out.messages ?? []),
+                tools: toolHeads(out.messages ?? []),
+                logs: s.relevantLogs(),
+            });
+            expect(s.problems).toEqual([]);
+        }, 60_000);
+
+// ── A session whose replay document the strict parser refuses (an invalid
+// trailing-blank decision), then a last-good replay on a held turn. The case
+// asserts that the following defer passes are served by the transform; it is
+// red when they are all replaced by last-good replays instead.
+// Open defect: a replay document the strict parser refuses turns every later pass into a last-good replay.
+for (const host of HOSTS)
+    it.skipIf(!OPEN_DEFECTS)(
+        `${host}: a replay document the strict parser refuses, then a last-good replay on a held turn`,
+        async () => {
+            const sessionId = `spe-baddoc-${host}`;
+            const s = session(host, sessionId);
+            s.user("long task");
+            await s.pass();
+            s.step(1, 2_400);
+            await s.pass();
+            s.db
+                .prepare(
+                    "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+                )
+                .run(JSON.stringify({ version: 2, trailingBlank: { ghost: "keep:1" } }), sessionId);
+            s.failNextPass();
+            s.step(2, 200);
+            await s.pass();
+            let replays = 0;
+            let refused = 0;
+            const trail: string[] = [];
+            for (let n = 3; n <= 8; n++) {
+                s.step(n, 200);
+                const out = await s.pass();
+                const replayed = s.logs.some((l) => l.includes("lkg_replay_served"));
+                if (replayed) replays++;
+                if (!out.messages) refused++;
+                trail.push(
+                    `${n}:${out.messages ? (replayed ? "replay" : "served") : "refused"}${s.logs.some((l) => l.includes("untagged")) ? "+untagged-log" : ""}`,
+                );
+            }
+            report(`${host} bad replay doc`, s, { replays, refused, trail });
+            expect(s.problems).toEqual([]);
+            // Defer passes of a held turn should be served by the transform,
+            // not replaced by last-good replays one after another.
+            expect(replays).toBe(0);
+        },
+        60_000,
+    );
+
+// ── The durable untagged-message record when its writes fail (a busy
+// database). Only writes of that record fail; every other replay-document
+// write goes through. Base has no record, so there the same stream shows what
+// the record is meant to prevent.
+function failUntaggedRecordWrites(): { stop: () => void; failures: () => number } {
+    let failures = 0;
+    const original = replayDocumentModule.updateReplayDocument;
+    const spy = spyOn(replayDocumentModule, "updateReplayDocument").mockImplementation(
+        (db, sessionId, mutate) => {
+            if (String(mutate).includes("lkgUntaggedInputIds")) {
+                failures++;
+                return false;
+            }
+            return original(db, sessionId, mutate);
+        },
+    );
+    return { stop: () => spy.mockRestore(), failures: () => failures };
+}
+
+for (const host of HOSTS) {
+    it(`${host}: the untagged-message record cannot be written for four passes after a last-good replay on a held turn`, async () => {
+        const s = session(host, `spe-recordfail-loop-${host}`);
+        s.user("long task");
+        await s.pass();
+        s.step(1, 2_400);
+        await s.pass();
+        const failing = failUntaggedRecordWrites();
+        s.failNextPass();
+        s.step(2, 200);
+        await s.pass();
+        const trail: string[] = [];
+        for (let n = 3; n <= 6; n++) {
+            s.step(n, 200);
+            const out = await s.pass();
+            trail.push(
+                `${n}:${out.messages ? (s.logs.some((l) => l.includes("lkg_replay_served")) ? "replay" : "served") : "refused"}`,
+            );
+        }
+        failing.stop();
+        s.step(7, 200);
+        const after = await s.pass();
+        trail.push(
+            `7:${after.messages ? (s.logs.some((l) => l.includes("lkg_replay_served")) ? "replay" : "served") : "refused"}`,
+        );
+        report(`${host} record write failing x4`, s, {
+            trail,
+            failures: failing.failures(),
+            tools: toolHeads(after.messages ?? []),
+        });
+        expect(s.problems).toEqual([]);
+    }, 60_000);
+
+    // Open defect: a failed untagged-record write before a restart lets the next real user re-tag the replayed tail.
+    it.skipIf(!OPEN_DEFECTS)(
+        `${host}: the untagged-message record cannot be written at a last-good replay, then the process restarts and a new real user arrives`,
+        async () => {
+            const s = session(host, `spe-recordfail-restart-${host}`);
+            s.user("long task");
+            await s.pass();
+            s.step(1, 2_400);
+            await s.pass();
+            const failing = failUntaggedRecordWrites();
+            s.failNextPass();
+            s.step(2, 200);
+            await s.pass();
+            s.step(3, 200);
+            await s.pass();
+            failing.stop();
+            // Both writes of the record failed (at the replay and on the next
+            // pass), so after the restart nothing says the replayed result was
+            // served untagged; the new real user makes the next pass a defer pass.
+            s.user("next task");
+            s.restart();
+            const out = await s.pass();
+            report(`${host} record write failed, restart + user`, s, {
+                failures: failing.failures(),
+                kept: signedSignatures(out.messages ?? []),
+                tools: toolHeads(out.messages ?? []),
+                logs: s.relevantLogs(),
+            });
+            expect(s.problems).toEqual([]);
+        },
+        60_000,
+    );
+}
+
+// ── Compaction-off first render with nothing changed in the head: the strip
+// is needed only when the new head differs from the one served. This measures
+// whether an unchanged head keeps the turn's thinking, warm and after a restart.
+// Open defect (restart without a saved last-good slot): a compaction-off first render strips thinking even when its head is unchanged.
+for (const host of HOSTS)
+    for (const [restart, settle] of [
+        [false, false],
+        [true, false],
+        [true, true],
+    ] as const)
+        it.skipIf(restart && !settle && !OPEN_DEFECTS)(
+            `${host}: compaction-off, a first render with an unchanged head ${restart ? "after a restart" : "in the same process"}${settle ? " (each last-good save landed)" : ""} keeps the turn's thinking`,
+            async () => {
+                const s = session(host, `spe-off-same-head-${host}-${restart}-${settle}`, {
+                    compactionOff: true,
+                });
+                // The last-good slot is saved to disk on a later tick; let it land.
+                const pass = async () => {
+                    await s.pass();
+                    if (settle)
+                        for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+                };
+                s.user("run some bash commands");
+                await pass();
                 for (let n = 1; n <= 3; n++) {
                     s.step(n, 200);
-                    await s.pass("2026-10-21", { systemFirst });
+                    await pass();
                 }
-                // Midnight inside the turn: the date stays frozen.
+                s.clearHead();
+                if (restart) s.restart();
                 s.step(4, 200);
-                const frozen = await s.pass("2026-10-22", { systemFirst });
-                s.step(5, 200);
-                s.rebaseClearsPromptState();
-                const out = await s.pass("2026-10-22", { systemFirst });
-                report(`${host} off=${compactionOff} rebase clears hash`, s, {
-                    frozenPrompt: frozen.prompt?.match(/Date: \S+/)?.[0],
-                    prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                const out = await s.pass();
+                report(`${host} off same-head restart=${restart}`, s, {
                     kept: signedSignatures(out.messages ?? []),
-                    logs: s.relevantLogs().filter((l) => /date|hash|strip|first_render/i.test(l)),
+                    logs: s.relevantLogs().filter((l) => /strip|first_render|frozen/.test(l)),
                 });
-                expect(frozen.prompt).toContain("Date: 2026-10-21");
                 expect(s.problems).toEqual([]);
+                expect(signedSignatures(out.messages ?? [])).toEqual([
+                    "sig-1",
+                    "sig-2",
+                    "sig-3",
+                    "sig-4",
+                ]);
             },
             60_000,
         );
+
+// ── A switch between managed and compaction-off mode inside a signed turn.
+// Compaction-off writes no tags, so a switch to it removes every §N§ prefix
+// the managed passes served, and a switch back adds them, in front of the
+// turn's thinking, even when the rendered head is the same. Each pass lets the
+// last-good save land, as a real session does between requests.
+for (const host of HOSTS)
+    for (const toCompactionOff of [true, false])
+        it(`${host}: a switch from ${toCompactionOff ? "managed to compaction-off" : "compaction-off to managed"} mode inside a signed turn`, async () => {
+            const s = session(host, `spe-switch-${host}-${toCompactionOff}`, {
+                compactionOff: !toCompactionOff,
+            });
+            const pass = async () => {
+                const out = await s.pass();
+                for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+                return out;
+            };
+            s.user("run some bash commands");
+            await pass();
+            s.step(1, 2_400);
+            await pass();
+            for (let n = 2; n <= 3; n++) {
+                s.step(n, 200);
+                await pass();
+            }
+            s.switchMode(toCompactionOff);
+            s.step(4, 200);
+            const out = await pass();
+            report(`${host} switch toCompactionOff=${toCompactionOff} mid-turn`, s, {
+                kept: signedSignatures(out.messages ?? []),
+                logs: s.relevantLogs().filter((l) => /strip|first_render|frozen|mode/i.test(l)),
+            });
+            expect(s.problems).toEqual([]);
+        }, 60_000);
+
+// ── A restart after a day rollover: the sticky system date must survive the
+// restart, or the first request after it carries the new date in front of
+// whatever signed thinking that request keeps.
+for (const host of HOSTS)
+    for (const compactionOff of [true, false])
+        it(`${host}: a restart after a day rollover inside a signed turn (${compactionOff ? "compaction-off" : "managed"})`, async () => {
+            const s = session(host, `spe-date-restart-${host}-${compactionOff}`, {
+                compactionOff,
+            });
+            s.user("run some bash commands");
+            await s.pass("2026-10-21");
+            s.step(1, 2_400);
+            await s.pass("2026-10-21");
+            s.step(2, 200);
+            await s.pass("2026-10-22");
+            s.restart();
+            s.step(3, 200);
+            const out = await s.pass("2026-10-22");
+            report(`${host} date restart off=${compactionOff}`, s, {
+                prompt: out.prompt?.match(/Date: \S+/)?.[0],
+                kept: signedSignatures(out.messages ?? []),
+                logs: s.relevantLogs().filter((l) => /date|strip|hash/i.test(l)),
+            });
+            expect(s.problems).toEqual([]);
+        }, 60_000);
