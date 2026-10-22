@@ -2649,6 +2649,8 @@ describe("runCompartmentAgent", () => {
                 ],
             },
         ];
+        // A pre-existing file row must still be queued with its summarized message.
+        createTagger().assignTag("ses-tag-drops", "m-1:file1", "file", 20, db);
         tagMessages("ses-tag-drops", messages, createTagger(), db);
 
         const client = {

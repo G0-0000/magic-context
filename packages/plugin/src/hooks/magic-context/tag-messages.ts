@@ -30,13 +30,7 @@ import { estimateTokens } from "./read-session-formatting";
 import { neutralizeDroppedReasoningPart } from "./sentinel";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
-import {
-    buildFileSourceContent,
-    isFilePart,
-    isTextPart,
-    isToolPartWithOutput,
-    stripTagPrefix,
-} from "./tag-part-guards";
+import { isFilePart, isTextPart, isToolPartWithOutput, stripTagPrefix } from "./tag-part-guards";
 import {
     createToolDropTarget,
     extractToolCallObservation,
@@ -1090,37 +1084,17 @@ export function tagMessages(
                 const filePart = part;
                 const messageParts = message.parts;
                 const contentId = `${messageId}:file${partIndex}`;
-                const existingTagId = resolver.resolve(messageId, "file", contentId, fileOrdinal);
-                const _tAssignFile = performance.now();
-                const tagId =
-                    existingTagId ??
-                    tagger.assignTag(
-                        sessionId,
-                        contentId,
-                        "file",
-                        byteSize(filePart.url),
-                        db,
-                        0,
-                        null,
-                        0,
-                        null,
-                        () => ({
-                            tokenCount: estimateTextTagTokenCount(filePart.url),
-                            inputTokenCount: null,
-                            reasoningTokenCount: null,
-                        }),
-                    );
-                accAssignTag += performance.now() - _tAssignFile;
-                if (existingTagId === undefined) {
-                    const sourceContent = buildFileSourceContent(message.parts);
-                    if (sourceContent) {
-                        const _tSaveFile = performance.now();
-                        if (options.refreshSourceContents)
-                            replaceSourceContent(db, sessionId, tagId, sourceContent);
-                        else saveSourceContent(db, sessionId, tagId, sourceContent);
-                        accSaveSource += performance.now() - _tSaveFile;
-                    }
-                }
+                const existingTagId =
+                    resolver.resolve(messageId, "file", contentId, fileOrdinal) ??
+                    getTagNumberByMessageId(db, sessionId, contentId) ??
+                    undefined;
+                fileOrdinal += 1;
+                // A file has no visible prefix, so allocating a number here would
+                // make the model's next visible number skip. Historical rows still
+                // bind their original drop targets without changing served bytes.
+                if (existingTagId === undefined) continue;
+                const tagId = existingTagId;
+                tagger.bindTag(sessionId, contentId, tagId);
                 messageTagNumbers.set(
                     message,
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
@@ -1148,7 +1122,6 @@ export function tagMessages(
                         return true;
                     },
                 });
-                fileOrdinal += 1;
             }
         }
 

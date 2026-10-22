@@ -112,6 +112,7 @@ import {
     resolveModelKey,
     resolveTrustedContextLimit,
 } from "./event-resolvers";
+import { omitIncompleteFileTokenTotals } from "./file-token-coverage";
 import {
     createFinalWireUsageTracker,
     describeFinalWireTail,
@@ -3600,10 +3601,13 @@ export function createTransform(deps: TransformDeps) {
         });
         if (uncachedMessageIds.length > 0) {
             try {
-                storedByMessage = getActiveTagTokenTotalsByMessage(
+                storedByMessage = omitIncompleteFileTokenTotals(
                     db,
                     sessionId,
-                    uncachedMessageIds,
+                    messages.flatMap((message) =>
+                        message.info.id ? [{ id: message.info.id, parts: message.parts }] : [],
+                    ),
+                    getActiveTagTokenTotalsByMessage(db, sessionId, uncachedMessageIds),
                 );
             } catch {
                 storedByMessage = new Map();
