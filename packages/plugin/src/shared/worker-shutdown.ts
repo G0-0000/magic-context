@@ -36,9 +36,16 @@ export function isWorkerCloseMessage(message: unknown): boolean {
  * and end the thread. `process.exit()` in a worker thread ends only that
  * thread, on Node and on Bun. Other `message` listeners in the worker see the
  * same message and must ignore its kind.
+ *
+ * Returns a function that removes the listener. A worker that finishes by
+ * closing its port must call it first: on Bun 1.3.14 a worker whose parent port
+ * still has a `message` listener does not exit after `port.close()`.
  */
-export function exitOnWorkerClose(port: MessagePort | null, closeConnections: () => void): void {
-    port?.on("message", (message: unknown) => {
+export function exitOnWorkerClose(
+    port: MessagePort | null,
+    closeConnections: () => void,
+): () => void {
+    const listener = (message: unknown) => {
         if (!isWorkerCloseMessage(message)) return;
         try {
             closeConnections();
@@ -47,7 +54,11 @@ export function exitOnWorkerClose(port: MessagePort | null, closeConnections: ()
             // that could not close is released by the thread's teardown instead.
             process.exit(0);
         }
-    });
+    };
+    port?.on("message", listener);
+    return () => {
+        port?.off("message", listener);
+    };
 }
 
 export interface WorkerShutdown {

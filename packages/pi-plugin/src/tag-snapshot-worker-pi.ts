@@ -43,7 +43,7 @@ let persistedVersion = 0;
 // registered before any packet-credit listener, so it closes the connection and
 // ends the thread before a credit listener could read the request; the owner
 // has already discarded the job.
-exitOnWorkerClose(port, () => {
+const stopListeningForClose = exitOnWorkerClose(port, () => {
 	const connection = db;
 	db = undefined;
 	connection?.close();
@@ -293,6 +293,9 @@ const run = async () => {
 		} satisfies PiHydrationMessage);
 	} finally {
 		db?.close();
+		// Bun 1.3.14 keeps the thread alive after port.close() while the close
+		// listener is still installed, and the owner waits for this exit.
+		stopListeningForClose();
 		port.close();
 	}
 };
