@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { installTagIdentityRevisionTrigger } from "@magic-context/core/features/magic-context/storage-tag-identity-revision";
@@ -410,6 +411,54 @@ it("worker hydrates full active and fallback projections with bounded credited p
 		expect(result.telemetry.packetCount).toBeGreaterThan(2);
 		expect(result.telemetry.maxReadTransactionMs).toBeGreaterThan(0);
 	} finally {
+		close();
+	}
+});
+
+it("worker finishes module evaluation before it needs its first packet ACK", async () => {
+	// Bun 1.3.14 delivers no parent message to a worker until the worker's
+	// entry module has finished evaluating. A job awaited at module top level
+	// then waits forever for its first ACK. The fixture entry reports when the
+	// real worker module has settled, and this parent holds every ACK until
+	// then, so the same deadlock shows up on any runtime.
+	const { db, path, close } = fixture();
+	const worker = new Worker(
+		new URL("./tag-snapshot-worker-evaluation.fixture.ts", import.meta.url),
+		{ workerData: requestFor(path) },
+	);
+	try {
+		seedPages(db);
+		let evaluated = false;
+		const held: PiHydrationMessage[] = [];
+		const ack = (message: PiHydrationMessage) => {
+			const bytes = message.type === "packet" ? message.bytes : undefined;
+			worker.postMessage(
+				{ type: "ack", sequence: message.sequence, bytes },
+				bytes ? [bytes] : [],
+			);
+		};
+		const outcome = await new Promise<string>((resolve) => {
+			const timer = setTimeout(() => resolve("no completion"), 5_000);
+			worker.on(
+				"message",
+				(message: PiHydrationMessage | { type: "evaluated" }) => {
+					if (message.type === "evaluated") {
+						evaluated = true;
+						for (const waiting of held.splice(0)) ack(waiting);
+					} else if (message.type === "done" || message.type === "failed") {
+						clearTimeout(timer);
+						resolve(message.type);
+					} else if (evaluated) ack(message);
+					else held.push(message);
+				},
+			);
+		});
+		expect({ outcome, evaluated }).toEqual({
+			outcome: "done",
+			evaluated: true,
+		});
+	} finally {
+		await worker.terminate();
 		close();
 	}
 });
