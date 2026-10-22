@@ -101,6 +101,12 @@ interface RunCompartmentPhaseArgs {
     fallbackModels?: readonly ModelInput[];
     compartmentDirectory: string;
     messages: MessageLike[];
+    /**
+     * The pass's list of covered id-less instruction rows set aside by the history
+     * trim. A re-preparation after a historian join cuts again and must add to the
+     * same list, so the rows it cuts are served or dropped like the first cut's.
+     */
+    coveredInstructions: MessageLike[];
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     fallbackModelId?: string;
     ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
@@ -362,6 +368,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             args.resolvedSessionId,
             args.messages,
             historyReprepareShouldBust,
+            args.coveredInstructions,
             args.projectPath,
             args.injectionBudgetTokens,
             args.experimentalTemporalAwareness,

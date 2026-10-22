@@ -992,6 +992,24 @@ export class V2StoreReader {
         });
     }
 
+    /**
+     * Instruction-update rows (`type = 'system'`) at or before `throughSeq`,
+     * oldest first. Only these rows are read, so a long session pays for its few
+     * instruction rows rather than for its whole history.
+     */
+    instructionRowsThrough(sessionID: string, throughSeq: number): StoreRow[] {
+        return trackDecodeOperation("instructionRowsThrough", () => {
+            if (!Number.isSafeInteger(throughSeq)) throw new Error("Invalid seq upper bound");
+            return (
+                this.prepare(
+                    `SELECT id, session_id, type, seq, time_created, data FROM session_message
+                         WHERE session_id = ? AND type = 'system' AND seq <= ?
+                         ORDER BY seq ASC`,
+                ).all(sessionID, throughSeq) as RawRow[]
+            ).map(decode);
+        });
+    }
+
     sequenceForId(sessionID: string, id: string | null | undefined): number | undefined {
         if (!id) return undefined;
         const row = this.prepare(

@@ -98,13 +98,7 @@ function runProductionFlow(opts: {
 }): { m0: string; m1: string; tailIds: string[] } {
     // Mirror the transform→postprocess order: prepareCompartmentInjection first
     // (trims the live tail), then injectM0M1 (prepends m[0]/m[1]).
-    prepareCompartmentInjection(
-        db,
-        SESSION_ID,
-        opts.messages,
-        opts.isCacheBustingPass,
-        PROJECT_PATH,
-    );
+    prepareCompartmentInjection(db, SESSION_ID, opts.messages, opts.isCacheBustingPass, [], PROJECT_PATH);
     const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
     const result = injectM0M1({
         db,
@@ -254,7 +248,7 @@ describe("restart history omission", () => {
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo just-published")]);
 
         const failMsgs = makeMessages(6);
-        prepareCompartmentInjection(db, SESSION_ID, failMsgs, true, PROJECT_PATH);
+        prepareCompartmentInjection(db, SESSION_ID, failMsgs, true, [], PROJECT_PATH);
 
         const beforeClear = runProductionFlow({
             projectDirectory,

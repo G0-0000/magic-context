@@ -121,6 +121,10 @@ import {
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    cloneKeepingCoveredInstructionMarks,
+    takeCoveredInstructionRows,
+} from "./host-served-rows";
+import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
@@ -803,8 +807,11 @@ export function createTransform(deps: TransformDeps) {
                     ["reasoning", "thinking", "redacted_thinking"].includes(String(part.type)),
             ),
         )
-            ? structuredClone(messages)
+            ? cloneKeepingCoveredInstructionMarks(messages)
             : null;
+        // Covered instruction rows restored by the OpenCode 2 hook stay out of
+        // every stage until postprocess decides whether this session serves them.
+        const coveredHostInstructions = takeCoveredInstructionRows(messages);
         const passOutcome = createPassOutcome();
         const tSessionId = performance.now();
         const sessionId = findSessionId(messages);
@@ -2283,6 +2290,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionId,
                 messages,
                 isCacheBusting,
+                coveredHostInstructions,
                 projectIdentity,
                 deps.memoryConfig?.injectionBudgetTokens,
                 deps.experimentalTemporalAwareness,
@@ -2662,6 +2670,7 @@ export function createTransform(deps: TransformDeps) {
             fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
             compartmentDirectory,
             messages,
+            coveredInstructions: coveredHostInstructions,
             pendingCompartmentInjection,
             fallbackModelId,
             projectPath: projectIdentity,
@@ -2955,6 +2964,7 @@ export function createTransform(deps: TransformDeps) {
             emergencyCeilingTokens,
             pendingCompartmentInjection,
             prefixTrimSourceOrder,
+            coveredHostInstructions,
             hiddenMessagesAtCompactionSeam,
             trimmedMessagesAtCompactionBoundary,
             didMutateFromFlushedStatuses,
