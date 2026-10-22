@@ -3,10 +3,10 @@
 /**
  * The first transform pass after a host restart, on a session whose last
  * request the provider rejected as too large (GitHub issue 752 follow-up).
- * Skipped unless MC_REVIEW_752=1. The case asserts the behavior the pass should
+ * The case asserts the behavior the pass should
  * have: overflow recovery sizes its emergency reclaim from the request that
  * overflowed, not from the provider's earlier, smaller accepted reading. It
- * fails while the restart pass prefers that saved reading.
+ * fails if the restart pass prefers that saved reading.
  *
  * The case drives a real createTransform and a real event handler over one
  * context.db, and simulates a host restart by building a new pair with empty
@@ -34,7 +34,6 @@ import { resolveContextWindowGeometry } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createTransform } from "./transform";
 
-const ENABLED = process.env.MC_REVIEW_752 === "1";
 // A model in the tokenizer calibration table with ratios close to 1. A seeded
 // model is the case where the code before the fix sized this pass from the
 // calibrated count of the request; an unseeded one was sized from the doubled
@@ -223,84 +222,108 @@ function harness(sessionId: string) {
             });
         },
         /** The provider rejects the request as too large, reporting no limit. */
-        overflow: async () => {
+        /**
+         * With no argument the error reports no token count and no limit (the
+         * OpenAI shape); with `counted`, it carries both, as Anthropic's does.
+         */
+        overflow: async (counted?: { tokens: number; maximum: number }) => {
             await proc.events({
                 event: {
                     type: "session.error",
-                    properties: { sessionID: sessionId, error: "prompt is too long" },
+                    properties: {
+                        sessionID: sessionId,
+                        error: counted
+                            ? `prompt is too long: ${counted.tokens} tokens > ${counted.maximum} maximum`
+                            : "prompt is too long",
+                    },
                 },
             });
         },
     };
 }
 
-it.skipIf(!ENABLED)(
-    "an overflow-recovery pass after a restart sizes the emergency reclaim from the rejected request, not the last accepted reading",
-    async () => {
-        const h = harness("ses-review-752-overflow");
-        try {
-            // A managed session the provider last measured at about 60%.
-            h.user("start the listings");
-            while (h.count(h.history) < 0.6 * h.usableHard()) h.tool(2_400);
-            h.user("continue");
-            const warm = await h.pass();
-            expect(warm.error).toBeNull();
-            const accepted = h.count(warm.messages);
-            await h.reply(accepted);
-            // One large tool output takes the request to about 88% by the
-            // plugin's count. An overflow event with no token count or limit in
-            // its message follows, as when a provider whose tokenizer is denser
-            // than the local count rejects the request.
-            const target = 0.88 * h.usableHard();
-            const before = h.count(h.history);
-            // Measure the local count per character of tool output, then size it.
-            h.tool(40_000);
-            const perChar = (h.count(h.history) - before) / 40_000;
-            h.history.pop();
-            h.tool(Math.round((target - before) / perChar));
-            h.user("summarize the output");
-            const rejected = await h.pass();
-            expect(rejected.error).toBeNull();
-            const rejectedCount = h.count(rejected.messages);
-            expect(rejectedCount / h.usableHard()).toBeGreaterThan(0.8);
-            expect(rejectedCount / h.usableHard()).toBeLessThan(0.95);
-            await h.overflow();
+async function overflowRestartCase(counted: boolean) {
+    const h = harness(`ses-review-752-overflow-${counted ? "counted" : "bare"}`);
+    try {
+        // A managed session the provider last measured at about 60%.
+        h.user("start the listings");
+        while (h.count(h.history) < 0.6 * h.usableHard()) h.tool(2_400);
+        h.user("continue");
+        const warm = await h.pass();
+        expect(warm.error).toBeNull();
+        const accepted = h.count(warm.messages);
+        await h.reply(accepted);
+        // One large tool output takes the request to about 88% by the
+        // plugin's count. An overflow event with no token count or limit in
+        // its message follows, as when a provider whose tokenizer is denser
+        // than the local count rejects the request.
+        const target = 0.88 * h.usableHard();
+        const before = h.count(h.history);
+        // Measure the local count per character of tool output, then size it.
+        h.tool(40_000);
+        const perChar = (h.count(h.history) - before) / 40_000;
+        h.history.pop();
+        h.tool(Math.round((target - before) / perChar));
+        h.user("summarize the output");
+        const rejected = await h.pass();
+        expect(rejected.error).toBeNull();
+        const rejectedCount = h.count(rejected.messages);
+        expect(rejectedCount / h.usableHard()).toBeGreaterThan(0.8);
+        expect(rejectedCount / h.usableHard()).toBeLessThan(0.95);
+        await h.overflow(
+            counted
+                ? { tokens: Math.round(rejectedCount * 1.15), maximum: h.usableHard() }
+                : undefined,
+        );
 
-            // The host restarts inside the cache window and retries the turn.
-            h.restart();
-            const boot = await h.pass();
-            const reading = boot.log
-                .map((line) =>
-                    /unknown provider usage; using (.*?) for priced pass inputTokens=(\d+) percentage=([\d.]+)/.exec(
-                        line,
-                    ),
-                )
-                .find(Boolean);
-            expect(boot.log.some((line) => line.includes("bumping percentage to 95%"))).toBe(true);
-            expect(reading).toBeDefined();
-            console.log(
-                "REVIEW_752_OVERFLOW",
-                JSON.stringify({
-                    accepted,
-                    rejectedCount,
-                    reading: reading![0],
-                    reclaim: boot.log.filter((line) =>
-                        /emergency tiered drop|EMERGENCY|pending ops WILL/.test(line),
-                    ),
-                }),
-            );
-            // The emergency planner reads inputTokens as the size of the request it
-            // must shrink. That size should cover the plugin's own count of the
-            // request that overflowed (within 5%: the pass counts its array
-            // mid-transform). The last accepted reading (about 60%) predates the
-            // large tool output and understates it.
-            const covers = Number(reading![2]) >= 0.95 * rejectedCount;
-            expect(`${reading![1]}: ${covers ? "covers" : "below"} the rejected request`).toBe(
-                `${reading![1]}: covers the rejected request`,
-            );
-        } finally {
-            h.restore();
-        }
-    },
+        // The host restarts inside the cache window and retries the turn.
+        h.restart();
+        const boot = await h.pass();
+        const reading = boot.log
+            .map((line) =>
+                /unknown provider usage; using (.*?) for priced pass inputTokens=(\d+) percentage=([\d.]+)/.exec(
+                    line,
+                ),
+            )
+            .find(Boolean);
+        expect(boot.log.some((line) => line.includes("bumping percentage to 95%"))).toBe(true);
+        expect(reading).toBeDefined();
+        console.log(
+            `REVIEW_752_OVERFLOW${counted ? "_COUNTED" : ""}`,
+            JSON.stringify({
+                accepted,
+                rejectedCount,
+                reading: reading![0],
+                reclaim: boot.log.filter((line) =>
+                    /emergency tiered drop|EMERGENCY|pending ops WILL/.test(line),
+                ),
+            }),
+        );
+        // The emergency planner reads inputTokens as the size of the request it
+        // must shrink. That size should cover the plugin's own count of the
+        // request that overflowed (within 5%: the pass counts its array
+        // mid-transform). The last accepted reading (about 60%) predates the
+        // large tool output and understates it.
+        const covers = Number(reading![2]) >= 0.95 * rejectedCount;
+        expect(`${reading![1]}: ${covers ? "covers" : "below"} the rejected request`).toBe(
+            `${reading![1]}: covers the rejected request`,
+        );
+    } finally {
+        h.restore();
+    }
+}
+
+it(
+    "an overflow-recovery pass after a restart sizes the emergency reclaim from the rejected request, not the last accepted reading",
+    () => overflowRestartCase(false),
+    60_000,
+);
+
+// The counted error (Anthropic's shape) records the rejected size and a
+// detected limit, so the saved reading never qualified here; this case holds
+// that path to the same outcome.
+it(
+    "an overflow-recovery pass after a restart, when the overflow error carries its token count, sizes from the rejected request",
+    () => overflowRestartCase(true),
     60_000,
 );

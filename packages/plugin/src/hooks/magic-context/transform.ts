@@ -2822,13 +2822,21 @@ export function createTransform(deps: TransformDeps) {
         // the provider would send a request that may not fit.
         let contextUsageFromEstimate = false;
         if (contextUsage.inputTokens <= 0 && protectionCacheBustingPass) {
-            const savedProviderReading = savedProviderReadingForPass({
-                persisted: persistedUsageBeforeResets,
-                currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
-                contextLimit: resolvedContextLimit,
-                lastResponseTime: sessionMeta.lastResponseTime,
-                cacheExpired: hardCacheExpired,
-            });
+            // Overflow recovery sizes the request the provider just rejected, so
+            // the saved reading (the last accepted request, which predates it) is
+            // never used here, and the request is counted with the fit envelope
+            // as before: recovery is a fit decision, and the emergency planner
+            // must plan its reclaim against the whole rejected request.
+            const overflowRecoveryPass = usagePercentageSynthetic || emergencyRecoveryArmed;
+            const savedProviderReading = overflowRecoveryPass
+                ? null
+                : savedProviderReadingForPass({
+                      persisted: persistedUsageBeforeResets,
+                      currentModelKey: currentModelKeyForBoundary ?? (hardModelKey || undefined),
+                      contextLimit: resolvedContextLimit,
+                      lastResponseTime: sessionMeta.lastResponseTime,
+                      cacheExpired: hardCacheExpired,
+                  });
             let pressureEstimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
             try {
                 pressureEstimate = estimateFinalWireInputTokens({
@@ -2871,7 +2879,9 @@ export function createTransform(deps: TransformDeps) {
                 contextUsage = resolveUnknownUsageFromWireEstimate({
                     usage: contextUsage,
                     pricedPass: true,
-                    wireEstimateTokens: pressureEstimate.pressureTokens,
+                    wireEstimateTokens: overflowRecoveryPass
+                        ? pressureEstimate.tokens
+                        : pressureEstimate.pressureTokens,
                     wireEstimateTrusted: pressureEstimate.trusted,
                     providerProvenInputTokens: providerProvenInputForRecovery,
                     providerProvenLimitTokens: providerProvenLimitForRecovery,
@@ -2886,6 +2896,7 @@ export function createTransform(deps: TransformDeps) {
                     // A reading raised only by the local count, with no provider
                     // measurement and no overflow latch behind it.
                     contextUsageFromEstimate =
+                        !overflowRecoveryPass &&
                         !usedProviderInput &&
                         !usagePercentageSynthetic &&
                         contextUsage.percentage > percentageBeforeEstimate;
