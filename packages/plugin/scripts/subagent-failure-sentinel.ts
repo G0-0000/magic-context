@@ -119,27 +119,42 @@ function key(alert: Alert): string {
 
 /**
  * Ids of routine failures (see RECOVERABLE_ERROR) that a completed fallback attempt
- * recovered. The run produced its result on the fallback model, so the primary's
- * failure is expected and is not worth a wake. A fallback that also fails leaves the
- * primary unrecovered, so its failure stays eligible for the alert rules.
+ * recovered. The run produced its result on a fallback model, so the earlier
+ * failures are expected and not worth a wake. A chain can fail on several models
+ * before one completes, for example when two models share one exhausted account
+ * pool, so recovery follows the chain: every failure on the way to the completed
+ * attempt counts as recovered only if each of them is routine. A chain that ends
+ * without a completed attempt leaves all its failures eligible for the alert rules.
  */
 export function recoveredByFallback(rows: Row[]): Set<number> {
+    const isRoutineFailure = (row: Row) =>
+        (row.status === "failed" || row.status === "timed_out") && RECOVERABLE_ERROR.test(row.error ?? "");
+    const nextAttempts = (row: Row) =>
+        rows.filter(
+            (candidate) =>
+                candidate.parent_invocation_id === row.id ||
+                (candidate.parent_invocation_id === null &&
+                    candidate.task === "fallback" &&
+                    candidate.subagent === row.subagent &&
+                    candidate.session_id === row.session_id &&
+                    candidate.started_at >= row.ended_at - 5_000 &&
+                    candidate.started_at <= row.ended_at + FALLBACK_START_WINDOW_MS),
+        );
+    // True when a completed attempt follows this routine failure through a chain of
+    // routine failures. `seen` guards against a malformed chain that loops.
+    const reachesCompletion = (row: Row, seen: Set<number>): boolean => {
+        for (const next of nextAttempts(row)) {
+            if (seen.has(next.id)) continue;
+            if (next.status === "completed") return true;
+            if (!isRoutineFailure(next)) continue;
+            seen.add(next.id);
+            if (reachesCompletion(next, seen)) return true;
+        }
+        return false;
+    };
     const recovered = new Set<number>();
     for (const row of rows) {
-        if (row.status !== "failed" && row.status !== "timed_out") continue;
-        if (!RECOVERABLE_ERROR.test(row.error ?? "")) continue;
-        const fallbackCompleted = rows.some(
-            (candidate) =>
-                candidate.status === "completed" &&
-                (candidate.parent_invocation_id === row.id ||
-                    (candidate.parent_invocation_id === null &&
-                        candidate.task === "fallback" &&
-                        candidate.subagent === row.subagent &&
-                        candidate.session_id === row.session_id &&
-                        candidate.started_at >= row.ended_at - 5_000 &&
-                        candidate.started_at <= row.ended_at + FALLBACK_START_WINDOW_MS)),
-        );
-        if (fallbackCompleted) recovered.add(row.id);
+        if (isRoutineFailure(row) && reachesCompletion(row, new Set([row.id]))) recovered.add(row.id);
     }
     return recovered;
 }

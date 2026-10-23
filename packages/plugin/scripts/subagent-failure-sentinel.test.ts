@@ -48,6 +48,27 @@ test("a quota failure recovered by a completed fallback raises no alert", async 
     expect((await run()).alerts).toHaveLength(0);
 });
 
+test("two quota failures in a row recovered by a later completed fallback raise no alert", async () => {
+    // Two models on one exhausted account pool both fail before the third model
+    // in the chain completes.
+    for (let i = 0; i < 8; i++) {
+        const primary = attempt({ session: `q-${i}`, status: "failed", time: NOW - 60_000 + i * 1_000, error: QUOTA });
+        const second = attempt({ session: `q-${i}`, status: "failed", time: NOW - 59_000 + i * 1_000, task: "fallback", parent: primary, error: QUOTA });
+        attempt({ session: `q-${i}`, status: "completed", time: NOW - 30_000 + i * 1_000, task: "fallback", parent: second });
+    }
+    expect((await run()).alerts).toHaveLength(0);
+});
+
+test("a chain broken by a non-routine failure leaves the earlier failures eligible", async () => {
+    for (let i = 0; i < 8; i++) {
+        const primary = attempt({ session: `r-${i}`, status: "failed", time: NOW - 60_000 + i * 1_000, error: QUOTA });
+        const second = attempt({ session: `r-${i}`, status: "failed", time: NOW - 59_000 + i * 1_000, task: "fallback", parent: primary, error: "missing complete root element" });
+        attempt({ session: `r-${i}`, status: "completed", time: NOW - 30_000 + i * 1_000, task: "fallback", parent: second });
+    }
+    const rules = (await run()).alerts.map((alert) => alert.rule);
+    expect(rules).toContain("failure_share");
+});
+
 test("a pre-send window refusal recovered by a completed fallback raises no alert", async () => {
     const WINDOW = "opencode/deepseek-v4.1-flash-free: producer_prompt_exceeds_window calibrated_tokens=287038 limit=162960 estimator_margin=0.03";
     for (let i = 0; i < 8; i++) {
