@@ -10,6 +10,7 @@ import {
 	TAG_SELECT_COLUMNS,
 } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database, type Statement } from "@magic-context/core/shared/sqlite";
+import { exitOnWorkerClose } from "@magic-context/core/shared/worker-shutdown";
 import { encodePiHydrationOperation } from "./tag-snapshot-codec-pi";
 import {
 	PI_FALLBACK_ROW_COLUMNS,
@@ -36,6 +37,17 @@ let sampledGeneration = false;
 let generationStatement: Statement;
 let opened = false;
 let persistedVersion = 0;
+
+// A cancelled job closes its connection before the thread ends instead of
+// being terminated with it open (see worker-shutdown.ts). This listener is
+// registered before any packet-credit listener, so it closes the connection and
+// ends the thread before a credit listener could read the request; the owner
+// has already discarded the job.
+const { closePort } = exitOnWorkerClose(port, () => {
+	const connection = db;
+	db = undefined;
+	connection?.close();
+});
 
 class StaleGeneration extends Error {}
 class UnsupportedSchema extends Error {}
@@ -281,7 +293,9 @@ const run = async () => {
 		} satisfies PiHydrationMessage);
 	} finally {
 		db?.close();
-		port.close();
+		// Removes the close listener before closing the port: Bun 1.3.14 keeps
+		// the thread alive otherwise, and the owner waits for this exit.
+		closePort();
 	}
 };
 

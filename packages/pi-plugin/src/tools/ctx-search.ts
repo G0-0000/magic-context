@@ -127,7 +127,7 @@ export function createCtxSearchTool(
 		async execute(
 			_toolCallId,
 			params: CtxSearchParams,
-			_signal,
+			signal,
 			_onUpdate,
 			ctx,
 		) {
@@ -275,6 +275,9 @@ export function createCtxSearchTool(
 					// this off to protect its latency budget.
 					explicitSearch: true,
 					rerankConnectionFile: deps.rerankConnectionFile,
+					// A cancelled call stops building the history-chunk pool
+					// between batches instead of finishing it for nobody.
+					signal,
 					...dateRange,
 				},
 			);

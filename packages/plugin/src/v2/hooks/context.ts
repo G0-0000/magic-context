@@ -1421,32 +1421,54 @@ export async function registerContext(context: V2Context) {
                         if (event.type === "session.deleted") {
                             clearLkgMeasuredRequest(sessionID);
                             deletedSessions.add(sessionID);
-                            transform?.clearSessionLogState(sessionID);
-                            if (db) {
-                                markSessionCleanupPending(db, sessionID);
-                                clearSession(db, sessionID);
+                            // A failed store clear (a busy writer lock, say) must not skip
+                            // the in-memory cleanup below: the pending-cleanup marker
+                            // retries the rows later, but nothing retries this map
+                            // cleanup. The store error is still rethrown and logged below.
+                            const failures: unknown[] = [];
+                            try {
+                                transform?.clearSessionLogState(sessionID);
+                                if (db) {
+                                    markSessionCleanupPending(db, sessionID);
+                                    clearSession(db, sessionID);
+                                }
+                            } catch (error) {
+                                failures.push(error);
                             }
-                            rawProviders.get(sessionID)?.();
-                            rawProviders.delete(sessionID);
-                            usage.delete(sessionID);
-                            hiddenSessionErrors.delete(sessionID);
-                            storageNoticeBySession.delete(sessionID);
-                            liveModels.delete(sessionID);
-                            variants.delete(sessionID);
-                            agents.delete(sessionID);
-                            channel1.delete(sessionID);
-                            commitSeenLastPass.delete(sessionID);
-                            clearEmbedSessionState(sessionID);
-                            historyRefreshSessions.delete(sessionID);
-                            clearPendingMaterialization(pendingMaterializationSessions, sessionID);
-                            lastHeuristicsTurnId.delete(sessionID);
-                            restoredRows.forget(sessionID);
-                            if (nativeFoldReplay) await nativeFoldReplay.forget(sessionID);
-                            else await forgetNativeFoldProvenance(context.storage, sessionID);
-                            generateReplay.forget(sessionID);
-                            systemPromptRefreshSessions.delete(sessionID);
-                            systemPrompt?.clearSession(sessionID);
-                            tagger.cleanup(sessionID);
+                            try {
+                                rawProviders.get(sessionID)?.();
+                                rawProviders.delete(sessionID);
+                                usage.delete(sessionID);
+                                hiddenSessionErrors.delete(sessionID);
+                                storageNoticeBySession.delete(sessionID);
+                                liveModels.delete(sessionID);
+                                variants.delete(sessionID);
+                                agents.delete(sessionID);
+                                channel1.delete(sessionID);
+                                commitSeenLastPass.delete(sessionID);
+                                clearEmbedSessionState(sessionID);
+                                historyRefreshSessions.delete(sessionID);
+                                clearPendingMaterialization(
+                                    pendingMaterializationSessions,
+                                    sessionID,
+                                );
+                                lastHeuristicsTurnId.delete(sessionID);
+                                restoredRows.forget(sessionID);
+                                if (nativeFoldReplay) await nativeFoldReplay.forget(sessionID);
+                                else await forgetNativeFoldProvenance(context.storage, sessionID);
+                                generateReplay.forget(sessionID);
+                                systemPromptRefreshSessions.delete(sessionID);
+                                systemPrompt?.clearSession(sessionID);
+                                tagger.cleanup(sessionID);
+                            } catch (error) {
+                                failures.push(error);
+                            }
+                            if (failures.length === 1) throw failures[0];
+                            if (failures.length > 1)
+                                throw new AggregateError(
+                                    failures,
+                                    "session deletion failed in both the store clear and the in-memory cleanup",
+                                );
                             continue;
                         }
                         if (event.type !== "session.execution.succeeded") continue;
