@@ -2888,6 +2888,7 @@ export async function runPostTransformPhase(
         args.sessionId,
         "heuristics",
         JSON.stringify([
+            args.currentTurnId,
             shouldRunHeuristics,
             shouldRunHeuristics ? null : args.schedulerDeferReason,
         ]),
@@ -2896,6 +2897,7 @@ export async function runPostTransformPhase(
         args.sessionId,
         "pending-ops",
         JSON.stringify([
+            args.currentTurnId,
             shouldApplyPendingOps,
             shouldApplyPendingOps ? null : args.schedulerDeferReason,
             shouldApplyPendingOps ? null : (getPendingOpsCount(args.db, args.sessionId) ?? 0) > 0,

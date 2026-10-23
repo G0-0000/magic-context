@@ -4741,7 +4741,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         const log = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
             lines.push(values.join(" "));
         });
-        const pass = async () => {
+        const pass = async (currentTurnId: string | null = null) => {
             const message = makeToolMessage("drop-owner");
             const messages = [
                 message,
@@ -4754,6 +4754,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             applyFlushedStatuses(sessionId, db, targets, getTagsBySession(db, sessionId));
             const result = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
+                    currentTurnId,
                     targets,
                     pendingMaterializationSessions,
                     resolvedProviderID: "anthropic",
@@ -4785,6 +4786,16 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             expect(lines.filter((line) => line.startsWith("heuristics WILL NOT RUN"))).toHaveLength(
                 1,
             );
+            expect(
+                lines.filter((line) => line.startsWith("pending ops WILL NOT APPLY")),
+            ).toHaveLength(1);
+            lines.length = 0;
+            const nextTurn = await pass("next-real-user");
+            expect(nextTurn.wire).toBe(defer.wire);
+            expect(
+                lines.filter((line) => line.startsWith("pending ops WILL NOT APPLY")),
+            ).toHaveLength(1);
+            await pass("next-real-user");
             expect(
                 lines.filter((line) => line.startsWith("pending ops WILL NOT APPLY")),
             ).toHaveLength(1);
