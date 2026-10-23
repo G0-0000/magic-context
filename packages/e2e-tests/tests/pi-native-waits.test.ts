@@ -16,7 +16,7 @@ c.execute('BEGIN IMMEDIATE')
 print('HELD', flush=True)
 time.sleep(32)
 c.commit()
-`, h.contextDbPath()], { stdout: "pipe", stderr: "pipe" });
+`, h.contextDbPath()], { stdout: "pipe", stderr: "pipe", windowsHide: true });
     const reader = (holder.stdout as ReadableStream<Uint8Array>).getReader();
     const ready = await reader.read();
     reader.releaseLock();

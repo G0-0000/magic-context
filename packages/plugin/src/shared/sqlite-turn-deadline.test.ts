@@ -34,7 +34,7 @@ async function hold(path: string, reader = false) {
     `,
             path,
         ],
-        { stdout: "pipe", stderr: "pipe" },
+        { stdout: "pipe", stderr: "pipe", windowsHide: true },
     );
     const output = child.stdout.getReader();
     const first = await output.read();

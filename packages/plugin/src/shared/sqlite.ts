@@ -416,11 +416,13 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
     // native busy handler inside the turn's allowance, including on cached statements.
     const withinDeadline = <T>(operation: () => T): T => {
         const deadline = nativeWaitScope.getStore();
-        if (!deadline?.active) return operation();
+        if (!deadline?.active || !deadline.remainingMs) return operation();
+        const remaining = deadline.remainingMs();
+        if (remaining === Infinity) return operation();
         timeoutReader ??= rawPrepare("PRAGMA busy_timeout");
         const row = timeoutReader.get() as Record<string, number>;
         const previous = Object.values(row)[0];
-        const timeout = Math.min(previous, Math.max(0, Math.floor(deadline.remainingMs())));
+        const timeout = Math.min(previous, Math.max(0, Math.floor(remaining)));
         if (timeout === previous) return operation();
         rawExec(`PRAGMA busy_timeout=${timeout}`);
         try {
@@ -430,7 +432,7 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
         }
     };
     const nativeExec = (sql: string) =>
-        /^\s*PRAGMA\s+busy_timeout\b/i.test(sql)
+        /^\s*PRAGMA\s+busy_timeout(?:\s*=\s*\d+|\s*\(\s*\d+\s*\))?\s*;?\s*$/i.test(sql)
             ? rawExec(sql)
             : withinDeadline(() => rawExec(sql));
     Object.defineProperty(db, "exec", {
@@ -980,24 +982,33 @@ export function prepareCachedStatement(db: Database, sql: string): Statement {
 }
 
 const privilegeDepth = new WeakMap<Database, number>();
-const nativeWaitScope = new AsyncLocalStorage<
-    { active: boolean; remainingMs(): number } | undefined
->();
+interface NativeWaitLease {
+    active: boolean;
+    remainingMs?: () => number;
+}
+const nativeWaitScope = new AsyncLocalStorage<NativeWaitLease | undefined>();
+
+function releaseNativeWaitLease(lease: NativeWaitLease): void {
+    lease.active = false;
+    // Detached descendants can retain their async-local lease after the turn.
+    // Do not retain the completed request through its deadline callback.
+    lease.remainingMs = undefined;
+}
 
 /** Bound native lock waits for an awaited turn, without changing background timeouts. */
 export function withSqliteTurnDeadline<T>(remainingMs: () => number, operation: () => T): T {
-    const lease = { active: true, remainingMs };
+    const lease: NativeWaitLease = { active: true, remainingMs };
     return nativeWaitScope.run(lease, () => {
         try {
             const result = operation();
             if (result && typeof (result as { then?: unknown }).then === "function")
-                return Promise.resolve(result).finally(() => {
-                    lease.active = false;
-                }) as T;
-            lease.active = false;
+                return Promise.resolve(result).finally(
+                    releaseNativeWaitLease.bind(null, lease),
+                ) as T;
+            releaseNativeWaitLease(lease);
             return result;
         } catch (error) {
-            lease.active = false;
+            releaseNativeWaitLease(lease);
             throw error;
         }
     });

@@ -37,7 +37,7 @@ if (mode === "lock") {
 			`import { DatabaseSync } from 'node:sqlite'; const db = new DatabaseSync(process.argv[1]); db.exec('BEGIN IMMEDIATE'); console.log('HELD'); setTimeout(() => {db.exec('COMMIT'); db.close();}, 32000);`,
 			path,
 		],
-		{ stdio: ["ignore", "pipe", "inherit"] },
+		{ stdio: ["ignore", "pipe", "inherit"], windowsHide: true },
 	);
 	await new Promise<void>((resolve, reject) => {
 		holder.stdout.on("data", (b) => {
@@ -89,19 +89,28 @@ if (mode === "lock") {
 		const fake = createFakePi();
 		Object.assign(fake.pi, { getAllTools: () => [] });
 		registerPiContextHandler(fake.pi as never, { db });
+		let history: ReturnType<typeof userMessage>[] = [];
 		for (let pass = 0; pass < 300; pass++) {
-			const session = `${harness}-${pass}`;
-			const raw = Array.from(
-				{ length: 1 + Math.floor(rand() * 15) },
-				(_, i) => {
-					const text = Array.from({ length: 1 + Math.floor(rand() * 60) }, () =>
-						Math.floor(rand() * 36).toString(36),
-					).join("");
-					return i % 2
-						? assistantMessage(text, i + 1)
-						: userMessage(text, i + 1);
-				},
-			);
+			const session = `${harness}-${Math.floor(pass / 3)}`;
+			if (pass % 3 === 0)
+				history = Array.from(
+					{ length: 1 + Math.floor(rand() * 15) },
+					(_, i) => {
+						const text = Array.from(
+							{ length: 1 + Math.floor(rand() * 60) },
+							() => Math.floor(rand() * 36).toString(36),
+						).join("");
+						return i % 2
+							? assistantMessage(text, i + 1)
+							: userMessage(text, i + 1);
+					},
+				);
+			if (pass % 3 === 1) {
+				if (history.length % 2)
+					history.push(assistantMessage(`reply ${rand()}`, history.length + 1));
+				history.push(userMessage(`append ${rand()}`, history.length + 1));
+			}
+			const raw = structuredClone(history);
 			const ctx = Object.assign(
 				fakeContext(
 					session,
@@ -129,7 +138,7 @@ if (mode === "lock") {
 			if (!JSON.stringify(result).includes("§"))
 				throw new Error(`unmanaged parity pass ${session}`);
 			outputs[harness].push(result);
-			clearContextHandlerSession(session);
+			if (pass % 3 === 2) clearContextHandlerSession(session);
 		}
 		db.close();
 	}

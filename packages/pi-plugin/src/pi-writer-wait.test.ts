@@ -70,7 +70,7 @@ test("Pi bounds a native read by the remaining turn allowance before writer admi
 	const dir = createTestTempDirFromPath(join(tmpdir(), "pi-native-read-"));
 	const path = join(dir, "context.db");
 	const db = createTestDb(path);
-	db.exec("PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=5000");
+	db.exec("PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=900");
 	const handler = install(db);
 	const holder = Bun.spawn(
 		[
@@ -84,7 +84,7 @@ test("Pi bounds a native read by the remaining turn allowance before writer admi
 	`,
 			path,
 		],
-		{ stdout: "pipe", stderr: "pipe" },
+		{ stdout: "pipe", stderr: "pipe", windowsHide: true },
 	);
 	const ready = holder.stdout.getReader();
 	const first = await ready.read();
