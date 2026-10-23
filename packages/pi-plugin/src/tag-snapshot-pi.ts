@@ -12,8 +12,10 @@ import {
 	type Database,
 	getSqliteDatabasePath,
 	inRootAsyncContext,
+	withSqliteTurnDeadline,
 } from "@magic-context/core/shared/sqlite";
 import type { PiContextBudget } from "./pi-context-budget";
+import { PI_CONTEXT_BUDGET } from "./pi-context-budget";
 import {
 	type PiHydrationGeneration,
 	type PiHydrationRequest,
@@ -25,6 +27,16 @@ import {
 export function createPiTagSnapshotReader(db: Database) {
 	const existing = readers.get(db);
 	if (existing) return existing;
+	const nativeWaiters = new Set<() => number>();
+	const inSnapshotRoot = <T>(operation: () => T): T =>
+		inRootAsyncContext(() =>
+			withSqliteTurnDeadline(() => {
+				let remaining = Infinity;
+				for (const waiter of nativeWaiters)
+					remaining = Math.min(remaining, waiter());
+				return remaining;
+			}, operation),
+		);
 	// Replace the pi_tag_insert/update/delete TEMP triggers when an extension
 	// reload keeps its SQLite connection: older definitions tracked only a
 	// revision, not the changed tag numbers needed to update cached rows.
@@ -218,7 +230,7 @@ export function createPiTagSnapshotReader(db: Database) {
 	// A shared prewarm outlives individual context waiters. Its TEMP bookkeeping
 	// must not inherit a cancelled waiter's transform-write or ownership guard.
 	const load = (sessionId: string): Promise<void> =>
-		inRootAsyncContext(async () => {
+		inSnapshotRoot(async () => {
 			managed.add(sessionId);
 			if (ready(sessionId)) return;
 			desiredSession = sessionId;
@@ -377,6 +389,12 @@ export function createPiTagSnapshotReader(db: Database) {
 	owners.set(db, {
 		ready,
 		load,
+		addNativeWaiter: (remaining) => {
+			nativeWaiters.add(remaining);
+			return () => {
+				nativeWaiters.delete(remaining);
+			};
+		},
 		manage: (sessionId) => managed.add(sessionId),
 		cancel,
 	});
@@ -546,6 +564,7 @@ export function createPiTagSnapshotReader(db: Database) {
 			// connection keys. Release large snapshots immediately on explicit close
 			// rather than retaining closed sessions until a major collection.
 			desiredSession = undefined;
+			nativeWaiters.clear();
 			current?.cancel();
 			cache.clear();
 			entryReaders.delete(db);
@@ -955,6 +974,7 @@ const owners = new WeakMap<
 	{
 		ready: (sessionId: string) => boolean;
 		load: (sessionId: string) => Promise<void>;
+		addNativeWaiter: (remaining: () => number) => () => void;
 		manage: (sessionId: string) => void;
 		cancel: (sessionId: string) => void;
 	}
@@ -1059,6 +1079,11 @@ export function ensurePiTagSnapshotReady(
 					"deadline",
 				);
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			// Snapshot loading must not inherit a request's write guard. Cap its native
+			// lock waits by the remaining turn budget while awaiting readiness.
+			const releaseNativeWaiter = owner.addNativeWaiter(
+				() => budget.remainingOutcome() - PI_CONTEXT_BUDGET.completionReserveMs,
+			);
 			try {
 				await budget.wait(
 					Promise.race([
@@ -1086,6 +1111,7 @@ export function ensurePiTagSnapshotReady(
 					throw error;
 			} finally {
 				clearTimeout(timer);
+				releaseNativeWaiter();
 			}
 		}
 	})();

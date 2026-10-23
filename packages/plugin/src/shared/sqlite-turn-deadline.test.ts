@@ -1,14 +1,20 @@
-import { expect, test } from "bun:test";
+import { Database as NativeDatabase } from "bun:sqlite";
+import { expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database, withoutSqliteTransformPass, withSqliteTurnDeadline } from "./sqlite";
+import {
+    createSqliteTurnDatabase,
+    Database,
+    withoutSqliteTransformPass,
+    withSqliteTurnDeadline,
+} from "./sqlite";
 import { createTestTempDirFromPath } from "./test-temp-dir";
 
 async function fixture(run: (db: Database, path: string) => Promise<void>) {
     const root = createTestTempDirFromPath(join(tmpdir(), "sqlite-turn-deadline-"));
     const path = join(root, "context.db");
-    const db = new Database(path);
+    const db = createSqliteTurnDatabase(path);
     db.exec(
         "PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=900; CREATE TABLE t(value); INSERT INTO t VALUES(1)",
     );
@@ -56,7 +62,114 @@ function bounded(operation: () => unknown) {
     ).toThrow(/locked|busy/i);
     // The connection allows 900 ms; a late turn has only 80 ms left for this wait.
     expect(performance.now() - start).toBeLessThan(400);
+    expect(performance.now() - start).toBeGreaterThan(40);
 }
+
+test("ordinary connections keep native cached SELECT methods", () => {
+    const db = new Database(":memory:");
+    const native = new NativeDatabase(":memory:");
+    try {
+        expect(db.prepare("SELECT 1").get).toBe(native.prepare("SELECT 1").get);
+    } finally {
+        db.close();
+        native.close();
+    }
+});
+
+test("native deadlines read the connection timeout once, not per cached execution", () => {
+    let reads = 0;
+    const prepare = Database.prototype.prepare;
+    const spy = spyOn(Database.prototype, "prepare").mockImplementation(function (
+        this: Database,
+        sql: string,
+    ) {
+        const statement = prepare.call(this, sql);
+        if (sql === "PRAGMA busy_timeout") {
+            const get = statement.get.bind(statement);
+            statement.get = (...args: unknown[]) => {
+                reads++;
+                return get(...args);
+            };
+        }
+        return statement;
+    });
+    let db: Database | undefined;
+    try {
+        db = createSqliteTurnDatabase(":memory:");
+        db.exec("PRAGMA busy_timeout=900");
+        const query = db.prepare("SELECT 1 AS value");
+        withSqliteTurnDeadline(
+            () => 80,
+            () => {
+                for (let i = 0; i < 100; i++) expect(query.get()).toEqual({ value: 1 });
+            },
+        );
+        expect(reads).toBe(1);
+        withSqliteTurnDeadline(
+            () => 80,
+            () => {
+                expect(db!.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 900 });
+            },
+        );
+    } finally {
+        db?.close();
+        spy.mockRestore();
+    }
+});
+
+test("timeout cache follows scripts, prepared setters, comments and failed prefixes", async () => {
+    await fixture(async (db, path) => {
+        db.exec(
+            "PRAGMA main.busy_timeout(900); SELECT '; PRAGMA busy_timeout=0;'; -- PRAGMA busy_timeout=1",
+        );
+        db.prepare("PRAGMA busy_timeout=800").get();
+        expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 800 });
+        expect(() => db.exec("PRAGMA busy_timeout=700; SELECT * FROM missing_table")).toThrow();
+        const read = db.prepare("SELECT * FROM t");
+        const release = await hold(path);
+        try {
+            bounded(() => read.get());
+            expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 700 });
+        } finally {
+            await release();
+        }
+    });
+});
+
+test("timeout cache follows prepare-time PRAGMA effects", () => {
+    const db = createSqliteTurnDatabase(":memory:");
+    const physicalTimeout = () =>
+        (db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout;
+    const harmlessRead = () =>
+        withSqliteTurnDeadline(
+            () => 80,
+            () => db.prepare("SELECT 1").get(),
+        );
+    try {
+        db.exec("PRAGMA busy_timeout=900");
+        const setter = db.prepare("PRAGMA busy_timeout=800");
+        expect(physicalTimeout()).toBe(800);
+        harmlessRead();
+        expect(physicalTimeout()).toBe(800);
+        db.exec("PRAGMA busy_timeout=700");
+        setter.get();
+        const before = physicalTimeout();
+        harmlessRead();
+        expect(physicalTimeout()).toBe(before);
+        const iterator = db.prepare("PRAGMA busy_timeout=600").iterate();
+        const beforeIteration = physicalTimeout();
+        harmlessRead();
+        expect(physicalTimeout()).toBe(beforeIteration);
+        db.exec("PRAGMA busy_timeout=500");
+        iterator.next();
+        const afterIteration = physicalTimeout();
+        harmlessRead();
+        expect(physicalTimeout()).toBe(afterIteration);
+        iterator.return?.();
+    } finally {
+        db.close();
+    }
+});
 
 for (const method of ["get", "all", "run", "values", "iterate"] as const) {
     test(`turn deadline bounds cached SELECT ${method}`, async () => {
@@ -89,7 +202,7 @@ test("turn deadline bounds native exec reads", async () => {
 test("turn deadline bounds native schema preparation", async () => {
     await fixture(async (_db, path) => {
         const release = await hold(path);
-        const fresh = new Database(path);
+        const fresh = createSqliteTurnDatabase(path);
         fresh.exec("PRAGMA busy_timeout=900");
         try {
             bounded(() => fresh.prepare("SELECT * FROM t"));

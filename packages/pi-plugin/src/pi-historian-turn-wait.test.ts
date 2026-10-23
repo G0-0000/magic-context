@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "@magic-context/core/shared/sqlite";
+import {
+	createSqliteTurnDatabase,
+	Database,
+} from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	inPiHistorianRootContext,
@@ -12,7 +15,7 @@ import {
 async function underLock(run: (read: () => unknown) => Promise<void>) {
 	const dir = createTestTempDirFromPath(join(tmpdir(), "pi-historian-native-"));
 	const path = join(dir, "context.db");
-	const db = new Database(path);
+	const db = createSqliteTurnDatabase(path);
 	db.exec(
 		"PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=900; CREATE TABLE t(value); INSERT INTO t VALUES(1)",
 	);
