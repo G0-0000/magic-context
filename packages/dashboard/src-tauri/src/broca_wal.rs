@@ -112,7 +112,10 @@ const GATED_VERSION: u8 = 3;
 /// records, `compaction_ride_wait` and `compaction_ride_wait_ended`, written
 /// while a step waits for the compaction provider's answer before a prompt
 /// rewrite; this reader ignores all three
-/// and keeps the step's usage and timestamps.
+/// and keeps the step's usage and timestamps. `auth-selection-method/v1` adds
+/// an optional `auth_method` to the frozen `config.auth_selection` on
+/// `RunStarted` (and a refreeze record) and makes `credential_id` an opaque
+/// vault id; this reader reads neither.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -147,6 +150,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "structured-output-paragraph/v1",
     "client-message-id/v1",
     "compaction-ride-wait/v1",
+    "auth-selection-method/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1887,6 +1891,7 @@ pub(crate) mod tests {
             "structured-output-paragraph/v1",
             "client-message-id/v1",
             "compaction-ride-wait/v1",
+            "auth-selection-method/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1939,6 +1944,22 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("compaction-ride-wait/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `auth-selection-method/v1` records the vault's method for the run's
+    /// credential in its frozen auth selection; such a run still yields its
+    /// steps.
+    #[test]
+    fn an_auth_selection_method_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["config"]["auth_selection"] =
+            json!({"credential_id": "cred_01opaque", "auth_method": "oauth"});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["auth-selection-method/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("auth-selection-method/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
