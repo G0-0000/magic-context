@@ -31,6 +31,7 @@ export async function registerTools(
     config: MagicContextPluginConfig,
     rustToolBackends?: RustToolBackends,
     isInternalChild?: (sessionId: string) => boolean,
+    ensureProjectRegistered = ensureProjectRegisteredFromOpenCodeDirectory,
 ) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
@@ -38,7 +39,7 @@ export async function registerTools(
         db,
         resolveProjectPath: (directory: string) =>
             resolveProjectIdentityForSession(directory, config.allow_home_project),
-        ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+        ensureProjectRegistered,
     };
     const definitions = {
         ...(compaction

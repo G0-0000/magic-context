@@ -60,6 +60,7 @@ function loadRegistrationConfig(directory: string): LoadResultDetailed {
 export async function ensureProjectRegisteredFromOpenCodeDirectory(
     directory: string,
     db: Database,
+    onRegistered?: (projectIdentity: string) => void,
 ): Promise<void> {
     const detailed = loadRegistrationConfig(directory);
     const projectIdentity = resolveProjectIdentityForSession(
@@ -104,4 +105,5 @@ export async function ensureProjectRegisteredFromOpenCodeDirectory(
     } else {
         unregisterProjectShadowEmbedding(projectIdentity);
     }
+    onRegistered?.(projectIdentity);
 }
