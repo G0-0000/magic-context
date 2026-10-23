@@ -409,7 +409,30 @@ export function getTagIdentityWriteGeneration(): number {
  * default to IMMEDIATE; explicit deferred calls and readonly handles keep read
  * snapshots without acquiring the writer lock. */
 function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean): void {
-    const nativeExec = db.exec.bind(db);
+    const rawExec = db.exec.bind(db);
+    const rawPrepare = db.prepare.bind(db);
+    let timeoutReader: BetterSqlite3.Statement | undefined;
+    // Reads, preparation and COMMIT can also encounter SQLite locks. Keep their
+    // native busy handler inside the turn's allowance, including on cached statements.
+    const withinDeadline = <T>(operation: () => T): T => {
+        const deadline = nativeWaitScope.getStore();
+        if (!deadline?.active) return operation();
+        timeoutReader ??= rawPrepare("PRAGMA busy_timeout");
+        const row = timeoutReader.get() as Record<string, number>;
+        const previous = Object.values(row)[0];
+        const timeout = Math.min(previous, Math.max(0, Math.floor(deadline.remainingMs())));
+        if (timeout === previous) return operation();
+        rawExec(`PRAGMA busy_timeout=${timeout}`);
+        try {
+            return operation();
+        } finally {
+            rawExec(`PRAGMA busy_timeout=${previous}`);
+        }
+    };
+    const nativeExec = (sql: string) =>
+        /^\s*PRAGMA\s+busy_timeout\b/i.test(sql)
+            ? rawExec(sql)
+            : withinDeadline(() => rawExec(sql));
     Object.defineProperty(db, "exec", {
         configurable: true,
         writable: true,
@@ -449,12 +472,35 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
             return nativeExec(sql);
         },
     });
-    const nativePrepare = db.prepare.bind(db);
+    const nativePrepare = (sql: string) => withinDeadline(() => rawPrepare(sql));
     Object.defineProperty(db, "prepare", {
         configurable: true,
         writable: true,
         value: (sql: string) => {
-            const statement = nativePrepare(sql);
+            // biome-ignore lint/suspicious/noExplicitAny: Bun adds values() to the common statement interface.
+            const statement: any = nativePrepare(sql);
+            for (const method of ["run", "get", "all", "values"] as const) {
+                const execute = statement[method]?.bind(statement);
+                if (!execute) continue;
+                Object.defineProperty(statement, method, {
+                    configurable: true,
+                    // biome-ignore lint/suspicious/noExplicitAny: retain native binding overloads.
+                    value: (...args: any[]) => withinDeadline(() => execute(...args)),
+                });
+            }
+            if (typeof statement.iterate === "function") {
+                const iterate = statement.iterate.bind(statement);
+                Object.defineProperty(statement, "iterate", {
+                    configurable: true,
+                    // biome-ignore lint/suspicious/noExplicitAny: retain native binding overloads.
+                    value: (...args: any[]) => {
+                        const iterator = withinDeadline(() => iterate(...args));
+                        const next = iterator.next.bind(iterator);
+                        iterator.next = () => withinDeadline(next);
+                        return iterator;
+                    },
+                });
+            }
             // SELECT/EXPLAIN cannot acquire a writer. Treat CTEs conservatively:
             // WITH can introduce INSERT/UPDATE/DELETE as well as a read query.
             if (!readonly && !/^\s*(?:SELECT|EXPLAIN|PRAGMA)\b/i.test(sql)) {
@@ -934,6 +980,28 @@ export function prepareCachedStatement(db: Database, sql: string): Statement {
 }
 
 const privilegeDepth = new WeakMap<Database, number>();
+const nativeWaitScope = new AsyncLocalStorage<
+    { active: boolean; remainingMs(): number } | undefined
+>();
+
+/** Bound native lock waits for an awaited turn, without changing background timeouts. */
+export function withSqliteTurnDeadline<T>(remainingMs: () => number, operation: () => T): T {
+    const lease = { active: true, remainingMs };
+    return nativeWaitScope.run(lease, () => {
+        try {
+            const result = operation();
+            if (result && typeof (result as { then?: unknown }).then === "function")
+                return Promise.resolve(result).finally(() => {
+                    lease.active = false;
+                }) as T;
+            lease.active = false;
+            return result;
+        } catch (error) {
+            lease.active = false;
+            throw error;
+        }
+    });
+}
 const transformPassScope = new AsyncLocalStorage<
     | {
           active: boolean;
@@ -947,7 +1015,7 @@ const backgroundWriterScope = new AsyncLocalStorage<boolean>();
 
 /** Opt in only a writer that can safely defer its work after a busy acquisition. */
 export function withSqliteBackgroundWriter<T>(operation: () => T): T {
-    return backgroundWriterScope.run(true, operation);
+    return nativeWaitScope.run(undefined, () => backgroundWriterScope.run(true, operation));
 }
 
 /** Only an awaited foreground transform may spend the extra acquisition budget.
@@ -984,7 +1052,7 @@ export function withSqliteTransformPass<T>(operation: () => T): T {
 
 /** Start detached maintenance work without borrowing a foreground pass's budget. */
 export function withoutSqliteTransformPass<T>(operation: () => T): T {
-    return transformPassScope.run(undefined, operation);
+    return nativeWaitScope.run(undefined, () => transformPassScope.run(undefined, operation));
 }
 
 /** Attach the adapter's existing generation/cancellation/deadline guard to writes. */

@@ -275,6 +275,7 @@ import {
 	withAsyncPrivilegedWriter,
 	withoutSqliteTransformPass,
 	withSqliteBackgroundWriter,
+	withSqliteTurnDeadline,
 } from "@magic-context/core/shared/sqlite";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
@@ -6658,10 +6659,14 @@ export function registerPiContextHandler(
 									// Releasing this owner's claim is safe after cancellation or
 									// deadline expiry; it cannot publish a superseded request.
 									withoutSqliteTransformPass(() =>
-										releasePiUpperEstimateReclaim(
-											options.db,
-											upperCursor,
-											reservation,
+										withSqliteTurnDeadline(
+											() => 0,
+											() =>
+												releasePiUpperEstimateReclaim(
+													options.db,
+													upperCursor,
+													reservation,
+												),
 										),
 									);
 							}
