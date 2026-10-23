@@ -2,13 +2,15 @@ import { withContentLanguageDirective } from "../../../agents/language-directive
 import type {
     HiddenCompletion,
     HiddenCompletionExecutor,
+    HiddenRunHandle,
 } from "../../../hooks/magic-context/compartment-runner-types";
 import * as shared from "../../../shared";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import type { PromptArgs } from "../../../shared/model-suggestion-retry";
-import { modelBodyField } from "../../../shared/resolve-fallbacks";
+import { modelBodyField, toModelEntry } from "../../../shared/resolve-fallbacks";
 import { formatRunTokenLog, runTokenLog } from "../../../shared/run-token-log";
+import { annotateSubagentInvocationError } from "../subagent-token-capture";
 
 /**
  * How long a Dreamer model may stay completely silent (nothing streamed, no
@@ -103,7 +105,8 @@ export async function runHiddenSingleShotPrompt<T>(
                 });
         })
         .catch(() => {});
-    const handle = await shared.raceWithSignal(opening, args.signal);
+    const handle: HiddenRunHandle = await shared.raceWithSignal(opening, args.signal);
+    let completion: HiddenCompletion | undefined;
     args.onOpened?.(handle.id);
     let promptSettled = false;
     try {
@@ -135,7 +138,10 @@ export async function runHiddenSingleShotPrompt<T>(
                 ...(args.signal ? { signal: args.signal } : {}),
                 fallbackModels: args.fallbackModels,
                 callContext: args.callContext,
-                fetchOutput: () => args.executor.collect(handle, 50),
+                fetchOutput: async () => {
+                    completion = await args.executor.collect(handle, 50);
+                    return completion;
+                },
                 validateOutput: (completion) => {
                     const tokens = completion.tokenLog ?? runTokenLog(undefined);
                     shared.sessionLog(
@@ -159,6 +165,16 @@ export async function runHiddenSingleShotPrompt<T>(
         promptSettled = true;
         return { validated: run.validated, completion: run.output, childSessionId: handle.id };
     } catch (error) {
+        const configuredModel = toModelEntry(args.model);
+        annotateSubagentInvocationError(error, {
+            attemptedModel:
+                completion?.attemptedModel ?? handle.attemptedModel ?? configuredModel?.model,
+            modelConfigKey:
+                completion?.modelConfigKey ??
+                handle.modelConfigKey ??
+                configuredModel?.sourceConfigKey,
+            ...(completion?.hostError === undefined ? {} : { hostError: completion.hostError }),
+        });
         if (args.onFailureOutput) {
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {

@@ -2,6 +2,7 @@ import {
     createDreamTokenBudget,
     DreamTokenBudgetExceeded,
 } from "../features/magic-context/dreamer/token-budget";
+import { annotateSubagentInvocationError } from "../features/magic-context/subagent-token-capture";
 import type {
     HiddenCompletion,
     HiddenCompletionExecutor,
@@ -322,11 +323,13 @@ function assistantText(row: StoreRow<"assistant">): string | null {
  */
 export class HiddenProviderError extends Error {
     readonly settled: boolean;
+    readonly hostError?: unknown;
 
-    constructor(detail: string, options: { settled?: boolean } = {}) {
+    constructor(detail: string, options: { settled?: boolean; hostError?: unknown } = {}) {
         super(`Hidden completion provider error: ${detail}`);
         this.name = "HiddenProviderError";
         this.settled = options.settled ?? true;
+        this.hostError = options.hostError;
     }
 }
 
@@ -405,8 +408,10 @@ async function awaitAssistantRow(
                     `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
                 ];
                 throw sessionError === undefined || !isProviderFailure(sessionError)
-                    ? new Error(`Hidden completion failed: ${details.join("; ")}`)
-                    : new HiddenProviderError(details.join("; "));
+                    ? new Error(`Hidden completion failed: ${details.join("; ")}`, {
+                          cause: sessionError,
+                      })
+                    : new HiddenProviderError(details.join("; "), { hostError: sessionError });
             }
             if (outcome === "succeeded" && newAssistant) return newAssistant;
         }
@@ -420,8 +425,10 @@ async function awaitAssistantRow(
                     `session_error=${sessionError === undefined ? "unavailable" : errorText(sessionError)}`,
                 ];
                 throw sessionError === undefined || !isProviderFailure(sessionError)
-                    ? new Error(`Hidden completion failed: ${details.join("; ")}`)
-                    : new HiddenProviderError(details.join("; "));
+                    ? new Error(`Hidden completion failed: ${details.join("; ")}`, {
+                          cause: sessionError,
+                      })
+                    : new HiddenProviderError(details.join("; "), { hostError: sessionError });
             }
             if (newAssistant.data.error !== undefined) {
                 throw new HiddenProviderError(errorText(newAssistant.data.error), {
@@ -624,7 +631,15 @@ export async function createV2HiddenCompletionExecutor(
                 const head = await resolveHead(identity);
                 const active = await lifecycle.open(identity, role, head);
                 openedChild = active;
-                const handle = { id: active.id, childSessionId: active.id };
+                const configuredModel = toModelEntry(identity.model);
+                const handle: HiddenRunHandle = {
+                    id: active.id,
+                    childSessionId: active.id,
+                    attemptedModel: modelKey(head),
+                    ...(configuredModel?.sourceConfigKey
+                        ? { modelConfigKey: configuredModel.sourceConfigKey }
+                        : {}),
+                };
                 const tokenBudget = identity.metadata?.tokenBudget;
                 const run: RunState = {
                     identity,
@@ -670,6 +685,12 @@ export async function createV2HiddenCompletionExecutor(
             }
 
             const requested = await validateVariant(requestModel(request, run.child.model));
+            const requestedRef = modelKey(requested);
+            const configuredModel = [run.identity.model, ...(run.identity.configuredModels ?? [])]
+                .map(toModelEntry)
+                .find((entry) => entry?.model === requestedRef);
+            handle.attemptedModel = requestedRef;
+            handle.modelConfigKey = configuredModel?.sourceConfigKey ?? handle.modelConfigKey;
             if (run.identity.kind !== "dreamer-task" && request.body.temperature === undefined) {
                 const configured = options.historianTemperature?.();
                 if (typeof configured === "number" && Number.isFinite(configured))
@@ -942,12 +963,26 @@ export async function createV2HiddenCompletionExecutor(
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
+                    attemptedModel: requestedRef,
+                    modelConfigKey: handle.modelConfigKey,
                 };
                 // Recorded for `keep_subagents` retention: this child now holds a settled run.
                 if (!run.child.ever_settled) run.child = lifecycle.markEverSettled(run.child);
             } catch (caught) {
                 const error =
                     attempt.budgetExceeded ?? attempt.stepLimit ?? attempt.refusal ?? caught;
+                const hostError =
+                    error instanceof HiddenProviderError
+                        ? error.hostError
+                        : error instanceof Error &&
+                            error.message.startsWith("Hidden completion failed:")
+                          ? error.cause
+                          : undefined;
+                annotateSubagentInvocationError(error, {
+                    attemptedModel: handle.attemptedModel,
+                    modelConfigKey: handle.modelConfigKey,
+                    ...(hostError === undefined ? {} : { hostError }),
+                });
                 run.failed = true;
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;

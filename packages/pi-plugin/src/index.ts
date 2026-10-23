@@ -1103,6 +1103,7 @@ export function resolveHistorianFromConfig(
 	return {
 		runner: new PiSubagentRunner(),
 		model,
+		modelConfigKey: resolved.primary?.sourceConfigKey,
 		fallbackModels,
 		historianChunkTokens,
 		historianContextLimit: resolveKnownHistorianContextLimit(model),

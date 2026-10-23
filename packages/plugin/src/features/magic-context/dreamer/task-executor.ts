@@ -48,7 +48,7 @@ import {
 } from "../memory";
 import { runCompressCues } from "../mural/compress-cues";
 import { detectOverflow } from "../overflow-detection";
-import { recordChildInvocation } from "../subagent-token-capture";
+import { failedInvocationStatus, recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { type ClassifyModuleClient, runClassify } from "./classify";
 import {
@@ -1559,6 +1559,28 @@ async function runRetrospectiveTask(
     let childSessionId: string | null = null;
     let hiddenHandle: HiddenRunHandle | null = null;
     let promptSettled = false;
+    let invocationRecorded = false;
+    const recordInvocation = (
+        status: ReturnType<typeof failedInvocationStatus> | "completed",
+        messages?: unknown[],
+        error?: unknown,
+    ): void => {
+        if (!parent || !childSessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        recordChildInvocation({
+            db,
+            parentSessionId: parent,
+            harness: deps.hiddenCompletionExecutor?.capabilities.harness ?? "opencode",
+            subagent: "dreamer",
+            task: config.task,
+            startedAt: helpers.invocationStartedAt,
+            status,
+            messages,
+            attemptedModel: config.model,
+            configuredModels: config.fallbackModels,
+            error,
+        });
+    };
     try {
         if (deps.hiddenCompletionExecutor) {
             hiddenHandle = await deps.hiddenCompletionExecutor.open({
@@ -1678,18 +1700,7 @@ async function runRetrospectiveTask(
             run: { output: unknown[] } | null,
             watermark: number | null,
         ): { retrospectiveWatermarkMs: number | null; taskStateJson?: string } => {
-            if (parent && run) {
-                recordChildInvocation({
-                    db,
-                    parentSessionId: parent,
-                    harness: "opencode",
-                    subagent: "dreamer",
-                    task: config.task,
-                    startedAt: helpers.invocationStartedAt,
-                    status: "completed",
-                    messages: run.output,
-                });
-            }
+            if (run) recordInvocation("completed", run.output);
             return completedWindow(watermark);
         };
 
@@ -1826,6 +1837,11 @@ async function runRetrospectiveTask(
         );
         return finish(deepenRun, scan.maxScannedTs);
     } catch (error) {
+        recordInvocation(
+            abortController.signal.aborted ? "aborted" : failedInvocationStatus(error),
+            undefined,
+            error,
+        );
         if (!detectOverflow(error).isOverflow) throw error;
 
         const failures = (activeOverflow?.failures ?? 0) + 1;
@@ -1964,6 +1980,28 @@ async function runAgenticTask(
     let childSessionId: string | null = null;
     let promptSettled = false;
     let expiredArchived = 0;
+    let invocationRecorded = false;
+    const recordInvocation = (
+        status: ReturnType<typeof failedInvocationStatus> | "completed",
+        messages?: unknown[],
+        error?: unknown,
+    ): void => {
+        if (!parent || !childSessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        recordChildInvocation({
+            db,
+            parentSessionId: parent,
+            harness: deps.hiddenCompletionExecutor?.capabilities.harness ?? "opencode",
+            subagent: "dreamer",
+            task,
+            startedAt: invocationStartedAt,
+            status,
+            messages,
+            attemptedModel: config.model,
+            configuredModels: config.fallbackModels,
+            error,
+        });
+    };
     try {
         // Curate owns the TTL lifecycle transition. It runs after the memory-domain
         // lease heartbeat starts and uses the same authority-specific archive path
@@ -2094,6 +2132,9 @@ async function runAgenticTask(
                     callContext: `dreamer:${task}`,
                     metadata: { tokenBudget: config.tokenBudget, onBudgetUpdate },
                     allowEmpty: task === "curate",
+                    onOpened: (sessionId) => {
+                        childSessionId = sessionId;
+                    },
                     model: config.model,
                     fallbackModels: config.fallbackModels,
                     language: task === "curate" ? (config.language ?? deps.language) : undefined,
@@ -2243,18 +2284,7 @@ async function runAgenticTask(
             log(`[dreamer] curate safety summary: refused=${curateRefused}`);
         }
 
-        if (parent) {
-            recordChildInvocation({
-                db,
-                parentSessionId: parent,
-                harness: "opencode",
-                subagent: "dreamer",
-                task,
-                startedAt: invocationStartedAt,
-                status: "completed",
-                messages: run.output,
-            });
-        }
+        recordInvocation("completed", run.output);
 
         if (task === "maintain-docs" && docsHashes && changes) {
             try {
@@ -2339,6 +2369,13 @@ async function runAgenticTask(
                   }
                 : {}),
         };
+    } catch (error) {
+        recordInvocation(
+            abortController.signal.aborted ? "aborted" : failedInvocationStatus(error),
+            undefined,
+            error,
+        );
+        throw error;
     } finally {
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);

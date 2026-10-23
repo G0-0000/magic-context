@@ -1138,6 +1138,10 @@ export class PiSubagentRunner implements SubagentRunner {
 				// fallback deliberately clears the primary --thinking level.
 				thinkingLevel: attempt?.qualifier,
 				fallbackModels: undefined,
+				accountingModelConfigKey:
+					typeof attempt === "object"
+						? (attempt.sourceConfigKey ?? options.accountingModelConfigKey)
+						: options.accountingModelConfigKey,
 			};
 			const result = await this.runOnce(
 				attemptOptions,
@@ -1246,6 +1250,8 @@ export class PiSubagentRunner implements SubagentRunner {
 					options.accountingSubagent ?? inferAccountingSubagent(options.agent),
 				task: options.accountingTask ?? null,
 				startedAt: startTime,
+				attemptedModel: modelRef,
+				modelConfigKey: options.accountingModelConfigKey,
 				status: result.ok
 					? "completed"
 					: result.meta?.failureClass === ZEN_FREE_TIER_FAILURE

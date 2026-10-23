@@ -908,12 +908,14 @@ function recordInvocation(
     recordChildInvocation({
         db: args.db,
         parentSessionId: args.parentSessionId,
-        harness: "opencode",
+        harness: args.hiddenCompletionExecutor?.capabilities.harness ?? "opencode",
         subagent: "dreamer",
         task: "map-memories",
         startedAt,
         status: params.status,
         messages: params.messages,
+        attemptedModel: args.model,
+        configuredModels: args.fallbackModels,
         error: params.error,
     });
 }

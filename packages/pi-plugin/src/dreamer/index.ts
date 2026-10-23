@@ -596,6 +596,12 @@ function createPiDreamerClient(
 			// double-iterate and override a task's own (possibly empty) chain.
 			const perTaskModel = extractBodyModel(args);
 			const requestedAgent = extractBodyAgent(args) ?? "magic-context-dreamer";
+			const accountingTask = accountingTaskFromTitle(dreamSession.title);
+			const taskConfig = accountingTask
+				? buildDreamTaskRuntimeConfigs(getDreamerConfig(), opts.harness).find(
+						(entry) => entry.task === accountingTask,
+					)
+				: undefined;
 			const controller = new AbortController();
 			let controllers = dreamAbortControllers.get(opts.registrationOwner);
 			if (!controllers) {
@@ -624,16 +630,9 @@ function createPiDreamerClient(
 				maxOutputTokens: getMaxOutputTokens(),
 				accountingSessionId: opts.projectIdentity,
 				accountingSubagent: "dreamer",
-				accountingTask: accountingTaskFromTitle(dreamSession.title),
-				tokenBudget: (() => {
-					if (args.tokenBudget !== undefined) return args.tokenBudget;
-					const task = accountingTaskFromTitle(dreamSession.title);
-					if (!task) return undefined;
-					return buildDreamTaskRuntimeConfigs(
-						getDreamerConfig(),
-						opts.harness,
-					).find((entry) => entry.task === task)?.tokenBudget;
-				})(),
+				accountingTask,
+				accountingModelConfigKey: taskConfig?.modelConfigKey,
+				tokenBudget: args.tokenBudget ?? taskConfig?.tokenBudget,
 			});
 			inFlightDreams.set(runPromise, opts.registrationOwner);
 			try {
