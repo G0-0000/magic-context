@@ -122,6 +122,138 @@ it("hydration publishes an empty complete session", async () => {
 	}
 });
 
+for (const legacy of [true, false]) {
+	it(`${legacy ? "legacy nonempty" : "revisioned nonempty"} hydration accepts its own first status update`, async () => {
+		const { db, close } = fixture();
+		try {
+			seed(db);
+			if (legacy)
+				db.exec(
+					"DELETE FROM schema_migrations_meta WHERE key = 'tag_revision:s'",
+				);
+			await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+			const before = getPiTagSnapshotView(db, "s");
+			expect(before).toEqual(getTagsBySession(db, "s"));
+			expect(before.find((tag) => tag.tagNumber === 8)?.status).toBe("active");
+			db.exec(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 8",
+			);
+			const after = getPiTagSnapshotView(db, "s");
+			expect(after).toEqual(getTagsBySession(db, "s"));
+			expect(after.find((tag) => tag.tagNumber === 8)?.status).toBe("dropped");
+			expect(after[0]).toBe(before[0]);
+		} finally {
+			await drainPiTagSnapshotSession("s");
+			close();
+		}
+	});
+}
+
+for (const mode of [
+	"foreign allocation",
+	"foreign write after own allocation",
+	"untracked foreign write before own allocation",
+] as const) {
+	it(`legacy nonempty hydration refuses ${mode}`, async () => {
+		const { db, foreign, path, close } = fixture();
+		const writer = mode.startsWith("untracked") ? new Database(path) : foreign;
+		try {
+			seed(db);
+			db.exec(
+				"DELETE FROM schema_migrations_meta WHERE key = 'tag_revision:s'",
+			);
+			await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+			expect(getPiTagSnapshotView(db, "s")).toEqual(getTagsBySession(db, "s"));
+			if (mode === "foreign write after own allocation")
+				db.exec(
+					"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 8",
+				);
+			writer.exec(
+				"UPDATE tags SET status = 'active' WHERE session_id = 's' AND tag_number = 2",
+			);
+			if (mode.startsWith("untracked"))
+				db.exec(
+					"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 8",
+				);
+			expect(() => getPiTagSnapshotView(db, "s")).toThrow(
+				"tag snapshot is not ready",
+			);
+		} finally {
+			await drainPiTagSnapshotSession("s");
+			if (writer !== foreign) writer.close();
+			close();
+		}
+	});
+}
+
+for (const mode of [
+	"recreated revision",
+	"recreated first allocation",
+	"recreated accepted allocation",
+	"regressed first allocation",
+] as const) {
+	it(`nonempty hydration refuses a ${mode} on its own connection`, async () => {
+		const { db, close } = fixture();
+		try {
+			seed(db);
+			if (mode !== "recreated revision")
+				db.exec(
+					"DELETE FROM schema_migrations_meta WHERE key = 'tag_revision:s'",
+				);
+			await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+			expect(getPiTagSnapshotView(db, "s")).toEqual(getTagsBySession(db, "s"));
+			if (mode !== "recreated revision")
+				db.exec(
+					"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 8",
+				);
+			if (mode === "recreated accepted allocation")
+				expect(getPiTagSnapshotView(db, "s")).toEqual(
+					getTagsBySession(db, "s"),
+				);
+			if (mode === "regressed first allocation")
+				db.exec(`UPDATE schema_migrations_meta SET value = substr(value, 1, instr(value, ':')) || '0'
+					WHERE key = 'tag_revision:s'`);
+			else
+				db.exec(
+					"DELETE FROM schema_migrations_meta WHERE key = 'tag_revision:s'",
+				);
+			db.exec(
+				"UPDATE tags SET status = 'active' WHERE session_id = 's' AND tag_number = 2",
+			);
+			expect(() => getPiTagSnapshotView(db, "s")).toThrow(
+				"tag snapshot is not ready",
+			);
+		} finally {
+			await drainPiTagSnapshotSession("s");
+			close();
+		}
+	});
+}
+
+for (const evidence of ["pi_tag_first_allocation", "pi_tag_changes"] as const) {
+	it(`legacy nonempty hydration refuses its own allocation without ${evidence}`, async () => {
+		const { db, close } = fixture();
+		try {
+			seed(db);
+			db.exec(
+				"DELETE FROM schema_migrations_meta WHERE key = 'tag_revision:s'",
+			);
+			await ensurePiTagSnapshotReady(db, "s", new PiContextBudget());
+			getPiTagSnapshotView(db, "s");
+			db.exec(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = 's' AND tag_number = 8",
+			);
+			db.exec(`DELETE FROM ${evidence} WHERE session_id = 's'`);
+			expect(() => getPiTagSnapshotView(db, "s")).toThrow(
+				"tag snapshot is not ready",
+			);
+		} finally {
+			await drainPiTagSnapshotSession("s");
+			close();
+		}
+	});
+}
+
 it("candidate matches the independent synchronous process oracle including fallback order and legacy normalization", async () => {
 	const { db, path, close } = fixture();
 	try {

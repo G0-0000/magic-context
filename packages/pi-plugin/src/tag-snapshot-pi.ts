@@ -140,8 +140,9 @@ export function createPiTagSnapshotReader(db: Database) {
 	const watch = db.prepare("INSERT OR IGNORE INTO pi_tag_watch VALUES (?)");
 	const unwatch = db.prepare("DELETE FROM pi_tag_watch WHERE session_id = ?");
 	const cache = new Map<string, SnapshotEntry>();
-	// An empty snapshot with no revision row may later receive its first local
-	// insert without becoming foreign. pi_tag_first_allocation must record this
+	// A snapshot with no revision row may receive its first local write without
+	// becoming foreign, including updates to tags from before revisions existed.
+	// pi_tag_first_allocation must record this
 	// connection allocating exactly one matching incarnation, every inserted
 	// number must remain in pi_tag_changes, and durable version advances must
 	// equal this connection's own writes. Foreign/recreated counters do not qualify.
@@ -149,7 +150,8 @@ export function createPiTagSnapshotReader(db: Database) {
 		db.prepare(`SELECT 1 FROM pi_tag_first_allocation allocation
 		WHERE session_id = ? AND seen = 1 AND incarnation || ':0' = ?
 		AND EXISTS (SELECT 1 FROM pi_tag_watch WHERE session_id = allocation.session_id)
-		AND EXISTS (SELECT 1 FROM pi_tag_first_rows WHERE session_id = allocation.session_id)
+		AND EXISTS (SELECT 1 FROM pi_tag_changes WHERE session_id = allocation.session_id)
+		AND (? = 'legacy' OR EXISTS (SELECT 1 FROM pi_tag_first_rows WHERE session_id = allocation.session_id))
 		AND NOT EXISTS (SELECT 1 FROM pi_tag_first_rows first_row WHERE first_row.session_id = allocation.session_id
 		AND NOT EXISTS (SELECT 1 FROM pi_tag_changes change WHERE change.session_id = first_row.session_id AND change.tag_number IS first_row.tag_number))`);
 	const managed = new Set<string>();
@@ -305,12 +307,14 @@ export function createPiTagSnapshotReader(db: Database) {
 							"stale",
 						);
 					const snapshot: SnapshotEntry = {
-						firstAllocationPending:
-							!live.revisionPresent &&
-							candidate.tags.length === 0 &&
-							!db
-								.prepare("SELECT 1 FROM tags WHERE session_id = ? LIMIT 1")
-								.get(sessionId),
+						firstAllocationPending: live.revisionPresent
+							? undefined
+							: candidate.tags.length === 0 &&
+									!db
+										.prepare("SELECT 1 FROM tags WHERE session_id = ? LIMIT 1")
+										.get(sessionId)
+								? "empty"
+								: "legacy",
 						revision: legacyFallbackOnly
 							? previous.revision
 							: live.localRevision,
@@ -413,10 +417,14 @@ export function createPiTagSnapshotReader(db: Database) {
 			snapshot.revision !== local &&
 			stamp.durable - snapshot.durableVersion ===
 				stamp.own - snapshot.ownVersion &&
-			ownFirstAllocation.get(sessionId, external)
+			ownFirstAllocation.get(
+				sessionId,
+				external,
+				snapshot.firstAllocationPending,
+			)
 		) {
 			snapshot.foreignRevision = external;
-			snapshot.firstAllocationPending = false;
+			snapshot.firstAllocationPending = undefined;
 			db.prepare("DELETE FROM pi_tag_first_watch WHERE session_id = ?").run(
 				sessionId,
 			);
@@ -588,7 +596,7 @@ export const PI_FALLBACK_ROW_PREDICATE = `((type = 'message' AND message_id LIKE
 	OR (type = 'tool' AND tool_owner_message_id LIKE 'pi-msg-%'))`;
 
 interface SnapshotEntry {
-	firstAllocationPending?: boolean;
+	firstAllocationPending?: "empty" | "legacy";
 	legacyFallback?: boolean;
 	revision: string;
 	foreignRevision: string;
