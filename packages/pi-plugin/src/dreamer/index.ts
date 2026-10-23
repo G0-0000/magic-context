@@ -26,6 +26,10 @@ import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magi
 import { extractLatestAssistantText } from "@magic-context/core/shared/assistant-message-extractor";
 import { log } from "@magic-context/core/shared/logger";
 import type { ModelHarness } from "@magic-context/core/shared/model-resolution";
+import {
+	noteModelActivityMonitored,
+	noteModelOutputReceived,
+} from "@magic-context/core/shared/model-suggestion-retry";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { CompletedSubagentToolCall } from "@magic-context/core/shared/subagent-runner";
 import { HiddenAgentStepLimit } from "@magic-context/core/v2/hooks/hidden-child";
@@ -33,6 +37,7 @@ import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { isPiModelRegistered } from "../model-chain-health";
 import { ZEN_FREE_TIER_FAILURE } from "../pi-zen-free-tier";
 import { PiSubagentRunner } from "../subagent-runner";
+import { piEventShowsModelOutput } from "./model-activity";
 import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
 
@@ -609,7 +614,15 @@ function createPiDreamerClient(
 				dreamAbortControllers.set(opts.registrationOwner, controllers);
 			}
 			controllers.add(controller);
+			noteModelActivityMonitored(args.signal ?? undefined);
 			const runPromise = runner.run({
+				onProgress: (progress) => {
+					if (
+						progress.type === "raw_event" &&
+						piEventShowsModelOutput(progress.event)
+					)
+						noteModelOutputReceived(args.signal ?? undefined);
+				},
 				agent: requestedAgent,
 				systemPrompt,
 				userMessage,
