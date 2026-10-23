@@ -62,6 +62,7 @@ import {
     docsBaseHashes,
     docsChangeSet,
     hasCurrentDocsProposal,
+    parseDocsProposalOutput,
     writeDocsProposal,
 } from "./docs-proposals";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
@@ -2103,6 +2104,7 @@ async function runAgenticTask(
                     ),
                     signal: abortController.signal,
                     parse: (text, completion): string | CurateValidatedOutput => {
+                        if (task === "maintain-docs") parseDocsProposalOutput(text);
                         if (task !== "curate") return text;
                         const memoryOperations = inspectCurateMemoryOperations(completion.messages);
                         if (text) validateCurateAssistantText(text);
@@ -2191,6 +2193,7 @@ async function runAgenticTask(
                             const text = extractLatestAssistantText(messages);
                             if (task !== "curate") {
                                 if (!text) throw new Error("Dreamer returned no assistant output.");
+                                if (task === "maintain-docs") parseDocsProposalOutput(text);
                                 return text;
                             }
 
@@ -2258,7 +2261,7 @@ async function runAgenticTask(
 
         if (task === "maintain-docs" && docsHashes && changes) {
             try {
-                if (run.validated === "[]") {
+                if (parseDocsProposalOutput(String(run.validated)).length === 0) {
                     helpers.recordRun("completed", null, { progress: "no corrections proposed" });
                     return {
                         status: "completed",
