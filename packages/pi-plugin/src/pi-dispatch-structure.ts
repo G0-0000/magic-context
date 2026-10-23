@@ -52,6 +52,7 @@ export interface PiPreparedStructure {
 	messages: readonly MessageStructure[];
 	chatMessages?: readonly MessageStructure[];
 	responsesMessages?: readonly MessageStructure[];
+	responsesAlternatives?: readonly (readonly MessageStructure[])[];
 	api?: string;
 	googleFunctionIds?: boolean;
 	structuralSkipReason?: string;
@@ -834,33 +835,57 @@ function buildPiPreparedStructure(
 	let responsesMessages: MessageStructure[] | undefined = responsesApi
 		? []
 		: undefined;
+	const fallbackMessages: MessageStructure[] = [];
+	const coldMessages: MessageStructure[] = [];
+	let unsignedAlternatives = false;
+	const appendResponse = (
+		output: MessageStructure[],
+		row: MessageStructure,
+		texts: readonly string[],
+	) => {
+		if (!texts.length && !row.calls.length) return;
+		const previous = output.at(-1);
+		if (previous?.role === "assistant") {
+			previous.calls.push(...row.calls);
+			previous.wireCalls?.push(...(row.wireCalls ?? []));
+			previous.responseTexts?.push(...texts);
+		} else
+			output.push({
+				...row,
+				calls: [...row.calls],
+				...(row.wireCalls ? { wireCalls: [...row.wireCalls] } : {}),
+				responseTexts: [...texts],
+			});
+	};
 	if (responsesMessages) {
 		for (const [index, row] of byIndex) {
 			if (row.role !== "assistant") {
 				responsesMessages.push(row);
+				fallbackMessages.push(row);
+				coldMessages.push(row);
 				continue;
 			}
-			const texts = piResponsesAssistantTexts(projectedMessages[index], model);
+			const alternatives: {
+				fallback?: readonly string[];
+				cold?: readonly string[];
+			} = {};
+			const texts = piResponsesAssistantTexts(
+				projectedMessages[index],
+				model,
+				host,
+				alternatives,
+			);
 			if (!texts) {
 				responsesMessages = undefined;
 				break;
 			}
-			if (!texts.length && !row.calls.length) continue;
 			// OpenAI Responses encodes assistant text and calls as separate input
 			// items. Its normalized role rows combine adjacent assistant messages;
 			// mirror that on prepared history without discarding any text or call ID.
-			const previous = responsesMessages.at(-1);
-			if (previous?.role === "assistant") {
-				previous.calls.push(...row.calls);
-				previous.wireCalls?.push(...(row.wireCalls ?? []));
-				previous.responseTexts?.push(...texts);
-			} else
-				responsesMessages.push({
-					...row,
-					calls: [...row.calls],
-					...(row.wireCalls ? { wireCalls: [...row.wireCalls] } : {}),
-					responseTexts: [...texts],
-				});
+			unsignedAlternatives ||= alternatives.fallback !== undefined;
+			appendResponse(responsesMessages, row, texts);
+			appendResponse(fallbackMessages, row, alternatives.fallback ?? texts);
+			appendResponse(coldMessages, row, alternatives.cold ?? texts);
 		}
 	}
 	const plan = piChatHistoryPlan(projectedMessages, model);
@@ -900,6 +925,13 @@ function buildPiPreparedStructure(
 				: {}),
 		...(chatMessages ? { chatMessages } : {}),
 		...(responsesMessages ? { responsesMessages } : {}),
+		// OMP 17.1.7 openai-shared.ts:1691-1719 chooses replay per request.
+		// 18.12.x :2267-2271 additionally replays cold-safe turns (:2098-2107).
+		// Each alternative is a complete fallback or cold message list for the
+		// whole request; individual rows cannot choose different alternatives.
+		...(responsesMessages && unsignedAlternatives
+			? { responsesAlternatives: [fallbackMessages, coldMessages] }
+			: {}),
 		...(model?.api ? { api: model.api } : {}),
 		...(model?.api?.startsWith("google-")
 			? {
@@ -1361,6 +1393,19 @@ export function piPreparedStructureMismatch(
 				: chat && prepared?.chatMessages
 					? prepared.chatMessages
 					: prepared?.messages;
+		if (responses && rows && prepared?.responsesAlternatives) {
+			const actual = rows;
+			expectedRows =
+				[prepared.responsesMessages, ...prepared.responsesAlternatives].find(
+					(candidate) =>
+						candidate?.length === actual.length &&
+						candidate.every(
+							(expected, index) =>
+								JSON.stringify(expected.responseTexts) ===
+								JSON.stringify(actual[index].responseTexts),
+						),
+				) ?? expectedRows;
+		}
 		if (expectedRows && imageProjection && imageBudget)
 			expectedRows = trimPreparedImageRows(expectedRows, imageBudget, trimmed);
 		if (!rows || !expectedRows)
