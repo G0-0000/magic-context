@@ -589,7 +589,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 db,
                 projectIdentity: identity,
                 ensureRegistered: async () => {
-                    await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
+                    await ensureProjectRegisteredFromOpenCodeDirectory(directory, db, {
+                        preflightLocalPooling: true,
+                    });
                     maybeSendProjectIdentitySessionWarning(sessionId, directory);
                 },
             },
