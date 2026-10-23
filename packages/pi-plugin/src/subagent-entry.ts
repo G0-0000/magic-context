@@ -119,6 +119,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 
 			registerMagicContextTools(pi, {
 				rerankConnectionFile: cfg.subc?.connection_file,
+				rerankConfig: cfg.rerank,
 				db,
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				resolveProjectIdentity: (ctx) =>

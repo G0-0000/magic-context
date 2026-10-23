@@ -65,7 +65,11 @@ export async function registerTools(
             smartNotesEnabled: config.smart_notes.enabled,
             ...(rustToolBackends ? { rustToolBackends } : {}),
         }),
-        ...createCtxSearchTools({ ...project, rerankConnectionFile: config.subc?.connection_file }),
+        ...createCtxSearchTools({
+            ...project,
+            rerankConnectionFile: config.subc?.connection_file,
+            rerankConfig: config.rerank,
+        }),
         ...(config.memory.enabled
             ? {
                   ...createCtxMemoryTools({
