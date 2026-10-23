@@ -1430,7 +1430,7 @@ export async function registerContext(context: V2Context) {
                                 transform?.clearSessionLogState(sessionID);
                                 if (db) {
                                     markSessionCleanupPending(db, sessionID);
-                                    clearSession(db, sessionID);
+                                    clearSession(db, sessionID, false, true);
                                 }
                             } catch (error) {
                                 failures.push(error);

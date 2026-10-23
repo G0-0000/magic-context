@@ -103,6 +103,7 @@ import {
 } from "./ctx-reduce-nudge";
 import { DegradedPassRefusalError, degradedPassError } from "./degraded-pass-refusal";
 import { deriveTriggerBudget } from "./derive-budgets";
+import { clearDiagnosticLogState, diagnosticStateChanged } from "./diagnostic-log-state";
 import { contextRefusalError, EmergencyFailClosedError } from "./emergency-fail-closed";
 import {
     escalationBands,
@@ -161,6 +162,7 @@ import {
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
+import { logNudgeEvaluation } from "./nudge-evaluation-log";
 import {
     createPassOutcome,
     degradationChangesRequest,
@@ -763,6 +765,7 @@ export function createTransform(deps: TransformDeps) {
     const compactionModeTransitionPending = new Set<string>();
     const clearSessionLogState = (sessionId: string): void => {
         prefixHoldLogTurnIds.delete(sessionId);
+        clearDiagnosticLogState(sessionId);
     };
     // Sessions whose history was clearly over the model's window, with no
     // Magic Context state to send in its place, on a pass that could not bring
@@ -2239,15 +2242,27 @@ export function createTransform(deps: TransformDeps) {
         // deriving it here keeps both tag scans scoped on every pass (those
         // anchor-miss passes were the residual ~90ms full-scan regression).
         const taggerFloor = compactionOff ? 0 : deriveTaggerLoadFloor(messages, sessionId, db);
-        // floor 0 = no leading wire message resolved to a tag → BOTH tag scans
+        // Floor 0 means no scoped lower bound above the safety margin: a tagless
+        // head or an early tag number can both cause it. BOTH tag scans
         // (tagger initFromDb + the trigger's token scans) fall back to the full
         // ~O(session) load. On a large session that's the ~70ms compartmentTrigger
         // we are trying to avoid, so surface it as a one-line health signal rather
         // than letting it hide as silent latency.
-        if (!compactionOff && taggerFloor === 0 && messages.length > 0) {
+        const tagFloorMode =
+            compactionOff || messages.length === 0
+                ? "inactive"
+                : taggerFloor === 0
+                  ? "fallback"
+                  : "scoped";
+        if (
+            diagnosticStateChanged(sessionId, "tag-floor", tagFloorMode) &&
+            tagFloorMode !== "inactive"
+        ) {
             sessionLog(
                 sessionId,
-                `tag floor: 0 (full-scan fallback) — no leading wire message resolved a tag across ${messages.length} msgs`,
+                taggerFloor === 0
+                    ? `tag floor: 0 (full-scan fallback) — no scoped floor above the safety margin across ${messages.length} msgs`
+                    : `tag floor: ${taggerFloor} (scoped load)`,
             );
         }
 
@@ -3879,7 +3894,11 @@ export function createTransform(deps: TransformDeps) {
                     postReduceGraceBaselineU: channel1State.postReduceGraceBaselineU,
                     postReduceGracePreLevel: channel1State.postReduceGracePreLevel,
                 });
-                sessionLog(sessionId, formatChannel1Evaluation(channel1Decision));
+                logNudgeEvaluation(
+                    sessionId,
+                    "transform",
+                    formatChannel1Evaluation(channel1Decision),
+                );
 
                 const channel2Evaluation = evaluateChannel2(channelBaseline);
                 const leaseBefore = getChannel2NudgeState(db, sessionId);
@@ -3895,8 +3914,9 @@ export function createTransform(deps: TransformDeps) {
                     }
                 }
                 const leaseAfter = getChannel2NudgeState(db, sessionId);
-                sessionLog(
+                logNudgeEvaluation(
                     sessionId,
+                    "transform",
                     formatChannel2Evaluation(channel2Evaluation, {
                         leaseBefore,
                         leaseAfter,

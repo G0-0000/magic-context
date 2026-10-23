@@ -4780,6 +4780,14 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             expect(defer.result.materialized).toBe(false);
             expect(lines).toContain("heuristics WILL NOT RUN — reason=scheduler_defer");
             expect(defer.wire).toBe(fold.wire);
+            const repeated = await pass();
+            expect(repeated.wire).toBe(defer.wire);
+            expect(lines.filter((line) => line.startsWith("heuristics WILL NOT RUN"))).toHaveLength(
+                1,
+            );
+            expect(
+                lines.filter((line) => line.startsWith("pending ops WILL NOT APPLY")),
+            ).toHaveLength(1);
         } finally {
             log.mockRestore();
         }
