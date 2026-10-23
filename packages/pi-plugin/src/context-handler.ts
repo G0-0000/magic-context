@@ -196,6 +196,13 @@ import {
 	historyBudgetPolicyIdentity,
 	resolveExecuteThreshold,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
+import {
+	clearExecuteReclaimState,
+	estimateExecuteReclaimTokens,
+	maintainExecuteFloorMark,
+	originateExecuteReclaim,
+	readExecuteReclaimState,
+} from "@magic-context/core/hooks/magic-context/execute-reclaim";
 import { foldExecutesThisPass } from "@magic-context/core/hooks/magic-context/fold-execution-gate";
 import { isHistorianDrainBudgetSpent } from "@magic-context/core/hooks/magic-context/historian-drain-gate";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
@@ -230,7 +237,10 @@ import {
 	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import {
+	estimateTokens,
+	hasMeaningfulUserText,
+} from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
 import {
 	DEFAULT_KEEP_REASONING_TOKENS,
@@ -5530,6 +5540,26 @@ export function registerPiContextHandler(
 					elapsedMs: performance.now() - fitInputStart,
 					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
 				});
+			if (!options.compactionOff && !sessionMeta.isSubagent) {
+				let promptId: string | null = null;
+				for (let i = event.messages.length - 1; i >= 0; i--) {
+					const message = event.messages[i];
+					if (message?.role !== "user") continue;
+					const parts =
+						typeof message.content === "string"
+							? [{ type: "text", text: message.content }]
+							: message.content;
+					if (!hasMeaningfulUserText(parts)) continue;
+					promptId = entryIds?.[i] ?? null;
+					break;
+				}
+				maintainExecuteFloorMark(
+					options.db,
+					sessionId,
+					promptId,
+					usagePercentage < effectiveExecuteThresholdPercentage,
+				);
+			}
 			const pipelineArgs: RunPipelineArgs = {
 				recoveryPrefix: recovery.prefix,
 				recoveryRebuildReason: recovery.rebuildReason,
@@ -5695,6 +5725,78 @@ export function registerPiContextHandler(
 			};
 			if (!options.compactionOff)
 				assertPiTagSnapshotReady(options.db, sessionId);
+			let historianEvaluatedThisPass = false;
+			const historian = options.historian;
+			const scheduleHistorian = (
+				result: Pick<
+					RunPipelineResult,
+					"activeTags" | "eligiblePendingDropTagIds" | "strictThinkingKept"
+				>,
+			) => {
+				if (historianEvaluatedThisPass) return;
+				historianEvaluatedThisPass = true;
+				const tHistorianScheduling = performance.now();
+				budget.stage = "historian scheduling";
+				if (historian && !options.compactionOff && budget.remainingWork() > 0) {
+					guardSqliteTransformPass({
+						assert: budget.assert,
+						remainingMs: budget.remainingWork,
+					});
+					try {
+						budget.assert();
+						maybeFireHistorian({
+							startGuard: () => {
+								// A completed pass has already admitted the background run;
+								// a following context pass must not cancel that admission.
+								if (!budget.completed) budget.assertOwner();
+								if (budget.abandoned || budget.remainingWork() === 0)
+									throw new PiContextDeadlineError(budget.diagnostic());
+							},
+							pi,
+							ctx,
+							sessionId,
+							db: options.db,
+							historian,
+							isFirstContextPassForSession,
+							activeTags: result.activeTags,
+							eligiblePendingDropTagIds: result.eligiblePendingDropTagIds,
+							rawMessageProvider,
+							ordinalAlignment: ordinalAlignment(),
+							taggerFloor,
+							sessionMeta,
+							piUsage,
+							pressureSnapshot: {
+								percentage: usagePercentage,
+								inputTokens: usageInputTokens,
+							},
+							minimumPercentage: usagePercentage,
+							liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
+							historianStateSnapshot: historianStateForPass,
+							publishedHistoryRide: isCacheBusting,
+							primaryExecute:
+								schedulerDecision === "execute" && !sessionMeta.isSubagent,
+							signedThinkingHeld: result.strictThinkingKept,
+						});
+					} catch (error) {
+						budget.assertOutcome();
+						sessionLog(
+							sessionId,
+							`historian scheduling skipped: ${String(error)}`,
+						);
+					} finally {
+						guardSqliteTransformPass({
+							assert: budget.assertOutcome,
+							remainingMs: budget.remainingOutcome,
+						});
+					}
+				}
+				logTransformTiming(
+					sessionId,
+					"historianScheduling",
+					tHistorianScheduling,
+				);
+			};
+			pipelineArgs.evaluateHistorianBeforeReclaim = scheduleHistorian;
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
 			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -5761,68 +5863,7 @@ export function registerPiContextHandler(
 				tTransformDecision,
 			);
 
-			// After tagging and drops commit, an optional historian can start in
-			// the background. A headless request proven too large joins it below
-			// before deciding whether the rebuilt request can be sent.
-			const tHistorianScheduling = performance.now();
-			const historian = options.historian;
-			budget.stage = "historian scheduling";
-			if (historian && !options.compactionOff && budget.remainingWork() > 0) {
-				guardSqliteTransformPass({
-					assert: budget.assert,
-					remainingMs: budget.remainingWork,
-				});
-				try {
-					budget.assert();
-					maybeFireHistorian({
-						startGuard: () => {
-							// A completed pass has already admitted the background run;
-							// a following context pass must not cancel that admission.
-							if (!budget.completed) budget.assertOwner();
-							if (budget.abandoned || budget.remainingWork() === 0)
-								throw new PiContextDeadlineError(budget.diagnostic());
-						},
-						pi,
-						ctx,
-						sessionId,
-						db: options.db,
-						historian,
-						isFirstContextPassForSession,
-						activeTags: result.activeTags,
-						eligiblePendingDropTagIds: result.eligiblePendingDropTagIds,
-						rawMessageProvider,
-						ordinalAlignment: ordinalAlignment(),
-						taggerFloor,
-						sessionMeta,
-						piUsage,
-						pressureSnapshot: {
-							percentage: usagePercentage,
-							inputTokens: usageInputTokens,
-						},
-						minimumPercentage: usagePercentage,
-						liveIsRawBranchEstimate: piLiveUsageIsRawBranchEstimate,
-						historianStateSnapshot: historianStateForPass,
-						publishedHistoryRide: isCacheBusting,
-						signedThinkingHeld: result.strictThinkingKept,
-					});
-				} catch (error) {
-					budget.assertOutcome();
-					sessionLog(
-						sessionId,
-						`historian scheduling skipped: ${String(error)}`,
-					);
-				} finally {
-					guardSqliteTransformPass({
-						assert: budget.assertOutcome,
-						remainingMs: budget.remainingOutcome,
-					});
-				}
-			}
-			logTransformTiming(
-				sessionId,
-				"historianScheduling",
-				tHistorianScheduling,
-			);
+			scheduleHistorian(result);
 
 			// Step 4b.4: nudge + note-nudge + auto-search hint. All three
 			// run AFTER tagging/drops finish so they see the post-mutation
@@ -7686,6 +7727,7 @@ function maybeFireHistorian(args: {
 	minimumPercentage: number;
 	historianStateSnapshot: PiHistorianStateSnapshot;
 	publishedHistoryRide: boolean;
+	primaryExecute?: boolean;
 	/** The pass kept the current turn's signed thinking under the bounded hold. */
 	signedThinkingHeld?: boolean;
 }): void {
@@ -8069,6 +8111,7 @@ function maybeFireHistorian(args: {
 				},
 			},
 			args.eligiblePendingDropTagIds,
+			args.primaryExecute === true,
 		);
 
 		if (!trigger.shouldFire) {
@@ -8165,6 +8208,12 @@ function maybeFireHistorian(args: {
 	}
 }
 interface RunPipelineArgs {
+	evaluateHistorianBeforeReclaim?: (
+		result: Pick<
+			RunPipelineResult,
+			"activeTags" | "eligiblePendingDropTagIds" | "strictThinkingKept"
+		>,
+	) => void;
 	/** Metadata estimates alone cannot rewrite messages bound to an active thinking signature. */
 	upperEstimateOnly?: boolean;
 	recoveryPrefix?: import("./pi-lkg").PiLkgRecoveryPrefix;
@@ -9203,6 +9252,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// orphaning tags/source_contents/caveman/drop-state. Positional entryIds is
 	// exactly aligned here: tagging runs at transcript-build time, before any splice.
 	let nativeRemovalInputs: Map<string, string> | undefined;
+	let probingExecuteRemoval = false;
 	try {
 		nativeRemovalInputs = getNativeReplayState(
 			args.db,
@@ -9230,7 +9280,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					sessionId: args.sessionId,
 					callId,
 					saved: nativeRemovalInputs,
-					canApply: isCacheBustingPass,
+					canApply: isCacheBustingPass || probingExecuteRemoval,
 				}),
 			authorizeToolRemovals: (callIds) =>
 				preparePiToolRemovalMeasurements({
@@ -9312,9 +9362,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const systemPrefixChangedThisPass =
 		!prefixPreflightContended && effectiveSystemChangedThisPass;
 	// Deferred render requests and native marker retries do not prove that the
-	// served system/m[0]/m[1] prefix changed. Only a user flush may deliberately
-	// admit drops when that prefix is unchanged.
+	// served system/m[0]/m[1] prefix changed. A user flush is explicit permission;
+	// bounded execute reclaim is admitted separately after target checks below.
 	const rideSignals = {
+		executeReclaim: false,
 		subagentExecute:
 			args.sessionMeta.isSubagent && args.schedulerDecision === "execute",
 		hardFold:
@@ -9533,7 +9584,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 		}
 	}
-	if (args.temporalAwareness && isCacheBustingPass && !protectedSignedPrefix) {
+
+	const applyTemporalOnRide = () => {
+		if (!args.temporalAwareness || !isCacheBustingPass || protectedSignedPrefix)
+			return;
 		temporalDecisions = freezeTemporalDecisions(
 			args.db,
 			args.sessionId,
@@ -9547,7 +9601,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			) > 0
 		)
 			recordFirstApplicationWireEdit(true);
-	}
+	};
+	applyTemporalOnRide();
 	logPiUnresolvedIdentities(args.sessionId, [
 		...guardPiToolAllocations(
 			args.db,
@@ -9897,6 +9952,77 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					RECENT_TOOL_SKELETON_WINDOW,
 				)
 			: [];
+	if (!args.sessionMeta.isSubagent && args.schedulerDecision === "execute") {
+		args.evaluateHistorianBeforeReclaim?.({
+			activeTags: getActiveTagsBySession(args.db, args.sessionId),
+			eligiblePendingDropTagIds,
+			strictThinkingKept: protectedSignedPrefix,
+		});
+	}
+	rideSignals.executeReclaim = originateExecuteReclaim({
+		db: args.db,
+		sessionId: args.sessionId,
+		primaryExecute:
+			!args.sessionMeta.isSubagent &&
+			args.schedulerDecision === "execute" &&
+			args.contextUsage.percentage < forceMaterializationPercentage,
+		alreadyBusting: isCacheBustingPass || identityRebuild,
+		summaryCanCome:
+			args.sessionMeta.compartmentInProgress ||
+			inFlightHistorian.has(args.sessionId) ||
+			((prefixPreflightContended || protectedSignedPrefix) &&
+				(deferredHistoryRefreshSessions.has(args.sessionId) ||
+					deferredMaterializationSessions.has(args.sessionId) ||
+					historyRefreshSessions.has(args.sessionId))) ||
+			readExecuteReclaimState(args.db, args.sessionId).floorOrdinal !== null,
+		reclaimableTokens: estimateExecuteReclaimTokens({
+			db: args.db,
+			sessionId: args.sessionId,
+			pendingOps,
+			tags: pendingOperationTags,
+			targets: newTargets,
+			protectedTagIds: new Set([
+				...protectedTagNumbersForPass,
+				...protectedToolTags,
+			]),
+			probePreparation: (targets) => {
+				const saved = nativeRemovalInputs;
+				const rollback = Symbol("execute removal probe");
+				const allowed = new Set<number>();
+				try {
+					// Exercise every candidate's marker write under one writer lock,
+					// then roll back the document write and restore nativeRemovalInputs.
+					nativeRemovalInputs = saved && new Map(saved);
+					probingExecuteRemoval = true;
+					args.db
+						.transaction(() => {
+							for (const [number, target] of targets) {
+								if (target.prepareDrop?.() !== false) allowed.add(number);
+							}
+							throw rollback;
+						})
+						.immediate();
+				} catch (error) {
+					if (error !== rollback) allowed.clear();
+				} finally {
+					nativeRemovalInputs = saved;
+					probingExecuteRemoval = false;
+				}
+				return allowed;
+			},
+		}),
+		usableWindow:
+			args.usableSoft ??
+			args.contextUsage.inputTokens / (args.contextUsage.percentage / 100),
+	});
+	if (rideSignals.executeReclaim) {
+		isCacheBustingPass = reclaimRidePermitted(rideSignals, ridePermissionGate);
+		publishedWorkDrainAllowed = isCacheBustingPass;
+		shouldRunHeuristics ||= isCacheBustingPass && args.heuristics !== undefined;
+		stripUnheldSignedTurnOnBust();
+		applyTemporalOnRide();
+	}
+
 	const deferredMaterialize =
 		canConsumeDeferredLate && deferredMaterializationWasPending;
 	const deferredHistoryRefresh =
@@ -11403,6 +11529,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				servedTagNumbers.add(tag.tagNumber);
 		}
 	}
+	if (bustedThisPass) clearExecuteReclaimState(args.db, args.sessionId);
 	return {
 		messages: outputMessages,
 		recoveryNormalized,
