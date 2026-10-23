@@ -94,6 +94,7 @@ import {
     applyFlushedStatuses,
     type ConvertedToolDropMode,
     foldBustsServedPrefix,
+    foldChangesServedPrefix,
     prepareLegacyToolSkeletonConversions,
     renderConvertedToolSkeletons,
 } from "./apply-operations";
@@ -152,7 +153,11 @@ import {
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
 } from "./inject-compartments";
-import { protectNewTagMutations, retainedActiveThinkingParts } from "./latest-assistant-turn";
+import {
+    isAnthropicThinkingPart,
+    protectNewTagMutations,
+    retainedActiveThinkingParts,
+} from "./latest-assistant-turn";
 import { markNoteNudgeDelivered, observeNoteNudgeServe, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
@@ -172,6 +177,7 @@ import {
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
 import {
+    isAnthropicFamilyRoute,
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
     replaySentinelByMessageIds,
@@ -645,6 +651,39 @@ function proactiveStripStartIndex(args: {
     });
     if (lastServed.proven) return divergence;
     return divergence ?? lastServed.messages.length;
+}
+
+/**
+ * True when the array about to be served still carries a thinking part that
+ * may be signed (its signature is not inspected). A part counts by the same route rule that finds an open signed turn
+ * (`isAnthropicThinkingPart`): on an Anthropic-family route (Anthropic,
+ * Bedrock, Vertex, Copilot) every thinking part counts, whichever metadata key
+ * holds its signature. Parts that never reach the provider do not count: an
+ * ignored part, or an empty one that carries no redacted payload. On a
+ * prefix-bound model such a block is bound to every byte in front of it, the
+ * system prompt included, so this is the fact that decides whether the system
+ * date may move. It reads the outcome of every strip the pass made instead of
+ * predicting it, so it also covers blocks of a turn whose opening user message
+ * was trimmed away.
+ */
+export function servesThinkingBlock(
+    messages: readonly MessageLike[],
+    providerID: string | undefined,
+    modelID: string | undefined,
+): boolean {
+    const familyRoute = isAnthropicFamilyRoute(providerID, modelID);
+    for (const message of messages) {
+        if (message.info.role !== "assistant") continue;
+        for (const part of message.parts) {
+            if (!isAnthropicThinkingPart(part, familyRoute) || part.ignored === true) continue;
+            if (part.type === "redacted_thinking") return true;
+            if (typeof part.text === "string" && part.text !== "") return true;
+            const records = isRecord(part.metadata) ? Object.values(part.metadata) : [];
+            if (records.some((record) => isRecord(record) && record.redactedData !== undefined))
+                return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -1637,6 +1676,13 @@ interface RunPostTransformPhaseArgs {
     activeThinkingPrefixHold?: boolean;
     directoryPrefixHold?: boolean;
     forceSignedRebuildForFit?: boolean;
+    /**
+     * The session's compaction mode changed (managed <-> compaction-off) and no
+     * pass has completed in the new mode yet. The new mode serves the message
+     * bytes differently (compaction-off writes no tags), so every signed
+     * thinking block on the wire sits behind changed bytes.
+     */
+    compactionModeTransition?: boolean;
     readLastServedMessages?: () => readonly unknown[] | null;
     deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
@@ -1767,12 +1813,6 @@ interface RunPostTransformPhaseArgs {
 
 export interface PostTransformPhaseResult {
     thinkingReleasedForFit?: boolean;
-    /**
-     * A prefix-bound model's open turn still serves signed thinking after this
-     * pass (it was neither stripped nor absent). Anything in front of it, the
-     * system prompt included, must not change on this pass.
-     */
-    openTurnSignedThinkingKept?: boolean;
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
     materialized: boolean;
@@ -2199,6 +2239,8 @@ export async function runPostTransformPhase(
             throw new Error("Cannot persist signed thinking omission before prefix rewrite");
         if (stripOffWire)
             for (const id of stripped.strip?.messageIds ?? []) compactionOffFrozenThinking.add(id);
+        // A later release on the same pass then has nothing left to record.
+        for (const id of stripped.strip?.messageIds ?? []) bindingThinking.add(id);
         retainedThinking.clear();
         protectedThinkingMessages.clear();
         activeThinkingTurn = false;
@@ -2217,6 +2259,18 @@ export async function runPostTransformPhase(
             (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true))
     ) {
         releaseThinkingForRewrite(true);
+    }
+    // A compaction mode switch adds or removes the tags in front of every
+    // signed block, whatever the head does, and the switch pass rebuilds the
+    // head anyway (the switch clears the cached m[0]/m[1]). Strip every signed
+    // block on that pass, before the head is prepared, so the rebuild carries
+    // no thinking bound to the other mode's bytes.
+    if (
+        args.compactionModeTransition === true &&
+        args.thinkingBindingRecoveryEnabledForModel === true
+    ) {
+        sessionLog(args.sessionId, "compaction mode switch: stripping signed thinking");
+        releaseThinkingForRewrite(false, true);
     }
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
@@ -2295,6 +2349,11 @@ export async function runPostTransformPhase(
         args.m0M1
     ) {
         let committedFoldBustsServedPrefix: boolean | undefined;
+        // Whether the committed fold serves m[0]/m[1]/mural bytes that differ
+        // from the head the session last served. Unlike the bust permission it
+        // ignores reasons that only lose the provider cache: signed thinking is
+        // bound to bytes, so only a byte change invalidates it.
+        let committedFoldChangesHead: boolean | undefined;
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
             // Omitting messages keeps prefix preparation off-wire. The final
@@ -2336,6 +2395,14 @@ export async function runPostTransformPhase(
                                   servedPrefixBeforeFold,
                                   rendered,
                               );
+                        committedFoldChangesHead = firstRenderBust
+                            ? !servedPrefixMatches({
+                                  messages: servedBeforeFirstRender,
+                                  m0Text: rendered.m0Bytes.toString(),
+                                  m1Text: rendered.m1Bytes.toString(),
+                                  muralDataUrl: rendered.muralDataUrl,
+                              })
+                            : foldChangesServedPrefix(servedPrefixBeforeFold, rendered);
                         if (bustsPrefix) {
                             if (!conversions.isCurrent(db)) {
                                 throw new MaterializeContentionError({
@@ -2356,6 +2423,24 @@ export async function runPostTransformPhase(
                 // Compaction-off holds every open signed turn, but a first render
                 // has no cached head to replay: the new head goes out, so the
                 // turn's thinking must leave the wire with it.
+                releaseThinkingForRewrite(false, true);
+            } else if (
+                compactionOff &&
+                !activeThinkingPrefixHold &&
+                args.thinkingBindingRecoveryEnabledForModel === true &&
+                committedFoldChangesHead
+            ) {
+                // Compaction-off holds the head only while the open turn has
+                // signed thinking. A fold on any other pass (the first request of
+                // a new turn after a memory edit, for example) re-renders the
+                // head in front of the earlier turns' signed thinking, which a
+                // prefix-bound model invalidates as well. That fold is the
+                // rewrite, so the blocks leave the wire on the same pass and
+                // stay stripped on every later one.
+                sessionLog(
+                    args.sessionId,
+                    "compaction-off fold changed the head: stripping signed thinking",
+                );
                 releaseThinkingForRewrite(false, true);
             }
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
@@ -4952,10 +5037,6 @@ export async function runPostTransformPhase(
         thinkingBindingRecovery,
         proactiveThinkingStrip,
         thinkingReleasedForFit,
-        openTurnSignedThinkingKept:
-            args.thinkingBindingRecoveryEnabledForModel === true &&
-            activeThinkingTurn &&
-            !rewritingSignedPrefix,
     };
 }
 

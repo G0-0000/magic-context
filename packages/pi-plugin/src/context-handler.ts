@@ -8480,7 +8480,7 @@ async function runCompactionOffPipeline(
 	// The transcript before any head is injected: the thinking strip below
 	// addresses its entries by their index in this array.
 	const transcript = [...(args.messages as unknown[])];
-	let headChangedUnderSignedTurn = false;
+	let headChangedUnderSignedThinking = false;
 	if (args.injection) {
 		const state: PiM0M1State = {
 			sessionId: args.sessionId,
@@ -8532,16 +8532,39 @@ async function runCompactionOffPipeline(
 			const head = JSON.stringify(
 				(args.messages as unknown[]).slice(0, headCount),
 			);
-			headChangedUnderSignedTurn =
+			headChangedUnderSignedThinking =
 				servedBeforeFirstRender === null ||
 				JSON.stringify(servedBeforeFirstRender.slice(0, headCount)) !== head;
+		} else if (
+			!signedTurnHoldsHead &&
+			args.reasoningClearing?.prefixBound === true &&
+			(injectionResult?.m0Materialized === true ||
+				injectionResult?.m1RenderedCoverage != null)
+		) {
+			// Nothing held the head on this pass (no open signed turn), so a fold
+			// could re-render it. The earlier turns' signed thinking is bound to
+			// the head it was served behind as well: when the new head differs from
+			// the one last served (or that one is unknown), those blocks are
+			// stripped below, on the same pass as the re-render.
+			const served = args.readLastServedMessages?.() ?? null;
+			const headCount = injectionResult?.syntheticLeadingCount ?? 0;
+			headChangedUnderSignedThinking =
+				served === null ||
+				JSON.stringify(served.slice(0, headCount)) !==
+					JSON.stringify((args.messages as unknown[]).slice(0, headCount));
+			if (headChangedUnderSignedThinking)
+				sessionLog(
+					args.sessionId,
+					"compaction-off fold changed the head: stripping signed thinking",
+				);
 		}
 	}
-	// The head changed in front of an open signed turn: strip every signed block
-	// on the wire, the turn's included (removing every block is always
-	// accepted). The entries are persisted first; the binding-mismatch replay at
-	// the end of every pass, compaction-off included, keeps them stripped.
-	if (headChangedUnderSignedTurn)
+	// The head changed in front of signed thinking (an open signed turn's, or
+	// an earlier turn's): strip every signed block on the wire, the open turn's
+	// included (removing every block is always accepted). The entries are
+	// persisted first; the binding-mismatch replay at the end of every pass,
+	// compaction-off included, keeps them stripped.
+	if (headChangedUnderSignedThinking)
 		applyPiProactiveThinkingStrip({
 			db: args.db,
 			sessionId: args.sessionId,
