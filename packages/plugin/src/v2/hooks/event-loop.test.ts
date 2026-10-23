@@ -405,7 +405,7 @@ test("v2 deletion still runs its in-memory cleanup when the store clear is busy,
         await f.start();
         ready.resolve();
         await until(() => consumed);
-        expect(clear).toHaveBeenCalledWith(f.db, deleted.data.sessionID);
+        expect(clear).toHaveBeenCalledWith(f.db, deleted.data.sessionID, false, true);
         // The cleanup after the store clear ran: it removes the fold admission key.
         expect(f.storageSet).toHaveBeenCalledWith(deletedAdmissionKey, null);
         // The store error was not swallowed: the event loop logged it.

@@ -500,10 +500,16 @@ export function createSystemPromptHashHandler(deps: {
         if (liveSystemContent.length === 0) return;
         const previousHash = sessionMetaEarly?.systemPromptHash ?? "";
         const hasPersistedHash = previousHash !== "" && previousHash !== "0";
+        const prefixBoundModel = isPrefixBoundThinkingModel(
+            liveModel?.providerID,
+            liveModel?.modelID,
+        );
         // When the durable system-prompt hash is cleared (a store-generation
         // rebase, a host conversion), the request establishes a new baseline.
-        // Its date still sits in front of whatever signed thinking the request
-        // serves. If the new prompt has as many host date fields as the previous
+        // A known non-prefix-bound model can adopt the live date with that baseline.
+        // For prefix-bound or unknown models, the date still sits in front of
+        // whatever signed thinking the request serves. If the new prompt has as
+        // many host date fields as the previous
         // sticky date, that date stays in force and the new date is adopted only
         // through the same rule as any other date change (`systemDateMayMove`
         // below). If the counts differ, the previous date cannot be applied
@@ -517,6 +523,7 @@ export function createSystemPromptHashHandler(deps: {
             const fieldCount = (dates: string | undefined) =>
                 dates === undefined ? 0 : (JSON.parse(dates) as unknown[]).length;
             stickyDate =
+                (!modelKey || prefixBoundModel) &&
                 previous !== undefined &&
                 live !== undefined &&
                 fieldCount(previous) === fieldCount(live)
@@ -592,10 +599,6 @@ export function createSystemPromptHashHandler(deps: {
         // invalidates it, and the provider rejects the request.
         const systemDateMayMove = (rewrite: boolean, keptSignedThinking: boolean | undefined) =>
             (rewrite || idleCacheExpired) && keptSignedThinking !== true;
-        const prefixBoundModel = isPrefixBoundThinkingModel(
-            liveModel?.providerID,
-            liveModel?.modelID,
-        );
         // A queued refresh alone cannot change the prompt before an assistant's
         // encrypted thinking that still requires its original earlier messages.
         // If the system hook runs first, wait for a permitted messages rebuild;

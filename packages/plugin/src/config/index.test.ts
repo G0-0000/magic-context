@@ -270,11 +270,17 @@ describe("loadPluginConfig — graduated mural config", () => {
         expect(
             resolveDreamerTaskModel({ config: result, harness: "opencode", task: "compress-cues" })
                 .primary,
-        ).toEqual({ model: "open/dreamer-default" });
+        ).toEqual({
+            model: "open/dreamer-default",
+            sourceConfigKey: "dreamer.opencode.model",
+        });
         expect(
             resolveDreamerTaskModel({ config: result, harness: "pi", task: "compress-cues" })
                 .primary,
-        ).toEqual({ model: "pi/dreamer-default" });
+        ).toEqual({
+            model: "pi/dreamer-default",
+            sourceConfigKey: "dreamer.pi.model",
+        });
     });
 
     it("emits no mural.model warning when the key is absent", () => {
@@ -302,11 +308,17 @@ describe("loadPluginConfig — graduated mural config", () => {
         expect(
             resolveDreamerTaskModel({ config: result, harness: "opencode", task: "compress-cues" })
                 .primary,
-        ).toEqual({ model: "open/project-cues" });
+        ).toEqual({
+            model: "open/project-cues",
+            sourceConfigKey: "dreamer.opencode.tasks.compress-cues.model",
+        });
         expect(
             resolveDreamerTaskModel({ config: result, harness: "opencode", task: "curate" })
                 .primary,
-        ).toEqual({ model: "open/project-curate" });
+        ).toEqual({
+            model: "open/project-curate",
+            sourceConfigKey: "dreamer.opencode.tasks.curate.model",
+        });
         expect(
             (result.configWarnings ?? []).filter((w) =>
                 w.endsWith(MURAL_MODEL_DEPRECATION_WARNING),
@@ -1690,8 +1702,18 @@ describe("loadPluginConfig — user-owned model profiles", () => {
         // existing model-switch identity path still sees canonical model IDs and
         // qualifier-distinct fallback attempts; profiles add no separate cache-bust class.
         expect(resolveHistorianModel(config, "opencode")).toEqual({
-            primary: { model: "anthropic/work", qualifier: "high" },
-            fallbacks: [{ model: "openai/work-fallback", qualifier: "low" }],
+            primary: {
+                model: "anthropic/work",
+                qualifier: "high",
+                sourceConfigKey: "historian.opencode.model",
+            },
+            fallbacks: [
+                {
+                    model: "openai/work-fallback",
+                    qualifier: "low",
+                    sourceConfigKey: "historian.opencode.fallback_models",
+                },
+            ],
         });
     });
 });

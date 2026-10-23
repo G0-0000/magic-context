@@ -1187,7 +1187,7 @@ describe("createTransform", () => {
         const preparedSql: string[] = [];
         const tokenQueryIds: string[][] = [];
         const db = new Proxy(realDb, {
-            get(target, prop, receiver) {
+            get(target, prop) {
                 if (prop === "prepare") {
                     return (sql: string) => {
                         preparedSql.push(sql);
@@ -1212,7 +1212,7 @@ describe("createTransform", () => {
                         });
                     };
                 }
-                const value = Reflect.get(target, prop, receiver);
+                const value = Reflect.get(target, prop, target);
                 return typeof value === "function" ? value.bind(target) : value;
             },
         }) as typeof realDb;
