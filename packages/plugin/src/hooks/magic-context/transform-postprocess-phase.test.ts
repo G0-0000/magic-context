@@ -13934,3 +13934,167 @@ it("issue 731 small subagent preserves results when fixed overhead exceeds the c
         expect(getEmergencyInputSample(db, sessionId)).toBe(0);
     }
 });
+
+it.skipIf(process.env.MC_REVIEW_775 !== "1")(
+    "inline thinking replay does not leave an empty strict-provider slot after full postprocess",
+    async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        const sessionId = "review775-inline-postprocess";
+        const messages: MessageLike[] = [
+            { info: { id: "first", role: "user" }, parts: [{ type: "text", text: "first" }] },
+            {
+                info: { id: "thinking-only", role: "assistant", providerID: "openai" },
+                parts: [{ type: "text", text: "<think>private reasoning</think>" }],
+            },
+            { info: { id: "next", role: "user" }, parts: [{ type: "text", text: "continue" }] },
+        ];
+        const tagger = createTagger();
+        const tagged = tagMessages(sessionId, messages, tagger, db, { skipPrefixInjection: true });
+        const tag = tagged.messageTagNumbers.get(messages[1]);
+        expect(tag).toBeGreaterThan(0);
+        updateSessionMeta(db, sessionId, { clearedReasoningThroughTag: tag });
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...tagged,
+                tagger,
+                resolvedProviderID: "openai",
+                fullFeatureMode: false,
+                schedulerDecision: "execute",
+            }),
+        );
+        console.log("inline thinking after full postprocess", JSON.stringify(messages));
+        const assistant = messages.find((message) => message.info.id === "thinking-only");
+        expect(assistant).toBeDefined();
+        expect((assistant!.parts[0] as { text: string }).text).not.toBe("");
+    },
+);
+
+it.skipIf(process.env.MC_REVIEW_775 !== "1")(
+    "an unseen copied-tag suffix with unavailable replay evidence does not originate a prefix bust",
+    async () => {
+        const { loadPersistedLkgSlot } = await import("./lkg-persist");
+        const root = createTestTempDirFromPath(join(tmpdir(), "review775-no-lkg-"));
+        tempDirs.push(root);
+        const path = join(root, "context.db");
+        db = new Database(path);
+        initializeDatabase(db);
+        runMigrations(db);
+        const sessionId = "review775-unseen-no-lkg";
+        const project = join(root, "project");
+        const m0M1 = {
+            projectPath: project,
+            projectDirectory: project,
+            injectDocs: false,
+            memoryEnabled: false,
+            historyBudgetTokens: 98000,
+            hardSignals: {
+                systemHash: "stable",
+                modelKey: "openai/mock",
+                cacheExpired: false,
+                lastResponseTime: 0,
+            },
+        };
+        const raw = [
+            {
+                id: "old-tool",
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool",
+                        tool: "bash",
+                        callID: "old-call",
+                        state: {
+                            status: "completed",
+                            input: { command: "echo stable" },
+                            output: "stable original output ".repeat(200),
+                        },
+                    },
+                ],
+            },
+            { id: "old-user", role: "user", content: [{ type: "text", text: "continue" }] },
+        ];
+        const source = (suffix = false): SessionContext =>
+            ({
+                sessionID: sessionId,
+                model: { providerID: "openai", id: "mock" },
+                agent: "build",
+                messages: structuredClone(
+                    suffix
+                        ? [
+                              ...raw,
+                              {
+                                  id: "new-copy",
+                                  role: "assistant",
+                                  content: [{ type: "text", text: "§58§" }],
+                              },
+                              {
+                                  id: "new-user",
+                                  role: "user",
+                                  content: [{ type: "text", text: "continue again" }],
+                              },
+                          ]
+                        : raw,
+                ),
+                system: [],
+                tools: {},
+                options: {},
+            }) as SessionContext;
+        const warm = adaptPayload(source());
+        let tagger = createTagger();
+        const tagged = tagMessages(sessionId, warm.messages, tagger, db);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, warm.messages, {
+                ...tagged,
+                tagger,
+                tags: getTagsBySession(db, sessionId),
+                resolvedProviderID: "openai",
+                m0M1,
+            }),
+        );
+        expect(JSON.stringify(warm.messages)).not.toContain('"text":""');
+        const oldTag = getTagsBySession(db, sessionId).find((tag) => tag.type === "tool")!;
+        expect(oldTag).toBeDefined();
+        expect(oldTag.status).toBe("active");
+        padRecentToolSkeletonWindow(
+            sessionId,
+            Math.max(...getTagsBySession(db, sessionId).map((tag) => tag.tagNumber)),
+        );
+        db.close();
+        db = new Database(path);
+        initializeDatabase(db);
+        expect(getOrCreateSessionMeta(db, sessionId).cachedM0Bytes).not.toBeNull();
+        expect(loadPersistedLkgSlot(db, sessionId)).toBeUndefined();
+        queuePendingOp(db, sessionId, oldTag.tagNumber, "drop");
+        tagger = createTagger();
+        const next = adaptPayload(source(true));
+        const nextTagged = tagMessages(sessionId, next.messages, tagger, db);
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, next.messages, {
+                ...nextTagged,
+                tagger,
+                tags: getTagsBySession(db, sessionId),
+                resolvedProviderID: "openai",
+                m0M1,
+                readLastServedMessages: () => {
+                    const slot = loadPersistedLkgSlot(db, sessionId);
+                    return slot ? JSON.parse(slot.jsonPrefix) : null;
+                },
+            }),
+        );
+        console.log(
+            "unseen suffix after missing replay evidence",
+            JSON.stringify({
+                busted: result.bustedThisPass,
+                reason: result.materializeReason,
+                pending: getPendingOps(db, sessionId).length,
+                oldStatus: getTagsBySession(db, sessionId).find(
+                    (tag) => tag.tagNumber === oldTag.tagNumber,
+                )?.status,
+            }),
+        );
+        expect(result.bustedThisPass).toBe(false);
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+    },
+);
