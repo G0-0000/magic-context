@@ -117,7 +117,10 @@ const GATED_VERSION: u8 = 3;
 /// `RunStarted` (and a refreeze record) and makes `credential_id` an opaque
 /// vault id; this reader reads neither. `tool-times/v1` records when each
 /// new tool call started and finished; this reader takes a step's timing from
-/// its own records, so it ignores the tool times.
+/// its own records, so it ignores the tool times. `message-times/v1` adds an
+/// optional `written_at_ms` to `run_started`, `model_step_finished`,
+/// `steered`, `queued` and `send_delivered`; this reader keeps using `ts_ms`
+/// and ignores it.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -154,6 +157,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "compaction-ride-wait/v1",
     "auth-selection-method/v1",
     "tool-times/v1",
+    "message-times/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1896,6 +1900,7 @@ pub(crate) mod tests {
             "compaction-ride-wait/v1",
             "auth-selection-method/v1",
             "tool-times/v1",
+            "message-times/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -1997,6 +2002,24 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("tool-times/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `message-times/v1` adds an optional `written_at_ms` to the run's start
+    /// and to its finished steps; a run carrying it still yields its steps.
+    #[test]
+    fn a_message_times_run_keeps_its_steps() {
+        let mut started = run_started("r1", 1_000);
+        started["written_at_ms"] = json!(1_800_000_000_123u64);
+        let mut finished = step_finished(1, usage(1, 2, 3, 4));
+        finished["written_at_ms"] = json!(1_800_000_000_456u64);
+        let bytes = wal_bytes(&[
+            json!({"requires": ["message-times/v1"], "record": started}),
+            json!(step_started(1)),
+            json!(attempt(1, 1_010)),
+            json!({"requires": ["message-times/v1"], "record": finished}),
+        ]);
+        let runs = decode(&bytes).expect("message-times/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
