@@ -49,7 +49,7 @@
 		"comment-json": "^5.0.0",
 		"onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
 		"quickjs-emscripten": "^0.32.0",
-		"zod": "^4.1.8"
+		"zod": "^4.6.6"
 	},
 	"optionalDependencies": {
 		"onnxruntime-node": "1.30.0",
