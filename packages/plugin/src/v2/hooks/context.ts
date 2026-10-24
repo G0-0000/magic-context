@@ -25,6 +25,7 @@ import {
     resolveProjectIdentityForSession,
     setHomeProjectPermission,
 } from "../../features/magic-context/memory/project-identity";
+import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
@@ -1386,6 +1387,14 @@ export async function registerContext(context: V2Context) {
                         }
                         if (!event.data?.sessionID) continue;
                         const sessionID = event.data.sessionID;
+                        if (db && event.type === "session.revert.committed") {
+                            // A committed revert deletes raw rows, invalidating both
+                            // indexed ordinals and the cached append count/anchor.
+                            const indexDb = db;
+                            withoutSqliteTransformPass(() =>
+                                scheduleClearAndReindex(indexDb, sessionID, pagedRead),
+                            );
+                        }
                         if (
                             event.type?.startsWith("session.revert.") ||
                             event.type === "session.message.content.updated"

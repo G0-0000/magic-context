@@ -137,6 +137,26 @@ test("OpenCode 2 indexes messages after the rebase and after an earlier reconcil
         await settled();
         expect(pages.mock.calls.length).toBe(pageCount);
         expect(deltaCounts).toHaveBeenCalledTimes(3);
+
+        append(5, "checkpoint", "compaction");
+        await pass();
+        await settled();
+        expect(getLastIndexedOrdinal(db, sessionId)).toBe(4);
+        expect(pages.mock.calls.length).toBe(pageCount);
+        append(6, "postcompactionneedle raw ordinal excludes the checkpoint");
+        await pass();
+        await settled();
+        expect(getLastIndexedOrdinal(db, sessionId)).toBe(5);
+        expect(
+            searchMessageHistory(db, {
+                sessionId,
+                query: "postcompactionneedle",
+                probes: ["postcompactionneedle"],
+                limit: 5,
+                collectDiagnostics: false,
+                dateRange: null,
+            }).results.map((hit) => [hit.messageId, hit.messageOrdinal]),
+        ).toEqual([["m-6", 5]]);
     } finally {
         await settled();
         host.close();

@@ -368,12 +368,16 @@ export function scheduleReconciliation(
     scheduleAfterBootQuiet(() => {
         defer(() => {
             let appendedDuringReconciliation = false;
+            const previousSnapshot = heapHolder.reconciledSnapshots.get(sessionId);
             void reconcileSessionIndex(db, sessionId, readMessages)
                 .then((ran) => {
                     if (ran) {
                         const snapshot = heapHolder.reconciledSnapshots.get(sessionId);
+                        // A failed catch-up keeps the old snapshot. Wait for another
+                        // touch after a gap rather than repeatedly retrying that snapshot.
                         appendedDuringReconciliation =
                             snapshot !== undefined &&
+                            snapshot !== previousSnapshot &&
                             readMessages.getRevision !== undefined &&
                             readMessages.getRevision(sessionId) !== snapshot.revision;
                         return;

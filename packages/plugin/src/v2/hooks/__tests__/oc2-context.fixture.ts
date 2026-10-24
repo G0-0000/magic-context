@@ -65,6 +65,8 @@ export async function oc2ContextFixture(
         instructions = true,
         temporal = true,
         host = "2.0.22" as HostVersion,
+        eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
+            (async function* () {})(),
     } = {},
 ) {
     setHarness("opencode2");
@@ -140,7 +142,7 @@ export async function oc2ContextFixture(
                 storage.set(key, structuredClone(value));
             },
         },
-        event: { subscribe: async function* () {} },
+        event: { subscribe: eventStream },
         tool: { hook: async () => {} },
         session: {
             remove: async () => {},
@@ -242,9 +244,11 @@ export async function oc2ContextFixture(
     let coveredThrough = -1;
     return {
         db,
+        raw,
         rows,
         session,
         host,
+        sessionLogs: () => logs.mock.calls.map((args) => args.map(String).join(" ")),
         /** A new plugin process over the same stores (an upgrade restart). */
         restart: startHook,
         get coveredThrough() {
@@ -382,6 +386,13 @@ export async function oc2ContextFixture(
             if (!row) throw new Error(`no row ${id}`);
             row.text = text;
             row.updated = nowClock;
+            persist();
+        },
+        /** Commit a host revert by deleting the selected row and its suffix. */
+        revertBefore(id: string) {
+            const index = rows.findIndex((row) => row.id === id);
+            if (index < 0) throw new Error(`no row ${id}`);
+            rows.splice(index);
             persist();
         },
         /**

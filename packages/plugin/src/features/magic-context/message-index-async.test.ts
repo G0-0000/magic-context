@@ -550,6 +550,28 @@ describe("message-index-async", () => {
         expect(searchMessageIds(db, "coalesced-append", "second")).toEqual(["second"]);
     });
 
+    it("does not spin on a gap after an earlier successful snapshot", async () => {
+        let count = 1;
+        let pages = 0;
+        const reader = {
+            getRevision: () => count,
+            getCount: () => count,
+            readPage: () => {
+                pages++;
+                return count === 1 ? [{ ...message("first", 1, "first bytes"), createdAt: 1 }] : [];
+            },
+        };
+        scheduleReconciliation(db, "cached-gap", reader);
+        await waitUntil(() => getMessageIndexQueueHeapStats().queueLength === 0);
+        expect(getLastIndexedOrdinal(db, "cached-gap")).toBe(1);
+        count = 2;
+        pages = 0;
+        scheduleReconciliation(db, "cached-gap", reader);
+        await waitUntil(() => getMessageIndexQueueHeapStats().queueLength === 0);
+        expect(getLastIndexedOrdinal(db, "cached-gap")).toBe(1);
+        expect(pages).toBe(1);
+    });
+
     it.each([
         "reader error",
         "revision error",

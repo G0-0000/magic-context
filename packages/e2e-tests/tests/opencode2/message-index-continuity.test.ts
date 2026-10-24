@@ -8,6 +8,7 @@ import { renderSearchArchive } from "../../../plugin/src/tools/ctx-expand/search
 import {
 	gaDatabasePath,
 	RAW_MESSAGE_TYPES,
+	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
 import {
 	inspectOpenFiles,
@@ -124,6 +125,77 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 				isolatedRoot: host.root,
 				queryPlans,
 				databases: paths.filter((path) => /\.db(?:-wal|-shm)?$/.test(path)),
+			}),
+		);
+		const rawCount = () => {
+			const reader = new V2StoreReader(
+				gaDatabasePath(dataHome, "latest", host.env),
+			);
+			try {
+				return reader.messageCount(session.id);
+			} finally {
+				reader.close();
+			}
+		};
+		const searchFor = (query: string) =>
+			searchMessageHistory(db, {
+				sessionId: session.id,
+				query,
+				probes: [query],
+				limit: 5,
+				collectDiagnostics: false,
+				dateRange: null,
+			}).results;
+		const waitForMessage = async (query: string) => {
+			const deadline = Date.now() + 15000;
+			while (Date.now() < deadline) {
+				const hit = searchFor(query)[0];
+				if (hit) return hit;
+				await Bun.sleep(25);
+			}
+			throw new Error(`Message index did not find ${query}`);
+		};
+		await prompt("revertedneedle772 remove this turn from search");
+		const reverted = await waitForMessage("revertedneedle772");
+		if (!reverted.messageId || reverted.messageOrdinal === undefined)
+			throw new Error("Revert target did not have an indexed message identity");
+		const beforeRevert = rawCount();
+		await client.session.revert.stage({
+			sessionID: session.id,
+			messageID: reverted.messageId,
+		});
+		expect(rawCount()).toBe(beforeRevert);
+		await client.session.revert.commit({ sessionID: session.id });
+		const afterRevert = rawCount();
+		expect(afterRevert).toBeLessThan(beforeRevert);
+		expect(afterRevert).toBe(reverted.messageOrdinal - 1);
+		const revertDeadline = Date.now() + 15000;
+		while (
+			getLastIndexedOrdinal(db, session.id) !== afterRevert &&
+			Date.now() < revertDeadline
+		)
+			await Bun.sleep(25);
+		expect(getLastIndexedOrdinal(db, session.id)).toBe(afterRevert);
+		expect(searchFor("revertedneedle772")).toEqual([]);
+		await prompt("replacementneedle772 append after committed revert");
+		const replacement = await waitForMessage("replacementneedle772");
+		expect(replacement.messageOrdinal).toBe(afterRevert + 1);
+		expect(getLastIndexedOrdinal(db, session.id)).toBeLessThanOrEqual(
+			rawCount(),
+		);
+		expect(searchFor("revertedneedle772")).toEqual([]);
+		expect(host.pluginLog()).not.toContain("reconciliation stalled");
+		inspectOpenFiles(pid, host.root, host.env);
+		console.log(
+			JSON.stringify({
+				version: process.env.MC_E2E_OPENCODE2_VERSION,
+				revert: {
+					before: beforeRevert,
+					after: afterRevert,
+					watermark: getLastIndexedOrdinal(db, session.id),
+				},
+				revertedSearch: searchFor("revertedneedle772"),
+				replacementSearch: searchFor("replacementneedle772"),
 			}),
 		);
 	} finally {
