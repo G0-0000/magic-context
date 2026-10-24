@@ -7,6 +7,11 @@ import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
 } from "@magic-context/core/shared/test-temp-dir";
+import {
+	exerciseOmpLoggerFiles,
+	pinOmpLoggerFiles,
+	reportOmpLogDescriptors,
+} from "./__tests__/omp-log-files";
 
 // OMP reads its configuration paths while importing the extension runner.
 const parent = join(tmpdir(), "magic-context", "issue-766");
@@ -28,6 +33,8 @@ for (const [key, value] of Object.entries(environment)) {
 	mkdirSync(value, { recursive: true });
 	process.env[key] = value;
 }
+const ompLoggerAliases = ["omp-pi-ai-1812", "omp-coding-agent-1812"];
+await pinOmpLoggerFiles(root, ompLoggerAliases);
 const require = createRequire(import.meta.url);
 const ai = require.resolve("omp-pi-ai-1812/package.json").slice(0, -12);
 const agent = require
@@ -43,6 +50,8 @@ const { registerOmpAssistantMessageStrip } = await import("./strip-tag-prefix");
 const { piPreparedStructure, piPreparedStructureMismatch } = await import(
 	"./pi-dispatch-structure"
 );
+await exerciseOmpLoggerFiles(ompLoggerAliases);
+reportOmpLogDescriptors();
 
 afterAll(() => {
 	for (const [key, value] of Object.entries(previous)) {

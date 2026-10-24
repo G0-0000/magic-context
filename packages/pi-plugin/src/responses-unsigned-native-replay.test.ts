@@ -8,6 +8,11 @@ import {
 	cleanupTestTempDir,
 	createTestTempDirFromPath,
 } from "@magic-context/core/shared/test-temp-dir";
+import {
+	exerciseOmpLoggerFiles,
+	pinOmpLoggerFiles,
+	reportOmpLogDescriptors,
+} from "./__tests__/omp-log-files";
 
 // OMP resolves some paths at import time, before the extension runner is constructed.
 const parent = join(tmpdir(), "magic-context", "issue-766");
@@ -43,20 +48,25 @@ const packageRoot = (alias: string, version: string) => {
 	expect(require(`${path}package.json`).version).toBe(version);
 	return path;
 };
+const hostDefinitions = [
+	{ ai: "omp-pi-ai-171", version: "17.1.7" },
+	{
+		ai: "omp-pi-ai-1812",
+		agent: "omp-coding-agent-1812",
+		version: "18.12.3",
+	},
+	{
+		ai: "omp-pi-ai-18126",
+		agent: "omp-coding-agent-18126",
+		version: "18.12.6",
+	},
+];
+const ompLoggerAliases = hostDefinitions.flatMap((host) =>
+	host.agent ? [host.ai, host.agent] : [host.ai],
+);
+await pinOmpLoggerFiles(root, ompLoggerAliases);
 const hosts = await Promise.all(
-	[
-		{ ai: "omp-pi-ai-171", version: "17.1.7" },
-		{
-			ai: "omp-pi-ai-1812",
-			agent: "omp-coding-agent-1812",
-			version: "18.12.3",
-		},
-		{
-			ai: "omp-pi-ai-18126",
-			agent: "omp-coding-agent-18126",
-			version: "18.12.6",
-		},
-	].map(async (host) => ({
+	hostDefinitions.map(async (host) => ({
 		...host,
 		build: (
 			await import(
@@ -79,6 +89,8 @@ const hosts = await Promise.all(
 			: {}),
 	})),
 );
+await exerciseOmpLoggerFiles(ompLoggerAliases);
+reportOmpLogDescriptors();
 const model = (api = "openai-responses") => ({
 	api,
 	id: "gpt-5",

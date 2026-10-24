@@ -1,5 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	cleanupTestTempDir,
+	createTestTempDirFromPath,
+} from "@magic-context/core/shared/test-temp-dir";
+import {
+	exerciseOmpLoggerFiles,
+	pinOmpLoggerFiles,
+	reportOmpLogDescriptors,
+} from "./__tests__/omp-log-files";
 import {
 	type PiDispatchHost,
 	piPreparedStructure,
@@ -50,15 +62,60 @@ async function load(
 	return { version, host, transform: module.transformMessages };
 }
 
-// The Oh My Pi releases our lanes pin. 18.12.5's transform-messages.ts is
-// byte-identical to 18.12.3's.
+const parent = join(tmpdir(), "magic-context", "issue-766");
+mkdirSync(parent, { recursive: true });
+const hostRoot = createTestTempDirFromPath(join(parent, "host-oracle-"));
+afterAll(() => cleanupTestTempDir(hostRoot));
+const ompVersions = [
+	["omp-pi-ai-1889", "18.8.9"],
+	["omp-pi-ai-1811", "18.11.3"],
+	["omp-pi-ai-1812", "18.12.3"],
+] as const;
+const ompLoggerAliases = ompVersions.map(([alias]) => alias);
+
+async function loadOmpHosts(): Promise<HostTransform[]> {
+	const environment = {
+		HOME: join(hostRoot, "home"),
+		XDG_CONFIG_HOME: join(hostRoot, "config"),
+		XDG_DATA_HOME: join(hostRoot, "data"),
+		XDG_CACHE_HOME: join(hostRoot, "cache"),
+		XDG_STATE_HOME: join(hostRoot, "state"),
+	};
+	const previous = Object.fromEntries(
+		Object.keys(environment).map((key) => [key, process.env[key]]),
+	);
+	// OMP captures log/config paths during import; later tests keep their own environment.
+	for (const [key, value] of Object.entries(environment)) {
+		mkdirSync(value, { recursive: true });
+		process.env[key] = value;
+	}
+	try {
+		await pinOmpLoggerFiles(hostRoot, ompLoggerAliases);
+		// Cover the supported OMP converters. The 18.12.5 transform is byte-identical
+		// to 18.12.3, so loading 18.12.3 also covers that release.
+		const hosts: HostTransform[] = [];
+		for (const [alias, version] of ompVersions) {
+			hosts.push(await load(alias, version, "omp"));
+		}
+		return hosts;
+	} finally {
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
 const hosts = [
-	await load("omp-pi-ai-1889", "18.8.9", "omp"),
-	await load("omp-pi-ai-1811", "18.11.3", "omp"),
-	await load("omp-pi-ai-1812", "18.12.3", "omp"),
+	...(await loadOmpHosts()),
 	await load("pi-ai-087", "0.87.1", "pi"),
 	await load("pi-ai-130", "1.3.0", "pi"),
 ];
+
+// Exercise real sinks after HOME is restored so lsof observes files,
+// not just configured paths.
+await exerciseOmpLoggerFiles(ompLoggerAliases);
+reportOmpLogDescriptors();
 
 const SEQUENCES = 2000;
 const responsesModel = {
