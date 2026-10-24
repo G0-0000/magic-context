@@ -1232,7 +1232,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	let openFailureCause: string | null = null;
 	const openStorage = async (): Promise<ContextDatabase | null> => {
 		try {
-			return await openDatabaseAsync();
+			return await openDatabaseAsync({ nativeTurnDeadlines: true });
 		} catch (error) {
 			openFailureCause = error instanceof Error ? error.message : String(error);
 			return null;

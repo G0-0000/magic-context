@@ -381,6 +381,10 @@ import {
 	shouldReclaimPiUpperEstimate,
 } from "./pi-fit-reclaim";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
+import {
+	inPiHistorianRootContext,
+	waitForPiHistorianInTurn,
+} from "./pi-historian-turn-wait";
 import { readPiHistoryRetirement } from "./pi-history-retirement";
 import {
 	clearPiLkgSessionState,
@@ -6630,7 +6634,16 @@ export function registerPiContextHandler(
 									const pending = inFlightHistorian.get(sessionId);
 									if (pending) {
 										budget.stage = "headless fit historian";
-										await budget.wait(pending);
+										await waitForPiHistorianInTurn(
+											sessionId,
+											() =>
+												Math.max(
+													0,
+													budget.remainingOutcome() -
+														PI_CONTEXT_BUDGET.completionReserveMs,
+												),
+											() => budget.wait(pending),
+										);
 									}
 								}
 								budget.stage = "outgoing fit reclaim";
@@ -6700,12 +6713,10 @@ export function registerPiContextHandler(
 								if (!reclaimCompleted && upperCursor && reservation)
 									// Releasing this owner's claim is safe after cancellation or
 									// deadline expiry; it cannot publish a superseded request.
-									withoutSqliteTransformPass(() =>
-										releasePiUpperEstimateReclaim(
-											options.db,
-											upperCursor,
-											reservation,
-										),
+									releasePiUpperEstimateReclaim(
+										options.db,
+										upperCursor,
+										reservation,
 									);
 							}
 						}
@@ -7485,14 +7496,15 @@ function spawnPiHistorianRun(args: {
 	const holderId = crypto.randomUUID();
 	const controller = new AbortController();
 	historianAbortControllers.set(sessionId, controller);
-	const runPromise = inRootAsyncContext(() =>
+	const runPromise = inPiHistorianRootContext(sessionId, () =>
 		(async () => {
-			// Defer the runner's synchronous prefix until the context handler has returned.
+			// Yield before starting detached work. A headless context pass may
+			// await this run instead of returning first.
 			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 			if (controller.signal.aborted) return;
 			// Do not start a historian after the pass's 21s optional cutoff.
-			// Once started, its lease protects history-summary publication without
-			// borrowing the foreground context deadline.
+			// Background publication keeps its own lease and budget. Native lock
+			// waits borrow a turn's allowance only while that turn awaits this run.
 			args.startGuard?.();
 			const lease = acquireCompartmentLease(db, sessionId, holderId);
 			if (!lease) {
