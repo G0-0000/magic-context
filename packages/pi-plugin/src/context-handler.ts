@@ -9677,6 +9677,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				{
 					skipPrefixInjection: !ctxReduceCallable,
+					// A tag-only literal retained at save time stays inert after a provider switch.
+					preserveTagOnlyAssistantText: true,
 					entryFingerprintByMessageId,
 					reuseMessageIds: textIdentityPlan.reusableMessageIds,
 					textIdentityDriftMessageIds: textIdentityPlan.driftedMessageIds,

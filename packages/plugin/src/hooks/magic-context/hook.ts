@@ -1130,7 +1130,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const hooks = {
         "experimental.chat.messages.transform": transform,
         "experimental.chat.system.transform": systemPromptHashHandler,
-        "experimental.text.complete": createTextCompleteHandler(),
+        "experimental.text.complete": createTextCompleteHandler(
+            (sessionID) => liveModelBySession.get(sessionID)?.providerID,
+        ),
         "chat.message": createChatMessageHook({
             db,
             liveModelBySession,

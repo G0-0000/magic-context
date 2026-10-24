@@ -355,6 +355,41 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
 
+it("repairs previously served tag-emptied history through one shared rebuild, then defers identically", async () => {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const { markServedShapeRepair } = await import("./served-shape-repair");
+    const sessionId = "served-shape-recovery";
+    const source = (): MessageLike[] => [
+        {
+            info: { id: "old", role: "assistant", providerID: "openai" },
+            parts: [{ type: "text", text: "§58§" }],
+        },
+        { info: { id: "error-1", role: "assistant", finish: "error" }, parts: [] },
+        { info: { id: "error-2", role: "assistant", finish: "error" }, parts: [] },
+        { info: { id: "retry", role: "user" }, parts: [{ type: "text", text: "retry" }] },
+    ];
+    const old = source();
+    (old[0].parts[0] as { text: string }).text = "";
+    let previous = old;
+    for (let pass = 0; pass < 3; pass++) {
+        const messages = source();
+        markServedShapeRepair(messages[0].info, [{ index: 0, text: "§58§" }]);
+        const result = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                readLastServedMessages: () => previous,
+                resolvedProviderID: "openai",
+            }),
+        );
+        expect(result.bustedThisPass).toBe(pass === 0);
+        expect((messages[0].parts[0] as { text: string }).text).toBe("§58§");
+        if (pass > 0) expect(JSON.stringify(messages)).toBe(JSON.stringify(previous));
+        previous = structuredClone(messages);
+    }
+    db.close();
+});
+
 for (const host of ["opencode", "opencode2"] as const) {
     describe(`${host} auto-search served decisions`, () => {
         function setup(label: string) {

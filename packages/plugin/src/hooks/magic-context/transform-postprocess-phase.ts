@@ -189,6 +189,7 @@ import {
     modelAcceptsEmptyContent,
     replaySentinelByMessageIds,
 } from "./sentinel";
+import { prepareServedShapeRepair } from "./served-shape-repair";
 import { servedPrefixMatches } from "./strict-thinking-prefix";
 import {
     applyFrozenTrailingBlankDecisions,
@@ -2086,6 +2087,13 @@ export async function runPostTransformPhase(
     };
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
+    const servedShapeRepair = prepareServedShapeRepair(
+        args.db,
+        args.sessionId,
+        args.messages,
+        args.readLastServedMessages,
+        compactionOff ? undefined : postprocessReplaySnapshot(args.db, args.sessionId),
+    );
     // Capture before todo/history synthesis can add assistant messages. Reasoning replay skips a
     // metadata-only OpenCode request shell, while trailing-blank freezing still tracks that newest
     // host message because its shape can change before the next pass.
@@ -2162,8 +2170,11 @@ export async function runPostTransformPhase(
         args.canRunCompartments &&
         !args.awaitedCompartmentRun &&
         activeCompartmentRun !== undefined;
-    let deferredMaterialize = args.canConsumeDeferredLate && deferredMaterializationWasPending;
-    let materializationRequested = isExplicitFlush || deferredMaterialize;
+    let deferredMaterialize =
+        (args.canConsumeDeferredLate || servedShapeRepair.needsRebuild) &&
+        deferredMaterializationWasPending;
+    let materializationRequested =
+        isExplicitFlush || deferredMaterialize || servedShapeRepair.needsRebuild;
     // Persist eligible prefix work off-wire before authorizing automatic cleanup.
     // Execute may refresh m[1] without changing it: only changed bytes supply a ride.
     // A failed or contended advisory alone must never open the reduction lanes.
@@ -2257,6 +2268,10 @@ export async function runPostTransformPhase(
         rewritingSignedPrefix = true;
         thinkingReleasedForFit ||= forFit;
     };
+    // Replacing a previously served empty text slot cannot wait for the signed-prefix hold. Reuse
+    // the normal rewrite release so no signature remains bound to old bytes.
+    if (servedShapeRepair.needsRebuild && activeThinkingTurn)
+        releaseThinkingForRewrite(false, true);
     // Fit proof authorizes rebuilding the signed prefix, independently of
     // pressure. Release before prefix preparation so it can refresh history
     // without pretending the protected tool window has reached 95% usage.
@@ -2322,7 +2337,10 @@ export async function runPostTransformPhase(
     let publishedM1RefreshedThisPass = false;
     let prefixPreflightFailed = false;
     const softRefreshOpportunity =
-        !freezeM0M1 && (args.schedulerDecision === "execute" || deferredMaterialize);
+        !freezeM0M1 &&
+        (args.schedulerDecision === "execute" ||
+            deferredMaterialize ||
+            servedShapeRepair.needsRebuild);
     let m0RematerializedThisPass = false;
     const m0CoverageBeforeFold =
         args.sessionMeta.cachedM0Bytes === null ? -1 : args.sessionMeta.cachedM0MaxCompartmentSeq;
@@ -2583,6 +2601,7 @@ export async function runPostTransformPhase(
     const idleExpiryRebuild =
         (!freezeM0M1 || activeThinkingPrefixHold) && args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
+        servedShapeRepair: servedShapeRepair.needsRebuild,
         executeReclaim: false,
         subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
         hardFold:
@@ -2649,18 +2668,20 @@ export async function runPostTransformPhase(
     // first omits every signed block. The directory veto freezes injection only.
     // The historian's redundancy skip applies the same predicate.
     const publishedWorkDrainAllowed =
-        !compactionOff &&
+        (!compactionOff || servedShapeRepair.needsRebuild) &&
         reclaimRidePermitted(rideSignals, {
             signedThinkingHold: activeThinkingPrefixHold,
             firstRender: firstRenderBust,
             idleExpiry: idleExpiryRebuild,
             emergency: emergencyDropEligible,
         });
-    const shouldApplyPendingOps = publishedWorkDrainAllowed;
+    const shouldApplyPendingOps = !compactionOff && publishedWorkDrainAllowed;
     const shouldRunHeuristics =
+        !compactionOff &&
         publishedWorkDrainAllowed &&
         (rideSignals.publishedHistory ||
             rideSignals.executeReclaim ||
+            rideSignals.servedShapeRepair ||
             materializationRequested ||
             forceMaterialization ||
             // The off-wire fold changed the served prefix, so the prefix already
@@ -2679,6 +2700,9 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    if (servedShapeRepair.needsRebuild && !isCacheBustingPass)
+        throw new Error("Served-shape repair requires a rebuilding pass");
+    servedShapeRepair.apply(isCacheBustingPass);
     // An unheld bust of a prefix-bound model whose turn still keeps signed
     // thinking lands like a bust on any other model: latest-turn protection is
     // lifted so queued drops and cleanup in the turn apply on it. A bust that
@@ -2974,6 +2998,7 @@ export async function runPostTransformPhase(
         firstApplicationEdits.beforeNewerThinking ||= beforeNewerThinking;
     };
     if (temporalFirstApplication) recordFirstApplicationWireEdit(true);
+    if (servedShapeRepair.needsRebuild) recordFirstApplicationWireEdit(true);
     const firstApplicationLocations = new Map<MessageLike, number>();
     const recordFirstApplicationAt = (message: MessageLike, partIndex: number): void => {
         recordFirstApplicationWireEdit(false);
@@ -3887,7 +3912,9 @@ export async function runPostTransformPhase(
         // and persist their IDs so future defer passes can replay.
         if (isCacheBustingPass) {
             const droppedResult = stripDroppedPlaceholderMessages(
-                args.messages,
+                args.messages.filter(
+                    (message) => !servedShapeRepair.messageIDs.has(message.info.id ?? ""),
+                ),
                 args.resolvedProviderID,
                 recordFirstApplicationAt,
             );

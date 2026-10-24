@@ -2188,7 +2188,8 @@ export async function registerContext(context: V2Context) {
                 // The host stores copied `§N§` notation unchanged (no hook runs before
                 // it writes a finished reply), so assistant text restored from a saved
                 // source copy gets the same strip `adaptPayload` gives the live text.
-                normalizeRestoredAssistantText: stripCopiedTagNotation,
+                normalizeRestoredAssistantText: (text, providerID) =>
+                    stripCopiedTagNotation(text, providerID === "anthropic"),
                 refreshSourceContents: (sessionID) =>
                     nativeFoldReplay?.needsHeadRebuild(sessionID) ?? false,
                 // GA owns its native checkpoints; this adapter never writes the v1
