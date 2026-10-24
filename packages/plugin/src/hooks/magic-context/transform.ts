@@ -2724,6 +2724,7 @@ export function createTransform(deps: TransformDeps) {
                 messages,
                 messageTagNumbers,
                 persistedReasoningWatermark,
+                !canUseEmptySentinels,
             );
             if (replayed > 0 || replayedInline > 0) {
                 sessionLog(

@@ -193,6 +193,7 @@ import { prepareServedShapeRepair } from "./served-shape-repair";
 import { servedPrefixMatches } from "./strict-thinking-prefix";
 import {
     applyFrozenTrailingBlankDecisions,
+    captureInlineThinkingRepairs,
     clearOldReasoning,
     findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripDecisions,
@@ -2087,6 +2088,12 @@ export async function runPostTransformPhase(
     };
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
+    if (!modelAcceptsEmptyContent(args.resolvedProviderID) && !compactionOff)
+        captureInlineThinkingRepairs(
+            args.messages,
+            args.messageTagNumbers,
+            args.sessionMeta?.clearedReasoningThroughTag ?? 0,
+        );
     const servedShapeRepair = prepareServedShapeRepair(
         args.db,
         args.sessionId,
@@ -3305,7 +3312,12 @@ export async function runPostTransformPhase(
             // models it stays off too (Pi caps both lanes with one cutoff).
             const strippedInline =
                 routineCleanupApplied && ageLaneAllowed
-                    ? stripInlineThinking(args.messages, args.messageTagNumbers, budgetCutoff)
+                    ? stripInlineThinking(
+                          args.messages,
+                          args.messageTagNumbers,
+                          budgetCutoff,
+                          !canUseEmptySentinels,
+                      )
                     : 0;
             // Fresh caveman compression above rebuilds text from its original source,
             // which brings back inline thinking that the replay at the start of this
@@ -3320,8 +3332,13 @@ export async function runPostTransformPhase(
                     args.messages,
                     args.messageTagNumbers,
                     persistedInlineWatermark,
+                    !canUseEmptySentinels,
                 );
             }
+            // Inline stripping records its source slot before emptying it. Persist
+            // new served-shape decisions only on a cache-busting pass; deferred
+            // passes replay those decisions without discovering new replacements.
+            servedShapeRepair.apply(isCacheBustingPass);
             // Every other provider removes whole reasoning parts instead. New ids
             // are chosen only here, on the same rebuilding pass as the lane above,
             // and persisted before final representation applies them; a failed
