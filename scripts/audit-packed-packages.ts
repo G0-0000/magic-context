@@ -25,7 +25,7 @@ export type AuditReport = {
     metadata?: {
         vulnerabilities?: Partial<Record<"info" | "low" | "moderate" | "high" | "critical", number>>;
     };
-    vulnerabilities?: Record<string, { severity?: string; via?: AuditVia[] }>;
+    vulnerabilities?: Record<string, { severity?: string; via?: AuditVia[]; nodes?: string[] }>;
 };
 
 /**
@@ -39,6 +39,11 @@ export type AuditReport = {
  * the projects that install it. Magic Context never parses TOML. Remove this
  * entry once `@opencode-ai/plugin` depends on a fixed `effect`; the audit prints
  * a reminder when the entry no longer matches anything.
+ *
+ * zod < 4.6.6: oversized constrained collections can exhaust memory during
+ * validation. Our packages require patched Zod, but @opencode-ai/plugin pins
+ * 4.1.8. Accept only its nested copy and this advisory; remove the entry when
+ * OpenCode updates the pin. A vulnerable direct or differently nested copy fails.
  */
 export const ACCEPTED_ADVISORIES = [
     {
@@ -50,6 +55,12 @@ export const ACCEPTED_ADVISORIES = [
         ],
         // Packages allowed to be flagged only because they depend on the package above.
         dependentPath: ["effect", "@opencode-ai/plugin"],
+    },
+    {
+        vulnerablePackage: "zod",
+        advisories: ["https://github.com/advisories/GHSA-mrhx-c7xc-m3w5"],
+        dependentPath: ["@opencode-ai/plugin"],
+        vulnerableNodes: ["node_modules/@opencode-ai/plugin/node_modules/zod"],
     },
 ] as const;
 
@@ -66,6 +77,7 @@ export function classifyHighFindings(
     const findings = report.vulnerabilities ?? {};
     const acceptedNames = new Set<string>();
     const usedExceptions = new Set<string>();
+    const allowedEdges = new Map<string, Set<string>>();
     for (const entry of ACCEPTED_ADVISORIES) {
         const vulnerable = findings[entry.vulnerablePackage];
         if (!vulnerable) continue;
@@ -80,19 +92,39 @@ export function classifyHighFindings(
                     (entry.advisories as readonly string[]).includes(item.url),
             );
         if (!onlyAccepted) continue;
+        if ("vulnerableNodes" in entry) {
+            const nodes = vulnerable.nodes ?? [];
+            if (
+                nodes.length === 0 ||
+                !nodes.every((node) => (entry.vulnerableNodes as readonly string[]).includes(node))
+            ) continue;
+        }
         usedExceptions.add(entry.vulnerablePackage);
         acceptedNames.add(entry.vulnerablePackage);
-        // Walk outward along the allowed path: each dependent is accepted only if
-        // it is flagged solely because of packages already accepted.
+        let previous: string = entry.vulnerablePackage;
         for (const dependent of [...entry.dependentPath, rootPackage]) {
+            const allowed = allowedEdges.get(dependent) ?? new Set<string>();
+            allowed.add(previous);
+            allowedEdges.set(dependent, allowed);
+            previous = dependent;
+        }
+    }
+    // A package can depend on both accepted chains. Resolve them together, but
+    // never let a direct dependency skip the intermediate packages in a path.
+    let changed = true;
+    while (changed) {
+        changed = false;
+        for (const [dependent, allowed] of allowedEdges) {
+            if (acceptedNames.has(dependent)) continue;
             const finding = findings[dependent];
             if (!finding) continue;
             const dependentVia = finding.via ?? [];
             if (
                 dependentVia.length > 0 &&
-                dependentVia.every((item) => typeof item === "string" && acceptedNames.has(item))
+                dependentVia.every((item) => typeof item === "string" && allowed.has(item) && acceptedNames.has(item))
             ) {
                 acceptedNames.add(dependent);
+                changed = true;
             }
         }
     }
