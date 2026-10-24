@@ -996,7 +996,7 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
 
         if (!cooledPrimary && !quota)
             log(
-                `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; trying ${fallbacks.length} fallback(s)`,
+                `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; ${fallbacks.length} fallback(s) configured, subject to remaining budget`,
             );
     }
 
