@@ -222,7 +222,6 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     explicitSearch: true,
                     rerankConnectionFile: deps.rerankConnectionFile,
                     rerankConfig: deps.rerankConfig,
-                    signal: toolContext.abort,
                     onRerankSkipped: (line) => {
                         rerankSkipped = line;
                     },
