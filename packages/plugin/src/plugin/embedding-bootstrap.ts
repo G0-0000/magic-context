@@ -62,7 +62,10 @@ function loadRegistrationConfig(directory: string): LoadResultDetailed {
 export async function ensureProjectRegisteredFromOpenCodeDirectory(
     directory: string,
     db: Database,
-    options: { preflightLocalPooling?: boolean } = {},
+    options: {
+        preflightLocalPooling?: boolean;
+        onRegistered?: (projectIdentity: string) => void;
+    } = {},
 ): Promise<void> {
     const detailed = loadRegistrationConfig(directory);
     const projectIdentity = resolveProjectIdentityForSession(
@@ -110,4 +113,5 @@ export async function ensureProjectRegisteredFromOpenCodeDirectory(
     } else {
         unregisterProjectShadowEmbedding(projectIdentity);
     }
+    options.onRegistered?.(projectIdentity);
 }

@@ -200,6 +200,24 @@ interface StaleIdentityRow {
 }
 
 const projectRegistrations = new Map<string, ProjectEmbeddingRegistration>();
+const projectContextUsers = new Map<string, number>();
+
+/** Keep embedding registrations active until the last context using this project is disposed. */
+export function retainProjectEmbedding(projectIdentity: string): () => void {
+    projectContextUsers.set(projectIdentity, (projectContextUsers.get(projectIdentity) ?? 0) + 1);
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        const remaining = (projectContextUsers.get(projectIdentity) ?? 1) - 1;
+        if (remaining > 0) {
+            projectContextUsers.set(projectIdentity, remaining);
+        } else {
+            projectContextUsers.delete(projectIdentity);
+            unregisterProjectEmbedding(projectIdentity);
+        }
+    };
+}
 
 interface ShadowEmbeddingRegistration {
     projectIdentity: string;
@@ -3810,6 +3828,7 @@ export function _resetProjectEmbeddingRegistryForTests(): void {
         disposeProvider(registration.provider);
     }
     projectRegistrations.clear();
+    projectContextUsers.clear();
     shadowRegistrations.clear();
     shadowQueue.length = 0;
     pendingShadowBackfills.clear();

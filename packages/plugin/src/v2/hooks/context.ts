@@ -184,6 +184,7 @@ import { DeletedSessionTombstones } from "./deleted-session-tombstones";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
+import { createV2EmbeddingScope } from "./embedding-lifecycle";
 import { generateReplayAnchor, V2GenerateReplay } from "./generate";
 import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
@@ -724,6 +725,9 @@ export async function registerContext(context: V2Context) {
         );
         return;
     }
+    const embeddings = createV2EmbeddingScope(
+        resolveProjectIdentityForSession(directory, config.allow_home_project),
+    );
     const folds = new FoldOwner(context.storage);
     // Experimental and opt-in (MC_OC2_INVISIBLE_FOLD=1). After OpenCode folds the
     // history, the provider request bytes must stay identical to the ones sent
@@ -834,8 +838,13 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("http.request", (draft) => hiddenChildHook.cacheRequest(draft));
     const tools =
         db && isDatabasePersisted(db)
-            ? await registerTools(context, db, config, moduleToolBackends?.backends, (id) =>
-                  hiddenChildHook.owns(id),
+            ? await registerTools(
+                  context,
+                  db,
+                  config,
+                  moduleToolBackends?.backends,
+                  (id) => hiddenChildHook.owns(id),
+                  embeddings.ensureRegistered,
               )
             : undefined;
     const usage: TransformDeps["contextUsageMap"] = new Map();
@@ -1020,6 +1029,7 @@ export async function registerContext(context: V2Context) {
             ),
             openReader: openStoreReader,
             rustModeModuleClient,
+            ensureRegistered: embeddings.ensureRegistered,
         });
     };
     if (db && isDatabasePersisted(db)) startMaintenance();
@@ -1526,7 +1536,12 @@ export async function registerContext(context: V2Context) {
         return materializeM0({
             ...createM0RenderOptions(
                 {
-                    ...createV2TransformFeatureDeps(config, compactionOff, directory),
+                    ...createV2TransformFeatureDeps(
+                        config,
+                        compactionOff,
+                        directory,
+                        embeddings.ensureRegistered,
+                    ),
                     ...createV2ThresholdDeps(config),
                 },
                 usage.get(draft.sessionID)?.usage ?? { percentage: 0, inputTokens: 0 },
@@ -2172,7 +2187,12 @@ export async function registerContext(context: V2Context) {
             // registered until plugin disposal, rather than falling back to the v1 store.
             prepareHistorySession(draft.sessionID);
             transform ??= createTransform({
-                ...createV2TransformFeatureDeps(config, compactionOff, directory),
+                ...createV2TransformFeatureDeps(
+                    config,
+                    compactionOff,
+                    directory,
+                    embeddings.ensureRegistered,
+                ),
                 cacheTtlConfig: config.cache_ttl,
                 cacheTtlConfigured: config.cacheTtlConfigured,
                 sampleCacheTtlConfig: () => liveConfigReader.poll().effective,
@@ -2226,12 +2246,16 @@ export async function registerContext(context: V2Context) {
                     const model = liveModels.get(sessionID);
                     return model ? `${model.providerID}/${model.modelID}` : undefined;
                 },
-                maybeAutoEmbedSession: createV2AutoEmbedSession({
-                    db,
-                    resolveDirectory: (sessionID) => sessionDirectories.get(sessionID) ?? directory,
-                    allowHomeProject: config.allow_home_project,
-                    recompProgressBySession: new Map(),
-                }),
+                maybeAutoEmbedSession: createV2AutoEmbedSession(
+                    {
+                        db,
+                        resolveDirectory: (sessionID) =>
+                            sessionDirectories.get(sessionID) ?? directory,
+                        allowHomeProject: config.allow_home_project,
+                        recompProgressBySession: new Map(),
+                    },
+                    embeddings.ensureRegistered,
+                ),
                 hiddenCompletionExecutor,
                 historianRunnable:
                     !compactionOff &&
@@ -2852,6 +2876,7 @@ export async function registerContext(context: V2Context) {
             deletedSessions.clear();
             await dreamTrigger?.dispose();
             await maintenanceTimer?.dispose();
+            await embeddings.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();
             restoredRows.clear();
