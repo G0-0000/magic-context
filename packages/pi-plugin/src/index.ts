@@ -1932,6 +1932,7 @@ async function startPiMagicContextRuntime(
 	// tool/command/overlay surface to change, matching Pi's registration lifecycle.
 	registerMagicContextTools(pi, {
 		rerankConnectionFile: config.subc?.connection_file,
+		rerankConfig: config.rerank,
 		expandTools: config.historian?.expand_tools,
 		db,
 		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,

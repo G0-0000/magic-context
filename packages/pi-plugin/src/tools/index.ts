@@ -76,6 +76,7 @@ export interface RegisterToolsOptions {
 	embeddingEnabled?: boolean;
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
+	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
 	/** Resolve the current directory's project identity using the user-level home-project setting. */
 	resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
 	/** When true, register the separate ctx_memory_list tool and enable Curate-only
@@ -178,6 +179,7 @@ export function registerMagicContextTools(
 				embeddingEnabled: opts.embeddingEnabled,
 				gitCommitsEnabled: opts.gitCommitsEnabled,
 				rerankConnectionFile: opts.rerankConnectionFile,
+				rerankConfig: opts.rerankConfig,
 				resolveProjectIdentity,
 			}),
 		),

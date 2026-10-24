@@ -186,6 +186,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 }
             }
 
+            let rerankSkipped = "";
             const results = await unifiedSearch(
                 deps.db,
                 toolContext.sessionID,
@@ -220,6 +221,11 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     // (the hot path) leave this off to protect their latency.
                     explicitSearch: true,
                     rerankConnectionFile: deps.rerankConnectionFile,
+                    rerankConfig: deps.rerankConfig,
+                    signal: toolContext.abort,
+                    onRerankSkipped: (line) => {
+                        rerankSkipped = line;
+                    },
                     // Probe match counts walk the session's FTS rows; run the
                     // message lane on a worker so the serving thread stays free.
                     searchMessageHistory: (request) =>
@@ -232,7 +238,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 },
             );
 
-            return formatSearchResults(query, results, toolContext.sessionID, diagnostics);
+            return (
+                formatSearchResults(query, results, toolContext.sessionID, diagnostics) +
+                (rerankSkipped ? `\n${rerankSkipped}` : "")
+            );
         },
     });
 }

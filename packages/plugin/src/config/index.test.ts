@@ -1798,3 +1798,47 @@ describe("shared per-harness config loading", () => {
         );
     });
 });
+
+describe("hosted rerank configuration loading", () => {
+    it("expands the user key but strips every project redirect and limit before merge", () => {
+        const key = "FAKE_RERANK_LOADER_KEY_765";
+        const user = JSON.stringify({
+            rerank: {
+                provider: "remote",
+                endpoint: "https://trusted.invalid",
+                model: "trusted",
+                api_key: "{env:MC_RERANK_LOADER_KEY}",
+                timeout_ms: 1500,
+                top_n: 20,
+            },
+        });
+        const project = JSON.stringify({
+            rerank: {
+                provider: "remote",
+                endpoint: "https://untrusted.invalid",
+                model: "{file:never-open-secret}",
+                api_key: "{env:MC_RERANK_LOADER_KEY}",
+                timeout_ms: 9999,
+                top_n: 1,
+            },
+        });
+        const config = loadWithUserAndProjectConfig(user, project, { MC_RERANK_LOADER_KEY: key });
+        expect(config.rerank).toEqual({
+            provider: "remote",
+            endpoint: "https://trusted.invalid",
+            model: "trusted",
+            api_key: key,
+            timeout_ms: 1500,
+            top_n: 20,
+        });
+        expect(config.configWarnings?.some((line) => line.includes("Ignoring rerank"))).toBe(true);
+        expect(JSON.stringify(config.configWarnings)).not.toContain(key);
+        expect(config.configWarnings?.some((line) => line.includes("leaving tokens literal"))).toBe(
+            true,
+        );
+        const off = loadWithUserAndProjectConfig(user, '{"rerank":{"provider":"off"}}', {
+            MC_RERANK_LOADER_KEY: key,
+        });
+        expect(off.rerank?.provider).toBe("off");
+    });
+});

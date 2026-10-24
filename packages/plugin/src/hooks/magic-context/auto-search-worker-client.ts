@@ -274,7 +274,26 @@ export async function searchAutoHint(
         import.meta.url,
     ),
 ): Promise<UnifiedSearchResult[]> {
-    return executeAutoSearchWorker(db, sessionId, projectPath, query, options, entry, "search");
+    // Automatic hints must never score remotely, even if a caller reuses the
+    // explicit-search options. Keep credentials and non-cloneable clients out
+    // of the worker message as well as disabling reranking there.
+    const {
+        rerankConfig: _rerankConfig,
+        rerankClient: _rerankClient,
+        rerankConnectionFile: _rerankConnectionFile,
+        onRerankSkipped: _onRerankSkipped,
+        captureRerankLanes: _captureRerankLanes,
+        ...hintOptions
+    } = options;
+    return executeAutoSearchWorker(
+        db,
+        sessionId,
+        projectPath,
+        query,
+        { ...hintOptions, explicitSearch: false, rerank: false },
+        entry,
+        "search",
+    );
 }
 
 const pendingBackfills = new WeakMap<Database, Map<string, Promise<void>>>();

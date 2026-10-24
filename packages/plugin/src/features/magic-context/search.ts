@@ -37,6 +37,7 @@ import {
     isProseQuery,
     logRerankFallback,
     prepareReranker,
+    remoteRerankSkipped,
     rerankSearchResults,
     type SearchLanes,
 } from "./search-rerank";
@@ -144,6 +145,8 @@ export interface UnifiedSearchOptions {
     rerankConnectionFile?: string;
     /** Optional service for offline comparisons and protocol tests. Null explicitly represents an unavailable Synapse service. */
     rerankClient?: SynapseClientLike | null;
+    rerankConfig?: import("../../config/schema/magic-context").RerankConfig;
+    onRerankSkipped?: (line: string) => void;
     /** Optional offline measurement sink, populated without repeating the original retrieval passes. */
     captureRerankLanes?: (lanes: SearchLanes) => void;
     /** Earliest persisted source timestamp in epoch milliseconds (inclusive). */
@@ -2303,6 +2306,7 @@ export async function unifiedSearch(
                   sessionId,
                   options.rerankConnectionFile,
                   options.rerankClient,
+                  options.rerankConfig,
               )
             : null;
     const lanes = reranker || options.captureRerankLanes ? emptySearchLanes() : undefined;
@@ -2558,7 +2562,10 @@ export async function unifiedSearch(
         options.captureRerankLanes?.(lanes);
     }
     if (reranker && lanes) {
-        const pool = fuseSearchLanes(lanes);
+        const pool = fuseSearchLanes(lanes).slice(
+            0,
+            "remote" in reranker ? reranker.remote.top_n : 20,
+        );
         try {
             results = await rerankSearchResults(
                 reranker,
@@ -2567,9 +2574,13 @@ export async function unifiedSearch(
                 pool,
                 candidateTexts(db, sessionId, projectPath, pool),
                 limit,
+                options.signal,
+                options.onRerankSkipped,
             );
         } catch {
-            logRerankFallback("candidate_validation");
+            if ("remote" in reranker)
+                remoteRerankSkipped("candidate_validation", options.onRerankSkipped);
+            else logRerankFallback("candidate_validation");
         }
     }
 
