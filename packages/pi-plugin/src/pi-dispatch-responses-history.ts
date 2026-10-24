@@ -1,3 +1,4 @@
+import { piOmitsTruncatedAssistant } from "./pi-dispatch-assistant-history";
 import type { PiChatHistoryModel } from "./pi-dispatch-chat-history";
 
 const MAX_TEXT_UNITS = 32 * 1024 * 1024;
@@ -61,13 +62,7 @@ export function piResponsesAssistantTexts(
 ): readonly string[] | undefined {
 	const message = object(value);
 	if (!message || !Array.isArray(message.content)) return undefined;
-	if (
-		["length", "error", "aborted"].includes(String(message.stopReason)) &&
-		!message.content.some((value) =>
-			["text", "toolCall"].includes(String(object(value)?.type)),
-		)
-	)
-		return [];
+	if (piOmitsTruncatedAssistant(message)) return [];
 	const texts: string[] = [];
 	const blocks: Record<string, unknown>[] = [];
 	const sameModel =
