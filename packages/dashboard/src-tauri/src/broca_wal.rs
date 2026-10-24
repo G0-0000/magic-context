@@ -1967,6 +1967,39 @@ pub(crate) mod tests {
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
+    /// `tool-times/v1` adds an optional time to existing tool records (when a
+    /// call was dispatched, when its result finished, when an approval
+    /// closed it). These are the record bodies Broca's encoder writes; a run
+    /// that carries them still yields its steps.
+    #[test]
+    fn a_tool_times_run_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["tool-times/v1"],
+                   "record": {"type": "tool_dispatch_intent", "batch_id": "b",
+                              "tool_call_id": "c", "args": {},
+                              "dispatched_at_ms": 1_800_000_000_123u64}}),
+            json!({"requires": ["tool-times/v1"],
+                   "record": {"type": "tool_result", "batch_id": "b",
+                              "result": {"tool_call_id": "c",
+                                         "output": {"kind": "text", "text": "ok"},
+                                         "is_error": false},
+                              "outcome": "completed",
+                              "finished_at_ms": 1_800_000_000_123u64}}),
+            json!({"requires": ["tool-times/v1"],
+                   "record": {"type": "approval_recorded", "call_key": "key",
+                              "call_id": "c", "decision": "declined",
+                              "closing_result": {"tool_call_id": "c",
+                                                 "output": {"kind": "text",
+                                                            "text": "pre_tool_declined"},
+                                                 "is_error": true},
+                              "closed_at_ms": 1_800_000_000_123u64}}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("tool-times/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
     /// `structured-output-paragraph/v1` marks a structured-output run whose
     /// schema instructions start a new paragraph; such a run still yields its
     /// steps.
