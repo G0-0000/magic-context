@@ -115,7 +115,9 @@ const GATED_VERSION: u8 = 3;
 /// and keeps the step's usage and timestamps. `auth-selection-method/v1` adds
 /// an optional `auth_method` to the frozen `config.auth_selection` on
 /// `RunStarted` (and a refreeze record) and makes `credential_id` an opaque
-/// vault id; this reader reads neither.
+/// vault id; this reader reads neither. `tool-times/v1` records when each
+/// new tool call started and finished; this reader takes a step's timing from
+/// its own records, so it ignores the tool times.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -151,6 +153,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "client-message-id/v1",
     "compaction-ride-wait/v1",
     "auth-selection-method/v1",
+    "tool-times/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1892,6 +1895,7 @@ pub(crate) mod tests {
             "client-message-id/v1",
             "compaction-ride-wait/v1",
             "auth-selection-method/v1",
+            "tool-times/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
