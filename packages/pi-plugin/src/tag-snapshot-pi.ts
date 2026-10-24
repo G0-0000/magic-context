@@ -174,6 +174,7 @@ export function createPiTagSnapshotReader(db: Database) {
 	let desiredSession: string | undefined;
 	let failedUntil = 0;
 	let lastFailure: unknown;
+	let failedSession: string | undefined;
 	const totalRevision = db.prepare(
 		"SELECT COALESCE(value, '0') AS revision, value IS NOT NULL AS present FROM (SELECT 1) LEFT JOIN schema_migrations_meta ON key = ?",
 	);
@@ -252,7 +253,8 @@ export function createPiTagSnapshotReader(db: Database) {
 					);
 				return load(sessionId);
 			}
-			if (performance.now() < failedUntil) throw lastFailure;
+			if (failedSession === sessionId && performance.now() < failedUntil)
+				throw lastFailure;
 			watch.run(sessionId);
 			const token = stamps(sessionId, ++jobId);
 			const previous = cache.get(sessionId);
@@ -369,6 +371,8 @@ export function createPiTagSnapshotReader(db: Database) {
 						desiredSession === sessionId &&
 						token.sessionEpoch === (sessionEpochs.get(sessionId) ?? 0)
 					) {
+						// Back off only the failed session; another session needs its own read.
+						failedSession = sessionId;
 						lastFailure = error;
 						failedUntil =
 							performance.now() +
