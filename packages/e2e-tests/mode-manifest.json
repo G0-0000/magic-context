@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/opencode2/message-index-continuity.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "A real OpenCode 2 host indexes a new message after the one-time generation stamp and an earlier reconciliation; message search and the ctx_expand archive renderer return its text. PID lsof proves isolated stores.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/omp-compaction-marker.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

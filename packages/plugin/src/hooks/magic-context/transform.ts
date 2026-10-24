@@ -969,7 +969,7 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        if (deps.client !== undefined) {
+        if (deps.client !== undefined || deps.hostMessageReconciliationSource !== undefined) {
             withoutSqliteTransformPass(() =>
                 scheduleReconciliation(db, sessionId, host.hostMessageReconciliationSource),
             );
