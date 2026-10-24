@@ -618,6 +618,16 @@ export class V2StoreReader {
         });
     }
 
+    /** Count only appended conversational rows, using the host's session/sequence index. */
+    messageCountAfterSequence(sessionID: string, after: number, through: number): number {
+        const rawTypes = RAW_MESSAGE_TYPES.map(() => "?").join(", ");
+        const row = this.prepare(
+            `SELECT COUNT(*) AS count FROM session_message
+             WHERE session_id = ? AND seq > ? AND seq <= ? AND type IN (${rawTypes})`,
+        ).get(sessionID, after, through, ...RAW_MESSAGE_TYPES) as { count?: number } | undefined;
+        return typeof row?.count === "number" ? row.count : 0;
+    }
+
     /**
      * One page of host sessions with the directory each was created in, in
      * ascending id order after `afterSessionID` (exclusive; null starts at the

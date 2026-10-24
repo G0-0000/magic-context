@@ -53,10 +53,11 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(32);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(48);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(49);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
+            "tests/opencode2/message-index-continuity.test.ts",
             "tests/opencode2/error-result-compaction.test.ts",
             "tests/opencode2/latest-turn-thinking-recovery.test.ts",
             "tests/opencode2/signed-drop-rebuild.test.ts",

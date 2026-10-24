@@ -11,6 +11,14 @@
             "hosts": ["pi"]
         },
         {
+            "path": "tests/opencode2/message-index-continuity.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "A real OpenCode 2 host indexes a new message after the one-time generation stamp and an earlier reconciliation; message search and the ctx_expand archive renderer return its text. PID lsof proves isolated stores.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/omp-compaction-marker.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
