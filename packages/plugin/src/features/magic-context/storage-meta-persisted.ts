@@ -3170,6 +3170,7 @@ export function getCompactionMarkerHealth(
 
 /** Frozen rendering decisions consumed by one postprocess pass. */
 export interface PostprocessReplaySnapshot {
+    servedShapeRepair?: unknown;
     executeReclaim?: unknown;
     staleReduceStrippedIds: Set<string>;
     processedImageStrippedIds: Set<string>;
@@ -3243,6 +3244,13 @@ export function loadPostprocessReplaySnapshot(
         row?.todo_permission_denied === 1 ? true : row?.todo_permission_denied === 0 ? false : null;
     const thinkingBindingRecoveryTarget = row?.thinking_binding_recovery_target;
     return {
+        servedShapeRepair: (() => {
+            try {
+                return parseReplayDocument(row?.trailing_blank_decisions).servedShapeRepair;
+            } catch {
+                return undefined;
+            }
+        })(),
         executeReclaim: executeReclaimFromReplay(row?.trailing_blank_decisions),
         staleReduceStrippedIds: new Set(parseStrippedBlob(row?.stale_reduce_stripped_ids)),
         processedImageStrippedIds: new Set(

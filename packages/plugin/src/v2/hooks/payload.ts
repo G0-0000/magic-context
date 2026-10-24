@@ -4,6 +4,7 @@ import {
     markCoveredInstructionRow,
 } from "../../hooks/magic-context/host-served-rows";
 import { modelAcceptsEmptyContent } from "../../hooks/magic-context/sentinel";
+import { markServedShapeRepair } from "../../hooks/magic-context/served-shape-repair";
 import { getEmptyImageParts } from "../../hooks/magic-context/strip-content";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
@@ -388,6 +389,7 @@ export function adaptPayload(
     const messages: MessageLike[] = [];
     for (const message of source) {
         const parts: Part[] = [];
+        const copiedTagOnly: Array<{ index: number; text: string }> = [];
         for (const content of message.content) {
             if (paired.has(content)) continue;
             const part =
@@ -401,8 +403,18 @@ export function adaptPayload(
                 message.role === "assistant" &&
                 part.type === "text" &&
                 typeof part.text === "string"
-            )
-                part.text = stripCopiedTagNotation(part.text);
+            ) {
+                if (
+                    !modelAcceptsEmptyContent(draft.model.providerID) &&
+                    part.text.trim().length > 0 &&
+                    stripCopiedTagNotation(part.text).trim().length === 0
+                )
+                    copiedTagOnly.push({ index: parts.length, text: part.text });
+                part.text = stripCopiedTagNotation(
+                    part.text,
+                    modelAcceptsEmptyContent(draft.model.providerID),
+                );
+            }
             if (message.id && admittedIDs.has(message.id)) part.synthetic = true;
             parts.push(part);
         }
@@ -448,6 +460,7 @@ export function adaptPayload(
             });
         }
         originals.set(mapped, message);
+        markServedShapeRepair(mapped.info, copiedTagOnly);
         // The transform decides whether a restored covered instruction is served.
         if (isCoveredInstructionRow(message)) markCoveredInstructionRow(mapped.info);
         if (typeof message.id !== "string") bridgesByCarrier.set(mapped, byCallID);

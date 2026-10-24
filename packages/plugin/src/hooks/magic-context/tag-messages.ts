@@ -28,7 +28,12 @@ import {
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { neutralizeDroppedReasoningPart } from "./sentinel";
-import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
+import {
+    byteSize,
+    isThinkingPart,
+    prependTag,
+    stripPersistedAssistantText,
+} from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import { isFilePart, isTextPart, isToolPartWithOutput, stripTagPrefix } from "./tag-part-guards";
 import {
@@ -251,6 +256,7 @@ export type MessageInfo = {
     id?: string;
     role?: string;
     sessionID?: string;
+    providerID?: string;
     time?: { created?: number; completed?: number };
     summary?: boolean;
     /** Marks one of the two m[0]/m[1] messages prepended by compartment injection. */
@@ -515,7 +521,7 @@ export interface TagMessagesOptions {
      * before that strip existed still holds the copies and would put them back.
      * Unset on every other host, where restored text is served as saved.
      */
-    normalizeRestoredAssistantText?: (text: string) => string;
+    normalizeRestoredAssistantText?: (text: string, providerID?: string) => string;
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -829,7 +835,9 @@ export function tagMessages(
                 const contentId = `${messageId}:p${partIndex}`;
                 const whitespaceOnlyAssistant =
                     message.info.role === "assistant" &&
-                    stripTagPrefix(textPart.text).trim().length === 0;
+                    (stripTagPrefix(textPart.text).trim().length === 0 ||
+                        (textPart.text.includes("§") &&
+                            stripPersistedAssistantText(textPart.text).length === 0));
                 // New whitespace-only assistant parts are provider framing, not reclaimable
                 // content. A pre-deploy row is different: replay its existing prefix forever
                 // so deployment never changes signed-adjacent bytes, but retire the row from
@@ -947,7 +955,10 @@ export function tagMessages(
                 if (persistedSource !== undefined && !options.refreshSourceContents) {
                     textPart.text =
                         options.normalizeRestoredAssistantText && message.info.role === "assistant"
-                            ? options.normalizeRestoredAssistantText(persistedSource)
+                            ? options.normalizeRestoredAssistantText(
+                                  persistedSource,
+                                  message.info.providerID,
+                              )
                             : persistedSource;
                 } else {
                     const sourceContent = stripTagPrefix(textPart.text);

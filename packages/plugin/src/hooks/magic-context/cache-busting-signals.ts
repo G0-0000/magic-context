@@ -49,6 +49,7 @@ export interface ReclaimRideSignals {
     publishedHistory: boolean;
     subagentExecute?: boolean;
     executeReclaim?: boolean;
+    servedShapeRepair?: boolean;
 }
 
 /** Primary execute reclaim must first satisfy the bounded queue/historian admission policy. */
@@ -59,7 +60,8 @@ export function hasReclaimRide(signals: ReclaimRideSignals): boolean {
         signals.explicitFlush ||
         signals.publishedHistory ||
         signals.subagentExecute === true ||
-        signals.executeReclaim === true
+        signals.executeReclaim === true ||
+        signals.servedShapeRepair === true
     );
 }
 
@@ -100,6 +102,7 @@ const RECLAIM_RIDE_NAMES = [
     "publishedHistory",
     "subagentExecute",
     "executeReclaim",
+    "servedShapeRepair",
 ] as const;
 
 /**

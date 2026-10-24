@@ -719,7 +719,7 @@ export interface TransformDeps {
      * `TagMessagesOptions.normalizeRestoredAssistantText`). Only the OpenCode 2
      * adapter supplies it.
      */
-    normalizeRestoredAssistantText?: (text: string) => string;
+    normalizeRestoredAssistantText?: (text: string, providerID?: string) => string;
     refreshSourceContents?: (sessionId: string) => boolean;
 }
 
@@ -2724,6 +2724,7 @@ export function createTransform(deps: TransformDeps) {
                 messages,
                 messageTagNumbers,
                 persistedReasoningWatermark,
+                !canUseEmptySentinels,
             );
             if (replayed > 0 || replayedInline > 0) {
                 sessionLog(
