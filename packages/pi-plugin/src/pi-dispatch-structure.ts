@@ -2,6 +2,7 @@ import {
 	piAgentHistory,
 	piIsDeveloperHistory,
 } from "./pi-dispatch-agent-history";
+import { piOmitsTruncatedAssistant } from "./pi-dispatch-assistant-history";
 import {
 	type PiChatHistoryModel,
 	piChatHistoryPlan,
@@ -62,24 +63,25 @@ export interface PiPreparedStructure {
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
 // APIs whose Oh My Pi provider runs transformMessages, so the host's tool-call
-// window rules are known for them. Checked against @oh-my-pi/pi-ai 18.12.3 and
-// 18.12.5 (stream.ts streamDispatch is identical in both), src/:
-// - openai-completions: providers/openai-completions.ts:2372 (convertMessages).
-// - openrouter: stream.ts routes it to openai-responses, or to
+// windows and interrupted-assistant omissions are known for them. Source lines
+// below are @oh-my-pi/pi-ai src/providers/, in version order 18.8.9 / 18.11.3 /
+// 18.12.3 (the pinned package versions):
+// - openai-completions: openai-completions.ts:2310/2371/2372 (convertMessages).
+// - openrouter: src/stream.ts:991/975/925 routes it to openai-responses, or to
 //   openai-completions when PI_OPENROUTER_RESPONSES=0.
-// - openai-responses, azure-openai-responses: openai-responses.ts:1612 and
-//   azure-openai-responses.ts:373 call buildResponsesInput, which runs it at
-//   openai-shared.ts:2162.
-// - openai-codex-responses: openai-codex-responses.ts:4977.
-// - anthropic-messages: anthropic.ts:5835.
-// - bedrock-converse-stream: amazon-bedrock.ts:1093.
-// - google-generative-ai, google-vertex, google-gemini-cli: google.ts:35,
-//   google-vertex.ts:32 and google-gemini-cli.ts:1266 reach google-shared.ts
-//   convertMessages, which runs it at google-shared.ts:213.
-// - ollama-chat: ollama.ts:269. devin-agent: devin.ts:248.
+// - openai-responses: openai-responses.ts:1568/1611/1612, and
+//   azure-openai-responses: azure-openai-responses.ts:373 (all three), call
+//   buildResponsesInput, which runs it at openai-shared.ts:2121/2162/2162.
+// - openai-codex-responses: openai-codex-responses.ts:4973/5013/4977.
+// - anthropic-messages: anthropic.ts:5210/5818/5835.
+// - bedrock-converse-stream: amazon-bedrock.ts:1089/1090/1093.
+// - google-generative-ai, google-vertex, google-gemini-cli: google.ts:35 (all),
+//   google-vertex.ts:33/32/32 and google-gemini-cli.ts:1256/1266/1266 reach
+//   google-shared.ts convertMessages, which runs it at :169/165/213.
+// - ollama-chat: ollama.ts:257/260/269. devin-agent: devin.ts:234/248/248.
 // - factory-droid-agent: factory-droid.ts streamWire sends every route through
-//   factory-droid/gemini.ts:190 or the Anthropic, Responses or Chat streams.
-// - apple-foundation-models: apple-foundation-models.ts:194.
+//   factory-droid/gemini.ts:175/179/190 or the Anthropic, Responses or Chat streams.
+// - apple-foundation-models: apple-foundation-models.ts:194 (all three).
 // cursor-agent (providers/cursor.ts) and gitlab-duo-agent
 // (gitlab-duo-workflow.ts:2581, "bypasses transformMessages") do not, and an
 // extension's custom API is unknown. Those use projectUnmodeledToolResults,
@@ -394,22 +396,10 @@ function projectMissingToolResults(
 		const message = object(value);
 		if (message?.role === "assistant") {
 			flush(message.timestamp);
+			// The host closes the preceding window before omitting this turn.
+			if (piOmitsTruncatedAssistant(message)) continue;
 			projected.push(value);
 			const calls = windowCalls(message);
-			// The host does not replay a truncated turn with neither text nor a tool
-			// call, so it opens no window. Its row stays here for the lane-specific
-			// omissions later in this file.
-			const truncated = ["length", "error", "aborted"].includes(
-				String(message.stopReason),
-			);
-			if (
-				truncated &&
-				Array.isArray(message.content) &&
-				!message.content.some((part) =>
-					["toolCall", "text"].includes(String(object(part)?.type)),
-				)
-			)
-				continue;
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				aborted = new Map(calls.map((call) => [pairingId(call.id), call]));
 				abortedTimestamp = message.timestamp;
