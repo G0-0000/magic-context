@@ -91,7 +91,9 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 		);
 		expect(archive).toContain(`${needle} newly written raw message`);
 		const paths = inspectOpenFiles(pid, host.root, host.env);
-		const rawDb = new Database(gaDatabasePath(dataHome, "latest", host.env), { readonly: true });
+		const rawDb = new Database(gaDatabasePath(dataHome, "latest", host.env), {
+			readonly: true,
+		});
 		let queryPlans: unknown[];
 		try {
 			queryPlans = [
