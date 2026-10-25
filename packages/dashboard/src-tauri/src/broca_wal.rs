@@ -122,8 +122,12 @@ const GATED_VERSION: u8 = 3;
 /// `steered`, `queued` and `send_delivered`; this reader keeps using `ts_ms`
 /// and ignores it. `plan-reference-slots/v1` adds an optional
 /// `reference_slots` map (tool name to `{name, kind}` slots) beside `reply` on
-/// an answered fetch in a run's frozen plan manifest; this reader never reads
-/// the manifest.
+/// an answered fetch in a run's frozen plan manifest, and
+/// `provider-declarations/v1` adds `declarations_frozen` (tool result formats
+/// and the `late_results` capability) to the same answered fetch; this reader
+/// never reads the manifest. `provider-held/v1` adds held-call records and a
+/// `tool_held` pause reason; this reader skips record types it doesn't use and
+/// never reads pause reasons.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -162,6 +166,8 @@ const KNOWN_FEATURES: &[&str] = &[
     "tool-times/v1",
     "message-times/v1",
     "plan-reference-slots/v1",
+    "provider-declarations/v1",
+    "provider-held/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1906,6 +1912,8 @@ pub(crate) mod tests {
             "tool-times/v1",
             "message-times/v1",
             "plan-reference-slots/v1",
+            "provider-declarations/v1",
+            "provider-held/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2043,6 +2051,41 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("plan-reference-slots/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `provider-declarations/v1` adds `declarations_frozen` beside `reply` on
+    /// an answered fetch in the run's frozen plan manifest. This reader never
+    /// reads the manifest, so a run carrying it still yields its steps.
+    #[test]
+    fn a_provider_declarations_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["manifest"] = json!({"items": [{"outcome": {"answered": {
+            "reply": {},
+            "declarations_frozen": {"result_formats": {"read": "text"}, "late_results": true},
+        }}}]});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["provider-declarations/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("provider-declarations/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `provider-held/v1` adds held-call records and a `tool_held` pause
+    /// reason. This reader skips record types it doesn't use, so a run that
+    /// carries them still yields its steps.
+    #[test]
+    fn a_provider_held_run_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["provider-held/v1"],
+                   "record": {"type": "tool_call_held", "tool_call_id": "c"}}),
+            json!({"requires": ["provider-held/v1"],
+                   "record": {"type": "run_paused", "reason": "tool_held"}}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("provider-held/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
