@@ -3133,6 +3133,7 @@ function terminateChild(child: ReturnType<typeof childProcess.spawn>) {
 
 export const __test = {
 	buildArgs,
+	OMP_CHILD_TOOL_CONFIG,
 	extractFinalAssistant,
 	isGenericRuntimeExecutable,
 	isPiCliScript,
