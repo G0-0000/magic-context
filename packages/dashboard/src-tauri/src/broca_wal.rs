@@ -120,7 +120,10 @@ const GATED_VERSION: u8 = 3;
 /// its own records, so it ignores the tool times. `message-times/v1` adds an
 /// optional `written_at_ms` to `run_started`, `model_step_finished`,
 /// `steered`, `queued` and `send_delivered`; this reader keeps using `ts_ms`
-/// and ignores it.
+/// and ignores it. `plan-reference-slots/v1` adds an optional
+/// `reference_slots` map (tool name to `{name, kind}` slots) beside `reply` on
+/// an answered fetch in a run's frozen plan manifest; this reader never reads
+/// the manifest.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -158,6 +161,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "auth-selection-method/v1",
     "tool-times/v1",
     "message-times/v1",
+    "plan-reference-slots/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1901,6 +1905,7 @@ pub(crate) mod tests {
             "auth-selection-method/v1",
             "tool-times/v1",
             "message-times/v1",
+            "plan-reference-slots/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2020,6 +2025,24 @@ pub(crate) mod tests {
             json!({"requires": ["message-times/v1"], "record": finished}),
         ]);
         let runs = decode(&bytes).expect("message-times/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `plan-reference-slots/v1` adds `reference_slots` beside `reply` on an
+    /// answered fetch in the run's frozen plan manifest. This reader never
+    /// reads the manifest, so a run carrying it still yields its steps.
+    #[test]
+    fn a_plan_reference_slots_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["manifest"] = json!({"items": [{"outcome": {"answered": {
+            "reply": {"research": {"max_ms": 120000}},
+            "reference_slots": {"read": [{"name": "path", "kind": "file"}]},
+        }}}]});
+        let bytes = wal_bytes(&[
+            json!({"requires": ["plan-reference-slots/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("plan-reference-slots/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
