@@ -59,6 +59,7 @@ import {
 	HISTORIAN_MAX_OUTPUT_TOKENS_ENV,
 	SUBAGENT_OUTPUT_CEILING_ENV,
 } from "./historian-calibration-extension";
+import { neutralizeOmpMentions, restoreOmpMentions } from "./omp-mentions";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import {
 	classifyZenFreeTierFailure,
@@ -68,8 +69,6 @@ import {
 	zenFreeTierMessage,
 } from "./pi-zen-free-tier";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
-
-import { neutralizeOmpMentions, restoreOmpMentions } from "./omp-mentions";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 /**
@@ -1213,10 +1212,15 @@ export class PiSubagentRunner implements SubagentRunner {
 		runMode: PiRunMode,
 		modelRefOverride?: string,
 	): Promise<SubagentRunResult> {
-		// Transform once before argv/stdin/RPC delivery and byte-limit selection.
-		// OMP expands transcript mentions even with skills and rules disabled.
+		// Transform once before argv, stdin, and the RPC prompt field, and before
+		// the byte-limit choice. OMP expands transcript mentions on every one of
+		// those paths even with skills and rules disabled. RPC mode itself is
+		// Pi-only; OMP children stay on print mode.
 		if (this.invocation.targetHarness === "omp") {
-			options = { ...options, userMessage: neutralizeOmpMentions(options.userMessage) };
+			options = {
+				...options,
+				userMessage: neutralizeOmpMentions(options.userMessage),
+			};
 		}
 		const startTime = Date.now();
 		const zenChild =

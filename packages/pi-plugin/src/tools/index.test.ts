@@ -21,7 +21,11 @@ import { createTestDb, fakeContext } from "../test-utils.test";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./index";
 
 describe("registerMagicContextTools", () => {
-	for (const [kind, hidden] of [["omp", true], ["omp", false], ["pi", true]] as const) {
+	for (const [kind, hidden] of [
+		["omp", true],
+		["omp", false],
+		["pi", true],
+	] as const) {
 		it(`${kind} ${hidden ? "hidden" : "main"} memory writes restore markers only for OMP children`, async () => {
 			const previous = process.env.MAGIC_CONTEXT_PI_SUBAGENT;
 			const db = createTestDb();
@@ -30,22 +34,54 @@ describe("registerMagicContextTools", () => {
 				else delete process.env.MAGIC_CONTEXT_PI_SUBAGENT;
 				__setPiHarnessKindForTesting(kind);
 				const tools = new Map<string, ToolDefinition>();
-				registerMagicContextTools({
-					registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
-					registerCommand: () => undefined,
-				} as never, { db, memoryEnabled: true, embeddingEnabled: false, allowDreamerActions: hidden, resolveProjectIdentity: () => "dir:issue779-test" });
-				const content = "Remember \u2060@agent://example and \u2060other @\u2060path";
-				const args = { action: "write", category: "PROJECT_RULES", content, extra: { values: ["\u2060@nested", null, 42] } };
+				registerMagicContextTools(
+					{
+						registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+						registerCommand: () => undefined,
+					} as never,
+					{
+						db,
+						memoryEnabled: true,
+						embeddingEnabled: false,
+						allowDreamerActions: hidden,
+						resolveProjectIdentity: () => "dir:issue779-test",
+					},
+				);
+				const content =
+					"Remember \u2060@agent://example and \u2060other @\u2060path";
+				const args = {
+					action: "write",
+					category: "PROJECT_RULES",
+					content,
+					extra: { values: ["\u2060@nested", null, 42] },
+				};
 				const original = JSON.stringify(args);
-				const result = await tools.get("ctx_memory")!.execute("call-779", args, new AbortController().signal, undefined, fakeContext("ses-779") as never);
+				const result = await tools
+					.get("ctx_memory")!
+					.execute(
+						"call-779",
+						args,
+						new AbortController().signal,
+						undefined,
+						fakeContext("ses-779") as never,
+					);
 				expect(result.isError).toBeUndefined();
 				const text = result.content[0];
-				const id = Number(text?.type === "text" ? text.text.match(/ID:\s*(\d+)/)?.[1] : undefined);
+				const id = Number(
+					text?.type === "text"
+						? text.text.match(/ID:\s*(\d+)/)?.[1]
+						: undefined,
+				);
 				expect(Number.isInteger(id)).toBe(true);
-				expect(getMemoryById(db, id)?.content).toBe(kind === "omp" && hidden ? "Remember @agent://example and \u2060other @\u2060path" : content);
+				expect(getMemoryById(db, id)?.content).toBe(
+					kind === "omp" && hidden
+						? "Remember @agent://example and \u2060other @\u2060path"
+						: content,
+				);
 				expect(JSON.stringify(args)).toBe(original);
 			} finally {
-				if (previous === undefined) delete process.env.MAGIC_CONTEXT_PI_SUBAGENT;
+				if (previous === undefined)
+					delete process.env.MAGIC_CONTEXT_PI_SUBAGENT;
 				else process.env.MAGIC_CONTEXT_PI_SUBAGENT = previous;
 				__setPiHarnessKindForTesting(undefined);
 				closeQuietly(db);

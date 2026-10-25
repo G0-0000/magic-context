@@ -143,7 +143,8 @@ export function registerMagicContextTools(
 	const smartNotesAvailable =
 		opts.smartNotesEnabled !== false && opts.dreamerEnabled !== false;
 	const restoreChildMentions =
-		process.env.MAGIC_CONTEXT_PI_SUBAGENT === "1" && resolvePiHarnessKind() === "omp";
+		process.env.MAGIC_CONTEXT_PI_SUBAGENT === "1" &&
+		resolvePiHarnessKind() === "omp";
 	const surfaceTool = <T extends ToolDefinition>(
 		definition: T,
 	): T & OmpEssentialTool => {
@@ -158,8 +159,9 @@ export function registerMagicContextTools(
 			throwReturnedToolErrors({
 				...definition,
 				parameters,
-				// Dreamer tools persist inside the child, before the parent can
-				// restore its event stream. Remove prompt markers before execution.
+				// Dreamer tools write memory inside the child, before the parent
+				// restores its event stream. Drop a WORD JOINER that was inserted
+				// only to keep an @ mention literal.
 				execute: (...args: Parameters<ToolDefinition["execute"]>) => {
 					if (restoreChildMentions) args[1] = restoreOmpMentions(args[1]);
 					return definition.execute(...args);

@@ -36,6 +36,17 @@ for (const delivery of ["argv", "stdin"] as const) {
                         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 4096,
                     }] },
                 } }));
+                // Match the isolated OMP harness: no plugin package, no xdev, no retries.
+                writeFileSync(join(process.env.PI_CODING_AGENT_DIR!, "config.yml"), JSON.stringify({
+                    tools: { xdev: false, intentTracing: false },
+                    defaultProvider: "mock",
+                    defaultModel: "mock-model",
+                    enabledModels: ["mock/mock-model"],
+                    compaction: { enabled: false },
+                    retry: { enabled: false },
+                    quietStartup: true,
+                    enableInstallTelemetry: false,
+                }));
                 writeFileSync(join(root, "mentioned.txt"), "UNRELATED_FILE_CONTENT_779");
                 const manifest = realpathSync(join(import.meta.dir, "../node_modules/omp-coding-agent-1812/package.json"));
                 const pkg = JSON.parse(readFileSync(manifest, "utf8"));
