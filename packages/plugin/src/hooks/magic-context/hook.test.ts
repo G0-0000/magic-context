@@ -655,17 +655,28 @@ describe("magic-context hook", () => {
             ];
             await hook["experimental.chat.messages.transform"]!({}, { messages });
         };
-        const waitUntil = async (predicate: () => boolean): Promise<void> => {
-            const deadline = Date.now() + 3_000;
-            while (!predicate() && Date.now() < deadline) {
+        // Each transform starts a background drain (registration, a database
+        // worker, the provider batches) that outlives the transform. Its finally
+        // block releases the session's run claim and, unless the drain was
+        // aborted or the embedding identity changed, records the completion
+        // latch or a retry. Wait for that outcome instead of a fixed deadline,
+        // which a loaded CI runner can overrun while the drain is still working;
+        // a drain that never settles fails on the test timeout.
+        const waitForDrainOutcome = async (): Promise<void> => {
+            const settled = () =>
+                !embedRunStateBySession.has(sessionId) &&
+                (autoEmbedAttemptedBySession.has(sessionId) ||
+                    autoEmbedRetryAfterBySession.has(sessionId));
+            while (!settled()) {
                 await new Promise((resolve) => setTimeout(resolve, 10));
             }
-            expect(predicate()).toBe(true);
+            // A retry instead of the latch means the drain stopped short.
+            expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
         };
 
         try {
             await runTransform();
-            await waitUntil(() => autoEmbedAttemptedBySession.has(sessionId));
+            await waitForDrainOutcome();
 
             for (let i = 1; i <= 7; i++) {
                 appendCompartments(db, sessionId, [
@@ -686,13 +697,10 @@ describe("magic-context hook", () => {
             }
 
             await runTransform();
-            await waitUntil(() => {
-                const coverage = getEmbeddingCoverageStatus(db, projectIdentity, sessionId);
-                return (
-                    coverage.session.total === 7 &&
-                    coverage.session.embedded === 7 &&
-                    autoEmbedAttemptedBySession.has(sessionId)
-                );
+            await waitForDrainOutcome();
+            expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
+                total: 7,
+                embedded: 7,
             });
             await new Promise((resolve) => setTimeout(resolve, 30));
             expect(userRows()).toEqual([]);
@@ -718,11 +726,10 @@ describe("magic-context hook", () => {
                 "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
             ).run(sessionId, 8, "u8", "user", "Later source text");
             await runTransform();
-            await waitUntil(
-                () =>
-                    getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session.embedded ===
-                    8,
-            );
+            await waitForDrainOutcome();
+            expect(
+                getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session.embedded,
+            ).toBe(8);
             expect(embedBatch.mock.calls.length).toBeGreaterThan(calls);
             expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
                 total: 8,
