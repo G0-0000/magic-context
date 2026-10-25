@@ -6,11 +6,12 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 // to prevent the TUI toast path from intercepting sendIgnoredMessage calls.
 process.env.OPENCODE_CLIENT = "desktop";
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { inspect } from "node:util";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { writeTaskScheduleState } from "../../features/magic-context/dreamer/storage-task-schedule";
 import { ensureContextStoreUuid } from "../../features/magic-context/legacy-authority-fixture.test-support";
@@ -45,6 +46,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
+import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import {
     autoEmbedAttemptedBySession,
@@ -671,6 +673,14 @@ describe("magic-context hook", () => {
         // error or deferred work) and is not waited out.
         const maxRetryPasses = 3;
         const maxWaitedRetryDelayMs = 2_000;
+        // The logger is silent under bun test. Capture its calls so a failed
+        // drain reports the original error or deferral, not just its retry time.
+        const drainLogs: string[] = [];
+        const logSpy = spyOn(logger, "log").mockImplementation((message, data) => {
+            if (/^\[magic-context\] (?:auto-embed|session backfill)/.test(message)) {
+                drainLogs.push(data === undefined ? message : `${message} ${inspect(data)}`);
+            }
+        });
         const waitForDrainOutcome = async (): Promise<void> => {
             const settled = () =>
                 !embedRunStateBySession.has(sessionId) &&
@@ -690,10 +700,9 @@ describe("magic-context hook", () => {
                 await runTransform();
             }
             // A retry instead of the latch means the drain stopped short.
-            expect(
-                autoEmbedAttemptedBySession.has(sessionId),
-                `auto-embed drain never latched: ${retryPasses} retry pass(es), next retry in ${retryDelayMs} ms`,
-            ).toBe(true);
+            const failure = `auto-embed drain never latched: ${retryPasses} retry pass(es), next retry in ${retryDelayMs} ms\n${drainLogs.join("\n")}`;
+            if (!autoEmbedAttemptedBySession.has(sessionId)) console.error(failure);
+            expect(autoEmbedAttemptedBySession.has(sessionId), failure).toBe(true);
         };
 
         try {
@@ -718,6 +727,10 @@ describe("magic-context hook", () => {
                 ).run(sessionId, i, `u${i}`, "user", `Source text ${i}`);
             }
 
+            // These direct FTS inserts bypass the indexer's source and rowid-map
+            // entries. Canonical chunk text defers such legacy-shaped spans until
+            // the startup rowid-map backfill completes, so join it before draining.
+            await startMessageFtsRowidMapBackfill(db);
             await runTransform();
             await waitForDrainOutcome();
             expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
@@ -759,6 +772,7 @@ describe("magic-context hook", () => {
             });
             expect(userRows()).toEqual([]);
         } finally {
+            logSpy.mockRestore();
             clearEmbedSessionState(sessionId);
             hostDb.close();
         }
