@@ -662,16 +662,38 @@ describe("magic-context hook", () => {
         // latch or a retry. Wait for that outcome instead of a fixed deadline,
         // which a loaded CI runner can overrun while the drain is still working;
         // a drain that never settles fails on the test timeout.
+        //
+        // A drain can also stop short and record a short retry (lease
+        // contention or a busy interruption sets it one second ahead). In
+        // production the session's next context pass after that delay starts
+        // the drain again, so the test drives the same extra idle pass, a
+        // bounded number of times. A long retry delay is a real failure (an
+        // error or deferred work) and is not waited out.
+        const maxRetryPasses = 3;
+        const maxWaitedRetryDelayMs = 2_000;
         const waitForDrainOutcome = async (): Promise<void> => {
             const settled = () =>
                 !embedRunStateBySession.has(sessionId) &&
                 (autoEmbedAttemptedBySession.has(sessionId) ||
                     autoEmbedRetryAfterBySession.has(sessionId));
-            while (!settled()) {
-                await new Promise((resolve) => setTimeout(resolve, 10));
+            let retryPasses = 0;
+            let retryDelayMs = 0;
+            for (;;) {
+                while (!settled()) {
+                    await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+                if (autoEmbedAttemptedBySession.has(sessionId)) break;
+                retryDelayMs = (autoEmbedRetryAfterBySession.get(sessionId) ?? 0) - Date.now();
+                if (retryPasses >= maxRetryPasses || retryDelayMs > maxWaitedRetryDelayMs) break;
+                retryPasses++;
+                await new Promise((resolve) => setTimeout(resolve, Math.max(0, retryDelayMs) + 10));
+                await runTransform();
             }
             // A retry instead of the latch means the drain stopped short.
-            expect(autoEmbedAttemptedBySession.has(sessionId)).toBe(true);
+            expect(
+                autoEmbedAttemptedBySession.has(sessionId),
+                `auto-embed drain never latched: ${retryPasses} retry pass(es), next retry in ${retryDelayMs} ms`,
+            ).toBe(true);
         };
 
         try {
