@@ -69,6 +69,7 @@ import {
 	zenFreeTierMessage,
 } from "./pi-zen-free-tier";
 import { SubagentTelemetry, subagentStepCap } from "./subagent-telemetry";
+import { OMP_CHILD_TOOL_CONFIG } from "./subagent-tool-boundary";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 /**
@@ -519,9 +520,8 @@ function describeSpawnFailure(
 /** Resolve an optional child extension bundled beside the Pi plugin entry. */
 function resolveSiblingEntryPath(fileName: string): string | undefined {
 	try {
-		// Source tests run before these sibling bundles exist. Production packaging
-		// emits both entries beside index.js, so missing files safely mean "skip" only
-		// in that pre-build environment.
+		// Production packaging emits sibling entries beside index.js. Source runs
+		// may lack those bundles; each caller decides whether its entry is optional.
 		const here = dirname(fileURLToPath(import.meta.url));
 		const candidate = resolvePath(here, fileName);
 		return existsSync(candidate) ? candidate : undefined;
@@ -716,10 +716,8 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
  * after filtering, so listing optional AFT read tools is safe when AFT is not
  * installed while still allowing them when an AFT provider extension is present.
  *
- * HOST CAVEAT — this is a capability boundary on Pi only. OMP applies
- * `--tools` to built-ins and then appends discovered extension tools, so on
- * OMP these entries describe the intended budget rather than an enforced
- * extension-tool sandbox.
+ * OMP's CLI filters only built-ins. Its child startup extension separately
+ * applies this list through setActiveTools after extensions register.
  */
 const STRICT_TOOL_ALLOWLIST_ENTRIES: readonly (readonly [
 	string,
@@ -781,8 +779,8 @@ const ZERO_TOOL_PROMPT_REQUIRED_AGENTS: ReadonlySet<string> = new Set(
  * addressed by this flag, and deduplicate aliases. When the host registry is
  * available, keep only built-ins that are registered in the current session.
  *
- * This narrows OMP's built-in surface only. OMP does not set
- * `restrictToolNames`, so discovered AFT/MCP/ctx tools remain available.
+ * This resolves the CLI's built-in budget only; the startup extension receives
+ * the full list, including extension tools, to select the exact active set.
  */
 const OMP_TOOL_ALIASES: Readonly<Record<string, string>> = {
 	find: "glob",
@@ -1375,6 +1373,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			(promptBytes > PROMPT_ARGV_MAX_BYTES || this.platform === "win32");
 		let systemPromptTempDir: string | undefined;
 		let systemPromptPath: string | undefined;
+		let ompToolConfigPath: string | undefined;
 		const cleanupSystemPromptFile = () => {
 			if (!systemPromptTempDir) return;
 			const tempDir = systemPromptTempDir;
@@ -1399,13 +1398,30 @@ export class PiSubagentRunner implements SubagentRunner {
 				);
 			}
 		}
-		if (rpcBudget && !systemPromptTempDir) {
+		if (
+			(rpcBudget || this.invocation.targetHarness === "omp") &&
+			!systemPromptTempDir
+		) {
 			try {
 				systemPromptTempDir = mkdtempSync(join(tmpdir(), "mc-pi-prompt-"));
 			} catch (error) {
 				return failBeforeSpawn(
 					"spawn_failed",
 					`failed to prepare pi budget guard: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		if (this.invocation.targetHarness === "omp") {
+			try {
+				if (!systemPromptTempDir)
+					throw new Error("child temp directory is unavailable");
+				ompToolConfigPath = join(systemPromptTempDir, "tool-boundary.yml");
+				writeFileSync(ompToolConfigPath, OMP_CHILD_TOOL_CONFIG, "utf8");
+			} catch (error) {
+				cleanupSystemPromptFile();
+				return failBeforeSpawn(
+					"spawn_failed",
+					`failed to prepare OMP child tool config: ${String(error)}`,
 				);
 			}
 		}
@@ -1431,6 +1447,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			hostToolNames: this.readHostToolNames(),
 			omitPositionalMessage: deliverViaStdin || rpcBudget,
 			systemPromptPath,
+			ompToolConfigPath,
 			modelRef: modelRefOverride,
 			rpc: rpcBudget,
 		});
@@ -2687,10 +2704,15 @@ export function buildArgs(
 		rpc?: boolean;
 		historianCalibrationEntryPath?: string | null;
 		hostToolNames?: readonly string[];
+		ompToolConfigPath?: string;
 	},
 ): string[] {
 	const targetHarness = opts?.targetHarness ?? resolvePiHarnessKind();
 	const ompTarget = targetHarness === "omp";
+	const ompToolConfigPath = opts?.ompToolConfigPath;
+	if (ompTarget && !ompToolConfigPath) {
+		throw new Error("OMP child requires a tool-boundary config overlay");
+	}
 	const args: string[] = [
 		...(opts?.rpc ? [] : ["--print"]),
 		"--mode",
@@ -2724,6 +2746,11 @@ export function buildArgs(
 		// Every known Magic Context child gets an explicit --tools allow-list so Pi's
 		// discovered extension registry cannot leak unrelated tools into subagents.
 	];
+	if (ompTarget && ompToolConfigPath) {
+		// Disable OMP's virtual-device transport and plan mode only in the child.
+		// Both can add a write tool even when its allowlist contains only reads.
+		args.push("--config", ompToolConfigPath);
+	}
 	if (
 		opts?.disableDiscoveredExtensions ||
 		opts?.subagentExtensions !== undefined
@@ -2778,19 +2805,25 @@ export function buildArgs(
 
 	const historianCalibrationEntryPath =
 		opts?.historianCalibrationEntryPath === undefined
-			? HISTORIAN_CALIBRATION_ENTRY_PATH
+			? (HISTORIAN_CALIBRATION_ENTRY_PATH ??
+				(ompTarget
+					? resolveSiblingEntryPath("historian-calibration-extension.ts")
+					: undefined))
 			: opts.historianCalibrationEntryPath;
+	if (ompTarget && !historianCalibrationEntryPath) {
+		throw new Error("OMP child requires the tool-boundary startup extension");
+	}
 	if (
-		subagentStepCap(options.agent) !== undefined &&
+		(ompTarget || subagentStepCap(options.agent) !== undefined) &&
 		historianCalibrationEntryPath
 	) {
 		args.push("--extension", historianCalibrationEntryPath);
 	}
 
-	// Every child receives an explicit built-in tool gate. Pi applies this as
-	// hard registry isolation. OMP validates only built-in names and always
-	// appends discovered extension tools, so its gate is a built-in budget only.
+	// Pi's CLI filters the complete registry. OMP needs both a built-in CLI budget
+	// and a startup selection through its extension API to exclude discovered tools.
 	const strictTools = STRICT_TOOL_ALLOWLIST.get(options.agent);
+	let activeToolNames: readonly string[] = [];
 	if (strictTools === undefined) {
 		sessionLog(
 			options.accountingSessionId ?? "pi-subagent",
@@ -2807,6 +2840,13 @@ export function buildArgs(
 			ompTarget ? opts?.hostToolNames : undefined,
 		);
 		const hostTools = resolution.tools;
+		activeToolNames = [
+			...new Set(
+				strictTools
+					.map((tool) => (ompTarget ? (OMP_TOOL_ALIASES[tool] ?? tool) : tool))
+					.filter((tool) => !resolution.dropped.includes(tool)),
+			),
+		];
 		for (const tool of resolution.dropped) {
 			const warningKey = `${options.agent}\u0000${tool}`;
 			if (loggedUnavailableBuiltinTools.has(warningKey)) continue;
@@ -2827,6 +2867,12 @@ export function buildArgs(
 		} else {
 			args.push("--no-tools");
 		}
+	}
+	if (ompTarget) {
+		args.push(
+			"--magic-context-tool-allowlist",
+			JSON.stringify(activeToolNames),
+		);
 	}
 
 	if (opts?.systemPromptPath) {

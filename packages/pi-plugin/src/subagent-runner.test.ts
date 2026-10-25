@@ -34,7 +34,10 @@ import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-run
 import { __temperatureTest } from "@magic-context/core/shared/subagent-temperature";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
-import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
+import {
+	__setPiHarnessKindForTesting,
+	resolvePiHarnessKind,
+} from "./pi-harness-kind";
 import {
 	__test,
 	configurePiSubagentHostTools,
@@ -210,7 +213,11 @@ function buildArgsForTest(
 ) {
 	return __test.buildArgs(options, {
 		systemPromptPath: TEST_SYSTEM_PROMPT_PATH,
-		historianCalibrationEntryPath: null,
+		ompToolConfigPath: "/tmp/omp-child-tools.yml",
+		historianCalibrationEntryPath:
+			(opts?.targetHarness ?? resolvePiHarnessKind()) === "omp"
+				? "/tmp/historian-calibration.js"
+				: null,
 		...opts,
 	});
 }
@@ -1201,6 +1208,60 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--tools");
 	});
 
+	it("selects exact OMP active tools without disabling discovered provider extensions", () => {
+		for (const [agent, tools] of __test.STRICT_TOOL_ALLOWLIST) {
+			const args = buildArgsForTest(
+				{ ...baseOptions, agent },
+				{ targetHarness: "omp" },
+			);
+			const index = args.indexOf("--magic-context-tool-allowlist");
+			const expected = [
+				...new Set(
+					tools.map((tool) =>
+						tool === "find" || tool === "ls" ? "glob" : tool,
+					),
+				),
+			];
+			expect(JSON.parse(args[index + 1])).toEqual(expected);
+			expect(args).not.toContain("--no-extensions");
+			expect(args).toContain("/tmp/historian-calibration.js");
+		}
+		const unknown = buildArgsForTest(
+			{ ...baseOptions, agent: "future-check" },
+			{ targetHarness: "omp" },
+		);
+		expect(unknown[unknown.indexOf("--magic-context-tool-allowlist") + 1]).toBe(
+			"[]",
+		);
+		const filtered = buildArgsForTest(
+			{ ...baseOptions, agent: "dreamer-primer-investigator" },
+			{ targetHarness: "omp", hostToolNames: ["read"] },
+		);
+		expect(
+			JSON.parse(
+				filtered[filtered.indexOf("--magic-context-tool-allowlist") + 1],
+			),
+		).toEqual(["read", "aft_outline", "aft_zoom", "aft_search", "ctx_search"]);
+	});
+
+	it("refuses an OMP child without the startup tool boundary entry", () => {
+		expect(() =>
+			buildArgsForTest(baseOptions, {
+				targetHarness: "omp",
+				historianCalibrationEntryPath: null,
+			}),
+		).toThrow("tool-boundary startup extension");
+	});
+
+	it("refuses an OMP child without its private tool config overlay", () => {
+		expect(() =>
+			buildArgsForTest(baseOptions, {
+				targetHarness: "omp",
+				ompToolConfigPath: undefined,
+			}),
+		).toThrow("tool-boundary config overlay");
+	});
+
 	it("locks dreamer-docs to read-only file tools and optional AFT reads", () => {
 		const args = buildArgsForTest({
 			...baseOptions,
@@ -1433,6 +1494,10 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(args).not.toContain("rpc");
 		expect(args.at(-1)).toBe("see \u2060@skill://name");
 		expect(child.stdinText).toBe("");
+		const configPath = args[args.indexOf("--config") + 1];
+		expect(readFileSync(configPath, "utf8")).toBe(
+			"tools:\n  xdev: false\nplan:\n  enabled: false\n  defaultOnStartup: false\n",
+		);
 		child.writeStdoutLine(
 			agentEnd([
 				{
@@ -1444,6 +1509,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		);
 		child.emitClose();
 		expect(await pending).toMatchObject({ ok: true, assistantText: "done" });
+		expect(existsSync(configPath)).toBe(false);
 	});
 
 	it("restores OMP output before streaming or returning nested summary, facts and memory text", async () => {
@@ -2292,6 +2358,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				// observation is not under test here.
 				delete process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE;
 				extension({
+					registerFlag: () => {},
 					on: (
 						name: string,
 						handler: (event: { payload: unknown }) => unknown,
