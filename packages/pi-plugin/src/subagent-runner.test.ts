@@ -1382,6 +1382,122 @@ describe("subagent-runner pure helpers", () => {
 });
 
 describe("PiSubagentRunner spawn lifecycle", () => {
+	for (const harness of ["omp", "pi"] as const) {
+		for (const delivery of ["argv", "windows-stdin", "large-stdin"] as const) {
+			it(`${harness} ${delivery} keeps transcript mentions literal only on OMP`, async () => {
+				const child = createMockChild();
+				const { runner, spawnImpl } = runnerWith(child, {
+					invocation: {
+						command: "host-test",
+						prefixArgs: [],
+						targetHarness: harness,
+					},
+					platform: delivery === "windows-stdin" ? "win32" : "linux",
+				});
+				const text = `see @skill://name @"some file" a@b.com${delivery === "large-stdin" ? " ".repeat(100_000) : ""}`;
+				const pending = runner.run({ ...baseOptions, userMessage: text });
+				await nextTick();
+				const args = spawnImpl.mock.calls[0]?.[1] as unknown as string[];
+				const delivered = delivery === "argv" ? args.at(-1) : child.stdinText;
+				expect(delivered).toBe(
+					harness === "omp" ? text.replaceAll(" @", " \u2060@") : text,
+				);
+				const reply = {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					stopReason: "stop",
+				};
+				child.writeStdoutLine(agentEnd([reply]));
+				child.emitClose();
+				expect(await pending).toMatchObject({
+					ok: true,
+					assistantText: "done",
+				});
+			});
+		}
+	}
+
+	it("keeps an OMP token-budget child on print mode with a neutralized prompt", async () => {
+		const child = createMockChild();
+		const { runner, spawnImpl } = runnerWith(child, {
+			invocation: { command: "omp-test", prefixArgs: [], targetHarness: "omp" },
+		});
+		const pending = runner.run({
+			...baseOptions,
+			userMessage: "see @skill://name",
+			tokenBudget: 1_000,
+		});
+		await nextTick();
+		const args = spawnImpl.mock.calls[0]?.[1] as unknown as string[];
+		expect(args).toContain("--print");
+		expect(args).not.toContain("rpc");
+		expect(args.at(-1)).toBe("see \u2060@skill://name");
+		expect(child.stdinText).toBe("");
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.emitClose();
+		expect(await pending).toMatchObject({ ok: true, assistantText: "done" });
+	});
+
+	it("restores OMP output before streaming or returning nested summary, facts and memory text", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child, {
+			invocation: { command: "omp-test", prefixArgs: [], targetHarness: "omp" },
+		});
+		const events: unknown[] = [];
+		const pending = runner.run({
+			...baseOptions,
+			onProgress: (event) => {
+				if (event.type === "raw_event") events.push(event.event);
+			},
+		});
+		await nextTick();
+		const reply = {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: '{"summary":"\u2060@skill://name","facts":["\u2060@agent://foo"],"memory":"\u2060@proc://bg_1"}',
+				},
+			],
+			stopReason: "stop",
+		};
+		// JSON escapes are decoded before restoration, not edited as raw bytes.
+		child.writeRawStdoutLine(
+			JSON.stringify(agentEnd([reply])).replaceAll("\u2060", "\\u2060"),
+		);
+		child.emitClose();
+		expect(await pending).toMatchObject({
+			ok: true,
+			assistantText:
+				'{"summary":"@skill://name","facts":["@agent://foo"],"memory":"@proc://bg_1"}',
+		});
+		expect(JSON.stringify(events)).not.toContain("\u2060");
+	});
+
+	it("leaves Pi output markers and unmarked OMP output byte-identical", () => {
+		for (const harness of ["pi", "omp"] as const) {
+			const text =
+				harness === "pi"
+					? "\u2060@skill://name"
+					: "@skill://name a@b.com 中文\nunchanged";
+			const event = agentEnd([
+				{ role: "assistant", content: [{ type: "text", text }] },
+			]);
+			expect(__test.parsePiEventLine(JSON.stringify(event), harness)).toEqual({
+				ok: true,
+				event,
+			});
+		}
+	});
+
 	for (const targetHarness of ["pi", "omp"] as const) {
 		it(`${targetHarness} records a refused model without an assistant reply`, async () => {
 			__setPiHarnessKindForTesting(targetHarness);

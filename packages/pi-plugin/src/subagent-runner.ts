@@ -59,6 +59,7 @@ import {
 	HISTORIAN_MAX_OUTPUT_TOKENS_ENV,
 	SUBAGENT_OUTPUT_CEILING_ENV,
 } from "./historian-calibration-extension";
+import { neutralizeOmpMentions, restoreOmpMentions } from "./omp-mentions";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import {
 	classifyZenFreeTierFailure,
@@ -1211,6 +1212,16 @@ export class PiSubagentRunner implements SubagentRunner {
 		runMode: PiRunMode,
 		modelRefOverride?: string,
 	): Promise<SubagentRunResult> {
+		// Transform once before argv, stdin, and the RPC prompt field, and before
+		// the byte-limit choice. OMP expands transcript mentions on every one of
+		// those paths even with skills and rules disabled. RPC mode itself is
+		// Pi-only; OMP children stay on print mode.
+		if (this.invocation.targetHarness === "omp") {
+			options = {
+				...options,
+				userMessage: neutralizeOmpMentions(options.userMessage),
+			};
+		}
 		const startTime = Date.now();
 		const zenChild =
 			STRICT_TOOL_ALLOWLIST.has(options.agent) && isZenModel(options.model);
@@ -1887,7 +1898,7 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			rl.on("line", (line) => {
 				if (settled || line.length === 0) return;
-				const parsed = parsePiEventLine(line);
+				const parsed = parsePiEventLine(line, this.invocation.targetHarness);
 				if (!parsed.ok) {
 					// Non-JSON stdout noise from co-loaded extensions is
 					// skipped silently. A malformed JSON event line is
@@ -3023,6 +3034,7 @@ export function countToolCalls(messages: unknown[]): number {
 
 export function parsePiEventLine(
 	line: string,
+	targetHarness: PiHarnessKind = "pi",
 ):
 	| { ok: true; event: unknown }
 	| { ok: false; error: string }
@@ -3038,7 +3050,14 @@ export function parsePiEventLine(
 		return { ok: false, noise: true };
 	}
 	try {
-		return { ok: true, event: JSON.parse(line) };
+		// Restore decoded strings before any consumer sees assistant text, tool
+		// arguments, or streamed dreamer decisions. Decode first so escaped
+		// WORD JOINERs are restored too.
+		const event: unknown = JSON.parse(line);
+		return {
+			ok: true,
+			event: targetHarness === "omp" ? restoreOmpMentions(event) : event,
+		};
 	} catch (error) {
 		return {
 			ok: false,
