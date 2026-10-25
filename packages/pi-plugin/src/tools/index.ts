@@ -24,6 +24,7 @@ import { createPromptSurfaceRuntime } from "@magic-context/core/shared/prompt-su
 import { withoutSmartNoteText } from "@magic-context/core/tools/ctx-note/constants";
 import { CTX_NOTE_LIGHT_DESCRIPTION } from "@magic-context/core/tools/light-descriptions";
 import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/parameter-descriptions";
+import { restoreOmpMentions } from "../omp-mentions";
 import { resolvePiHarnessKind } from "../pi-harness-kind";
 import { createCtxExpandTool } from "./ctx-expand";
 import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
@@ -141,6 +142,8 @@ export function registerMagicContextTools(
 	// omitted flag (as in subagent entries) counts as on.
 	const smartNotesAvailable =
 		opts.smartNotesEnabled !== false && opts.dreamerEnabled !== false;
+	const restoreChildMentions =
+		process.env.MAGIC_CONTEXT_PI_SUBAGENT === "1" && resolvePiHarnessKind() === "omp";
 	const surfaceTool = <T extends ToolDefinition>(
 		definition: T,
 	): T & OmpEssentialTool => {
@@ -155,6 +158,12 @@ export function registerMagicContextTools(
 			throwReturnedToolErrors({
 				...definition,
 				parameters,
+				// Dreamer tools persist inside the child, before the parent can
+				// restore its event stream. Remove prompt markers before execution.
+				execute: (...args: Parameters<ToolDefinition["execute"]>) => {
+					if (restoreChildMentions) args[1] = restoreOmpMentions(args[1]);
+					return definition.execute(...args);
+				},
 				description:
 					definition.name === "ctx_note" && !smartNotesAvailable
 						? withoutSmartNoteText(
