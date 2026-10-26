@@ -2379,7 +2379,11 @@ mod tests {
             ("mixed-text-and-notice", MIXED, vec![SINGLE_LINE]),
             // Text the user typed inside the notice's own envelope stays stripped
             // with the envelope, so the answer keeps that text on its own line.
-            ("text-inside-notice-envelope", INSIDE, vec![INSIDE_ANSWER_LINES]),
+            (
+                "text-inside-notice-envelope",
+                INSIDE,
+                vec![INSIDE_ANSWER_LINES],
+            ),
         ]
     }
 
@@ -2447,7 +2451,10 @@ mod tests {
             ("reminder only", vec![reminder]),
             ("leading and trailing whitespace", vec!["  padded text  \n"]),
             ("multi-part", vec!["first part", "second part"]),
-            ("multi-part with an empty part", vec!["first part", reminder, "second part"]),
+            (
+                "multi-part with an empty part",
+                vec!["first part", reminder, "second part"],
+            ),
             ("steering wrapper", vec![queued]),
             ("non-answer notice", vec![DISMISSAL]),
             ("drift", vec![DRIFT_HEADER]),
@@ -2507,7 +2514,10 @@ mod tests {
     #[test]
     fn a_batch_answer_report_every_decision_on_the_same_line() {
         let rendered = user_render(&[BATCH]);
-        assert_eq!(rendered, format!("[1] U: {}", normalize_answer(BATCH_BOTH_LINES)));
+        assert_eq!(
+            rendered,
+            format!("[1] U: {}", normalize_answer(BATCH_BOTH_LINES))
+        );
     }
 
     fn store_for_tests() -> (tempfile::TempDir, mc_store::McStore) {
