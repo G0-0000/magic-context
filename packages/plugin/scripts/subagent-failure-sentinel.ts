@@ -122,9 +122,11 @@ function key(alert: Alert): string {
  * recovered. The run produced its result on a fallback model, so the earlier
  * failures are expected and not worth a wake. A chain can fail on several models
  * before one completes, for example when two models share one exhausted account
- * pool, so recovery follows the chain: every failure on the way to the completed
- * attempt counts as recovered only if each of them is routine. A chain that ends
- * without a completed attempt leaves all its failures eligible for the alert rules.
+ * pool, so recovery follows the chain to the completed attempt. Only routine
+ * failures are excused. A non-routine step on the way, such as a fallback that
+ * returned an empty reply, still lets the chain reach its completion, but that step
+ * itself stays eligible for the alert rules. A chain that ends without a completed
+ * attempt leaves all its failures eligible.
  */
 export function recoveredByFallback(rows: Row[]): Set<number> {
     const isRoutineFailure = (row: Row) =>
@@ -140,13 +142,12 @@ export function recoveredByFallback(rows: Row[]): Set<number> {
                     candidate.started_at >= row.ended_at - 5_000 &&
                     candidate.started_at <= row.ended_at + FALLBACK_START_WINDOW_MS),
         );
-    // True when a completed attempt follows this routine failure through a chain of
-    // routine failures. `seen` guards against a malformed chain that loops.
+    // True when a completed attempt follows this failure further down its chain.
+    // `seen` guards against a malformed chain that loops.
     const reachesCompletion = (row: Row, seen: Set<number>): boolean => {
         for (const next of nextAttempts(row)) {
             if (seen.has(next.id)) continue;
             if (next.status === "completed") return true;
-            if (!isRoutineFailure(next)) continue;
             seen.add(next.id);
             if (reachesCompletion(next, seen)) return true;
         }
