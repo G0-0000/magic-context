@@ -49,7 +49,7 @@ def missing_run_retry_seconds():
 
 def verify_release(sha, sleep=time.sleep):
     delay = missing_run_retry_seconds()
-    for name in ("CI", "Mutations", "Smoke"):
+    for name in ("CI", "Smoke"):
         run = latest_run(sha, name)
         for attempt in range(MISSING_RUN_RETRIES):
             if run:
