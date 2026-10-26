@@ -648,6 +648,38 @@ describe("createCtxNoteTools", () => {
             expect(result).toContain("Saved session note #1");
         });
 
+        it("plain read with an empty note_ids list validates and lists notes", async () => {
+            await tools.ctx_note.execute(
+                { action: "write", content: "Listed plain-read note" },
+                toolContext(),
+            );
+            const params: { action: "read"; content: string; note_ids: number[] } = {
+                action: "read",
+                content: "",
+                note_ids: [],
+            };
+            const hostSchema = tool.schema.object(tools.ctx_note.args ?? {});
+            expect(hostSchema.safeParse(params).success).toBe(true);
+            const result = await tools.ctx_note.execute(params, toolContext());
+            expect(result).toContain("Listed plain-read note");
+        });
+
+        it("read with a note id validates and returns the full body", async () => {
+            await tools.ctx_note.execute(
+                { action: "write", content: "Targeted full-body note" },
+                toolContext(),
+            );
+            const params: { action: "read"; content: string; note_ids: number[] } = {
+                action: "read",
+                content: "",
+                note_ids: [1],
+            };
+            const hostSchema = tool.schema.object(tools.ctx_note.args ?? {});
+            expect(hostSchema.safeParse(params).success).toBe(true);
+            const result = await tools.ctx_note.execute(params, toolContext());
+            expect(result).toContain("Targeted full-body note");
+        });
+
         it("read and dismiss succeed with empty content filler", async () => {
             await tools.ctx_note.execute(
                 { action: "write", content: "Dismissable note" },

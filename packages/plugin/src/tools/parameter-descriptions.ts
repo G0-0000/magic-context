@@ -24,7 +24,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
         limit: "Rows per read (default 25).",
         offset: "Skip this many newest rows (default 0).",
         note_ids:
-            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
+            "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.",
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",
@@ -64,7 +64,7 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
         limit: "Rows per read (default 25).",
         offset: "Skip newest rows (default 0).",
         note_ids:
-            "One id for update, 1–50 for dismiss or read (full bodies). Write takes an empty list.",
+            "One id for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.",
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",

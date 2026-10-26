@@ -2955,6 +2955,27 @@ describe("createCtxMemoryTools", () => {
             ).toBe(true);
         });
 
+        it("archive with empty content and any category validates and archives", async () => {
+            await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "PROJECT_RULES",
+                    content: "Archivable filler fact.",
+                },
+                toolContext(),
+            );
+            const params: {
+                action: "archive";
+                ids: number[];
+                content: string;
+                category: string;
+            } = { action: "archive", ids: [1], content: "", category: "CONSTRAINTS" };
+            const hostSchema = tool.schema.object(tools.ctx_memory.args ?? {});
+            expect(hostSchema.safeParse(params).success).toBe(true);
+            const result = await tools.ctx_memory.execute(params, toolContext());
+            expect(result).toContain("Archived memory [ID: 1]");
+        });
+
         it("write succeeds with an empty ids list and still rejects an empty content", async () => {
             const written = await tools.ctx_memory.execute(
                 {

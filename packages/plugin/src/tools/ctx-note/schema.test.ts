@@ -5,7 +5,7 @@ import { CTX_NOTE_LIGHT_DESCRIPTION } from "../light-descriptions";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
 
 const NOTE_IDS_DESCRIPTION =
-    "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.";
+    "Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.";
 // ck-mc keeps the previous contract until the Claude Code gateway owner picks
 // this up on the release train: at least one id required, and the
 // write-ignores wording.

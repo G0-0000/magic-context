@@ -99,7 +99,7 @@ const ParamsSchema = Type.Object(
 			{
 				maxItems: 50,
 				description:
-					"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
+					"Note ids: one for update, 1–50 for dismiss, or 1–50 to read those notes in full. Write and a plain read take an empty list.",
 			},
 		),
 		filter: Type.Optional(
@@ -189,8 +189,10 @@ function formatNotesById(
 
 /**
  * Read `note_ids` for targeted reads and mutations. `write` ignores the field
- * because required-all tool surfaces send filler there. `read` and `dismiss`
- * accept one to fifty IDs; `update` addresses exactly one note.
+ * and a plain `read` treats an empty list the same as omitting it, because
+ * required-field tool surfaces send `[]` where there is nothing to select.
+ * A non-empty list on `read` returns those notes in full; `dismiss` accepts
+ * one to fifty IDs; `update` addresses exactly one note.
  */
 function parseNoteIds(action: string, value: unknown): number[] | string {
 	const max = action === "update" ? 1 : 50;
@@ -300,11 +302,21 @@ export function createCtxNoteTool(
 			// check would mis-infer `write` and then reject the empty content.
 			const action =
 				params.action ?? (params.content?.trim() ? "write" : "read");
+			// An empty list on read is the plain listing read, not a targeted
+			// one: required-field providers always send the field, so `[]`
+			// must behave like omitting it. Only a non-empty list selects the
+			// full-body read; dismiss and update genuinely need ids.
+			const targetedReadIds =
+				action === "read" &&
+				Array.isArray(params.note_ids) &&
+				params.note_ids.length === 0
+					? undefined
+					: params.note_ids;
 			const noteIds =
 				action === "dismiss" ||
 				action === "update" ||
-				(action === "read" && params.note_ids !== undefined)
-					? parseNoteIds(action, params.note_ids)
+				(action === "read" && targetedReadIds !== undefined)
+					? parseNoteIds(action, targetedReadIds)
 					: undefined;
 			if (typeof noteIds === "string") return err(noteIds);
 

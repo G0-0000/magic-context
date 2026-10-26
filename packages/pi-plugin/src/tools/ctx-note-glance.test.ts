@@ -326,6 +326,36 @@ describe("Pi ctx_note glance", () => {
 			expect(text).toContain("Saved session note #1");
 		});
 
+		it("plain read with an empty note_ids list validates and lists notes", async () => {
+			const db = createTestDb();
+			await callNote({
+				db,
+				params: { action: "write", content: "Listed plain-read note" },
+			});
+			const tool = createCtxNoteTool({ db });
+			const params = { action: "read", content: "", note_ids: [] as number[] };
+			expect(Value.Check(tool.parameters, params)).toBe(true);
+			const { isError, text } = await callNote({ db, params });
+
+			expect(isError).toBe(false);
+			expect(text).toContain("Listed plain-read note");
+		});
+
+		it("read with a note id validates and returns the full body", async () => {
+			const db = createTestDb();
+			await callNote({
+				db,
+				params: { action: "write", content: "Targeted full-body note" },
+			});
+			const tool = createCtxNoteTool({ db });
+			const params = { action: "read", content: "", note_ids: [1] };
+			expect(Value.Check(tool.parameters, params)).toBe(true);
+			const { isError, text } = await callNote({ db, params });
+
+			expect(isError).toBe(false);
+			expect(text).toContain("Targeted full-body note");
+		});
+
 		it("read and dismiss succeed with empty content filler", async () => {
 			const db = createTestDb();
 			await callNote({

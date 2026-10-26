@@ -1694,6 +1694,50 @@ describe("createCtxMemoryTool", () => {
 			}
 		});
 
+		it("archive with empty content and any category validates and archives", async () => {
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				const ctx = fakeContext("ses-memory") as never;
+				const signal = new AbortController().signal;
+				await tool.execute(
+					"call-seed",
+					{
+						action: "write",
+						category: "PROJECT_RULES",
+						content: "Archivable filler fact.",
+					},
+					signal,
+					undefined,
+					ctx,
+				);
+				const params = {
+					action: "archive",
+					ids: [1],
+					content: "",
+					category: "CONSTRAINTS",
+				};
+				expect(Value.Check(tool.parameters, params)).toBe(true);
+				const archived = textOf793(
+					await tool.execute(
+						"call-archive-filler",
+						params,
+						signal,
+						undefined,
+						ctx,
+					),
+				);
+				expect(archived).toContain("Archived memory [ID: 1]");
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
 		it("write succeeds with an empty ids list and still rejects empty content", async () => {
 			const db = createTestDb();
 			try {
