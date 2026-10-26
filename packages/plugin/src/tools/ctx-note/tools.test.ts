@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { tool } from "@opencode-ai/plugin";
 
 import {
     __wakePlaneTest,
@@ -616,5 +617,85 @@ describe("createCtxNoteTools", () => {
         expect(page).toContain("ready note 1");
         expect(page).not.toContain("ready note 6\n");
         expect(page).not.toContain("older: ctx_note");
+    });
+
+    describe("issue 793 required provider schema", () => {
+        it("advertises action, content and note_ids as required", () => {
+            // Argument-dropping providers (InferenceNet via OpenRouter) only
+            // emit required properties, so the key arguments must be required
+            // for the calls to arrive complete. `filter` stays optional: a
+            // read without it still renders the default mixed view.
+            const jsonSchema = tool.schema.toJSONSchema(
+                tool.schema.object(tools.ctx_note.args ?? {}),
+            ) as { required?: string[] };
+            expect(jsonSchema.required?.sort()).toEqual(["action", "content", "note_ids"]);
+        });
+
+        it("write succeeds with an empty note_ids list", async () => {
+            const result = await tools.ctx_note.execute(
+                { action: "write", content: "Empty ids note", note_ids: [] },
+                toolContext(),
+            );
+            expect(result).toContain("Saved session note #1");
+        });
+
+        it("read and dismiss succeed with empty content filler", async () => {
+            await tools.ctx_note.execute(
+                { action: "write", content: "Dismissable note" },
+                toolContext(),
+            );
+            const readResult = await tools.ctx_note.execute(
+                { action: "read", content: "" },
+                toolContext(),
+            );
+            expect(readResult).toContain("Dismissable note");
+            const dismissResult = await tools.ctx_note.execute(
+                { action: "dismiss", note_ids: [1], content: "" },
+                toolContext(),
+            );
+            expect(dismissResult).toContain("Note #1 dismissed.");
+        });
+
+        it("update accepts empty content when a surface condition is given", async () => {
+            tools = createCtxNoteTools({
+                db,
+                dreamerEnabled: true,
+                resolveProjectPath: () => "git:project-a",
+            });
+            await tools.ctx_note.execute(
+                {
+                    action: "write",
+                    content: "Condition-only update target",
+                    surface_condition: "When the release lands",
+                },
+                toolContext(),
+            );
+            const result = await tools.ctx_note.execute(
+                {
+                    action: "update",
+                    note_ids: [1],
+                    content: "",
+                    surface_condition: "When the hotfix lands",
+                },
+                toolContext(),
+            );
+            expect(result).toContain("Updated note #1");
+            expect(result).toContain("When the hotfix lands");
+        });
+
+        it("still rejects content missing where the action needs it", async () => {
+            const writeResult = await tools.ctx_note.execute(
+                { action: "write", content: "", note_ids: [] },
+                toolContext(),
+            );
+            expect(writeResult).toContain("'content' is required when action is 'write'.");
+            const dismissResult = await tools.ctx_note.execute(
+                { action: "dismiss", note_ids: [] },
+                toolContext(),
+            );
+            expect(dismissResult).toContain(
+                "'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
+            );
+        });
     });
 });

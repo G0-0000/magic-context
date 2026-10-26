@@ -30,7 +30,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
         action: "write | update | archive | merge | get",
         content: "The memory text — one standalone fact (write, update, merge).",
         category:
-            "Kind of fact (required for write; on update/merge optional, omitted keeps the current category).",
+            "Kind of fact (required for write; on update/merge, pass the memory's current category to keep it).",
         ids: "Memory ids from <project-memory>: one for update, one or more for archive, two or more for merge, 1–20 for get.",
         reason: "Why it is being archived (optional).",
     },
@@ -68,7 +68,8 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
     ctx_memory: {
         action: "write | update | archive | merge | get",
         content: "One standalone fact (write, update, merge).",
-        category: "Kind of fact (required for write; optional on update/merge).",
+        category:
+            "Kind of fact (required for write; on update/merge pass the current category to keep it).",
         ids: "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get.",
         reason: "Why it is archived (optional).",
     },

@@ -73,42 +73,36 @@ type CtxNoteReadFilter = (typeof FILTER_VALUES)[number];
 
 const ParamsSchema = Type.Object(
 	{
-		action: Type.Optional(
-			Type.Union(
-				[
-					Type.Literal("write"),
-					Type.Literal("read"),
-					Type.Literal("dismiss"),
-					Type.Literal("update"),
-				],
-				{
-					description:
-						"write | read | update | dismiss. Defaults to write when content is given, else read.",
-				},
-			),
-		),
-		content: Type.Optional(
-			Type.String({
+		action: Type.Union(
+			[
+				Type.Literal("write"),
+				Type.Literal("read"),
+				Type.Literal("dismiss"),
+				Type.Literal("update"),
+			],
+			{
 				description:
-					"Note text for write/update: first line is the title (under 80 chars), then the detail.",
-			}),
+					"write | read | update | dismiss. Defaults to write when content is given, else read.",
+			},
 		),
+		content: Type.String({
+			description:
+				"Note text for write/update: first line is the title (under 80 chars), then the detail.",
+		}),
 		surface_condition: Type.Optional(
 			Type.String({
 				description:
 					"Makes this a smart note: a condition an outside checker can verify on its own, periodically — repository state, releases, web pages, anything it can look up — never something only this conversation knows. The note is parked until the condition holds.",
 			}),
 		),
-		note_ids: Type.Optional(
-			Type.Array(
-				Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-				{
-					minItems: 1,
-					maxItems: 50,
-					description:
-						"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
-				},
-			),
+		note_ids: Type.Array(
+			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+			{
+				minItems: 1,
+				maxItems: 50,
+				description:
+					"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
+			},
 		),
 		filter: Type.Optional(
 			Type.Union(

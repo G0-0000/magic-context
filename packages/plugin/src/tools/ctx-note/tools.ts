@@ -153,13 +153,11 @@ function writeTray(
 const ctxNoteArgsShape = {
     action: tool.schema
         .enum(["write", "read", "dismiss", "update"])
-        .optional()
         .describe(
             "write | read | update | dismiss. Defaults to write when content is given, else read.",
         ),
     content: tool.schema
         .string()
-        .optional()
         .describe(
             "Note text for write/update: first line is the title (under 80 chars), then the detail.",
         ),
@@ -181,7 +179,6 @@ const ctxNoteArgsShape = {
         .array(tool.schema.number().int().min(1))
         .min(1)
         .max(50)
-        .optional()
         .describe(
             "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
         ),

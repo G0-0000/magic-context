@@ -285,4 +285,96 @@ describe("Pi ctx_note glance", () => {
 
 		expect(text).toContain("#1 · 0m · Remember the docs.");
 	});
+
+	describe("issue 793 required provider schema", () => {
+		it("advertises action, content and note_ids as required", () => {
+			// Argument-dropping providers (InferenceNet via OpenRouter) only
+			// emit required properties, so the key arguments must be required
+			// for the calls to arrive complete. `filter` stays optional: a
+			// read without it still renders the default mixed view.
+			const tool = createCtxNoteTool({ db: createTestDb() });
+			const schema = tool.parameters as unknown as { required?: string[] };
+			expect([...(schema.required ?? [])].sort()).toEqual([
+				"action",
+				"content",
+				"note_ids",
+			]);
+		});
+
+		it("write succeeds with an empty note_ids list", async () => {
+			const db = createTestDb();
+			const { isError, text } = await callNote({
+				db,
+				params: { action: "write", content: "Empty ids note", note_ids: [] },
+			});
+
+			expect(isError).toBe(false);
+			expect(text).toContain("Saved session note #1");
+		});
+
+		it("read and dismiss succeed with empty content filler", async () => {
+			const db = createTestDb();
+			await callNote({
+				db,
+				params: { action: "write", content: "Dismissable note" },
+			});
+			const read = await callNote({
+				db,
+				params: { action: "read", content: "" },
+			});
+			expect(read.isError).toBe(false);
+			expect(read.text).toContain("Dismissable note");
+			const dismiss = await callNote({
+				db,
+				params: { action: "dismiss", note_ids: [1], content: "" },
+			});
+			expect(dismiss.isError).toBe(false);
+			expect(dismiss.text).toContain("Note #1 dismissed.");
+		});
+
+		it("update accepts empty content when a surface condition is given", async () => {
+			const db = createTestDb();
+			await callNote({
+				db,
+				params: {
+					action: "write",
+					content: "Condition-only update target",
+					surface_condition: "When the release lands",
+				},
+			});
+			const { isError, text } = await callNote({
+				db,
+				params: {
+					action: "update",
+					note_ids: [1],
+					content: "",
+					surface_condition: "When the hotfix lands",
+				},
+			});
+
+			expect(isError).toBe(false);
+			expect(text).toContain("Updated note #1");
+			expect(text).toContain("When the hotfix lands");
+		});
+
+		it("still rejects content missing where the action needs it", async () => {
+			const db = createTestDb();
+			const write = await callNote({
+				db,
+				params: { action: "write", content: "", note_ids: [] },
+			});
+			expect(write.isError).toBe(true);
+			expect(write.text).toContain(
+				"'content' is required when action is 'write'.",
+			);
+			const dismiss = await callNote({
+				db,
+				params: { action: "dismiss", note_ids: [] },
+			});
+			expect(dismiss.isError).toBe(true);
+			expect(dismiss.text).toContain(
+				"'note_ids' must contain 1 to 50 positive integer ids when action is 'dismiss'.",
+			);
+		});
+	});
 });
