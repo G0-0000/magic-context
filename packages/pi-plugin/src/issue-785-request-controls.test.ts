@@ -87,9 +87,7 @@ test("issue 785: request controls inside the conversation are not prepared turns
 		[...wire.slice(0, 3), effortOnly, wire[3]],
 		[...wire, effortOnly],
 	])
-		expect(
-			piPreparedStructureMismatch({ messages }, prepared),
-		).toBeUndefined();
+		expect(piPreparedStructureMismatch({ messages }, prepared)).toBeUndefined();
 });
 
 test("issue 785: unprepared system text rows still refuse", () => {
