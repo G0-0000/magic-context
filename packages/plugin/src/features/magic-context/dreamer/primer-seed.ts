@@ -21,7 +21,7 @@
  * proceeding with an empty orientation.
  */
 import {
-    cleanUserText,
+    readUserChunkText,
     visitRawSessionMessages,
     visitRawSessionMessagesAsync,
 } from "../../../hooks/magic-context/read-session-chunk";
@@ -30,7 +30,6 @@ import {
     extractTexts,
     extractToolCallSummaries,
     hasMeaningfulUserText,
-    normalizeText,
 } from "../../../hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "../../../hooks/magic-context/read-session-raw";
 import type { Database } from "../../../shared/sqlite";
@@ -94,11 +93,7 @@ function orientationRenderer(capTokens: number) {
             sawMessage = true;
             const out: string[] = [];
             if (msg.role === "user" && hasMeaningfulUserText(msg.parts)) {
-                const text = extractTexts(msg.parts)
-                    .map((t) => cleanUserText(t))
-                    .map(normalizeText)
-                    .filter((t) => t.length > 0)
-                    .join(" / ");
+                const text = readUserChunkText(extractTexts(msg.parts).join("\n"));
                 if (text) out.push(`U: ${text}`);
             }
             // Tool-call inputs (no outputs) — what the agent looked at. Applies to
