@@ -84,16 +84,16 @@ class ReleaseRetryTests(unittest.TestCase):
 
     def test_run_missing_on_first_lookup_and_green_on_second_passes(self):
         calls, sleeps, error = self.verify(
-            lambda name, attempt: None if name == "Mutations" and attempt == 1 else GREEN)
+            lambda name, attempt: None if name == "Smoke" and attempt == 1 else GREEN)
         self.assertIsNone(error)
-        self.assertEqual(calls, ["CI", "Mutations", "Mutations", "Smoke"])
+        self.assertEqual(calls, ["CI", "Smoke", "Smoke"])
         self.assertEqual(sleeps, [15])
 
     def test_run_missing_every_time_refuses_after_the_retries(self):
         calls, sleeps, error = self.verify(lambda name, attempt: None if name == "Smoke" else GREEN)
         self.assertIsNotNone(error)
         self.assertIn(f"Smoke for {SHA}: missing, not completed/success", str(error))
-        self.assertEqual(calls, ["CI", "Mutations"] + ["Smoke"] * 5)
+        self.assertEqual(calls, ["CI"] + ["Smoke"] * 5)
         self.assertEqual(sleeps, [15] * 4)
 
     def test_present_but_unsuccessful_run_refuses_without_retry(self):

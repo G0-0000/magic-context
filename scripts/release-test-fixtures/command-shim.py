@@ -31,7 +31,7 @@ if name == "gh":
             sys.exit("Release query must paginate the full certified SHA")
         runs = [{"id": index + 10, "name": workflow, "head_sha": expected,
                  "status": "completed", "conclusion": "success"}
-                for index, workflow in enumerate(("CI", "Mutations", "Smoke"))]
+                for index, workflow in enumerate(("CI", "Smoke"))]
         for run in runs:
             run.update(scenario.get("workflows", {}).get(run["name"], {}))
         runs = [run for run in runs if run["name"] != scenario.get("missing")]

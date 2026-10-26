@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/release.sh 0.1.0        # release v0.1.0
 #   ./scripts/release.sh 0.1.0 --dry  # preview without committing/pushing
-#   ./scripts/release.sh 0.1.0 --ci-gate=<sha>  # reuse CI, Mutations and Smoke on HEAD
+#   ./scripts/release.sh 0.1.0 --ci-gate=<sha>  # reuse CI and Smoke on HEAD
 #
 # What it does:
 #   1. Validates the version is semver
@@ -82,7 +82,7 @@ if [[ -n "$CI_GATE_SHA" ]]; then
     CI_GATE_SHA=""
   else
     python3 "$SCRIPT_DIR/ci-gate.py" release "$CI_GATE_SHA"
-    echo "  CI, Mutations and Smoke certify $CI_GATE_SHA; skipping all local test, lint and typecheck gates."
+    echo "  CI and Smoke certify $CI_GATE_SHA; skipping all local test, lint and typecheck gates."
   fi
 fi
 

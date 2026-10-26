@@ -104,7 +104,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(args[0] == "push" or args[:2] == ["tag", "-a"] for args in self.commands("git")))
 
     def test_each_workflow_must_succeed_on_exact_sha(self):
-        for workflow in ("CI", "Mutations", "Smoke"):
+        for workflow in ("CI", "Smoke"):
             for override in ({"conclusion": "failure"}, {"status": "in_progress", "conclusion": None}, {"head_sha": "a" * 40}):
                 with self.subTest(workflow=workflow, override=override):
                     self.scenario["workflows"] = {workflow: override}
@@ -120,10 +120,10 @@ class ReleaseTests(unittest.TestCase):
         run = self.run_script()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Smoke for " + self.base + ": missing", run.stderr)
-        # CI and Mutations are found at once; Smoke is looked up once and then
+        # CI is found at once; Smoke is looked up once and then
         # retried four times before the release is refused.
         lookups = [args for args in self.commands("gh") if any("/actions/runs?head_sha=" in arg for arg in args)]
-        self.assertEqual(len(lookups), 2 + 1 + 4)
+        self.assertEqual(len(lookups), 1 + 1 + 4)
         self.assert_no_publish()
 
     def test_newer_failed_run_cannot_reuse_older_success(self):
