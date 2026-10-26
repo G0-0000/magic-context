@@ -4,10 +4,11 @@ import {
 	piPreparedStructureMismatch,
 } from "./pi-dispatch-structure";
 
-// Issue 785: Oh My Pi's Anthropic provider appends request-control system
-// messages (tool_addition/tool_removal blocks, or an empty effort-only control)
-// after the context pass. They are not prepared turns, so the dispatch check
-// must not count them as conversation rows.
+// Issue 785: Oh My Pi's Anthropic provider inserts request-control system
+// messages (tool_addition/tool_removal blocks, or an effort-only control with
+// empty content and its effort in output_config) after the context pass. They
+// are not prepared turns, so the dispatch check must not count them as
+// conversation rows, wherever they sit in the request.
 
 const anthropic = {
 	api: "anthropic-messages",
@@ -66,6 +67,28 @@ test("issue 785: trailing request-control system rows are not prepared turns", (
 				{ messages: [...wire, { role: "system", content }] },
 				prepared,
 			),
+		).toBeUndefined();
+});
+
+test("issue 785: request controls inside the conversation are not prepared turns", () => {
+	const effortOnly = {
+		role: "system",
+		content: [],
+		output_config: { effort: "high" },
+	};
+	const toolControl = {
+		role: "system",
+		content: [control("tool_addition", "x")],
+	};
+	// Oh My Pi replays a recorded control before the earlier response it came
+	// with, and puts an effort-only control before the turn's user message.
+	for (const messages of [
+		[wire[0], toolControl, ...wire.slice(1)],
+		[...wire.slice(0, 3), effortOnly, wire[3]],
+		[...wire, effortOnly],
+	])
+		expect(
+			piPreparedStructureMismatch({ messages }, prepared),
 		).toBeUndefined();
 });
 

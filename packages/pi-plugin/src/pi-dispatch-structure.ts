@@ -971,11 +971,14 @@ function payloadStructure(
 			(message.role === "system" || message.role === "developer")
 		)
 			continue;
-		// Oh My Pi's Anthropic provider appends request-control system messages
-		// (only tool_addition/tool_removal blocks, or empty effort-only controls)
-		// while building the request, after the context pass. They are not
-		// prepared turns. @oh-my-pi/pi-ai/src/providers/anthropic.ts
-		// insertAnthropicControlMarkers (18.12.6).
+		// Oh My Pi's Anthropic provider inserts request-control system messages while
+		// building the request, after the context pass, so they are never prepared
+		// turns. Their content holds only tool_addition/tool_removal blocks; an
+		// effort-only control has empty content and carries its effort in
+		// output_config. A control can sit at the end of the request, before an
+		// earlier response it was recorded with, or before the turn's user message,
+		// so it is skipped wherever it appears. @oh-my-pi/pi-ai
+		// src/providers/anthropic.ts insertAnthropicControlMarkers (18.12.6).
 		if (
 			message.role === "system" &&
 			Array.isArray(message.content) &&
