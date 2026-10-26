@@ -233,7 +233,6 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         oc.close(); context.close();
     }
 
-    it("deferred render epoch rebuild catches up a lagging marker with NULL pending", () => mixedCatchup(), 600_000);
     it("byte-preserving marker HARD holds the host marker, queued drops and frozen provider bytes", () => mixedCatchup(true), 600_000);
     it("mixed 16k catch-up has byte-stable following SOFT+ and bounded host writes", () => mixedCatchup(), 600_000);
 });
