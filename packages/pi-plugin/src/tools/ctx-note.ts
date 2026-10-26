@@ -81,8 +81,7 @@ const ParamsSchema = Type.Object(
 				Type.Literal("update"),
 			],
 			{
-				description:
-					"write | read | update | dismiss. Defaults to write when content is given, else read.",
+				description: "write | read | update | dismiss.",
 			},
 		),
 		content: Type.String({
@@ -98,10 +97,9 @@ const ParamsSchema = Type.Object(
 		note_ids: Type.Array(
 			Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 			{
-				minItems: 1,
 				maxItems: 50,
 				description:
-					"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
+					"Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
 			},
 		),
 		filter: Type.Optional(

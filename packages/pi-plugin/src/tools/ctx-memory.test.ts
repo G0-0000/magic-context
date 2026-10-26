@@ -1670,6 +1670,30 @@ describe("createCtxMemoryTool", () => {
 			]);
 		});
 
+		it("accepts an empty ids list at the provider-schema level", () => {
+			// ctx_memory ids carries no minimum: a model that correctly sends
+			// ids: [] on write must pass host schema validation.
+			const db = createTestDb();
+			try {
+				const tool = createCtxMemoryTool({
+					db,
+					memoryEnabled: true,
+					embeddingEnabled: false,
+					allowDreamerActions: false,
+				});
+				expect(
+					Value.Check(tool.parameters, {
+						action: "write",
+						content: "x",
+						category: "PROJECT_RULES",
+						ids: [],
+					}),
+				).toBe(true);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
 		it("write succeeds with an empty ids list and still rejects empty content", async () => {
 			const db = createTestDb();
 			try {

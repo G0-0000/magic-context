@@ -15,7 +15,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
             "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     },
     ctx_note: {
-        action: "write | read | update | dismiss. Defaults to write when content is given, else read.",
+        action: "write | read | update | dismiss.",
         content:
             "Note text for write/update: first line is the title (under 80 chars), then the detail.",
         surface_condition:
@@ -24,7 +24,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
         limit: "Rows per read (default 25).",
         offset: "Skip this many newest rows (default 0).",
         note_ids:
-            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
+            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",
@@ -56,14 +56,15 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
             "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     },
     ctx_note: {
-        action: "write | read | update | dismiss (default: write with content, else read).",
+        action: "write | read | update | dismiss.",
         content: "Note text: first line title (<80 chars), then detail.",
         surface_condition:
             "A condition an outside checker can verify on its own, periodically (repository, releases, web — anything it can look up); never something only this conversation knows.",
         filter: "Read filter: all, active, pending, ready, dismissed. Omitted: active notes plus every current smart note (pending included); active: only active-status notes.",
         limit: "Rows per read (default 25).",
         offset: "Skip newest rows (default 0).",
-        note_ids: "One id for update, 1–50 for dismiss or read (full bodies). Ignored by write.",
+        note_ids:
+            "One id for update, 1–50 for dismiss or read (full bodies). Write takes an empty list.",
     },
     ctx_memory: {
         action: "write | update | archive | merge | get",

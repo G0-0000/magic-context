@@ -2941,6 +2941,20 @@ describe("createCtxMemoryTools", () => {
             expect(jsonSchema.required?.sort()).toEqual(["action", "category", "content", "ids"]);
         });
 
+        it("accepts an empty ids list at the provider-schema level", () => {
+            // ctx_memory ids carries no minimum: a model that correctly sends
+            // ids: [] on write must pass host schema validation.
+            const hostSchema = tool.schema.object(tools.ctx_memory.args ?? {});
+            expect(
+                hostSchema.safeParse({
+                    action: "write",
+                    content: "x",
+                    category: "PROJECT_RULES",
+                    ids: [],
+                }).success,
+            ).toBe(true);
+        });
+
         it("write succeeds with an empty ids list and still rejects an empty content", async () => {
             const written = await tools.ctx_memory.execute(
                 {

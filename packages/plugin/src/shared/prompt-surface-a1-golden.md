@@ -201,7 +201,7 @@ Finer recovery:
 }
 ```
 
-### ctx_note — description ~376 tokens, params ~303 tokens (total ~679)
+### ctx_note — description ~376 tokens, params ~288 tokens (total ~664)
 
 **Description:**
 
@@ -229,7 +229,7 @@ First line is the title (under 80 chars), followed by detail. Operations:
 ```json
 {
   "action": {
-    "description": "write | read | update | dismiss. Defaults to write when content is given, else read.",
+    "description": "write | read | update | dismiss.",
     "type": "string",
     "enum": [
       "write",
@@ -266,8 +266,7 @@ First line is the title (under 80 chars), followed by detail. Operations:
     "type": "number"
   },
   "note_ids": {
-    "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
-    "minItems": 1,
+    "description": "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
     "maxItems": 50,
     "type": "array",
     "items": {

@@ -153,9 +153,7 @@ function writeTray(
 const ctxNoteArgsShape = {
     action: tool.schema
         .enum(["write", "read", "dismiss", "update"])
-        .describe(
-            "write | read | update | dismiss. Defaults to write when content is given, else read.",
-        ),
+        .describe("write | read | update | dismiss."),
     content: tool.schema
         .string()
         .describe(
@@ -177,10 +175,9 @@ const ctxNoteArgsShape = {
     offset: tool.schema.number().optional().describe("Skip this many newest rows (default 0)."),
     note_ids: tool.schema
         .array(tool.schema.number().int().min(1))
-        .min(1)
         .max(50)
         .describe(
-            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Ignored by write.",
+            "Note ids: one for update, 1–50 for dismiss or read (read returns full bodies). Write takes an empty list.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

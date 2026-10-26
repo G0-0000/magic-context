@@ -631,6 +631,15 @@ describe("createCtxNoteTools", () => {
             expect(jsonSchema.required?.sort()).toEqual(["action", "content", "note_ids"]);
         });
 
+        it("accepts an empty note_ids list at the provider-schema level", () => {
+            // Without this, a model that correctly sends note_ids: [] on write
+            // is rejected by host schema validation before the handler runs.
+            const hostSchema = tool.schema.object(tools.ctx_note.args ?? {});
+            expect(
+                hostSchema.safeParse({ action: "write", content: "x", note_ids: [] }).success,
+            ).toBe(true);
+        });
+
         it("write succeeds with an empty note_ids list", async () => {
             const result = await tools.ctx_note.execute(
                 { action: "write", content: "Empty ids note", note_ids: [] },

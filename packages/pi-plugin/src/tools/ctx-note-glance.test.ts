@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { addNote } from "@magic-context/core/features/magic-context/storage";
+import { Value } from "typebox/value";
 
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxNoteTool } from "./ctx-note";
@@ -299,6 +300,19 @@ describe("Pi ctx_note glance", () => {
 				"content",
 				"note_ids",
 			]);
+		});
+
+		it("accepts an empty note_ids list at the provider-schema level", () => {
+			// Without this, a model that correctly sends note_ids: [] on write
+			// is rejected by host schema validation before the handler runs.
+			const tool = createCtxNoteTool({ db: createTestDb() });
+			expect(
+				Value.Check(tool.parameters, {
+					action: "write",
+					content: "x",
+					note_ids: [],
+				}),
+			).toBe(true);
 		});
 
 		it("write succeeds with an empty note_ids list", async () => {
