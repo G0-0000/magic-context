@@ -20163,7 +20163,9 @@ mod tests {
     }
 
     async fn wait_for_store_open(handler: &McHandler) {
-        tokio::time::timeout(Duration::from_secs(1), async {
+        // A hang guard, not a speed check: opening the store runs its migrations,
+        // which can take over a second on a loaded CI runner.
+        tokio::time::timeout(Duration::from_secs(30), async {
             while handler.store.get().is_none() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -20180,7 +20182,11 @@ mod tests {
         let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
         let predecessor = McStore::open_for_test(&descriptor).unwrap();
         let handler = McHandler::new();
-        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_millis(500)));
+        // The lease must still be awaited when the predecessor lets go, so the wait
+        // window has to outlast this test's own work before the drop. A 500 ms window
+        // expired first on a loaded runner and turned the open terminal. Expiry has
+        // its own test below.
+        handler.set_store_open_policy_for_test(short_store_open_policy(Duration::from_secs(30)));
 
         handler.begin_store_open(descriptor, DescriptorOrigin::DevFallback);
         wait_for_store_open_phase(&handler, STORE_OPEN_WAITING).await;
