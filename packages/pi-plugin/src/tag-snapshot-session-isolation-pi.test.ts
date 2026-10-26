@@ -92,14 +92,14 @@ it("a deadline-terminated session cannot refuse another session's hydration", as
 	}
 });
 
-function priorityHarness() {
+function priorityHarness(sessions = ["priority-a", "priority-b"]) {
 	const root = createTestTempDirFromPath(
 		join(tmpdir(), "pi-hydration-priority-"),
 	);
 	const db = new Database(join(root, "context.db"));
 	initializeDatabase(db);
 	runMigrations(db);
-	for (const session of ["priority-a", "priority-b"]) {
+	for (const session of sessions) {
 		db.prepare(
 			"INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size) VALUES (?, 1, 'entry-1', 'message', 'active', 10)",
 		).run(session);
@@ -199,6 +199,30 @@ it("turn priority: B's prewarm queues without cancelling A's turn", async () => 
 		await h.turn("priority-b");
 		expect(h.cancellations).toEqual([]);
 		expect(h.starts).toEqual(["priority-a", "priority-b"]);
+	} finally {
+		await h.close();
+	}
+});
+
+// Subagents run in the parent's process and share one reader, which runs one
+// snapshot hydration at a time. A parent
+// that starts several children at once sends their first turns within a few
+// milliseconds of each other; every one of them has to be served, none
+// cancelled.
+it("turn priority: first turns of five sessions started together are all served", async () => {
+	const children = ["child-1", "child-2", "child-3", "child-4", "child-5"];
+	const h = priorityHarness(children);
+	try {
+		const results = await Promise.allSettled(
+			children.map((child) => h.turn(child)),
+		);
+		expect(results.map((result) => result.status)).toEqual(
+			children.map(() => "fulfilled"),
+		);
+		expect(h.cancellations).toEqual([]);
+		expect([...h.starts].sort()).toEqual(children);
+		for (const child of children)
+			expect(getPiTagSnapshotView(h.db, child)).toHaveLength(1);
 	} finally {
 		await h.close();
 	}
