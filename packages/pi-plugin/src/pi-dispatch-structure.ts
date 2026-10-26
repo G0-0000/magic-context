@@ -58,10 +58,50 @@ export interface PiPreparedStructure {
 	googleFunctionIds?: boolean;
 	structuralSkipReason?: string;
 	imageBudget?: PiImageBudgetPlan<MessageStructure>;
+	/** Set when the Anthropic Continue-pad rule was modeled for this route. */
+	anthropicContinuePad?: boolean;
 }
 
 const MAX_MESSAGES = 100_000;
 const ORPHAN_NOTE = Symbol("prepared orphan tool result");
+
+/**
+ * Neutral user nudge Oh My Pi's Anthropic converter inserts between adjacent
+ * assistant params (and after a trailing assistant for non-compaction
+ * requests) so the API does not reject consecutive assistant messages.
+ * The pad is a string-content user row, placed directly after the earlier
+ * assistant with request controls looked through.
+ * @oh-my-pi/pi-ai 18.10.4 providers/anthropic.ts:5992-6001,6065-6075,6098-6101;
+ * 18.12.3 :6159-6163,6232-6242,6265-6268; 18.12.6 :6356-6360,6429-6439,6462-6465.
+ * All three pin the same rule; 17.1.7 has the same repair without the
+ * control look-through. Only this converter pads: Bedrock converse,
+ * Google/Vertex, Ollama, OpenAI completions/responses and Pi's own
+ * converter emit adjacent assistants unchanged or reject them, so the pad
+ * is modeled only for the Anthropic Messages route on the OMP host.
+ * Bedrock/Vertex endpoint variants of that route share the same api and
+ * converter, so they are covered; Plain Pi never pads, so it is excluded.
+ */
+export const ANTHROPIC_CONTINUE_PAD_TEXT = "Continue.";
+const ANTHROPIC_CONTINUE_PAD_APIS = new Set(["anthropic-messages"]);
+
+/**
+ * Whether this route models the Anthropic adjacent-assistant repair.
+ * One shared predicate for the prepared builder, the trailing-pad allowance
+ * and the tests; do not copy the api/host rule elsewhere.
+ */
+export function piModelsAnthropicContinuePad(
+	api: string | undefined,
+	host: PiDispatchHost,
+): boolean {
+	return (
+		host === "omp" && api !== undefined && ANTHROPIC_CONTINUE_PAD_APIS.has(api)
+	);
+}
+
+/** Whether a wire row is the string-content Continue pad. */
+function isAnthropicContinuePadRow(row: MessageStructure): boolean {
+	return row.role === "user" && row.wireContent === ANTHROPIC_CONTINUE_PAD_TEXT;
+}
 // APIs whose Oh My Pi provider runs transformMessages, so the host's tool-call
 // windows and interrupted-assistant omissions are known for them. Source lines
 // below are @oh-my-pi/pi-ai src/providers/, in version order 18.8.9 / 18.11.3 /
@@ -821,6 +861,26 @@ function buildPiPreparedStructure(
 					: texts;
 		}
 	}
+	// Model OMP's adjacent-assistant repair on the Anthropic route: an assistant
+	// directly followed by another assistant gains a neutral user Continue pad.
+	// Prepared rows hold no request controls, so looking through them is vacuous
+	// here while matching the host walk that skips them. The pad carries exact
+	// text so only the host's neutral nudge matches, not any other user turn.
+	const modelsContinuePad = piModelsAnthropicContinuePad(model?.api, host);
+	if (modelsContinuePad) {
+		for (let position = rows.length - 1; position > 0; position--) {
+			if (
+				rows[position]?.role === "assistant" &&
+				rows[position - 1]?.role === "assistant"
+			)
+				rows.splice(position, 0, {
+					role: "user",
+					calls: [],
+					results: [],
+					exactText: ANTHROPIC_CONTINUE_PAD_TEXT,
+				});
+		}
+	}
 	const responsesApi = responsesLane(model?.api);
 	let responsesMessages: MessageStructure[] | undefined = responsesApi
 		? []
@@ -923,6 +983,7 @@ function buildPiPreparedStructure(
 			? { responsesAlternatives: [fallbackMessages, coldMessages] }
 			: {}),
 		...(model?.api ? { api: model.api } : {}),
+		...(modelsContinuePad ? { anthropicContinuePad: true as const } : {}),
 		...(model?.api?.startsWith("google-")
 			? {
 					googleFunctionIds:
@@ -1544,13 +1605,28 @@ export function piPreparedStructureMismatch(
 							: "result id",
 					);
 		}
-		if (rows.length !== expectedRows.length)
-			return structureDetail(
-				Math.min(rows.length, expectedRows.length),
-				expectedRows,
-				rows,
-				"count",
-			);
+		if (rows.length !== expectedRows.length) {
+			// OMP appends the same neutral Continue pad after a trailing assistant
+			// for live requests, but not for compaction requests. Accept the single
+			// trailing pad when the prepared turn ends with an assistant on a
+			// route that models the repair. Interior pads are already prepared
+			// with exact text, so any other length still refuses.
+			const lastActual = rows[rows.length - 1] as MessageStructure | undefined;
+			const allowsTrailingPad =
+				prepared?.anthropicContinuePad === true &&
+				expectedRows.length > 0 &&
+				expectedRows[expectedRows.length - 1]?.role === "assistant" &&
+				rows.length === expectedRows.length + 1 &&
+				!!lastActual &&
+				isAnthropicContinuePadRow(lastActual);
+			if (!allowsTrailingPad)
+				return structureDetail(
+					Math.min(rows.length, expectedRows.length),
+					expectedRows,
+					rows,
+					"count",
+				);
+		}
 		if (imageProjection && imageBudget)
 			onImageTrim?.({
 				planned: imageBudget.count,
