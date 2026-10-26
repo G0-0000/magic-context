@@ -127,7 +127,8 @@ const GATED_VERSION: u8 = 3;
 /// and the `late_results` capability) to the same answered fetch; this reader
 /// never reads the manifest. `provider-held/v1` adds held-call records and a
 /// `tool_held` pause reason; this reader skips record types it doesn't use and
-/// never reads pause reasons.
+/// never reads pause reasons. `tool-schema-pins/v1` adds frozen `schema_pins`
+/// to the run's plan manifest; this reader never reads the manifest.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -168,6 +169,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "plan-reference-slots/v1",
     "provider-declarations/v1",
     "provider-held/v1",
+    "tool-schema-pins/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1914,6 +1916,7 @@ pub(crate) mod tests {
             "plan-reference-slots/v1",
             "provider-declarations/v1",
             "provider-held/v1",
+            "tool-schema-pins/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2086,6 +2089,24 @@ pub(crate) mod tests {
             step_finished(1, usage(1, 2, 3, 4)),
         ]);
         let runs = decode(&bytes).expect("provider-held/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `tool-schema-pins/v1` adds frozen `schema_pins` to the run's plan
+    /// manifest. This reader never reads the manifest, so a run carrying it
+    /// still yields its steps.
+    #[test]
+    fn a_tool_schema_pins_run_keeps_its_steps() {
+        let mut record = run_started("r1", 1);
+        record["manifest"] = json!({
+            "items": [{"outcome": {"answered": {"reply": {}}}}],
+            "schema_pins": {"read": "sha256:00"},
+        });
+        let bytes = wal_bytes(&[
+            json!({"requires": ["tool-schema-pins/v1"], "record": record}),
+            step_finished(1, usage(1, 2, 3, 4)),
+        ]);
+        let runs = decode(&bytes).expect("tool-schema-pins/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
     }
 
