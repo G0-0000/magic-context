@@ -971,6 +971,19 @@ function payloadStructure(
 			(message.role === "system" || message.role === "developer")
 		)
 			continue;
+		// Oh My Pi's Anthropic provider appends request-control system messages
+		// (only tool_addition/tool_removal blocks, or empty effort-only controls)
+		// while building the request, after the context pass. They are not
+		// prepared turns. @oh-my-pi/pi-ai/src/providers/anthropic.ts
+		// insertAnthropicControlMarkers (18.12.6).
+		if (
+			message.role === "system" &&
+			Array.isArray(message.content) &&
+			message.content.every((block) =>
+				["tool_addition", "tool_removal"].includes(String(object(block)?.type)),
+			)
+		)
+			continue;
 		// Responses emits reasoning/text/calls as separate items for one assistant
 		// turn. Only its call/result IDs survive every supported replay mode.
 		if (responses && message.type === "reasoning") continue;
