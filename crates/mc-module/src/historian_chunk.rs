@@ -2497,7 +2497,7 @@ mod tests {
         assert_eq!(
             rendered,
             format!(
-                "[1] U: Use staging. Please confirm before the release. {}",
+                "[1] U: Use staging. Please confirm before the release. / {}",
                 normalize_answer(SINGLE_LINE)
             ),
             "{rendered}"
