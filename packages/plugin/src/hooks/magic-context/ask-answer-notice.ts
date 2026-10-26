@@ -2,7 +2,7 @@
 export interface AskAnswerNotice {
     /** The question text as Prefrontal rendered it, on one line. */
     question: string;
-    /** The user's answer. Form answers list one `- … (answered)` line per question. */
+    /** The user's answer, as Prefrontal rendered it, newlines and all. */
     answer: string;
 }
 
@@ -86,4 +86,16 @@ export function extractAskAnswerNotices(text: string): AskAnswerNotice[] {
 /** `U (answered "<question>"): <answer>`, the line the historian reads. */
 export function formatAskAnswerNotice(notice: AskAnswerNotice): string {
     return `U (answered "${notice.question}"): ${notice.answer}`;
+}
+
+/**
+ * One `U (answered "<question>"): <answer>` line per answer notice in `text`, in
+ * delivery order. The chunk readers append these after the user's own words, so a
+ * decision the user made by answering an ask reaches the historian as the user's
+ * line instead of only as the agent's restatement. A text with no answer notice
+ * yields no lines, which leaves every other user message rendered exactly as it
+ * was before this existed.
+ */
+export function askAnswerLines(text: string): string[] {
+    return extractAskAnswerNotices(text).map(formatAskAnswerNotice);
 }

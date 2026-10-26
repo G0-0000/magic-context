@@ -8,7 +8,7 @@ import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-m
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
-import { extractAskAnswerNotices, formatAskAnswerNotice } from "./ask-answer-notice";
+import { askAnswerLines } from "./ask-answer-notice";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 import {
@@ -302,43 +302,24 @@ export function withRawMessageProvider<T>(
 
 /**
  * Strip system-reminder blocks and OMO markers from user text for chunk
- * compaction, keeping the user's answer to a parked ask as the answer line (see
- * readUserChunkText). OpenCode 1.17.8 and older wrapped a user message sent
- * mid-run in a reminder whose body is the user's own words; that wrapper is kept
- * verbatim, as stripSystemInjection keeps it, so the message is not dropped as
- * noise.
- *
- * This is the answer line alone, without the message's other text: callers that
- * render their own `U:` lines use it so a decision shows up once, as an answer.
- * With no answer notice it is the plain strip, so those callers still hear the
- * user's words.
+ * compaction. OpenCode 1.17.8 and older wrapped a user message sent mid-run in a
+ * reminder whose body is the user's own words; that wrapper is kept verbatim,
+ * as stripSystemInjection keeps it, so the message is not dropped as noise.
  */
 export function cleanUserText(text: string): string {
-    const answers = extractAskAnswerNotices(text).map(formatAskAnswerNotice).join(" / ");
-    return answers.length > 0 ? answers : stripAllReminders(text);
-}
-
-// Every reminder stripped, the ask answers included. Text with no reminder at
-// all comes back unchanged apart from the OMO marker.
-function stripAllReminders(text: string): string {
     return stripOutsideSteeringWrappers(text, (segment) =>
         removeSystemReminders(segment).replace(OMO_INTERNAL_INITIATOR_MARKER, ""),
     ).trim();
 }
 
 /**
- * The chunk reader's user text, normalized to one line. An answer to a parked
- * ask is the user's own decision, so it is pulled out of its reminder envelope
- * and rendered as `U (answered "<question>"): <answer>` after whatever else the
- * message said; every other reminder is stripped as before. A message that holds
- * only an answer notice is therefore no longer noise.
+ * The answer lines the chunk reader appends to a user message, one per answer
+ * notice in its raw text, normalized like every other user text.
  */
-export function readUserChunkText(rawText: string): string {
-    const remainder = stripAllReminders(rawText);
-    // With no reminder, and so no answer notice, the message reads as it always
-    // did: cleaning it again would only append the same words twice.
-    if (remainder === rawText) return normalizeText(remainder);
-    return normalizeText(`${remainder} ${cleanUserText(rawText)}`);
+function answerLineParts(rawText: string): string[] {
+    return askAnswerLines(rawText)
+        .map(normalizeText)
+        .filter((value) => value.length > 0);
 }
 
 /**
@@ -358,7 +339,17 @@ function hasMeaningfulChunkUserText(parts: unknown[]): boolean {
         if (isSystemDirective(cleaned)) continue;
         return true;
     }
-    return false;
+    // A message that held only an answer notice cleans to nothing, but it carries
+    // a decision the user made, so it is not noise.
+    return parts.some(
+        (part) =>
+            part !== null &&
+            typeof part === "object" &&
+            (part as Record<string, unknown>).type === "text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            (part as Record<string, unknown>).ignored !== true &&
+            askAnswerLines((part as Record<string, unknown>).text as string).length > 0,
+    );
 }
 
 export interface SessionChunk {
@@ -1482,39 +1473,49 @@ export function readSessionChunk(
         }
 
         const role = compactRole(msg.role);
-        // A user message's parts are joined before cleaning so an ask answer is
-        // matched against the whole message, not a fragment of it.
-        const userRawText = msg.role === "user" ? extractTexts(msg.parts).join("\n") : "";
-        const textParts =
+        const textParts = extractTexts(msg.parts)
+            .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
+            .map(normalizeText)
+            .filter((value) => value.length > 0);
+
+        // A user's answer to a parked ask arrives inside a reminder, so cleaning
+        // would drop it. Its answer lines follow the user's own words instead,
+        // in part order. A message with no answer notice appends nothing and is
+        // rendered exactly as before.
+        const answerParts =
             msg.role === "user"
-                ? [readUserChunkText(userRawText)].filter((value) => value.length > 0)
-                : extractTexts(msg.parts)
-                      .map(normalizeText)
-                      .filter((value) => value.length > 0);
+                ? extractTexts(msg.parts).flatMap((text) => answerLineParts(text))
+                : [];
+        const userParts = answerParts.length > 0 ? [...textParts, ...answerParts] : textParts;
 
         // For messages with no text content, extract tool-call descriptions as
         // lightweight summaries so historian sees what actions were taken.
         const allParts =
             options.expand === false
                 ? [
-                      ...textParts,
+                      ...userParts,
                       ...(textParts.length === 0 ? extractToolCallSummaries(msg.parts) : []),
                   ]
                 : msg.parts.flatMap((part) => {
                       if (expandedResults.has(part)) return [];
                       const expansion = expandedParts.get(part) ?? null;
                       if (expansion !== null) return [`TC: ${expansion}`];
-                      const texts =
-                          msg.role === "user"
-                              ? textParts
-                              : extractTexts([part])
-                                    .map(normalizeText)
-                                    .filter((value) => value.length > 0);
+                      const texts = extractTexts([part])
+                          .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
+                          .map(normalizeText)
+                          .filter(Boolean);
+                      // The answer lines follow the text part that carried them,
+                      // so a message keeps its own order.
+                      if (msg.role === "user") {
+                          texts.push(
+                              ...extractTexts([part]).flatMap((text) => answerLineParts(text)),
+                          );
+                      }
                       return texts.length
                           ? texts
                           : textParts.length === 0
-                              ? extractToolCallSummaries([part])
-                              : [];
+                            ? extractToolCallSummaries([part])
+                            : [];
                   });
 
         const compacted = compactTextForSummary(allParts.join(" / "), msg.role);
@@ -1528,7 +1529,7 @@ export function readSessionChunk(
         // Narrative is present iff this message contributed at least one real text part.
         // Tool summaries alone count as tool-only. User-role messages here always carry
         // meaningful text (the no-text user branch returned above).
-        const msgHasNarrative = textParts.length > 0;
+        const msgHasNarrative = userParts.length > 0;
 
         if (currentBlock && currentBlock.role === role) {
             currentBlock.endOrdinal = msg.ordinal;

@@ -1,19 +1,15 @@
 import { expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { extractAskAnswerNotices, formatAskAnswerNotice } from "./ask-answer-notice";
-import { cleanUserText, readUserChunkText } from "./read-session-chunk";
+import { askAnswerLines, extractAskAnswerNotices } from "./ask-answer-notice";
+import { cleanUserText, readSessionChunk, withRawMessageProvider } from "./read-session-chunk";
+import type { RawMessage } from "./read-session-raw";
 
 const fixtureDir = join(import.meta.dir, "../../../../../testdata/prefrontal-ask-answer-notice-v1");
 
 /** A rendered notice vector, decoded from its single JSON string. */
 function vector(name: string): string {
     return JSON.parse(readFileSync(join(fixtureDir, `${name}.json`), "utf8"));
-}
-
-/** An answer line with its whitespace collapsed, the way the chunk reader renders every user line. */
-function normalizeAnswer(line: string): string {
-    return line.replace(/\s+/g, " ").trim();
 }
 
 const SINGLE_LINE = 'U (answered "Which route should I use?"): Use the project route';
@@ -23,72 +19,64 @@ const FORM_LINE =
     'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)';
 const TWO_ROUND_LINE =
     'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)';
-
-// Written text around a notice, and text the user typed inside the notice's own
-// envelope (which stays stripped with the envelope).
-const MIXED = `Use staging.\n\n${vector("single-option")}\n\nPlease confirm before the release.`;
-const INSIDE_ENVELOPE = vector("single-option").replace(
-    "\nAnswer: Use the project route\n",
-    "\nAnswer: Use the project route\nPlease confirm before the release.\n",
-);
+const BATCH_LINES = [SINGLE_LINE, TYPED_LINE];
 
 // The table the Rust historian reader asserts too (notice_vectors in
-// crates/mc-module/src/historian_chunk.rs): case, user text, the answer lines
-// cleanUserText reports, and the whole user line readUserChunkText reads. Both
-// lanes read Prefrontal's rendered notices, so neither may change the answer
-// line alone.
-const VECTORS: Array<[string, () => string, string[], string]> = [
-    ["clarification", () => vector("clarification"), [], ""],
-    ["dismissal", () => vector("dismissal"), [], ""],
-    ["drift-header", () => vector("drift-header"), [], ""],
-    ["drift-trailer", () => vector("drift-trailer"), [], ""],
-    ["single-option", () => vector("single-option"), [SINGLE_LINE], SINGLE_LINE],
-    ["typed", () => vector("typed"), [TYPED_LINE], TYPED_LINE],
-    ["form", () => vector("form"), [FORM_LINE], FORM_LINE],
-    ["two-round-follow-up", () => vector("two-round-follow-up"), [TWO_ROUND_LINE], TWO_ROUND_LINE],
-    ["batch", () => vector("batch"), [SINGLE_LINE, TYPED_LINE], `${SINGLE_LINE} / ${TYPED_LINE}`],
-    [
-        "mixed-text-and-notice",
-        () => MIXED,
-        [SINGLE_LINE],
-        `Use staging. Please confirm before the release. ${SINGLE_LINE}`,
-    ],
-    [
-        "text-inside-notice-envelope",
-        () => INSIDE_ENVELOPE,
-        [
-            'U (answered "Which route should I use?"): Use the project route\nPlease confirm before the release.',
-        ],
-        'U (answered "Which route should I use?"): Use the project route Please confirm before the release.',
-    ],
+// crates/mc-module/src/historian_chunk.rs): case, the rendered notice, and the
+// answer lines both readers must report for it.
+const VECTORS: Array<[string, () => string, string[]]> = [
+    ["clarification", () => vector("clarification"), []],
+    ["dismissal", () => vector("dismissal"), []],
+    ["drift-header", () => vector("drift-header"), []],
+    ["drift-trailer", () => vector("drift-trailer"), []],
+    ["single-option", () => vector("single-option"), [SINGLE_LINE]],
+    ["typed", () => vector("typed"), [TYPED_LINE]],
+    ["form", () => vector("form"), [FORM_LINE]],
+    ["two-round-follow-up", () => vector("two-round-follow-up"), [TWO_ROUND_LINE]],
+    ["batch", () => vector("batch"), BATCH_LINES],
 ];
 
-it("renders each notice vector as the user's own line", () => {
-    for (const [name, textOf, answers, remainder] of VECTORS) {
-        const text = textOf();
-        expect(extractAskAnswerNotices(text).map(formatAskAnswerNotice), name).toEqual(answers);
-        expect(normalizeAnswer(cleanUserText(text)), name).toBe(
-            normalizeAnswer(answers.join(" / ")),
-        );
-        expect(normalizeAnswer(readUserChunkText(text)), name).toBe(normalizeAnswer(remainder));
+it("reports one answer line per notice, in delivery order", () => {
+    for (const [name, textOf, expected] of VECTORS) {
+        expect(askAnswerLines(textOf()), name).toEqual(expected);
     }
 });
 
-it("keeps text the user wrote around an answer notice", () => {
-    expect(readUserChunkText(MIXED)).toBe(
-        `Use staging. Please confirm before the release. ${SINGLE_LINE}`,
+it("rejects a dismissal, a drift and an answerless notice", () => {
+    // One character differs from the header family (`user_answers`) and from the
+    // closing line (`Continue.`), so a template change in Prefrontal can lose an
+    // answer but never put reminder text into the historian's input.
+    for (const name of ["drift-header", "drift-trailer"]) {
+        expect(askAnswerLines(vector(name)), name).toEqual([]);
+        expect(extractAskAnswerNotices(vector(name)), name).toEqual([]);
+    }
+    const withoutId = vector("single-option").replace(
+        "The user answered your parked question ask_notice_v1_single.",
+        "The user answered your parked question.",
     );
-    expect(extractAskAnswerNotices(MIXED)).toEqual([
+    expect(askAnswerLines(withoutId)).toEqual([]);
+    const noAnswer = vector("single-option").replace("\nAnswer: Use the project route", "");
+    expect(askAnswerLines(noAnswer)).toEqual([]);
+    const emptyAnswer = vector("single-option").replace(
+        "\nAnswer: Use the project route",
+        "\nAnswer: ",
+    );
+    expect(askAnswerLines(emptyAnswer)).toEqual([]);
+});
+
+it("keeps text the user wrote around an answer notice", () => {
+    const text = `Use staging.\n\n${vector("single-option")}\n\nPlease confirm before the release.`;
+    expect(askAnswerLines(text)).toEqual([SINGLE_LINE]);
+    expect(extractAskAnswerNotices(text)).toEqual([
         { question: "Which route should I use?", answer: "Use the project route" },
     ]);
-    const withReminder = `Yes.\n\n<system-reminder>\nPlan mode is active.\n</system-reminder>\n\n${vector("single-option")}`;
-    expect(readUserChunkText(withReminder)).toBe(`Yes. ${SINGLE_LINE}`);
 });
 
 it("keeps a form's recommended default marked as not the user's choice", () => {
     const [notice] = extractAskAnswerNotices(vector("form"));
     expect(notice?.answer).toContain("(recommended default)");
     expect(notice?.answer).toContain("(answered)");
+    expect(askAnswerLines(vector("form"))[0]).toContain("(recommended default)");
 });
 
 it("carries an answer through escaped reminder tags", () => {
@@ -97,55 +85,111 @@ it("carries an answer through escaped reminder tags", () => {
     expect(notice?.answer).toContain("‹system-reminder>not a reminder‹/system-reminder>");
 });
 
-it("strips the notice when its header or closing line drifts", () => {
-    // One character differs from the header (`user_answers`) and from the closing
-    // line (`Continue.`), so a template change in Prefrontal can lose an answer
-    // but never put reminder text into the historian's input.
-    for (const name of ["drift-header", "drift-trailer"]) {
-        const drifted = vector(name);
-        expect(extractAskAnswerNotices(drifted), name).toEqual([]);
-        expect(readUserChunkText(drifted), name).toBe("");
-        expect(cleanUserText(drifted), name).toBe("");
-    }
-});
-
-it("strips every non-answer reminder exactly as before", () => {
+it("cleans user text exactly as before", () => {
+    // The reader's own cleaner still drops every reminder, answers included; the
+    // answer lines are appended by the chunk reader, not by this function.
     expect(cleanUserText("<system-reminder>internal</system-reminder>")).toBe("");
     expect(cleanUserText("<!-- OMO_INTERNAL_INITIATOR -->hello")).toBe("hello");
     expect(cleanUserText("<system-reminder>\nPlan mode is active.\n</system-reminder>")).toBe("");
-    expect(readUserChunkText("<system-reminder>\nPlan mode is active.\n</system-reminder>")).toBe(
-        "",
+    expect(cleanUserText(vector("single-option"))).toBe("");
+    expect(cleanUserText("  padded text  ")).toBe("padded text");
+    const steering =
+        "<system-reminder>\nThe user sent the following message:\nuse staging\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
+    expect(cleanUserText(steering)).toBe(steering);
+});
+
+// Each read gets its own session id: another test file in the same run may hold a
+// provider registration for a shared id.
+let sessionCounter = 0;
+
+function userMessage(ordinal: number, texts: string[]): RawMessage {
+    return {
+        ordinal,
+        id: `m-${ordinal}`,
+        role: "user",
+        parts: texts.map((text) => ({ type: "text", text })),
+    };
+}
+
+function assistantMessage(ordinal: number, text: string): RawMessage {
+    return { ordinal, id: `m-${ordinal}`, role: "assistant", parts: [{ type: "text", text }] };
+}
+
+/**
+ * The chunk text of `messages`, read through a provider registered for this call
+ * only. The reader never includes the last message's ordinal, so the caller keeps
+ * a protected tail at the end.
+ */
+function readChunk(messages: RawMessage[]): string {
+    if (messages.length === 0) return "";
+    const sessionId = `ask-answer-${(sessionCounter += 1)}`;
+    return withRawMessageProvider(
+        sessionId,
+        { readMessages: () => messages, getMessageCount: () => messages.length },
+        () => readSessionChunk(sessionId, 100_000, 1, messages.length, { expand: false }).text,
+    );
+}
+
+/** A user message followed by an assistant reply, so the user block is settled. */
+function readUserLine(texts: string[]): string {
+    return readChunk([userMessage(1, texts), assistantMessage(2, "ok")]);
+}
+
+const REMINDER = "<system-reminder>\nPlan mode is active.\n</system-reminder>";
+const STEERING =
+    "<system-reminder>\nThe user sent the following message:\nuse staging\n\nPlease address this message and continue with your tasks.\n</system-reminder>";
+
+it("renders messages with no answer notice exactly as before", () => {
+    // Expected values are spelled out by hand, per case: each one is what the
+    // reader produced before ask answers were kept.
+    const cases: Array<[string, string[], string]> = [
+        ["plain text", ["real user text"], "[1] U: real user text"],
+        ["reminder plus text", [`${REMINDER}\n\nAlso check the logs.`], "[1] U: Also check the logs."],
+        ["reminder only", [REMINDER], ""],
+        ["leading and trailing whitespace", ["  padded text  \n"], "[1] U: padded text"],
+        ["multi-part", ["first part", "second part"], "[1] U: first part / second part"],
+        [
+            "multi-part with an empty part",
+            ["first part", REMINDER, "second part"],
+            "[1] U: first part / second part",
+        ],
+        ["steering wrapper", [STEERING], `[1] U: ${STEERING.replace(/\s+/g, " ")}`],
+        ["dismissal notice", [vector("dismissal")], ""],
+        ["drifted notice", [vector("drift-header")], ""],
+    ];
+    for (const [name, texts, expected] of cases) {
+        const text = readUserLine(texts);
+        const line = text.startsWith("[1] U: ") ? text.split("\n")[0] : "";
+        expect(line, name).toBe(expected);
+    }
+    expect(readChunk([]), "no messages").toBe("");
+});
+
+it("appends the answer line to the user message that carried it", () => {
+    expect(readUserLine([vector("single-option")])).toContain(`[1] U: ${SINGLE_LINE}`);
+    expect(readUserLine([vector("batch")])).toContain(
+        `[1] U: ${SINGLE_LINE} / ${TYPED_LINE.replace(/\s+/g, " ")}`,
     );
 });
 
-it("ignores a notice with a missing ask id or with no answer", () => {
-    const withoutId = vector("single-option").replace(
-        "The user answered your parked question ask_notice_v1_single.",
-        "The user answered your parked question.",
+it("keeps the user's written text before the answer line", () => {
+    const mixed = `Use staging.\n\n${vector("single-option")}\n\nPlease confirm before the release.`;
+    expect(readUserLine([mixed])).toContain(
+        `[1] U: Use staging. Please confirm before the release. / ${SINGLE_LINE}`,
     );
-    expect(extractAskAnswerNotices(withoutId)).toEqual([]);
-    const noAnswer = vector("single-option").replace("\nAnswer: Use the project route", "");
-    expect(extractAskAnswerNotices(noAnswer)).toEqual([]);
-    const emptyAnswer = vector("single-option").replace(
-        "\nAnswer: Use the project route",
-        "\nAnswer: ",
-    );
-    expect(extractAskAnswerNotices(emptyAnswer)).toEqual([]);
 });
 
-it("treats a notice quoted inside a steering wrapper as the user's own text", () => {
-    // The steering wrapper carries the user's words, so a notice nested in it is
-    // text the user typed, not a notice Prefrontal delivered.
-    const wrapped = `<system-reminder>\nThe user sent the following message:\n${vector("single-option")}\n\nPlease address this message and continue with your tasks.\n</system-reminder>`;
-    expect(extractAskAnswerNotices(wrapped)).toHaveLength(0);
-    expect(readUserChunkText(wrapped)).toContain("Please address this message");
-});
-
-it("carries an answer out of a steering-wrapped message", () => {
-    const wrapped = `<system-reminder>\nThe user sent the following message:\nuse staging\n\nPlease address this message and continue with your tasks.\n</system-reminder>\n\n${vector("single-option")}`;
-    // The steering wrapper is kept verbatim, as it always was, and the answer
-    // line follows it: that is where the notice sat in the message.
-    expect(readUserChunkText(wrapped)).toBe(
-        `<system-reminder> The user sent the following message: use staging Please address this message and continue with your tasks. </system-reminder> ${SINGLE_LINE}`,
-    );
+it("treats a message that only carries an answer as the user's turn", () => {
+    // The dismissal before it stays noise; the answer is a decision, so it opens
+    // the user block instead of being filtered away. The trailing message is the
+    // protected tail, which the reader never includes.
+    const text = readChunk([
+        userMessage(1, [vector("dismissal")]),
+        assistantMessage(2, "noted"),
+        userMessage(3, [vector("single-option")]),
+        assistantMessage(4, "on it"),
+        userMessage(5, ["protected tail"]),
+    ]);
+    expect(text).toContain(`[3] U: ${SINGLE_LINE}`);
+    expect(text).not.toContain("dismissed this question");
 });

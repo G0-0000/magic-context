@@ -20,8 +20,9 @@
  * back to a closed-book seed (origin compartment P1) rather than silently
  * proceeding with an empty orientation.
  */
+import { askAnswerLines } from "../../../hooks/magic-context/ask-answer-notice";
 import {
-    readUserChunkText,
+    cleanUserText,
     visitRawSessionMessages,
     visitRawSessionMessagesAsync,
 } from "../../../hooks/magic-context/read-session-chunk";
@@ -30,6 +31,7 @@ import {
     extractTexts,
     extractToolCallSummaries,
     hasMeaningfulUserText,
+    normalizeText,
 } from "../../../hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "../../../hooks/magic-context/read-session-raw";
 import type { Database } from "../../../shared/sqlite";
@@ -93,7 +95,15 @@ function orientationRenderer(capTokens: number) {
             sawMessage = true;
             const out: string[] = [];
             if (msg.role === "user" && hasMeaningfulUserText(msg.parts)) {
-                const text = readUserChunkText(extractTexts(msg.parts).join("\n"));
+                const rawTexts = extractTexts(msg.parts);
+                const parts = rawTexts
+                    .map((t) => cleanUserText(t))
+                    .map(normalizeText)
+                    .filter((t) => t.length > 0);
+                // The user's answer to a parked ask is the one thing cleaning
+                // would drop, so its line follows the user's own words.
+                parts.push(...rawTexts.flatMap((t) => askAnswerLines(t)).map(normalizeText));
+                const text = parts.filter((t) => t.length > 0).join(" / ");
                 if (text) out.push(`U: ${text}`);
             }
             // Tool-call inputs (no outputs) — what the agent looked at. Applies to
