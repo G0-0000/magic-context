@@ -220,6 +220,8 @@ if [[ -z "$CI_GATE_SHA" ]]; then
   bun run --cwd "$PI_DIR" lint 2>&1 || { echo "Error: Pi-plugin lint failed"; exit 1; }
   bun run --cwd "$PI_DIR" typecheck 2>&1 || { echo "Error: Pi-plugin typecheck failed"; exit 1; }
   run_package_tests "pi-plugin" "$PI_DIR"
+  bun "$REPO_ROOT/packages/e2e-tests/scripts/run-slow-unit-tests.ts" || { echo "Error: Slow unit lane failed"; exit 1; }
+  MAGIC_CONTEXT_DEBUG_ASSERTIONS=1 bun "$REPO_ROOT/packages/e2e-tests/scripts/run-slow-unit-tests.ts" || { echo "Error: Slow unit assertions lane failed"; exit 1; }
 fi
 
 echo "  [pi-plugin] bun build..."

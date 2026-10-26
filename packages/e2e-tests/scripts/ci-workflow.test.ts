@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { failedRequiredJobs } from "./check-ci-results";
+import { failedRequiredJobs, slowUnitRequired } from "./check-ci-results";
 
 const root = resolve(import.meta.dir, "../../..");
 const text = await Bun.file(resolve(root, ".github/workflows/ci.yml")).text();
 const releaseText = await Bun.file(resolve(root, ".github/workflows/release.yml")).text();
 const waitActionText = await Bun.file(resolve(root, ".github/actions/wait-ci-artifact/action.yml")).text();
 type Step = { name?: string; run?: string; if?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> };
-type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard: number[]; mode?: string[]; version?: string[] } } };
+type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard?: number[]; mode?: string[]; version?: string[] } } };
 const workflow = Bun.YAML.parse(text) as { jobs: Record<string, Job> };
 const releaseWorkflow = Bun.YAML.parse(releaseText) as { jobs: Record<string, Job> };
 const allWorkflowDocuments = await Promise.all(
@@ -36,6 +36,26 @@ test("summary rejects failed, cancelled, skipped and missing legs", () => {
     }
     expect(failedRequiredJobs(required, { first: { result: "success" } })).toEqual(["second"]);
     expect(() => failedRequiredJobs([], {})).toThrow();
+});
+
+test("slow units are required on nightly and check branches, but may skip only on fast runs", () => {
+    const job = workflow.jobs["slow-unit"]!;
+    expect(job.if).toBe("github.event_name == 'schedule' || startsWith(github.ref, 'refs/heads/train/check-')");
+    expect(job.strategy).toEqual({ "fail-fast": false, matrix: { mode: ["normal", "assertions"] } });
+    expect(slowUnitRequired("schedule", "refs/heads/master")).toBe(true);
+    expect(slowUnitRequired("push", "refs/heads/train/check-pr-123")).toBe(true);
+    for (const [event, ref] of [["push", "refs/heads/master"], ["pull_request", "refs/pull/123/merge"], ["push", "refs/heads/train/other"]]) {
+        expect(slowUnitRequired(event, ref)).toBe(false);
+    }
+    expect(failedRequiredJobs(["slow-unit"], { "slow-unit": { result: "skipped" } }, ["slow-unit"])).toEqual([]);
+    expect(failedRequiredJobs(["slow-unit"], { "slow-unit": { result: "skipped" } })).toEqual(["slow-unit"]);
+    expect(failedRequiredJobs(["slow-unit"], {}, ["slow-unit"])).toEqual(["slow-unit"]);
+    expect(failedRequiredJobs(["slow-unit"], { "slow-unit": { result: "failure" } }, ["slow-unit"])).toEqual(["slow-unit"]);
+    for (const id of ["publish-npm", "publish-npm-pi", "publish-npm-cli", "github-release"]) {
+        expect(releaseWorkflow.jobs[id]!.needs).toContain("slow-unit");
+        expect(releaseWorkflow.jobs[id]!.if).toContain("needs.slow-unit.result == 'success'");
+    }
+    expect(releaseWorkflow.jobs["slow-unit"]!.if).toBeUndefined();
 });
 
 test("dists publish before independent checks without removing preflight gates", () => {

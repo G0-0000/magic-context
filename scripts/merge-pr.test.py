@@ -404,6 +404,17 @@ class MergeTests(unittest.TestCase):
         self.assertFalse(self.commands("bun"))
         self.assert_cleaned()
 
+    def test_ci_gate_missing_slow_modes_never_fast_forwards_master(self):
+        self.scenario["ci_jobs"] = []
+        run = self.run_script("--ci-gate")
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("required slow lane", run.stderr)
+        self.assertEqual(self.git("rev-parse", "master").strip(), self.master)
+        pushes = [item["args"] for item in self.commands("git") if item["args"][0] == "push"]
+        self.assertEqual(len(pushes), 1)
+        self.assertTrue(pushes[0][-1].endswith(":refs/heads/train/check-pr-123"))
+        self.assert_cleaned()
+
     def test_ci_gate_fast_forwards_only_the_tested_sha(self):
         run = self.run_script("--ci-gate")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

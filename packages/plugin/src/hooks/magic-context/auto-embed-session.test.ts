@@ -39,6 +39,7 @@ import {
     setEmbeddingSessionBusy,
 } from "../../shared/embedding-activity";
 import * as logger from "../../shared/logger";
+import { scaleTest } from "../../shared/slow-test";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { maybeAutoEmbedSessionBackfill } from "./auto-embed-session";
 import {
@@ -222,58 +223,75 @@ afterEach(() => {
     spyOn(logger, "log").mockRestore();
 });
 
-it("re-embeds 1600 old chunks under busy active passes without draining inactive sessions or blocking a turn", async () => {
-    const { pass, register, coverage, db } = fixture(1600);
-    await settle(pass);
-    expect(logs.filter((line) => line.includes("failed"))).toEqual([]);
-    expect(autoEmbedAttemptedBySession.has(active), JSON.stringify(logs)).toBe(true);
-    calls = 0;
-    register("voyage-new");
-    setEmbeddingSessionBusy(active, true);
-    let last = performance.now();
-    let maxBlock = 0;
-    let passes = 0;
-    const heartbeat = setInterval(() => {
-        const time = performance.now();
-        maxBlock = Math.max(maxBlock, time - last);
-        last = time;
-        passes++;
-        pass();
-    }, 1);
-    try {
-        const start = performance.now();
-        for (let i = 0; i < 40; i++) {
-            pass();
-            await Bun.sleep(1);
-        }
+const busyBackfill =
+    "re-embeds old chunks under busy active passes without draining inactive sessions or blocking a turn";
+scaleTest(
+    busyBackfill,
+    async (slow) => {
+        const count = slow ? 1600 : 48;
+        const { pass, register, coverage, db } = fixture(count);
         await settle(pass);
-        const elapsed = performance.now() - start;
-        expect(coverage()).toBe(1600);
-        expect(coverage(inactive)).toBe(0);
-        expect(calls).toBe(800);
-        expect(maxBatch).toBe(2);
-        expect(passes).toBeGreaterThan(100);
-        expect(maxBlock).toBeLessThan(50);
-        expect(
-            db
+        expect(logs.filter((line) => line.includes("failed"))).toEqual([]);
+        expect(autoEmbedAttemptedBySession.has(active), JSON.stringify(logs)).toBe(true);
+        calls = 0;
+        register("voyage-new");
+        setEmbeddingSessionBusy(active, true);
+        let last = performance.now();
+        let maxBlock = 0;
+        let passes = 0;
+        let yieldedDuringBackfill = false;
+        const heartbeat = setInterval(() => {
+            const time = performance.now();
+            maxBlock = Math.max(maxBlock, time - last);
+            last = time;
+            passes++;
+            pass();
+            if (!slow && !yieldedDuringBackfill) {
+                const embedded = coverage();
+                yieldedDuringBackfill = embedded > 0 && embedded < count;
+            }
+        }, 1);
+        try {
+            const start = performance.now();
+            for (let i = 0; i < 40; i++) {
+                pass();
+                await Bun.sleep(1);
+            }
+            await settle(pass);
+            const elapsed = performance.now() - start;
+            expect(coverage()).toBe(count);
+            expect(coverage(inactive)).toBe(0);
+            expect(calls).toBe(count / 2);
+            expect(maxBatch).toBe(2);
+            expect(passes).toBeGreaterThan(slow ? 100 : 0);
+            if (!slow) expect(yieldedDuringBackfill).toBe(true);
+            if (slow) expect(maxBlock).toBeLessThan(50);
+            expect(
+                db
+                    .prepare(
+                        "SELECT DISTINCT dims FROM compartment_chunk_embeddings WHERE model_id = ?",
+                    )
+                    .all(getProjectEmbeddingSnapshot(project)!.chunkModelId),
+            ).toEqual([{ dims: 1024 }]);
+            const saved = db
                 .prepare(
-                    "SELECT DISTINCT dims FROM compartment_chunk_embeddings WHERE model_id = ?",
+                    "SELECT vector FROM compartment_chunk_embeddings WHERE model_id = ? LIMIT 1",
                 )
-                .all(getProjectEmbeddingSnapshot(project)!.chunkModelId),
-        ).toEqual([{ dims: 1024 }]);
-        const saved = db
-            .prepare("SELECT vector FROM compartment_chunk_embeddings WHERE model_id = ? LIMIT 1")
-            .get(getProjectEmbeddingSnapshot(project)!.chunkModelId) as { vector: Uint8Array };
-        expect(new Set(new Float32Array(saved.vector.slice().buffer))).toEqual(new Set([1]));
-        expect(logs.filter((line) => line.includes("session backfill start"))).toHaveLength(1);
-        expect(logs.filter((line) => line.includes("session backfill complete"))).toHaveLength(1);
-        console.log(
-            `1600-chunk busy backfill: passes=${passes} calls=${calls} max_event_loop_gap_ms=${maxBlock.toFixed(2)} elapsed_ms=${elapsed.toFixed(0)}`,
-        );
-    } finally {
-        clearInterval(heartbeat);
-    }
-}, 120_000);
+                .get(getProjectEmbeddingSnapshot(project)!.chunkModelId) as { vector: Uint8Array };
+            expect(new Set(new Float32Array(saved.vector.slice().buffer))).toEqual(new Set([1]));
+            expect(logs.filter((line) => line.includes("session backfill start"))).toHaveLength(1);
+            expect(logs.filter((line) => line.includes("session backfill complete"))).toHaveLength(
+                1,
+            );
+            console.log(
+                `${count}-chunk busy backfill: passes=${passes} calls=${calls} max_event_loop_gap_ms=${maxBlock.toFixed(2)} elapsed_ms=${elapsed.toFixed(0)}`,
+            );
+        } finally {
+            clearInterval(heartbeat);
+        }
+    },
+    120_000,
+);
 
 it("retries project lease contention on later active passes instead of latching busy", async () => {
     const { pass, register, coverage, db } = fixture(9);

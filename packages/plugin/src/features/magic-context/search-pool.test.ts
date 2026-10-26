@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { scaleTest, slowOnlyTest } from "../../shared/slow-test";
 import { Database } from "../../shared/sqlite";
 import {
     _getCompartmentChunkSearchCacheStatsForTests,
@@ -510,22 +511,27 @@ test("250 seeded searches equal base SQL rows, ids, ordering and exact scores af
     }
 });
 
-test("cold full rebuild keeps every main-thread slice below 50ms", async () => {
-    const fixture = searchPoolFixture(15000, 4096);
-    try {
-        const result = await measureSearchBlock(() => load(fixture.db));
-        expect(result.value).toHaveLength(15000);
-        console.log(
-            `search-pool cold: max=${result.maximum.toFixed(2)}ms cpu-at-max=${result.cpuMsAtMaximum.toFixed(2)}ms (${result.cpuSource}) total=${result.elapsed.toFixed(2)}ms`,
-        );
-        expect(result.maximum).toBeLessThan(50);
-    } finally {
-        fixture.close();
-        _resetCompartmentChunkSearchCacheForTests();
-    }
-}, 30000);
+scaleTest(
+    "cold full rebuild returns every row across cooperative slices",
+    async (slow) => {
+        const count = slow ? 15000 : 128;
+        const fixture = searchPoolFixture(count, slow ? 4096 : 64);
+        try {
+            const result = await measureSearchBlock(() => load(fixture.db));
+            expect(result.value).toHaveLength(count);
+            console.log(
+                `search-pool cold: max=${result.maximum.toFixed(2)}ms cpu-at-max=${result.cpuMsAtMaximum.toFixed(2)}ms (${result.cpuSource}) total=${result.elapsed.toFixed(2)}ms`,
+            );
+            if (slow) expect(result.maximum).toBeLessThan(50);
+        } finally {
+            fixture.close();
+            _resetCompartmentChunkSearchCacheForTests();
+        }
+    },
+    30000,
+);
 
-test("heartbeat CPU samples observe synchronous busy work", async () => {
+slowOnlyTest("heartbeat CPU samples observe synchronous busy work", async () => {
     const measured = await measureSearchBlock(() => {
         let value = 1;
         for (let i = 0; i < 20_000_000; i++) value = (Math.imul(value, 1664525) + 1013904223) | 0;
@@ -539,7 +545,7 @@ test("heartbeat CPU samples observe synchronous busy work", async () => {
     );
 });
 
-test("heartbeat stops sampling when the measured operation ends", async () => {
+slowOnlyTest("heartbeat stops sampling when the measured operation ends", async () => {
     const measured = await measureSearchBlock(() => 4, "short measurement");
     const before = measured.outliers.slice();
     const started = performance.now();

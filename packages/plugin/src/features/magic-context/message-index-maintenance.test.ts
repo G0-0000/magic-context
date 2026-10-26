@@ -7,6 +7,7 @@ import { join } from "node:path";
 import * as recoveryFence from "../../hooks/magic-context/lkg-recovery-fence";
 import { _resetHarnessForTesting, getHarness, setHarness } from "../../shared/harness";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
+import { scaleTest } from "../../shared/slow-test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -650,113 +651,120 @@ describe("message history orphan sweep on OpenCode 2", () => {
     }
 
     for (const huge of [false, true]) {
-        test(`OC2 orphan transactions release the writer between ${huge ? "one 200000-tag session" : "2000 realistically tagged sessions"}`, async () => {
-            setHarness("opencode2");
-            const directory = createTestTempDirFromPath(join(tmpdir(), "orphan-hold-bound-"));
-            tempDirectories.push(directory);
-            const path = join(directory, "context.db");
-            let db = new Database(path);
-            db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL");
-            initializeDatabase(db);
-            runMigrations(db);
-            const now = 2_000_000_000_000;
-            const old = now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1;
-            const tag = db.prepare(
-                "INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size, harness) VALUES (?, ?, ?, 'message', 'active', 2048, 'opencode2')",
-            );
-            db.transaction(() => {
-                for (let i = 0; i < (huge ? 1 : 2000); i++) {
-                    const id = `orphan-${String(i).padStart(4, "0")}`;
-                    seedOpenCode2Session(db, id, old);
-                    for (let n = 1; n <= (huge ? 200000 : 120); n++)
-                        tag.run(id, n, `${id}-message-${n}`);
-                    for (let n = 1; n <= (huge ? 2000 : 8); n++) {
-                        const row = db
-                            .prepare(
-                                "INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, 'user', ?)",
-                            )
-                            .run(
-                                id,
-                                n,
-                                `${id}-message-${n}`,
-                                "realistic searchable message content ".repeat(60),
-                            );
-                        recordMessageFtsRowid(db, id, n, row.lastInsertRowid);
+        const writerYield = `OC2 orphan transactions release the writer between ${huge ? "one huge session" : "many realistically tagged sessions"}`;
+        scaleTest(
+            writerYield,
+            async (slow) => {
+                const sessions = huge ? 1 : slow ? 2000 : 8;
+                const tags = huge ? (slow ? 200000 : 512) : 120;
+                const ftsRows = huge ? (slow ? 2000 : 128) : 8;
+                setHarness("opencode2");
+                const directory = createTestTempDirFromPath(join(tmpdir(), "orphan-hold-bound-"));
+                tempDirectories.push(directory);
+                const path = join(directory, "context.db");
+                let db = new Database(path);
+                db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL");
+                initializeDatabase(db);
+                runMigrations(db);
+                const now = 2_000_000_000_000;
+                const old = now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1;
+                const tag = db.prepare(
+                    "INSERT INTO tags(session_id, tag_number, message_id, type, status, byte_size, harness) VALUES (?, ?, ?, 'message', 'active', 2048, 'opencode2')",
+                );
+                db.transaction(() => {
+                    for (let i = 0; i < sessions; i++) {
+                        const id = `orphan-${String(i).padStart(4, "0")}`;
+                        seedOpenCode2Session(db, id, old);
+                        for (let n = 1; n <= tags; n++) tag.run(id, n, `${id}-message-${n}`);
+                        for (let n = 1; n <= ftsRows; n++) {
+                            const row = db
+                                .prepare(
+                                    "INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, 'user', ?)",
+                                )
+                                .run(
+                                    id,
+                                    n,
+                                    `${id}-message-${n}`,
+                                    "realistic searchable message content ".repeat(60),
+                                );
+                            recordMessageFtsRowid(db, id, n, row.lastInsertRowid);
+                        }
                     }
-                }
-            }).immediate();
-            await runMessageFtsRowidMapBackfill(db);
-            db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-            // Production sweeps open a worker connection, not the connection that
-            // bulk-created the store. Retire fixture preparations before measuring.
-            db.close();
-            Bun.gc(true);
-            db = new Database(path);
-            db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL");
-            const source = createMigratedStore(["live"]);
-            const holds: number[] = [];
-            const cpuHolds: number[] = [];
-            let started = 0;
-            let cpuStarted = process.cpuUsage();
-            const exec = db.exec.bind(db);
-            const observed = spyOn(db, "exec").mockImplementation((sql) => {
-                if (sql === "BEGIN IMMEDIATE") cpuStarted = process.cpuUsage();
-                const result = exec(sql);
-                if (sql === "BEGIN IMMEDIATE") started = performance.now();
-                if (sql === "COMMIT") {
-                    holds.push(performance.now() - started);
-                    const cpu = process.cpuUsage(cpuStarted);
-                    cpuHolds.push((cpu.user + cpu.system) / 1000);
-                }
-                return result;
-            });
-            const contender = new Database(join(directory, "context.db"));
-            contender.exec("PRAGMA busy_timeout=0");
-            let yieldedWrites = 0;
-            const heartbeat = setInterval(() => {
-                contender
-                    .prepare(
-                        "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES ('sweep-contender','live')",
-                    )
-                    .run();
-                yieldedWrites++;
-            }, 0);
-            try {
-                let deleted = 0;
-                for (;;) {
-                    const result = await sweepOrphanedOpenCodeMessageIndexesCooperatively(
-                        db,
-                        () => new Database(source, { readonly: true }),
-                        { now },
-                    );
-                    deleted += result.deleted;
-                    if (!result.cursor && !result.partial) break;
-                }
-                expect(deleted).toBe(huge ? 1 : 2000);
-                expect(holds.length).toBeGreaterThanOrEqual(
-                    Math.ceil((huge ? 200000 : 240000) / 64),
-                );
-                expect(yieldedWrites).toBeGreaterThanOrEqual(holds.length);
-                const sorted = holds.toSorted((a, b) => a - b);
-                const p50 = sorted[Math.floor(sorted.length * 0.5)]!,
-                    p95 = sorted[Math.floor(sorted.length * 0.95)]!,
-                    max = sorted.at(-1)!;
-                const sortedCpu = cpuHolds.toSorted((a, b) => a - b);
-                const cpu95 = sortedCpu[Math.floor(sortedCpu.length * 0.95)]!,
-                    cpuMax = sortedCpu.at(-1)!;
-                console.log(
-                    `OC2 orphan sweep ${huge ? "huge" : "many"} write-lock ms: n=${holds.length} wall p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} max=${max.toFixed(2)} CPU p95=${cpu95.toFixed(2)} max=${cpuMax.toFixed(2)}; ${huge ? "1 session, 200000 tags, 2000 FTS rows" : "2000 sessions, 240000 tags, 16000 FTS rows"}; competing writes=${yieldedWrites}`,
-                );
-                expect(p95).toBeLessThan(100);
-                expect(cpuMax).toBeLessThan(100);
-                expect(db.prepare("SELECT COUNT(*) AS n FROM tags").get()).toEqual({ n: 0 });
-            } finally {
-                clearInterval(heartbeat);
-                observed.mockRestore();
-                contender.close();
+                }).immediate();
+                await runMessageFtsRowidMapBackfill(db);
+                db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+                // Production sweeps open a worker connection, not the connection that
+                // bulk-created the store. Retire fixture preparations before measuring.
                 db.close();
-            }
-        }, 120000);
+                Bun.gc(true);
+                db = new Database(path);
+                db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL");
+                const source = createMigratedStore(["live"]);
+                const holds: number[] = [];
+                const cpuHolds: number[] = [];
+                let started = 0;
+                let cpuStarted = process.cpuUsage();
+                const exec = db.exec.bind(db);
+                const observed = spyOn(db, "exec").mockImplementation((sql) => {
+                    if (sql === "BEGIN IMMEDIATE") cpuStarted = process.cpuUsage();
+                    const result = exec(sql);
+                    if (sql === "BEGIN IMMEDIATE") started = performance.now();
+                    if (sql === "COMMIT") {
+                        holds.push(performance.now() - started);
+                        const cpu = process.cpuUsage(cpuStarted);
+                        cpuHolds.push((cpu.user + cpu.system) / 1000);
+                    }
+                    return result;
+                });
+                const contender = new Database(join(directory, "context.db"));
+                contender.exec("PRAGMA busy_timeout=0");
+                let yieldedWrites = 0;
+                const heartbeat = setInterval(() => {
+                    contender
+                        .prepare(
+                            "INSERT OR REPLACE INTO schema_migrations_meta(key,value) VALUES ('sweep-contender','live')",
+                        )
+                        .run();
+                    yieldedWrites++;
+                }, 0);
+                try {
+                    let deleted = 0;
+                    for (;;) {
+                        const result = await sweepOrphanedOpenCodeMessageIndexesCooperatively(
+                            db,
+                            () => new Database(source, { readonly: true }),
+                            { now },
+                        );
+                        deleted += result.deleted;
+                        if (!result.cursor && !result.partial) break;
+                    }
+                    expect(deleted).toBe(sessions);
+                    expect(holds.length).toBeGreaterThanOrEqual(Math.ceil((sessions * tags) / 64));
+                    expect(yieldedWrites).toBeGreaterThanOrEqual(holds.length);
+                    const sorted = holds.toSorted((a, b) => a - b);
+                    const p50 = sorted[Math.floor(sorted.length * 0.5)]!,
+                        p95 = sorted[Math.floor(sorted.length * 0.95)]!,
+                        max = sorted.at(-1)!;
+                    const sortedCpu = cpuHolds.toSorted((a, b) => a - b);
+                    const cpu95 = sortedCpu[Math.floor(sortedCpu.length * 0.95)]!,
+                        cpuMax = sortedCpu.at(-1)!;
+                    console.log(
+                        `OC2 orphan sweep ${huge ? "huge" : "many"} write-lock ms: n=${holds.length} wall p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} max=${max.toFixed(2)} CPU p95=${cpu95.toFixed(2)} max=${cpuMax.toFixed(2)}; ${sessions} sessions, ${sessions * tags} tags, ${sessions * ftsRows} FTS rows; competing writes=${yieldedWrites}`,
+                    );
+                    if (slow) {
+                        expect(p95).toBeLessThan(100);
+                        expect(cpuMax).toBeLessThan(100);
+                    }
+                    expect(db.prepare("SELECT COUNT(*) AS n FROM tags").get()).toEqual({ n: 0 });
+                } finally {
+                    clearInterval(heartbeat);
+                    observed.mockRestore();
+                    contender.close();
+                    db.close();
+                }
+            },
+            120000,
+        );
     }
 
     test("OC2 clears recovery fences after committing orphan rows", async () => {

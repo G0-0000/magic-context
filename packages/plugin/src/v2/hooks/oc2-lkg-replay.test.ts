@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as models from "../../shared/models-dev-cache";
+import { scaleTest } from "../../shared/slow-test";
 import {
     type HostVersion,
     installBusyAdmission,
@@ -457,89 +457,27 @@ async function runBusyDifferential(host: HostVersion, seeds: number[], steps: nu
 }
 
 for (const host of ["2.0.22", "2.1.0"] as const)
-    test(`OC2 replay differential: busy turns serve only matching saved requests, byte for byte (${host})`, async () => {
-        const stats = await runBusyDifferential(host, [7621, 7622, 7623, 7624, 7625, 7626], 26);
-        const { failures, ...counts } = stats;
-        console.log(`OC2_REPLAY_DIFFERENTIAL ${host} ${bytes(counts)} failures=${failures.length}`);
-        for (const failure of failures) console.log(`OC2_REPLAY_FAILURE ${failure}`);
-        expect(stats.failures).toEqual([]);
-        expect(stats.passes).toBeGreaterThanOrEqual(300);
-        expect(stats.served).toBeGreaterThan(0);
-        expect(stats.servedAfterCheckpoint).toBeGreaterThan(0);
-        expect(stats.servedTemporalOff).toBeGreaterThan(0);
-        expect(stats.refusedChanged).toBeGreaterThan(0);
-        expect(stats.folds).toBeGreaterThan(0);
-        expect(stats.restarts).toBeGreaterThan(0);
-    }, 900000);
-
-/**
- * Ordinary turns only (no busy database): the served bytes of every pass,
- * hashed in order and printed, so a run of this file on the commit before this
- * change and a run on this change can be compared digest for digest. The test
- * itself only checks the number of passes.
- */
-async function ordinaryDigest(host: HostVersion, seeds: number[], steps: number) {
-    const hash = createHash("sha256");
-    let passes = 0;
-    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
-    try {
-        for (const seed of seeds) {
-            let random = seed;
-            const next = (bound: number) => {
-                random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-                return random % bound;
-            };
-            const f = await oc2ContextFixture(seed, {
-                area: AREA,
+    scaleTest(
+        `OC2 replay differential: busy turns serve only matching saved requests, byte for byte (${host})`,
+        async (slow) => {
+            const stats = await runBusyDifferential(
                 host,
-                temporal: seed % 2 === 0,
-                instructions: seed % 3 === 0,
-                cacheTtl: "1h",
-            });
-            let folds = 0;
-            try {
-                f.compartment(4);
-                hash.update((await f.pass()).bytes);
-                passes++;
-                for (let step = 0; step < steps; step++) {
-                    const action = next(10);
-                    if (action === 0 && folds < 2 && f.rows.length > 20) {
-                        await f.fold(3 + next(3));
-                        folds++;
-                    } else if (action <= 2) {
-                        const limitRow = f.rows.length - 6;
-                        let end = Math.min(limitRow, f.coveredThrough + 3 + next(6));
-                        while (end > f.coveredThrough && f.rows[end]?.type === "system") end--;
-                        if (end > f.coveredThrough + 1) f.compartment(end);
-                    } else if (action === 3) {
-                        await f.restart();
-                    } else if (action === 4) {
-                        f.instruction(`Today's date is now: ${seed} day ${step}.`);
-                    }
-                    if (next(4) === 0) f.idle(2);
-                    f.user(
-                        `${seed}/${step}: ${prose.repeat(1 + next(3))}`,
-                        120000 + next(4) * 900000,
-                    );
-                    hash.update((await f.pass()).bytes);
-                    f.respond(1 + next(2));
-                    hash.update((await f.pass()).bytes);
-                    f.respond();
-                    passes += 2;
-                }
-            } finally {
-                await f.cleanup();
-            }
-        }
-    } finally {
-        limit.mockRestore();
-    }
-    return { passes, digest: hash.digest("hex") };
-}
-
-for (const host of ["2.0.22", "2.1.0"] as const)
-    test(`OC2 replay differential: ordinary turns serve the same bytes as before (${host})`, async () => {
-        const result = await ordinaryDigest(host, [7631, 7632, 7633, 7634, 7635, 7636], 25);
-        console.log(`OC2_ORDINARY_DIGEST ${host} ${bytes(result)}`);
-        expect(result.passes).toBeGreaterThanOrEqual(300);
-    }, 900000);
+                slow ? [7621, 7622, 7623, 7624, 7625, 7626] : [7621, 7622, 7625],
+                26,
+            );
+            const { failures, ...counts } = stats;
+            console.log(
+                `OC2_REPLAY_DIFFERENTIAL ${host} ${bytes(counts)} failures=${failures.length}`,
+            );
+            for (const failure of failures) console.log(`OC2_REPLAY_FAILURE ${failure}`);
+            expect(stats.failures).toEqual([]);
+            expect(stats.passes).toBeGreaterThanOrEqual(slow ? 300 : 150);
+            expect(stats.served).toBeGreaterThan(0);
+            expect(stats.servedAfterCheckpoint).toBeGreaterThan(0);
+            expect(stats.servedTemporalOff).toBeGreaterThan(0);
+            expect(stats.refusedChanged).toBeGreaterThan(0);
+            expect(stats.folds).toBeGreaterThan(0);
+            expect(stats.restarts).toBeGreaterThan(0);
+        },
+        900000,
+    );

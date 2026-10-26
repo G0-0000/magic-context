@@ -1,6 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import * as timers from "node:timers/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
@@ -49,6 +50,45 @@ async function until(predicate: () => boolean) {
     const deadline = Date.now() + 2000;
     while (!predicate() && Date.now() < deadline) await delay(5);
     expect(predicate()).toBe(true);
+}
+
+function controlledBackoff(realRetries = 0) {
+    const original = timers.setTimeout;
+    const pending = new Set<() => void>();
+    const clock = spyOn(timers, "setTimeout").mockImplementation(
+        <T>(
+            ms?: number,
+            value?: T,
+            options?: { signal?: AbortSignal; ref?: boolean },
+        ): Promise<T> => {
+            if (!options?.signal || realRetries-- > 0)
+                return original(ms, value, options) as Promise<T>;
+            const signal = options.signal;
+            return new Promise<T>((resolve, reject) => {
+                const finish = () => {
+                    pending.delete(finish);
+                    signal.removeEventListener("abort", abort);
+                    resolve(value as T);
+                };
+                const abort = () => {
+                    pending.delete(finish);
+                    reject(new Error("backoff aborted"));
+                };
+                pending.add(finish);
+                signal.addEventListener("abort", abort, { once: true });
+                if (signal.aborted) abort();
+            });
+        },
+    );
+    return {
+        pending: () => pending.size,
+        async advance() {
+            // Fire any armed retry, including one left behind by incorrect disposal.
+            for (const finish of [...pending]) finish();
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        },
+        restore: () => clock.mockRestore(),
+    };
 }
 
 async function fixture(
@@ -270,6 +310,7 @@ for (const failDeletion of [false, true]) {
 
 for (const failure of ["end", "throw"] as const) {
     test(`v2 resubscribes with backoff after stream ${failure} and records usage`, async () => {
+        const backoff = controlledBackoff(1);
         const ready = Promise.withResolvers<void>();
         let consumed = false;
         const f = await fixture(async function* (signal, subscription) {
@@ -294,16 +335,18 @@ for (const failure of ["end", "throw"] as const) {
             ).toBe(12345);
             await f.dispose();
             expect(f.signals.every((signal) => signal.aborted)).toBe(true);
-            await delay(300);
+            await backoff.advance();
             expect(f.starts).toHaveLength(2);
         } finally {
             ready.resolve();
             await f.cleanup();
+            backoff.restore();
         }
     });
 }
 
 test("v2 dispose cancels reconnect backoff before a replacement subscribes", async () => {
+    const backoff = controlledBackoff();
     let ended = false;
     const f = await fixture(async function* () {
         ended = true;
@@ -312,16 +355,19 @@ test("v2 dispose cancels reconnect backoff before a replacement subscribes", asy
     try {
         await f.start();
         await until(() => ended);
+        await until(() => backoff.pending() > 0);
         await f.dispose();
         const previousStarts = f.starts.length;
         await f.start();
         expect(f.starts).toHaveLength(previousStarts + 1);
         expect(f.signals.slice(0, previousStarts).every((signal) => signal.aborted)).toBe(true);
+        await until(() => backoff.pending() > 0);
         await f.dispose();
-        await delay(300);
+        await backoff.advance();
         expect(f.starts).toHaveLength(previousStarts + 1);
     } finally {
         await f.cleanup();
+        backoff.restore();
     }
 });
 
