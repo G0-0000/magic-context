@@ -144,7 +144,11 @@ it("renders messages with no answer notice exactly as before", () => {
     // reader produced before ask answers were kept.
     const cases: Array<[string, string[], string]> = [
         ["plain text", ["real user text"], "[1] U: real user text"],
-        ["reminder plus text", [`${REMINDER}\n\nAlso check the logs.`], "[1] U: Also check the logs."],
+        [
+            "reminder plus text",
+            [`${REMINDER}\n\nAlso check the logs.`],
+            "[1] U: Also check the logs.",
+        ],
         ["reminder only", [REMINDER], ""],
         ["leading and trailing whitespace", ["  padded text  \n"], "[1] U: padded text"],
         ["multi-part", ["first part", "second part"], "[1] U: first part / second part"],
