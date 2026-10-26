@@ -56,7 +56,9 @@ const VECTORS: Array<[string, () => string, string[], string]> = [
     [
         "text-inside-notice-envelope",
         () => INSIDE_ENVELOPE,
-        ["U (answered \"Which route should I use?\"): Use the project route\nPlease confirm before the release."],
+        [
+            'U (answered "Which route should I use?"): Use the project route\nPlease confirm before the release.',
+        ],
         'U (answered "Which route should I use?"): Use the project route Please confirm before the release.',
     ],
 ];
@@ -65,7 +67,9 @@ it("renders each notice vector as the user's own line", () => {
     for (const [name, textOf, answers, remainder] of VECTORS) {
         const text = textOf();
         expect(extractAskAnswerNotices(text).map(formatAskAnswerNotice), name).toEqual(answers);
-        expect(normalizeAnswer(cleanUserText(text)), name).toBe(normalizeAnswer(answers.join(" / ")));
+        expect(normalizeAnswer(cleanUserText(text)), name).toBe(
+            normalizeAnswer(answers.join(" / ")),
+        );
         expect(normalizeAnswer(readUserChunkText(text)), name).toBe(normalizeAnswer(remainder));
     }
 });
@@ -107,7 +111,7 @@ it("strips the notice when its header or closing line drifts", () => {
 
 it("strips every non-answer reminder exactly as before", () => {
     expect(cleanUserText("<system-reminder>internal</system-reminder>")).toBe("");
-    expect(readUserChunkText("<!-- OMO_INTERNAL_INITIATOR -->hello")).toBe("hello");
+    expect(cleanUserText("<!-- OMO_INTERNAL_INITIATOR -->hello")).toBe("hello");
     expect(cleanUserText("<system-reminder>\nPlan mode is active.\n</system-reminder>")).toBe("");
     expect(readUserChunkText("<system-reminder>\nPlan mode is active.\n</system-reminder>")).toBe(
         "",

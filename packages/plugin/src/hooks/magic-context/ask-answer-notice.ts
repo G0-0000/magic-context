@@ -17,8 +17,10 @@ export interface AskAnswerNotice {
 // anchor the header without the multiline flag, whose `$` would also match
 // before a `\n` and leave the body open to a forged match.
 const ANSWER_HEADER_PREFIX = /^Inbox [^\n]* notice from user via user_answer \(user_answer\)/;
-const ANSWER_TRAILER = /\n([\s\S]*?)\nThis ask is now closed; no dismiss is needed\. Continue accordingly\.$/;
-const ANSWER_ANSWER_LINE = /^The user answered your parked question (\S+)\.\nQuestion: ([^\n]+)\nAnswer: /;
+const ANSWER_TRAILER =
+    /\n([\s\S]*?)\nThis ask is now closed; no dismiss is needed\. Continue accordingly\.$/;
+const ANSWER_ANSWER_LINE =
+    /^The user answered your parked question (\S+)\.\nQuestion: ([^\n]+)\nAnswer: /;
 const ANSWER_QUESTION_LINE = /^Question: ([^\n]+)\nAnswer: /;
 
 const reminderEnvelopePattern = /<system-reminder>([\s\S]*?)<\/system-reminder>/gi;

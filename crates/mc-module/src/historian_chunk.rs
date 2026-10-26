@@ -1982,10 +1982,12 @@ fn strip_all_reminders(text: &str) -> String {
 /// unrecognised stays stripped, so a template change in Prefrontal can cost the historian an answer
 /// but can never inject reminder text into the historian's input.
 fn extract_ask_answer_notices(text: &str) -> Vec<AskAnswerNotice> {
-    envelope_regex().captures_iter(text).filter_map(|capture| {
-        parse_ask_answer_body(capture.get(1).map_or("", |body| body.as_str()))
-    })
-    .collect()
+    envelope_regex()
+        .captures_iter(text)
+        .filter_map(|capture| {
+            parse_ask_answer_body(capture.get(1).map_or("", |body| body.as_str()))
+        })
+        .collect()
 }
 
 fn parse_ask_answer_body(body: &str) -> Option<AskAnswerNotice> {
@@ -2363,8 +2365,7 @@ mod tests {
 
     // The answer line each notice renders to, before the chunk reader collapses
     // its whitespace like it does for every user line.
-    const SINGLE_LINE: &str =
-        "U (answered \"Which route should I use?\"): Use the project route";
+    const SINGLE_LINE: &str = "U (answered \"Which route should I use?\"): Use the project route";
     const TYPED_LINE: &str = "U (answered \"What should I write?\"): Keep <route> literal.\nThen say \"ready\".\n‹system-reminder>not a reminder‹/system-reminder>";
     const FORM_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)";
     const TWO_ROUND_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)";
@@ -2446,7 +2447,12 @@ mod tests {
             msg("u1", 1, "user", vec![text(DISMISSAL)]),
             msg("a2", 2, "assistant", vec![text("noted")]),
             msg("u3", 3, "user", vec![text(SINGLE)]),
-            msg("a4", 4, "assistant", vec![text("leaving the protected tail")]),
+            msg(
+                "a4",
+                4,
+                "assistant",
+                vec![text("leaving the protected tail")],
+            ),
             msg("u5", 5, "user", vec![text("protected tail")]),
         ];
         let built = project_and_build(&messages, 1, 10_000, 5);

@@ -9,7 +9,8 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
 import { extractAskAnswerNotices, formatAskAnswerNotice } from "./ask-answer-notice";
-import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
+import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
+import { prewarmRawSessionOrdinalsForDb } from "./raw-ordinal-warmup";
 import {
     getMessageTimesFromOpenCodeDb,
     getRawSessionMessageCountFromDb,
