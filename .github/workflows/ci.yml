@@ -123,7 +123,8 @@ jobs:
           timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
           bun packages/e2e-tests/scripts/validate-mode-manifest.ts
           cd packages/e2e-tests
-          bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts
+          bun test scripts/validate-mode-manifest.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts scripts/run-slow-unit-tests.test.ts
+          bun scripts/run-slow-unit-tests.ts --dry-run
       - name: Format check
         if: ${{ !cancelled() }}
         run: cargo fmt --check
@@ -267,6 +268,29 @@ jobs:
           name: unit-plugin-${{ matrix.mode }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: unit-junit.xml
           if-no-files-found: error
+
+  slow-unit:
+    name: Slow unit (${{ matrix.mode }})
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/heads/train/check-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [normal, assertions]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - uses: ./.github/actions/restore-ci-dists
+      - name: Run full corpora and isolated timing checks once per mode
+        env:
+          UNIT_MODE: ${{ matrix.mode }}
+        run: |
+          if [[ "$UNIT_MODE" == assertions ]]; then export MAGIC_CONTEXT_DEBUG_ASSERTIONS=1; fi
+          bun packages/e2e-tests/scripts/run-slow-unit-tests.ts
 
   unit-pi-plugin:
     name: Unit (pi-plugin ${{ matrix.mode }} ${{ matrix.shard }}/4)
@@ -1203,7 +1227,7 @@ jobs:
     name: CI (required)
     runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic, rust-raw-replay-review]
+    needs: [preflight, check-docs-layout, check-plugin, check-pi-plugin, check-plugin-compat, unit-plugin, unit-pi-plugin, slow-unit, check-dashboard, e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp, e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp, rust-clippy, rust-lib-archive, rust-mc-module-lib, rust-mc-module-parity, rust-mc-module-integration, rust-workspace-crates, rust-crates, e2e-rust-hermetic-build, e2e-rust-hermetic, rust-raw-replay-review]
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

@@ -138,6 +138,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(self.run_script().returncode, 0)
         self.assert_no_publish()
 
+    def test_release_requires_completed_slow_modes_on_the_candidate(self):
+        for jobs in ([], [{"name": "Slow unit (normal)", "status": "completed", "conclusion": "success"}],
+                     [{"name": "Slow unit (normal)", "status": "completed", "conclusion": "skipped"}]):
+            with self.subTest(jobs=jobs):
+                self.scenario["slow_jobs"] = jobs
+                run = self.run_script()
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("required slow lane", run.stderr)
+                self.assert_no_publish()
+
     def test_tag_workflow_always_requires_rust_build_and_shards(self):
         workflow = (SCRIPTS.parent / ".github/workflows/release.yml").read_text()
         self.assertNotIn("RELEASE_SKIP_RUST_E2E", workflow)

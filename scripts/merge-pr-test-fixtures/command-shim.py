@@ -80,7 +80,9 @@ if name == "gh":
         }]}]))
     elif args[:1] == ["api"] and any("/actions/runs/321/jobs?" in arg for arg in args):
         jobs = [{"name": "Rust shard", "status": "completed", "conclusion": "failure"},
-                {"name": "Still running", "status": "in_progress", "conclusion": None}] if scenario.get("failed_job") else []
+                {"name": "Still running", "status": "in_progress", "conclusion": None}] if scenario.get("failed_job") else scenario.get("ci_jobs", [
+                    {"name": f"Slow unit ({mode})", "status": "completed", "conclusion": "success"}
+                    for mode in ("normal", "assertions")])
         print(json.dumps([{"jobs": jobs}]))
     else:
         sys.exit("Unexpected gh command (all writes forbidden): " + repr(args))

@@ -4,6 +4,7 @@ import { setHostInstructionRetentionEnabledForTests } from "../../features/magic
 import * as incremental from "../../hooks/magic-context/compartment-runner-incremental";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as models from "../../shared/models-dev-cache";
+import { scaleTest } from "../../shared/slow-test";
 import {
     firstDivergence,
     oc2ContextFixture as fixture,
@@ -216,15 +217,24 @@ for (const [provider, model] of [
     ["openai", "gpt-4.1"],
     ["anthropic", "claude-opus-4-1"],
 ] as const) {
-    test(`issue 750 differential: ${provider} defer passes replay their predecessor over 200+ passes`, async () => {
-        const result = await runDifferential(provider, model, [7501, 7502, 7503, 7504], 30);
-        console.log(`ISSUE750 ${provider} ${JSON.stringify(result)}`);
-        expect(result.passes).toBeGreaterThanOrEqual(200);
-        expect(result.executes).toBeGreaterThan(0);
-        expect(result.instructionsCovered).toBeGreaterThan(0);
-        expect(result.checkpointPasses).toBeGreaterThan(0);
-        expect(result.failures).toEqual([]);
-    }, 600000);
+    scaleTest(
+        `issue 750 differential: ${provider} defer passes replay their predecessor`,
+        async (slow) => {
+            const result = await runDifferential(
+                provider,
+                model,
+                slow ? [7501, 7502, 7503, 7504] : [7501, 7502],
+                30,
+            );
+            console.log(`ISSUE750 ${provider} ${JSON.stringify(result)}`);
+            expect(result.passes).toBeGreaterThanOrEqual(slow ? 200 : 100);
+            expect(result.executes).toBeGreaterThan(0);
+            expect(result.instructionsCovered).toBeGreaterThan(0);
+            expect(result.checkpointPasses).toBeGreaterThan(0);
+            expect(result.failures).toEqual([]);
+        },
+        600000,
+    );
 }
 
 for (const checkpoint of [true, false]) {
