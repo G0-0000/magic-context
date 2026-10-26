@@ -2361,18 +2361,16 @@ mod tests {
         }
     }
 
-    const EXPECTED_SINGLE_ANSWER: &str =
+    // The answer line each notice renders to, before the chunk reader collapses
+    // its whitespace like it does for every user line.
+    const SINGLE_LINE: &str =
         "U (answered \"Which route should I use?\"): Use the project route";
-    const EXPECTED_TYPED_ANSWER: &str = "U (answered \"What should I write?\"): Keep <route> literal. Then say \"ready\". ‹system-reminder>not a reminder‹/system-reminder>";
-    const EXPECTED_FORM_ANSWER: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered) - Release notes [notes]: Keep the current endpoint (recommended default)";
-    const EXPECTED_TWO_ROUND_ANSWER: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered) - Release notes [notes]: Keep the current endpoint (recommended default) - When should it ship? [timing]: Tomorrow morning (answered)";
+    const TYPED_LINE: &str = "U (answered \"What should I write?\"): Keep <route> literal.\nThen say \"ready\".\n‹system-reminder>not a reminder‹/system-reminder>";
+    const FORM_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)";
+    const TWO_ROUND_LINE: &str = "U (answered \"Deployment plan\"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)";
+    const BATCH_BOTH_LINES: &str = "U (answered \"Which route should I use?\"): Use the project route / U (answered \"What should I write?\"): Keep <route> literal. Then say \"ready\". ‹system-reminder>not a reminder‹/system-reminder>";
     const INSIDE_ENVELOPE_ANSWER: &str = "U (answered \"Which route should I use?\"): Use the project route Please confirm before the release.";
 
-    // Rendered ask notices from Prefrontal (test-vectors/ask-answer-notice-v1 at
-    // 843ba9d2d), plus drifted and mixed variants. Each row is (case name, user
-    // text, clean_user_text output, read_user_chunk_text output). The TypeScript
-    // lane's ask-answer-notice.test.ts carries the same table, so neither reader
-    // can change the answer line alone.
     const CLARIFICATION: &str = "<system-reminder>\nInbox wake notice from user via user_clarification (user_clarification)\nThe user requested clarification for ask ask_notice_v1_clarification.\nUser request: \"What does \\\"project route\\\" mean?\\nPlease explain the risk.\"\nRespond by calling exactly:\nask(action=\"append\", id=\"ask_notice_v1_clarification\", text=\"...\")\n</system-reminder>";
     const DISMISSAL: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nQuestion: Should I replace the endpoint?\nThe user dismissed this question without choosing an option. Nothing was decided; ask again with current context if it still needs a ruling.\n</system-reminder>";
     const DRIFT_HEADER: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answers)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
@@ -2385,41 +2383,60 @@ mod tests {
     const MIXED: &str = "Use staging.\n\n<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>\n\nPlease confirm before the release.";
     const INSIDE: &str = "<system-reminder>\nInbox wake notice from user via user_answer (user_answer)\nThe user answered your parked question ask_notice_v1_single.\nQuestion: Which route should I use?\nAnswer: Use the project route\nPlease confirm before the release.\nThis ask is now closed; no dismiss is needed. Continue accordingly.\n</system-reminder>";
 
-    const NOTICE_VECTORS: &[(&str, &str, &[&str], &str)] = &[
-        ("clarification", CLARIFICATION, &[], ""),
-        ("dismissal", DISMISSAL, &[], ""),
-        ("drift-header", DRIFT_HEADER, &[], ""),
-        ("drift-trailer", DRIFT_TRAILER, &[], ""),
-        ("single-option", SINGLE, &[EXPECTED_SINGLE_ANSWER], EXPECTED_SINGLE_ANSWER),
-        // A multi-line answer normalizes to one line, as every user line does.
-        (
-            "typed",
-            TYPED,
-            &[EXPECTED_TYPED_ANSWER],
-            "U (answered \"What should I write?\"): Keep <route> literal. Then say \"ready\". ‹system-reminder>not a reminder‹/system-reminder>",
-        ),
-        ("form", FORM, &[EXPECTED_FORM_ANSWER], EXPECTED_FORM_ANSWER),
-        (
-            "two-round-follow-up",
-            TWO_ROUND,
-            &[EXPECTED_TWO_ROUND_ANSWER],
-            EXPECTED_TWO_ROUND_ANSWER,
-        ),
-        ("batch", BATCH, &[EXPECTED_SINGLE_ANSWER, EXPECTED_TYPED_ANSWER], ""),
-        ("mixed-text-and-notice", MIXED, &[EXPECTED_SINGLE_ANSWER], ""),
-        (
-            "text-inside-notice-envelope",
-            INSIDE,
-            &[INSIDE_ENVELOPE_ANSWER],
-            INSIDE_ENVELOPE_ANSWER,
-        ),
-    ];
+    /// An answer line with its whitespace collapsed, the way the chunk reader
+    /// renders every user line.
+    fn normalize_answer(line: &str) -> String {
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Rendered ask notices from Prefrontal (test-vectors/ask-answer-notice-v1 at
+    /// 843ba9d2d), plus drifted and mixed variants. Each row is (case name, user
+    /// text, clean_user_text answers, chunk reader text), with the answer lines
+    /// whitespace-normalized like every user line the chunk reader renders. The
+    /// TypeScript lane's ask-answer-notice.test.ts carries the same table, so
+    /// neither reader can change the answer line alone.
+    #[allow(clippy::type_complexity)]
+    fn notice_vectors() -> Vec<(&'static str, &'static str, Vec<&'static str>, &'static str)> {
+        vec![
+            ("clarification", CLARIFICATION, vec![], ""),
+            ("dismissal", DISMISSAL, vec![], ""),
+            ("drift-header", DRIFT_HEADER, vec![], ""),
+            ("drift-trailer", DRIFT_TRAILER, vec![], ""),
+            ("single-option", SINGLE, vec![SINGLE_LINE], SINGLE_LINE),
+            // A multi-line answer keeps its line breaks here; the chunk reader
+            // collapses them with the rest of the user line.
+            ("typed", TYPED, vec![TYPED_LINE], TYPED_LINE),
+            ("form", FORM, vec![FORM_LINE], FORM_LINE),
+            ("two-round-follow-up", TWO_ROUND, vec![TWO_ROUND_LINE], TWO_ROUND_LINE),
+            ("batch", BATCH, vec![SINGLE_LINE, TYPED_LINE], BATCH_BOTH_LINES),
+            (
+                "mixed-text-and-notice",
+                MIXED,
+                vec![SINGLE_LINE],
+                "Use staging. Please confirm before the release. U (answered \"Which route should I use?\"): Use the project route",
+            ),
+            (
+                "text-inside-notice-envelope",
+                INSIDE,
+                vec![INSIDE_ENVELOPE_ANSWER],
+                INSIDE_ENVELOPE_ANSWER,
+            ),
+        ]
+    }
 
     #[test]
     fn ask_answer_notices_render_as_the_users_own_line() {
-        for (name, text, answers, remainder) in NOTICE_VECTORS {
-            assert_eq!(clean_user_text(text), answers.join(" / "), "{name}");
-            assert_eq!(read_user_chunk_text(text), *remainder, "{name}");
+        for (name, text, answers, remainder) in notice_vectors() {
+            assert_eq!(
+                normalize_answer(&clean_user_text(text)),
+                normalize_answer(&answers.join(" / ")),
+                "{name}"
+            );
+            assert_eq!(
+                normalize_answer(&read_user_chunk_text(text)),
+                normalize_answer(remainder),
+                "{name}"
+            );
         }
     }
 
@@ -2436,7 +2453,7 @@ mod tests {
         assert!(
             built
                 .text
-                .contains(&format!("[3] U: {EXPECTED_SINGLE_ANSWER}")),
+                .contains(&format!("[3] U: {}", normalize_answer(SINGLE_LINE))),
             "{}",
             built.text
         );
@@ -2457,7 +2474,8 @@ mod tests {
         ];
         let built = project_and_build(&messages, 1, 10_000, 3);
         let expected = format!(
-            "[1] U: Use staging. Please confirm before the release. {EXPECTED_SINGLE_ANSWER}"
+            "[1] U: Use staging. Please confirm before the release. {}",
+            normalize_answer(SINGLE_LINE)
         );
         assert!(built.text.contains(&expected), "{}", built.text);
     }

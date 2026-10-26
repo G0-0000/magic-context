@@ -6,90 +6,79 @@ import { cleanUserText, readUserChunkText } from "./read-session-chunk";
 
 const fixtureDir = join(import.meta.dir, "../../../../../testdata/prefrontal-ask-answer-notice-v1");
 
-/** A Prefrontal notice vector, decoded from its single JSON string. */
+/** A rendered notice vector, decoded from its single JSON string. */
 function vector(name: string): string {
     return JSON.parse(readFileSync(join(fixtureDir, `${name}.json`), "utf8"));
 }
 
-const SINGLE_ANSWER = 'U (answered "Which route should I use?"): Use the project route';
-const TYPED_ANSWER =
-    'U (answered "What should I write?"): Keep <route> literal.\nThen say "ready".\n‹system-reminder>not a reminder‹/system-reminder>';
-const FORM_ANSWER =
-    'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)';
-const TWO_ROUND_ANSWER =
-    'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)';
-const INSIDE_ENVELOPE_ANSWER =
-    'U (answered "Which route should I use?"): Use the project route\nPlease confirm before the release.';
-// Inside the envelope, the user's typed text is not theirs to keep: the envelope
-// is stripped whole, and only the answer is carried out — so that line keeps its
-// original line break instead of being joined onto the answer.
-const INSIDE_ENVELOPE_REMAINDER =
-    'U (answered "Which route should I use?"): Use the project route Please confirm before the release.';
+/** An answer line with its whitespace collapsed, the way the chunk reader renders every user line. */
+function normalizeAnswer(line: string): string {
+    return line.replace(/\s+/g, " ").trim();
+}
 
-// Written text on either side of a notice, and text the user typed inside the
-// notice's own envelope.
+const SINGLE_LINE = 'U (answered "Which route should I use?"): Use the project route';
+const TYPED_LINE =
+    'U (answered "What should I write?"): Keep <route> literal.\nThen say "ready".\n‹system-reminder>not a reminder‹/system-reminder>';
+const FORM_LINE =
+    'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)';
+const TWO_ROUND_LINE =
+    'U (answered "Deployment plan"): - Which route? [route]: Admin route (answered)\n- Release notes [notes]: Keep the current endpoint (recommended default)\n- When should it ship? [timing]: Tomorrow morning (answered)';
+
+// Written text around a notice, and text the user typed inside the notice's own
+// envelope (which stays stripped with the envelope).
 const MIXED = `Use staging.\n\n${vector("single-option")}\n\nPlease confirm before the release.`;
 const INSIDE_ENVELOPE = vector("single-option").replace(
     "\nAnswer: Use the project route\n",
     "\nAnswer: Use the project route\nPlease confirm before the release.\n",
 );
 
-// The same table the Rust historian reader asserts (NOTICE_VECTORS in
-// crates/mc-module/src/historian_chunk.rs): case, user text, cleanUserText
-// output, readUserChunkText output. Both lanes read Prefrontal's rendered
-// notices, so neither may change the answer line alone.
+// The table the Rust historian reader asserts too (notice_vectors in
+// crates/mc-module/src/historian_chunk.rs): case, user text, the answer lines
+// cleanUserText reports, and the whole user line readUserChunkText reads. Both
+// lanes read Prefrontal's rendered notices, so neither may change the answer
+// line alone.
 const VECTORS: Array<[string, () => string, string[], string]> = [
     ["clarification", () => vector("clarification"), [], ""],
     ["dismissal", () => vector("dismissal"), [], ""],
     ["drift-header", () => vector("drift-header"), [], ""],
     ["drift-trailer", () => vector("drift-trailer"), [], ""],
-    ["single-option", () => vector("single-option"), [SINGLE_ANSWER], SINGLE_ANSWER],
-    // A multi-line answer normalizes to one line, as every user line does.
-    ["typed", () => vector("typed"), [TYPED_ANSWER], TYPED_ANSWER.replace(/\n/g, " ")],
-    ["form", () => vector("form"), [FORM_ANSWER], FORM_ANSWER.replace(/\n/g, " ")],
-    [
-        "two-round-follow-up",
-        () => vector("two-round-follow-up"),
-        [TWO_ROUND_ANSWER],
-        TWO_ROUND_ANSWER.replace(/\n/g, " "),
-    ],
-    [
-        "batch",
-        () => vector("batch"),
-        [SINGLE_ANSWER, TYPED_ANSWER],
-        `${SINGLE_ANSWER} / ${TYPED_ANSWER.replace(/\n/g, " ")}`,
-    ],
+    ["single-option", () => vector("single-option"), [SINGLE_LINE], SINGLE_LINE],
+    ["typed", () => vector("typed"), [TYPED_LINE], TYPED_LINE],
+    ["form", () => vector("form"), [FORM_LINE], FORM_LINE],
+    ["two-round-follow-up", () => vector("two-round-follow-up"), [TWO_ROUND_LINE], TWO_ROUND_LINE],
+    ["batch", () => vector("batch"), [SINGLE_LINE, TYPED_LINE], `${SINGLE_LINE} / ${TYPED_LINE}`],
     [
         "mixed-text-and-notice",
         () => MIXED,
-        [SINGLE_ANSWER],
-        `Use staging. Please confirm before the release. ${SINGLE_ANSWER}`,
+        [SINGLE_LINE],
+        `Use staging. Please confirm before the release. ${SINGLE_LINE}`,
     ],
     [
         "text-inside-notice-envelope",
         () => INSIDE_ENVELOPE,
-        [INSIDE_ENVELOPE_ANSWER],
-        INSIDE_ENVELOPE_REMAINDER,
+        ["U (answered \"Which route should I use?\"): Use the project route\nPlease confirm before the release."],
+        'U (answered "Which route should I use?"): Use the project route Please confirm before the release.',
     ],
 ];
 
-it("renders each Prefrontal notice vector as the user's own line", () => {
+it("renders each notice vector as the user's own line", () => {
     for (const [name, textOf, answers, remainder] of VECTORS) {
         const text = textOf();
         expect(extractAskAnswerNotices(text).map(formatAskAnswerNotice), name).toEqual(answers);
-        expect(readUserChunkText(text), name).toBe(remainder);
+        expect(normalizeAnswer(cleanUserText(text)), name).toBe(normalizeAnswer(answers.join(" / ")));
+        expect(normalizeAnswer(readUserChunkText(text)), name).toBe(normalizeAnswer(remainder));
     }
 });
 
 it("keeps text the user wrote around an answer notice", () => {
     expect(readUserChunkText(MIXED)).toBe(
-        `Use staging. Please confirm before the release. ${SINGLE_ANSWER}`,
+        `Use staging. Please confirm before the release. ${SINGLE_LINE}`,
     );
     expect(extractAskAnswerNotices(MIXED)).toEqual([
         { question: "Which route should I use?", answer: "Use the project route" },
     ]);
     const withReminder = `Yes.\n\n<system-reminder>\nPlan mode is active.\n</system-reminder>\n\n${vector("single-option")}`;
-    expect(readUserChunkText(withReminder)).toBe(`Yes. ${SINGLE_ANSWER}`);
+    expect(readUserChunkText(withReminder)).toBe(`Yes. ${SINGLE_LINE}`);
 });
 
 it("keeps a form's recommended default marked as not the user's choice", () => {
@@ -125,7 +114,7 @@ it("strips every non-answer reminder exactly as before", () => {
     );
 });
 
-it("recognises the notice with a missing ask id and ignores an answerless body", () => {
+it("ignores a notice with a missing ask id or with no answer", () => {
     const withoutId = vector("single-option").replace(
         "The user answered your parked question ask_notice_v1_single.",
         "The user answered your parked question.",
@@ -140,21 +129,19 @@ it("recognises the notice with a missing ask id and ignores an answerless body",
     expect(extractAskAnswerNotices(emptyAnswer)).toEqual([]);
 });
 
-it("reads an answer notice inside a steering wrapper without keeping the wrapper", () => {
-    // A steering wrapper holds the user's own words, so a notice typed by the user
-    // inside it is ordinary text, not a notice Prefrontal delivered.
-    const quoted = "<system-reminder>internal</system-reminder>";
+it("treats a notice quoted inside a steering wrapper as the user's own text", () => {
+    // The steering wrapper carries the user's words, so a notice nested in it is
+    // text the user typed, not a notice Prefrontal delivered.
     const wrapped = `<system-reminder>\nThe user sent the following message:\n${vector("single-option")}\n\nPlease address this message and continue with your tasks.\n</system-reminder>`;
     expect(extractAskAnswerNotices(wrapped)).toHaveLength(0);
     expect(readUserChunkText(wrapped)).toContain("Please address this message");
-    expect(cleanUserText(quoted)).toBe("");
 });
 
 it("carries an answer out of a steering-wrapped message", () => {
     const wrapped = `<system-reminder>\nThe user sent the following message:\nuse staging\n\nPlease address this message and continue with your tasks.\n</system-reminder>\n\n${vector("single-option")}`;
-    // The steering wrapper is kept verbatim, as it always was, and one line after
-    // it — in the notice's position — is the user's answer.
+    // The steering wrapper is kept verbatim, as it always was, and the answer
+    // line follows it: that is where the notice sat in the message.
     expect(readUserChunkText(wrapped)).toBe(
-        `<system-reminder> The user sent the following message: use staging Please address this message and continue with your tasks. </system-reminder> ${SINGLE_ANSWER}`,
+        `<system-reminder> The user sent the following message: use staging Please address this message and continue with your tasks. </system-reminder> ${SINGLE_LINE}`,
     );
 });

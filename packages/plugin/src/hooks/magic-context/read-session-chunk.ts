@@ -309,9 +309,12 @@ export function withRawMessageProvider<T>(
  *
  * This is the answer line alone, without the message's other text: callers that
  * render their own `U:` lines use it so a decision shows up once, as an answer.
+ * With no answer notice it is the plain strip, so those callers still hear the
+ * user's words.
  */
 export function cleanUserText(text: string): string {
-    return extractAskAnswerNotices(text).map(formatAskAnswerNotice).join(" / ");
+    const answers = extractAskAnswerNotices(text).map(formatAskAnswerNotice).join(" / ");
+    return answers.length > 0 ? answers : stripAllReminders(text);
 }
 
 // Every reminder stripped, the ask answers included. Text with no reminder at
@@ -331,6 +334,9 @@ function stripAllReminders(text: string): string {
  */
 export function readUserChunkText(rawText: string): string {
     const remainder = stripAllReminders(rawText);
+    // With no reminder, and so no answer notice, the message reads as it always
+    // did: cleaning it again would only append the same words twice.
+    if (remainder === rawText) return normalizeText(remainder);
     return normalizeText(`${remainder} ${cleanUserText(rawText)}`);
 }
 
