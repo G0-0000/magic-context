@@ -22,6 +22,12 @@ import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import {
+    discardPendingOpForForeignTag,
+    type ForeignTextParts,
+    lastStoredPartIndex,
+    rememberLegacyForeignTextTags,
+} from "./foreign-text-parts";
+import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
 } from "./image-token-estimate";
@@ -377,6 +383,62 @@ export interface TagMessagesResult {
     normalizationTargets: TagNormalizationTarget[];
 }
 
+interface LegacyForeignTextTag {
+    tagNumber: number;
+    /** False when the tag was dropped or caveman-compressed: serve the part raw. */
+    prefixed: boolean;
+}
+
+/**
+ * Find tags an older release gave to another plugin's text part, keyed by the
+ * part. Only a part after the message's last stored part counts (where an
+ * appending plugin's part always sat, so a binding there cannot belong to a
+ * stored part that still exists), and only through the exact content id of
+ * its position, never the ordinal fallback. Every tag found is kept out of the
+ * fallback for stored parts, recorded for ctx_reduce, and has any queued drop
+ * discarded; the tag row and its saved copy are otherwise left as they are.
+ */
+function findLegacyForeignTextTags(
+    sessionId: string,
+    messages: MessageLike[],
+    assignments: ReadonlyMap<string, number>,
+    db: ContextDatabase,
+    isForeignTextPart: (part: unknown) => boolean,
+    inertWhitespaceTagNumbers: ReadonlySet<number>,
+): Map<unknown, LegacyForeignTextTag> {
+    const legacy = new Map<unknown, LegacyForeignTextTag>();
+    for (const message of messages) {
+        const messageId = typeof message.info.id === "string" ? message.info.id : null;
+        if (!messageId) continue;
+        const firstTrailingIndex = lastStoredPartIndex(message.parts) + 1;
+        for (
+            let partIndex = firstTrailingIndex;
+            partIndex < message.parts.length;
+            partIndex += 1
+        ) {
+            const part = message.parts[partIndex];
+            if (!isTextPart(part) || !isForeignTextPart(part)) continue;
+            const contentId = `${messageId}:p${partIndex}`;
+            const tagNumber =
+                assignments.get(contentId) ?? getTagNumberByMessageId(db, sessionId, contentId);
+            if (tagNumber === null || tagNumber === undefined) continue;
+            if (inertWhitespaceTagNumbers.has(tagNumber)) continue;
+            const tag = getTagById(db, sessionId, tagNumber);
+            if (tag?.type !== "message") continue;
+            legacy.set(part, {
+                tagNumber,
+                prefixed: tag.status !== "dropped" && tag.cavemanDepth === 0,
+            });
+        }
+    }
+    if (legacy.size > 0) {
+        const tagNumbers = [...legacy.values()].map((entry) => entry.tagNumber);
+        rememberLegacyForeignTextTags(sessionId, tagNumbers);
+        for (const tagNumber of tagNumbers) discardPendingOpForForeignTag(db, sessionId, tagNumber);
+    }
+    return legacy;
+}
+
 function collectRelevantSourceTagIds(
     messages: MessageLike[],
     assignments: ReadonlyMap<string, number>,
@@ -522,6 +584,14 @@ export interface TagMessagesOptions {
      * Unset on every other host, where restored text is served as saved.
      */
     normalizeRestoredAssistantText?: (text: string, providerID?: string) => string;
+    /**
+     * OpenCode 1 only: text parts another plugin appended to stored messages
+     * (see `collectForeignTextParts`). They are never tagged, saved, restored,
+     * prefixed or targeted. A part that an older release already tagged keeps
+     * only that tag's prefix, on its current text, so its served bytes stay
+     * as they were while the other plugin's text is unchanged.
+     */
+    foreignTextParts?: ForeignTextParts;
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -608,11 +678,32 @@ export function tagMessages(
     logTransformTiming(sessionId, "tag.inertWhitespace", tInertWhitespace);
     const assignments = tagger.getAssignments(sessionId);
     const resolver = createExistingTagResolver(sessionId, tagger, db);
+    const foreignTextParts = options.foreignTextParts;
+    const isForeignTextPart = (part: unknown): boolean =>
+        foreignTextParts !== undefined &&
+        part !== null &&
+        typeof part === "object" &&
+        foreignTextParts.has(part);
+    const legacyForeignTags = findLegacyForeignTextTags(
+        sessionId,
+        messages,
+        assignments,
+        db,
+        isForeignTextPart,
+        inertWhitespaceTagNumbers,
+    );
+    const legacyForeignTagNumbers = new Set(
+        [...legacyForeignTags.values()].map((legacy) => legacy.tagNumber),
+    );
     const tGetSourceContents = performance.now();
     const sourceContents = getSourceContents(
         db,
         sessionId,
-        collectRelevantSourceTagIds(messages, assignments),
+        // A legacy foreign tag's saved copy is the other plugin's old text;
+        // nothing may ever serve it again.
+        collectRelevantSourceTagIds(messages, assignments).filter(
+            (tagNumber) => !legacyForeignTagNumbers.has(tagNumber),
+        ),
     );
     logTransformTiming(sessionId, "tag.getSourceContents", tGetSourceContents);
     // Partial compartment ends (a compartment that stops inside a message at
@@ -829,6 +920,21 @@ export function tagMessages(
                 ownerByPartKey.set(part, { ownerMsgId, callId: toolObservation.callId });
             }
 
+            if (messageId && isTextPart(part) && isForeignTextPart(part)) {
+                // Another plugin's part: serve its current text. It never takes
+                // a tag, a saved copy, a target or a text ordinal, so stored
+                // parts keep their ordinals wherever the plugin put it. A tag an
+                // older release gave this position keeps replaying its prefix on
+                // the current text (byte-identical while the text is unchanged);
+                // a dropped or compressed one is served raw, since that plugin
+                // already refused those requests.
+                const legacy = legacyForeignTags.get(part);
+                if (legacy?.prefixed && !skipPrefixInjection) {
+                    part.text = prependTag(legacy.tagNumber, part.text);
+                }
+                continue;
+            }
+
             if (messageId && isTextPart(part)) {
                 const textPart = part;
                 const thinkingParts = messageThinkingParts;
@@ -910,7 +1016,9 @@ export function tagMessages(
                     // re-assigns part IDs); the assigned tag below uses those bindings. Inert
                     // whitespace rows are replay-only and must never migrate onto real text.
                     existingTagId = resolver.resolve(messageId, "message", contentId, textOrdinal, {
-                        accept: (tagNumber) => !inertWhitespaceTagNumbers.has(tagNumber),
+                        accept: (tagNumber) =>
+                            !inertWhitespaceTagNumbers.has(tagNumber) &&
+                            !legacyForeignTagNumbers.has(tagNumber),
                     });
                     if (
                         existingTagId === undefined &&

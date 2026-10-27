@@ -84,6 +84,7 @@ import {
     resolveExecuteThresholdDetail,
     resolveModelKey,
 } from "./event-resolvers";
+import { collectForeignTextParts } from "./foreign-text-parts";
 import { formatEmbedStatusText } from "./format-embed-status";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
@@ -664,6 +665,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         cacheTtlConfigured: deps.config.cacheTtlConfigured,
         sampleCacheTtlConfig: () => deps.sampleHistorianConfig?.() ?? deps.config,
         tagger: deps.tagger,
+        // OpenCode 1 stores every part with an id, so an id-less text part in a
+        // stored message is another plugin's and must be served untouched.
+        collectForeignTextParts,
         scheduler: deps.scheduler,
         contextUsageMap,
         db,

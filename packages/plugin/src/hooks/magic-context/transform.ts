@@ -120,6 +120,7 @@ import {
     estimateFinalWireInputTokens,
     estimateMessageTokens,
 } from "./final-wire-token-estimate";
+import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
 import { takeCoveredInstructionRows } from "./host-served-rows";
@@ -476,6 +477,12 @@ export interface TransformDeps {
     hostRefusalNotice?: HostRefusalNotice;
     hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
+    /**
+     * OpenCode 1 only: find the text parts another plugin appended to stored
+     * messages, on the array the host handed to the hook. Unset on hosts whose
+     * parts carry no ids (OpenCode 2), where an id-less part may be stored text.
+     */
+    collectForeignTextParts?: (messages: MessageLike[]) => ForeignTextParts | undefined;
     scheduler: Scheduler;
     contextUsageMap: Map<
         string,
@@ -815,6 +822,10 @@ export function createTransform(deps: TransformDeps) {
         const startTime = performance.now();
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
+        // Captured before Magic Context edits anything, so only parts the host
+        // delivered can count as another plugin's (Rust mode tags elsewhere).
+        const foreignTextParts =
+            deps.transformMode === "rust" ? undefined : deps.collectForeignTextParts?.(messages);
         // The entry order, for the signed-thinking fit snapshot taken once the
         // hold is decided (see takeSignedThinkingFitSnapshot). No message or
         // part is edited before that point; only covered instruction rows are
@@ -2501,6 +2512,7 @@ export function createTransform(deps: TransformDeps) {
                       servedMessages: messages,
                       normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                       refreshSourceContents: deps.refreshSourceContents?.(sessionId),
+                      foreignTextParts,
                   });
                   for (const [number, target] of tagged.targets) targets.set(number, target);
                   for (const [message, parts] of tagged.reasoningByMessage)
@@ -2566,6 +2578,7 @@ export function createTransform(deps: TransformDeps) {
                         servedMessages: messages,
                         normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                         refreshSourceContents: deps.refreshSourceContents?.(sessionId),
+                        foreignTextParts,
                     },
                 );
                 targets = result.targets;
