@@ -1,10 +1,10 @@
 /// <reference types="bun-types" />
 
 /**
- * Witnesses from the independent cache review of the rule that leaves text
- * parts another OpenCode 1 plugin appends untagged: across an upgrade, a legacy
- * tag must serve exactly the bytes the previous release served while the other
- * plugin's text is unchanged, including on defer passes.
+ * Tests the rule that leaves text parts another OpenCode 1 plugin appends
+ * untagged: across an upgrade, a legacy tag must serve exactly the bytes the
+ * previous release served while the other plugin's text is unchanged,
+ * including on defer passes.
  *
  * "Old" passes run the same code with no foreign-part collector, which is
  * exactly what the release before the rule did: with `foreignTextParts` unset

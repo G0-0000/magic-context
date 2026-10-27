@@ -10,9 +10,11 @@ import { isTextPart } from "./tag-part-guards";
  * `experimental.chat.messages.transform`. A text part with no id inside a
  * message that has stored parts was therefore appended by a plugin that ran
  * earlier in the same hook (for example an auth plugin's effort marker). Such
- * a part is that plugin's content: Magic Context must serve it exactly as the
- * plugin left it, so the tagger never tags it, saves it or restores an older
- * copy over it.
+ * a part is that plugin's content, so the tagger never tags it, saves it or
+ * restores an older copy over it: a new part passes through unchanged. A part
+ * an older release already tagged keeps serving what that release served
+ * (its prefix, drop placeholder or compressed form) while the plugin's text is
+ * unchanged, so a cache-hit pass never changes its bytes.
  */
 export type ForeignTextParts = { has(part: object): boolean };
 

@@ -823,7 +823,8 @@ export function createTransform(deps: TransformDeps) {
         const historianRun = deps.resolveHistorianRun?.();
         const messages = output.messages as MessageLike[];
         // Captured before Magic Context edits anything, so only parts the host
-        // delivered can count as another plugin's (Rust mode tags elsewhere).
+        // delivered can count as another plugin's. In Rust mode the module does
+        // the tagging, so this collector isn't used there.
         const foreignTextParts =
             deps.transformMode === "rust" ? undefined : deps.collectForeignTextParts?.(messages);
         // The entry order, for the signed-thinking fit snapshot taken once the

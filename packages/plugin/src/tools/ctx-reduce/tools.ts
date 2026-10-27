@@ -203,8 +203,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 ),
             );
             // A tag an older release put on another plugin's text part (OpenCode 1)
-            // has no reclaimable content: the part is always served as that plugin
-            // wrote it. Skip it per id like provider framing, never fail the call.
+            // can't reclaim anything: that text belongs to the other plugin, and a
+            // new drop on it is never applied. Skip it per id like provider
+            // framing; never fail the call.
             const foreignTextTagNumbers = new Set(
                 dropIds.filter((id) => isLegacyForeignTextTag(sessionId, id)),
             );

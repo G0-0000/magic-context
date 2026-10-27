@@ -666,7 +666,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         sampleCacheTtlConfig: () => deps.sampleHistorianConfig?.() ?? deps.config,
         tagger: deps.tagger,
         // OpenCode 1 stores every part with an id, so an id-less text part in a
-        // stored message is another plugin's and must be served untouched.
+        // stored message is another plugin's, and Magic Context never tags,
+        // saves or restores it (see foreign-text-parts.ts).
         collectForeignTextParts,
         scheduler: deps.scheduler,
         contextUsageMap,
