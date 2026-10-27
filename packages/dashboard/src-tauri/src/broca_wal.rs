@@ -134,7 +134,9 @@ const GATED_VERSION: u8 = 3;
 /// message content. `refusal-fallback/v1` adds a `model_step_refused` record,
 /// which this reader skips, and optional `model_step_finished` members
 /// (`served_model`, `usage_iterations`, `route`, `refusal_fallback`,
-/// `refusal_after_tool_use`), which it ignores.
+/// `refusal_after_tool_use`), which it ignores. `output-reservation/v1` adds an
+/// `output_reservation_clamped` record (a step's output cap lowered so input
+/// plus cap fits the window), which this reader skips.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -178,6 +180,7 @@ const KNOWN_FEATURES: &[&str] = &[
     "tool-schema-pins/v1",
     "provider-fallback-block/v1",
     "refusal-fallback/v1",
+    "output-reservation/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1927,6 +1930,7 @@ pub(crate) mod tests {
             "tool-schema-pins/v1",
             "provider-fallback-block/v1",
             "refusal-fallback/v1",
+            "output-reservation/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2156,6 +2160,24 @@ pub(crate) mod tests {
             json!({"requires": ["refusal-fallback/v1"], "record": finished}),
         ]);
         let runs = decode(&bytes).expect("refusal-fallback/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+        assert_eq!(runs[0].steps[0].usage.output_tokens, Some(4));
+    }
+
+    /// `output-reservation/v1` writes an `output_reservation_clamped` record
+    /// before a step whose output cap was lowered. This reader skips it, so the
+    /// step that follows still counts, with its usage.
+    #[test]
+    fn an_output_reservation_run_keeps_its_steps() {
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["output-reservation/v1"],
+                   "record": {"type": "output_reservation_clamped", "step_id": 1,
+                               "max_output_tokens": 8_000, "estimated_input_tokens": 190_000,
+                               "context_limit": 200_000}}),
+            json!(step_finished(1, usage(1, 2, 3, 4))),
+        ]);
+        let runs = decode(&bytes).expect("output-reservation/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
         assert_eq!(runs[0].steps[0].usage.output_tokens, Some(4));
     }
