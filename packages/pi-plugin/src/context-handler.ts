@@ -631,6 +631,16 @@ function observePipelineResultForTests(
 
 let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 let beforePipelineForTests: (() => Promise<void>) | undefined;
+/** Tests only: each pass's fit-input copies, seen after its first pipeline run. */
+let thinkingFitInputObserverForTests:
+	| ((observation: {
+			sessionId: string;
+			held: boolean;
+			strictThinkingKept: boolean;
+			thinkingCopy: readonly unknown[] | null;
+			fitReclaimCopy: readonly unknown[] | undefined;
+	  }) => void)
+	| undefined;
 
 function logPiLkgRecovery(sessionId: string, message: string): void {
 	lkgRecoveryLogObserverForTests?.(message);
@@ -758,6 +768,15 @@ export const __test = {
 		pipelineResultObserverForTests = fn;
 		return () => {
 			pipelineResultObserverForTests = previous;
+		};
+	},
+	setThinkingFitInputObserverForTests(
+		fn: typeof thinkingFitInputObserverForTests,
+	): () => void {
+		const previous = thinkingFitInputObserverForTests;
+		thinkingFitInputObserverForTests = fn;
+		return () => {
+			thinkingFitInputObserverForTests = previous;
 		};
 	},
 };
@@ -5526,24 +5545,13 @@ export function registerPiContextHandler(
 					contextLimit: rawFallbackLimit,
 					forcePercentage: forceMaterializationPercentage,
 				});
-			let inputForThinkingFit: unknown[] | null =
-				(getHarness() !== "pi" || nativeFitPossible) &&
-				isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id)
-					? structuredClone(event.messages)
-					: null;
-			// Renderers can mutate parts, and JSONL lacks context added by extensions.
-			// Preserve the original only for recovery, missing usage, near-capacity
-			// input, a large new tail, or an invalidated cache; not steady low-pressure turns.
-			let inputForFitReclaim: unknown[] | undefined = nativeFitPossible
-				? (inputForThinkingFit ?? structuredClone(event.messages))
-				: undefined;
-			if (fitInputStart !== undefined)
-				recordPiTransformTiming({
-					sessionId,
-					stage: "fitInputPreparation",
-					elapsedMs: performance.now() - fitInputStart,
-					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
-				});
+			// The fit inputs are copied just before the pipeline runs (below), once
+			// the signed-thinking hold is known. Nothing edits event.messages, its
+			// messages or their parts before then.
+			const fitPredictionMs =
+				fitInputStart === undefined
+					? undefined
+					: performance.now() - fitInputStart;
 			if (!options.compactionOff && !sessionMeta.isSubagent) {
 				let promptId: string | null = null;
 				for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -5801,7 +5809,38 @@ export function registerPiContextHandler(
 				);
 			};
 			pipelineArgs.evaluateHistorianBeforeReclaim = scheduleHistorian;
+			const fitCopyStart =
+				fitPredictionMs === undefined ? undefined : performance.now();
+			// The signed-thinking fit retry below runs only when the pipeline kept a
+			// held signed turn (strictThinkingKept), which requires this pass's hold.
+			// An unheld pass therefore never needs this copy and does not take it.
+			let inputForThinkingFit: unknown[] | null =
+				(getHarness() !== "pi" || nativeFitPossible) &&
+				isPrefixBoundThinkingModel(ctx.model?.provider, ctx.model?.id) &&
+				pipelineArgs.signedThinkingHold === true
+					? structuredClone(event.messages)
+					: null;
+			// Renderers can mutate parts, and JSONL lacks context added by extensions.
+			// Preserve the original only for recovery, missing usage, near-capacity
+			// input, a large new tail, or an invalidated cache; not steady low-pressure turns.
+			let inputForFitReclaim: unknown[] | undefined = nativeFitPossible
+				? (inputForThinkingFit ?? structuredClone(event.messages))
+				: undefined;
+			if (fitPredictionMs !== undefined && fitCopyStart !== undefined)
+				recordPiTransformTiming({
+					sessionId,
+					stage: "fitInputPreparation",
+					elapsedMs: fitPredictionMs + (performance.now() - fitCopyStart),
+					extra: inputForFitReclaim ? "snapshot" : "no-snapshot",
+				});
 			let result = await budget.waitMandatory(runPipeline(pipelineArgs));
+			thinkingFitInputObserverForTests?.({
+				sessionId,
+				held: pipelineArgs.signedThinkingHold === true,
+				strictThinkingKept: result.strictThinkingKept,
+				thinkingCopy: inputForThinkingFit,
+				fitReclaimCopy: inputForFitReclaim,
+			});
 			observePipelineResultForTests(sessionId, result);
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
 			if (result.identityRebuilt || result.lkgFrozenReleaseReason)
