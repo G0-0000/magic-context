@@ -194,6 +194,44 @@ export function getOpenCodeV2ActiveGeneration(slot: string): string | undefined 
     }
 }
 
+export type OpenCodeHostGeneration = "v1" | "v2";
+
+/**
+ * The name OpenCode 2 gives the cache slot of `spec`: on Windows the host
+ * replaces each character Windows forbids in file names (`<>:"|?*` and control
+ * characters) with `_`, so a range spec such as `>=0.49` lives in `_=0.49`.
+ */
+export function openCodeV2SlotSpec(spec: string, platform: NodeJS.Platform = process.platform) {
+    if (platform !== "win32") return spec;
+    return Array.from(spec, (char) =>
+        '<>:"|?*'.includes(char) || char.charCodeAt(0) < 32 ? "_" : char,
+    ).join("");
+}
+
+/**
+ * Every directory holding an installed copy of Magic Context that a host could
+ * load, as the directory that owns that copy's `node_modules`: for OpenCode 1
+ * the two `packages/` roots, for OpenCode 2 the newest install generation of
+ * each `npm/<name>@<spec>/` slot (the one the host loads). The host generation
+ * doctor found comes first, and on OpenCode 2 the slot of the spec the config
+ * registers leads it. The other generation's copies follow, because both
+ * layouts share one cache root and can sit side by side after an upgrade.
+ */
+export function getOpenCodePluginInstallRoots(
+    hostGeneration: OpenCodeHostGeneration,
+    config?: Record<string, unknown> | null,
+    npmCacheDir = getOpenCodeV2NpmCacheDir(),
+    platform: NodeJS.Platform = process.platform,
+): string[] {
+    const configured = openCodeV2SlotSpec(readConfiguredOpenCodePluginSpec(config), platform);
+    const v2 = listOpenCodeV2PluginCacheSlots(npmCacheDir)
+        .sort((a, b) => Number(b.spec === configured) - Number(a.spec === configured))
+        .map((slot) => getOpenCodeV2ActiveGeneration(slot.slot))
+        .filter((generation): generation is string => generation !== undefined);
+    const v1 = getOpenCodePluginCacheRoots();
+    return hostGeneration === "v2" ? [...v2, ...v1] : [...v1, ...v2];
+}
+
 /** Version of the Magic Context package OpenCode 2 would load from `slot`, if readable. */
 export function readOpenCodeV2CachedPluginVersion(slot: string): string | undefined {
     const generation = getOpenCodeV2ActiveGeneration(slot);
