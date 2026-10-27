@@ -411,11 +411,7 @@ function findLegacyForeignTextTags(
         const messageId = typeof message.info.id === "string" ? message.info.id : null;
         if (!messageId) continue;
         const firstTrailingIndex = lastStoredPartIndex(message.parts) + 1;
-        for (
-            let partIndex = firstTrailingIndex;
-            partIndex < message.parts.length;
-            partIndex += 1
-        ) {
+        for (let partIndex = firstTrailingIndex; partIndex < message.parts.length; partIndex += 1) {
             const part = message.parts[partIndex];
             if (!isTextPart(part) || !isForeignTextPart(part)) continue;
             const contentId = `${messageId}:p${partIndex}`;

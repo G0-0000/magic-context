@@ -23,7 +23,9 @@ interface ForeignMessageLike {
 
 function hasStringId(part: unknown): boolean {
     return (
-        part !== null && typeof part === "object" && typeof (part as { id?: unknown }).id === "string"
+        part !== null &&
+        typeof part === "object" &&
+        typeof (part as { id?: unknown }).id === "string"
     );
 }
 

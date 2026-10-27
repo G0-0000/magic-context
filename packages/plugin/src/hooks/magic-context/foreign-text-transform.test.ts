@@ -7,7 +7,11 @@ import { join } from "node:path";
 
 import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
-import { closeDatabase, getTagsBySession, openDatabase } from "../../features/magic-context/storage";
+import {
+    closeDatabase,
+    getTagsBySession,
+    openDatabase,
+} from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { __test as transformDecisionTest } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
@@ -84,13 +88,13 @@ it("an OpenCode 1 defer pass serves another plugin's appended marker as that plu
         return user.parts.map((part) => part.text);
     };
 
-    const first = await pass("<cortexkit-internal-effort-anchor-v1 digest=\"a\"/>");
-    const second = await pass("<cortexkit-internal-effort-anchor-v1 digest=\"b\"/>");
+    const first = await pass('<cortexkit-internal-effort-anchor-v1 digest="a"/>');
+    const second = await pass('<cortexkit-internal-effort-anchor-v1 digest="b"/>');
 
     expect(first?.[0]).toStartWith("§1§ ");
-    expect(first?.[1]).toBe("<cortexkit-internal-effort-anchor-v1 digest=\"a\"/>");
+    expect(first?.[1]).toBe('<cortexkit-internal-effort-anchor-v1 digest="a"/>');
     expect(second?.[0]).toBe(first?.[0]);
-    expect(second?.[1]).toBe("<cortexkit-internal-effort-anchor-v1 digest=\"b\"/>");
+    expect(second?.[1]).toBe('<cortexkit-internal-effort-anchor-v1 digest="b"/>');
     expect(getTagsBySession(db, sessionId).some((tag) => tag.messageId === "m-user:p1")).toBe(
         false,
     );
