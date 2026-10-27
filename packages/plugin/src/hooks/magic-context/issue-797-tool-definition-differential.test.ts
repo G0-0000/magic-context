@@ -478,7 +478,8 @@ for (const host of ["opencode1", "opencode2"] as const) {
                             resetLkgSlotsForTest();
                             warm = buildWarm();
                             unknownUsage = true;
-                            // A restart often meets a priced pass: a /ctx-flush here.
+                            // Half the restarts queue a /ctx-flush, so the first pass after
+                            // them may rewrite the cached prefix and size the request.
                             if (random() < 0.5) pendingOrigins.push("user_flush");
                             counts.restarts++;
                         } else if (random() < 0.08) unknownUsage = true;

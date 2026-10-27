@@ -14,7 +14,8 @@
  * the request from its local count, which includes the tool-definition total.
  * With the 74 rows counted that count is past the 95% emergency line; counting
  * only the tools the request carries it stays near 60%, so no emergency drop
- * runs. The stored rows of the retired tools are deleted once the route flies.
+ * runs. The stored rows of the retired tools are deleted by the first request
+ * after the restart, once it has measured the tools it carries.
  * OpenCode 2 reads the session's last usage from its own store before the
  * transform, so its first pass has a reading and does not size from the count;
  * there the case checks that the stored set becomes exactly the request's tools.
@@ -226,7 +227,8 @@ async function runCase(host: Parameters<typeof createScenarioHarness>[0]) {
             expect(bootReading).toBeLessThan(FORCE_BAND);
         }
         expect(summary.emergencyLines).toEqual([]);
-        // The retired tools' rows are gone once the route flew; the request's own stay.
+        // After the first request following the restart, the retired tools' rows
+        // are gone and the rows of the request's own tools remain.
         expect(summary.retiredRowsAfterBoot).toBe(0);
         expect(rowsAfterBoot.length).toBeGreaterThan(0);
     } finally {
