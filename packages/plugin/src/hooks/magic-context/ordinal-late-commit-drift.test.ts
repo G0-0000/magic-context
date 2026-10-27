@@ -144,8 +144,9 @@ test("a message written after a later-created one keeps warm ordinals one short"
             };
         });
         // A new connection (an OpenCode restart) counts the whole session again.
-        // The historian's next chunk starts after the stored end ordinal, which
-        // now names the message the previous chunk recorded as its last one.
+        // The historian resumes at the stored end ordinal + 1. That end was one
+        // short, so after the recount ordinal end + 1 is the previous chunk's
+        // own last message, which would be summarized a second time.
         closeReadOnlySessionDb();
         const restarted = await withReadOnlySessionDb(async (reader) => {
             expect(await prewarmRawSessionOrdinalsForDb(reader, SESSION)).toBe("warm");
