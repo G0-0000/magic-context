@@ -81,8 +81,9 @@ function wellFormed(text: string): string {
  * - redacted thinking under dropAllThinking or droppedThinkingBlocks, or
  *   with blank data (6024-6030 / 6221-6227 / 6398-6404);
  * - block types it has no branch for, such as images.
- * It sends tool calls (6040 / 6237 / 6414) and server-tool blocks (6031 /
- * 6228 / 6405) unchanged, and drops the whole assistant when nothing is left
+ * It always sends tool calls as tool_use blocks (6040 / 6237 / 6414) and
+ * server-tool blocks as they are (6031 / 6228 / 6405), and drops the whole
+ * assistant when nothing is left
  * (`if (blocks.length === 0) continue;` at 6088 / 6285 / 6462). 18.13.0 may
  * prepend a placeholder thinking block (6479-6481), but only after that check.
  * Before the converter, transformMessages (identical in the three versions)
@@ -94,8 +95,9 @@ function wellFormed(text: string): string {
  * depend on the request, the credential and the model catalog, so an
  * assistant whose only possible survivors are thinking blocks is "optional".
  * A fallback block survives only on requests that opt into server-side
- * fallback (collapseFallbackSegments at 5744 / 5915 / 6063); an assistant whose
- * only possible survivor is a fallback block keeps counting as "kept".
+ * fallback (collapseFallbackSegments at 5744 / 5915 / 6063), so an assistant
+ * whose only possible survivor is a fallback block can also be absent. That
+ * shape is not modelled: it is classified "kept", as it was before.
  *
  * Plain Pi (@earendil-works/pi-ai dist/api/anthropic-messages.js, assistant
  * branch at 0.87.1:1019-1078 and 1.3.0:1123-1182) also skips text whose

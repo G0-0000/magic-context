@@ -285,7 +285,7 @@ for (const { version, convert } of converters) {
 					totals.negatives++;
 				}
 			}
-			// Negative: add an extra assistant before the final request.
+			// Negative: add an extra assistant before the final wire row.
 			const extra = [
 				...wire.slice(0, -1),
 				{ role: "assistant", content: [{ type: "text", text: "extra" }] },

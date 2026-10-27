@@ -11,7 +11,8 @@ import {
 // whose content is one empty text block. OMP's Anthropic converter skips the
 // blank text and then the whole message, so the wire has one row fewer than
 // the dispatch check expected and every later pass refused. These tests
-// replay the reporter's two sessions through the real 18.13.0 converter.
+// rebuild the two session shapes reported in the issue (one and two such
+// turns) and encode them with the real 18.13.0 converter.
 
 const require = createRequire(import.meta.url);
 
@@ -296,8 +297,9 @@ test("issue 794: Plain Pi drops a whitespace-only finished assistant", () => {
 	clock = 0;
 	const blank = { ...answer(" "), stopReason: "stop" };
 	expect(piAnthropicAssistantReplay(blank, model, "pi")).toBe("dropped");
-	// Pi's replay pass already omits aborted turns, and a thinking turn whose
-	// handling differs between Pi versions keeps its row.
+	// Pi's replay pass already omits every errored or aborted turn, so only a
+	// finished blank turn reaches this rule. Pi 0.87.1 sends foreign nonblank
+	// thinking as text and 1.3.0 drops it, so the classifier keeps that row.
 	expect(
 		piAnthropicAssistantReplay(
 			{
@@ -315,7 +317,8 @@ test("issue 794: Plain Pi drops a whitespace-only finished assistant", () => {
 		"pi",
 	);
 	expect(prepared?.messages.map((row) => row.role)).toEqual(["user", "user"]);
-	// Other routes keep the row: only the Anthropic converter is modelled.
+	// The classifier models only the Anthropic converter and keeps every
+	// assistant on other APIs.
 	expect(
 		piAnthropicAssistantReplay(
 			abortedEmptyText(),

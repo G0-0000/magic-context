@@ -54,8 +54,9 @@ interface MessageStructure {
 	images?: readonly PiInputImage[];
 	/**
 	 * Set on an assistant the Anthropic converter may or may not send; see
-	 * piAnthropicAssistantReplay. When the row is sent, its wire content must
-	 * come from this thinking.
+	 * piAnthropicAssistantReplay. When the row is sent, each wire block must
+	 * come from this evidence (see piExplainsOptionalAssistant), or be the
+	 * converter's thinking placeholder.
 	 */
 	optionalThinking?: PiAnthropicOptionalThinking;
 }
