@@ -15,6 +15,7 @@ import {
 import { createTagger, type Tagger } from "../../features/magic-context/tagger";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database } from "../../shared/sqlite";
+import { cavemanCompress } from "./caveman";
 import {
     clearLegacyForeignTextTagsForTest,
     collectForeignTextParts,
@@ -53,7 +54,7 @@ function pass(
     db: DatabaseType,
     tagger: Tagger,
     parts: Record<string, unknown>[],
-    options: { foreign?: boolean } = {},
+    options: { foreign?: boolean; replaysCaveman?: boolean } = {},
 ): MessageLike {
     const message: MessageLike = {
         info: { id: "u", role: "user", sessionID: SESSION },
@@ -66,7 +67,12 @@ function pass(
         messages,
         tagger,
         db,
-        options.foreign === false ? {} : { foreignTextParts: collectForeignTextParts(messages) },
+        options.foreign === false
+            ? {}
+            : {
+                  foreignTextParts: collectForeignTextParts(messages),
+                  replaysCaveman: options.replaysCaveman,
+              },
     );
     result.batch.finalize();
     return message;
@@ -133,17 +139,43 @@ describe("a tag an older release put on the appended part", () => {
         expect(texts(back)).toEqual(["§1§ hello", "§2§ <marker a/>"]);
     });
 
-    it("serves a dropped or compressed legacy tag raw", () => {
-        for (const reduce of ["dropped", "caveman"] as const) {
+    it("keeps serving the drop placeholder for a legacy tag the old release dropped, whatever the marker says", () => {
+        const db = openTestDb();
+        const tagger = createTagger();
+        seedLegacy(db, tagger);
+        updateTagStatus(db, SESSION, 2, "dropped");
+
+        for (const marker of ["<marker a/>", "<marker b/>", "<marker a/>"]) {
+            const message = pass(db, tagger, [stored("prt_1", "hello"), appended(marker)]);
+            expect(texts(message)).toEqual(["§1§ hello", "[dropped §2§]"]);
+        }
+        expect(getTagById(db, SESSION, 2)?.status).toBe("dropped");
+    });
+
+    it("serves a compressed legacy tag's caveman bytes while the marker is unchanged, and the prefix on a changed one", () => {
+        const marker =
+            "<marker>The quick brown fox is really just very quickly jumping over the extremely lazy dog.</marker>";
+        const changed = `${marker} again`;
+        for (const replaysCaveman of [true, false]) {
             const db = openTestDb();
             const tagger = createTagger();
-            seedLegacy(db, tagger);
-            if (reduce === "dropped") updateTagStatus(db, SESSION, 2, "dropped");
-            else updateCavemanDepth(db, SESSION, 2, 1);
+            seedLegacy(db, tagger, marker);
+            updateCavemanDepth(db, SESSION, 2, 1);
 
-            const message = pass(db, tagger, [stored("prt_1", "hello"), appended("<marker a/>")]);
+            const same = pass(db, tagger, [stored("prt_1", "hello"), appended(marker)], {
+                replaysCaveman,
+            });
+            const moved = pass(db, tagger, [stored("prt_1", "hello"), appended(changed)], {
+                replaysCaveman,
+            });
 
-            expect(texts(message)).toEqual(["§1§ hello", "<marker a/>"]);
+            // A fresh session is on the original caveman rules, which the old
+            // replay served without a prefix. Without replay the old release
+            // served the prefixed saved copy.
+            const compressed = cavemanCompress(marker, "lite", "ascii-v1");
+            expect(compressed).not.toBe(marker);
+            expect(texts(same)[1]).toBe(replaysCaveman ? compressed : `§2§ ${marker}`);
+            expect(texts(moved)[1]).toBe(`§2§ ${changed}`);
         }
     });
 

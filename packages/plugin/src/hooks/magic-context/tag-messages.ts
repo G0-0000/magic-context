@@ -5,6 +5,10 @@ import {
     saveSourceContent,
 } from "../../features/magic-context/storage";
 import {
+    type CavemanReplayState,
+    getCavemanReplayState,
+} from "../../features/magic-context/storage-caveman-rules";
+import {
     adoptNullOwnerToolTag,
     getCandidateToolOwners,
     getInertWhitespaceAssistantTags,
@@ -18,8 +22,11 @@ import {
     updateTagTokenCount,
 } from "../../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
+import type { TagEntry } from "../../features/magic-context/types";
 import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
+import { buildReplacementContent } from "./apply-operations";
+import { cavemanReplayText } from "./caveman-cleanup";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import {
     discardPendingOpForForeignTag,
@@ -385,8 +392,54 @@ export interface TagMessagesResult {
 
 interface LegacyForeignTextTag {
     tagNumber: number;
-    /** False when the tag was dropped or caveman-compressed: serve the part raw. */
-    prefixed: boolean;
+    status: TagEntry["status"];
+    cavemanDepth: number;
+    /** The saved copy, read only for a compressed tag whose replay depends on it. */
+    savedText?: string;
+}
+
+/**
+ * The bytes the previous release served for a legacy foreign tag, while the
+ * other plugin's text is unchanged. That release restored the saved copy,
+ * prefixed it, then replaced it with `[dropped §N§]` for a dropped tag or
+ * with its caveman form for a compressed one (both only where the part was
+ * not past a partial compartment's end). A compressed tag whose text the
+ * other plugin has since changed gets the prefix on the current text instead:
+ * replaying the saved copy is the bug this rule fixes.
+ */
+function serveLegacyForeignText(
+    legacy: LegacyForeignTextTag,
+    current: string,
+    options: {
+        skipPrefixInjection: boolean;
+        pastPartialEnd: boolean;
+        caveman: CavemanReplayState | null;
+    },
+): { text: string; dropsReasoning: boolean } {
+    const prefixed = options.skipPrefixInjection ? current : prependTag(legacy.tagNumber, current);
+    if (options.pastPartialEnd) return { text: prefixed, dropsReasoning: false };
+    if (legacy.status === "dropped") {
+        return { text: buildReplacementContent(legacy.tagNumber), dropsReasoning: true };
+    }
+    const unchanged =
+        legacy.savedText !== undefined && stripTagPrefix(current) === legacy.savedText;
+    if (
+        legacy.status === "active" &&
+        legacy.cavemanDepth > 0 &&
+        options.caveman &&
+        unchanged &&
+        legacy.savedText
+    ) {
+        const replayed = cavemanReplayText(
+            legacy.tagNumber,
+            legacy.savedText,
+            legacy.cavemanDepth,
+            options.caveman,
+            options.skipPrefixInjection ? "" : prependTag(legacy.tagNumber, ""),
+        );
+        if (replayed) return replayed;
+    }
+    return { text: prefixed, dropsReasoning: false };
 }
 
 /**
@@ -423,7 +476,8 @@ function findLegacyForeignTextTags(
             if (tag?.type !== "message") continue;
             legacy.set(part, {
                 tagNumber,
-                prefixed: tag.status !== "dropped" && tag.cavemanDepth === 0,
+                status: tag.status,
+                cavemanDepth: tag.cavemanDepth,
             });
         }
     }
@@ -431,6 +485,17 @@ function findLegacyForeignTextTags(
         const tagNumbers = [...legacy.values()].map((entry) => entry.tagNumber);
         rememberLegacyForeignTextTags(sessionId, tagNumbers);
         for (const tagNumber of tagNumbers) discardPendingOpForForeignTag(db, sessionId, tagNumber);
+        const compressed = [...legacy.values()].filter(
+            (entry) => entry.status === "active" && entry.cavemanDepth > 0,
+        );
+        if (compressed.length > 0) {
+            const saved = getSourceContents(
+                db,
+                sessionId,
+                compressed.map((entry) => entry.tagNumber),
+            );
+            for (const entry of compressed) entry.savedText = saved.get(entry.tagNumber);
+        }
     }
     return legacy;
 }
@@ -584,10 +649,16 @@ export interface TagMessagesOptions {
      * OpenCode 1 only: text parts another plugin appended to stored messages
      * (see `collectForeignTextParts`). They are never tagged, saved, restored,
      * prefixed or targeted. A part that an older release already tagged keeps
-     * only that tag's prefix, on its current text, so its served bytes stay
-     * as they were while the other plugin's text is unchanged.
+     * serving what that release served for the tag (see serveLegacyForeignText).
      */
     foreignTextParts?: ForeignTextParts;
+    /**
+     * Whether this pass replays persisted caveman compression. The caller sets
+     * it with the same gate as its `replayCavemanCompression` call, so a legacy
+     * foreign tag is served compressed exactly when that replay would have
+     * compressed it.
+     */
+    replaysCaveman?: boolean;
     /** @internal diagnostic hook used by cache-stability/perf tests. */
     onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
@@ -691,12 +762,18 @@ export function tagMessages(
     const legacyForeignTagNumbers = new Set(
         [...legacyForeignTags.values()].map((legacy) => legacy.tagNumber),
     );
+    // Read once, and only when a compressed legacy foreign tag is on the wire.
+    let cavemanState: CavemanReplayState | null | undefined;
+    const legacyCavemanState = (): CavemanReplayState | null => {
+        cavemanState ??= options.replaysCaveman ? getCavemanReplayState(db, sessionId) : null;
+        return cavemanState;
+    };
     const tGetSourceContents = performance.now();
     const sourceContents = getSourceContents(
         db,
         sessionId,
         // A legacy foreign tag's saved copy is the other plugin's old text;
-        // nothing may ever serve it again.
+        // it is never restored over the current text.
         collectRelevantSourceTagIds(messages, assignments).filter(
             (tagNumber) => !legacyForeignTagNumbers.has(tagNumber),
         ),
@@ -920,13 +997,33 @@ export function tagMessages(
                 // Another plugin's part: serve its current text. It never takes
                 // a tag, a saved copy, a target or a text ordinal, so stored
                 // parts keep their ordinals wherever the plugin put it. A tag an
-                // older release gave this position keeps replaying its prefix on
-                // the current text (byte-identical while the text is unchanged);
-                // a dropped or compressed one is served raw, since that plugin
-                // already refused those requests.
+                // older release gave this position keeps serving what that
+                // release served (its prefix, its drop placeholder or its
+                // caveman form) while the plugin's text is unchanged; see
+                // serveLegacyForeignText.
                 const legacy = legacyForeignTags.get(part);
-                if (legacy?.prefixed && !skipPrefixInjection) {
-                    part.text = prependTag(legacy.tagNumber, part.text);
+                if (legacy) {
+                    const partialEnd = getPartialEnds().get(messageId);
+                    const served = serveLegacyForeignText(legacy, part.text, {
+                        skipPrefixInjection,
+                        pastPartialEnd: partialEnd !== undefined && partIndex > partialEnd,
+                        caveman: legacy.cavemanDepth > 0 ? legacyCavemanState() : null,
+                    });
+                    part.text = served.text;
+                    // The previous release wrote these bytes through the text
+                    // target, whose non-reasoning-keeping writes also take the
+                    // message's reasoning off the wire.
+                    if (served.dropsReasoning) {
+                        for (const thinkingPart of messageThinkingParts) {
+                            if (protectedThinkingParts.has(thinkingPart)) continue;
+                            if (
+                                partialEnd !== undefined &&
+                                message.parts.indexOf(thinkingPart) > partialEnd
+                            )
+                                continue;
+                            neutralizeDroppedReasoningPart(thinkingPart);
+                        }
+                    }
                 }
                 continue;
             }

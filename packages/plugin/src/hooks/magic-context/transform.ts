@@ -2492,6 +2492,10 @@ export function createTransform(deps: TransformDeps) {
             logTransformTiming(sessionId, "injectTemporalMarkers", tTemporal);
         }
 
+        // One gate for persisted caveman replay, shared with the tagger so a legacy
+        // foreign tag is served compressed exactly when the replay below runs.
+        const replaysCaveman =
+            !reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled === true;
         let taggingSucceeded = false;
         let recoveryBatch: { finalize: () => void } | null = null;
         let recoveryNormalized = false;
@@ -2513,6 +2517,7 @@ export function createTransform(deps: TransformDeps) {
                       normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                       refreshSourceContents: deps.refreshSourceContents?.(sessionId),
                       foreignTextParts,
+                      replaysCaveman,
                   });
                   for (const [number, target] of tagged.targets) targets.set(number, target);
                   for (const [message, parts] of tagged.reasoningByMessage)
@@ -2579,6 +2584,7 @@ export function createTransform(deps: TransformDeps) {
                         normalizeRestoredAssistantText: deps.normalizeRestoredAssistantText,
                         refreshSourceContents: deps.refreshSourceContents?.(sessionId),
                         foreignTextParts,
+                        replaysCaveman,
                     },
                 );
                 targets = result.targets;
@@ -2704,7 +2710,7 @@ export function createTransform(deps: TransformDeps) {
         // caveman compression even when no new cleanup is allowed. Replay it before
         // inline-reasoning removal: compression would otherwise bring back thinking
         // that an earlier request removed. Fresh cleanup uses the same ordering.
-        if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
+        if (replaysCaveman) {
             const tCavemanReplay = performance.now();
             const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
             if (replayedCaveman > 0) {
