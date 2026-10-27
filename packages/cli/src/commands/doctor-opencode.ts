@@ -89,7 +89,7 @@ import {
 } from "../lib/opencode-helpers";
 import {
     describeUnusedOpenCodePluginCache,
-    getOpenCodePluginInstallRoots,
+    getOpenCodeLoadedPluginInstallRoots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
 } from "../lib/opencode-plugin-cache";
@@ -753,8 +753,8 @@ export async function runIssueFlow(
 // bundle when the native addon is absent. Verify both lanes so a loadable
 // onnxruntime-web package cannot hide a missing persistence-capable bundle.
 // Shared by the explicit-`local` branch and the no-config/default-provider path.
-// `installRoots` are the installed plugin copies to inspect, most likely first
-// (`getOpenCodePluginInstallRoots`).
+// `installRoots` are the alternative locations of the one plugin copy the host
+// loads (`getOpenCodeLoadedPluginInstallRoots`).
 function checkLocalEmbeddingRuntimeForDoctor(
     installRoots: string[],
     runtimePreference: LocalEmbeddingRuntime = "auto",
@@ -1939,11 +1939,22 @@ export async function runDoctor(
                 unknown
             >;
     } catch {
-        // Unreadable config: look in every slot, `latest` first.
+        // Unreadable config: the host loads the `latest` slot.
     }
+    // Only the copy the host loads can break local embeddings, so only that
+    // copy is checked; a healthy copy elsewhere must not hide a broken one.
+    const embeddingInstalls = getOpenCodeLoadedPluginInstallRoots(
+        hostGeneration,
+        embeddingHostConfig,
+    );
+    const unusedInstalls = embeddingInstalls.others.filter((root) => existsSync(root));
+    if (unusedInstalls.length > 0)
+        log.info(
+            `Local embedding runtime: checked only the copy ${hostGeneration === "v2" ? "OpenCode 2" : "OpenCode 1"} loads; other installed copies (not loaded, not checked): ${unusedInstalls.join(", ")}`,
+        );
     const embeddingCheck = await checkEmbeddingConfig(
         paths.magicContextConfig,
-        getOpenCodePluginInstallRoots(hostGeneration, embeddingHostConfig),
+        embeddingInstalls.loaded,
     );
     issues += embeddingCheck.issues;
     if (embeddingCheck.issues > 0) failCount += embeddingCheck.issues;
