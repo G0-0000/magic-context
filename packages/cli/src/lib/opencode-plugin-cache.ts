@@ -232,6 +232,41 @@ export function getOpenCodePluginInstallRoots(
     return hostGeneration === "v2" ? [...v2, ...v1] : [...v1, ...v2];
 }
 
+/**
+ * The installed copy of Magic Context the host actually loads, and every other
+ * copy on disk. On OpenCode 2 the loaded copy is the newest install generation
+ * of the configured spec's slot (none when that slot is not installed); on
+ * OpenCode 1 it is the `packages/` tree, whose two root names belong to
+ * different OpenCode 1 versions of one install. Checks that describe the
+ * running plugin, such as the local embedding runtime, must look only at
+ * `loaded`: a healthy copy the host never reads cannot stand in for a broken
+ * loaded one. `others` are listed for information only.
+ */
+export function getOpenCodeLoadedPluginInstallRoots(
+    hostGeneration: OpenCodeHostGeneration,
+    config?: Record<string, unknown> | null,
+    npmCacheDir = getOpenCodeV2NpmCacheDir(),
+    platform: NodeJS.Platform = process.platform,
+): { loaded: string[]; others: string[] } {
+    let loaded: string[];
+    if (hostGeneration === "v2") {
+        const configured = openCodeV2SlotSpec(readConfiguredOpenCodePluginSpec(config), platform);
+        const generation = getOpenCodeV2ActiveGeneration(
+            getOpenCodeV2PluginCacheSlot(npmCacheDir, configured),
+        );
+        loaded = generation === undefined ? [] : [generation];
+    } else {
+        loaded = getOpenCodePluginCacheRoots();
+    }
+    const others = getOpenCodePluginInstallRoots(
+        hostGeneration,
+        config,
+        npmCacheDir,
+        platform,
+    ).filter((root) => !loaded.includes(root));
+    return { loaded, others };
+}
+
 /** Version of the Magic Context package OpenCode 2 would load from `slot`, if readable. */
 export function readOpenCodeV2CachedPluginVersion(slot: string): string | undefined {
     const generation = getOpenCodeV2ActiveGeneration(slot);
