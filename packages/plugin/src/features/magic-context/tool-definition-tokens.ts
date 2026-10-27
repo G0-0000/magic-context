@@ -8,10 +8,12 @@
  * tokenizer used everywhere else in the plugin and stored per tool under a
  * `${providerID}/${modelID}/${agentName}` route key.
  *
- * What a total counts: only the tools of the current request. A tool the
- * host stopped offering, a tool measured in an earlier process, or a tool
- * another session was offered must not add to it. How the current request's
- * tools are known depends on the host:
+ * What a total counts: the tools of the current request. A tool the host
+ * stopped offering, a tool measured in an earlier process, or a tool another
+ * session was offered must not add to it. How the current request's tools are
+ * known depends on the host (OpenCode 1 approximates the set, see below, and
+ * until a route's first live measurement after a restart its stored rows stand
+ * in for it):
  *
  * - OpenCode 1 fires its `tool.definition` hook once per tool per
  *   `ToolRegistry.tools()` call (once per request, all tools at once, before
@@ -462,8 +464,8 @@ export function recordToolDefinitionSet(
  * Tool names alone identify the prefix change this marker explains. Schema
  * fingerprints remain necessary for measurement de-duplication, but including
  * them here would add cost without improving cache-bust attribution. An empty
- * string means the route has not reported any tool definitions, not an empty
- * provider `tools` array.
+ * string is returned both before any measurement and for a request that
+ * carried no tools; it does not tell those cases apart.
  */
 export function getCurrentToolSetHash(
     providerID: string,
@@ -504,8 +506,9 @@ export function getMeasuredToolDefinitionTokens(
 }
 
 /**
- * The tool definitions `sessionId`'s last measured request carried, on
- * whatever route it flew. For a session whose current route has no
+ * The tool-definition total of the route `sessionId` last flew: on OpenCode 2
+ * the exact set of that session's last request, on OpenCode 1 the route's
+ * recent-flight total. For a session whose current route has no
  * measurement yet (for example right after a model switch), this is the best
  * evidence of the tools it is offered; undefined when the session never had
  * its tools measured.
@@ -517,14 +520,6 @@ export function getSessionToolDefinitionTokens(sessionId: string | undefined): n
     if (flight.exact) return flight.exact.total;
     const route = routes.get(flight.key);
     return route ? summarize(currentTools(route)).total : undefined;
-}
-
-/** The largest current tool set of any route, for routes with no measurement. */
-export function getLargestMeasuredToolDefinitionTokens(): number | undefined {
-    let largest = 0;
-    for (const route of routes.values())
-        largest = Math.max(largest, summarize(currentTools(route)).total);
-    return largest > 0 ? largest : undefined;
 }
 
 /** Test helper: reset the store so suites don't leak measurements. */

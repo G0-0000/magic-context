@@ -1724,6 +1724,7 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: runNotificationParams(sessionId)?.agent,
+                    sessionId,
                 });
                 // The history alone, unscaled: system prompt and tool
                 // definitions are not something this pass can reduce, and the
@@ -2970,6 +2971,7 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
+                    sessionId,
                 });
             } catch (error) {
                 sessionLog(
@@ -3242,6 +3244,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                         systemPromptHash: sessionMeta.systemPromptHash,
                     },
                     boundaryContextLimit,
@@ -3274,6 +3277,7 @@ export function createTransform(deps: TransformDeps) {
                               providerID: modelForBudget?.providerID,
                               modelID: modelForBudget?.modelID,
                               agentName: notificationParams.agent,
+                              sessionId,
                               systemPromptHash: sessionMeta.systemPromptHash,
                           },
                           boundaryContextLimit,
@@ -3351,6 +3355,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                     });
                 if (untrimmed.tokens > boundaryContextLimit) {
                     sessionLog(
@@ -3375,12 +3380,13 @@ export function createTransform(deps: TransformDeps) {
                     providerID: modelForBudget?.providerID,
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
+                    sessionId,
                 });
                 // Count the request the way it will really go out: system
                 // prompt, history and this route's measured tool definitions,
                 // unscaled. When the route's tool definitions are not measured
-                // yet, the estimate's figure is an upper envelope (the largest
-                // tool set seen on any route, scaled up), which would refuse
+                // yet, the estimate's figure is an upper envelope (the tool set
+                // this session last sent, scaled up), which would refuse
                 // a request that fits and keep the session flagged; leave it
                 // out then, as the entry check does. The system prompt and
                 // history stay in, so a carried session whose host-cut history
@@ -3540,6 +3546,7 @@ export function createTransform(deps: TransformDeps) {
                         providerID: modelForBudget?.providerID,
                         modelID: modelForBudget?.modelID,
                         agentName: notificationParams.agent,
+                        sessionId,
                     });
                 } catch (error) {
                     sessionLog(sessionId, "degraded pass size guard could not estimate:", error);
@@ -3958,6 +3965,7 @@ export function createTransform(deps: TransformDeps) {
                 providerID: modelForBudget?.providerID,
                 modelID: modelForBudget?.modelID,
                 agentName: notificationParams.agent,
+                sessionId,
                 systemPromptHash: sessionMeta.systemPromptHash,
             });
     };

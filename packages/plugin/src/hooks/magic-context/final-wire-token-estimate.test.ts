@@ -3,7 +3,7 @@ import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     __resetToolDefinitionMeasurements,
-    getLargestMeasuredToolDefinitionTokens,
+    getSessionToolDefinitionTokens,
     loadToolDefinitionMeasurements,
     recordToolDefinition,
     setDatabase,
@@ -64,7 +64,8 @@ it("uncertain refusal bounds pathological text without changing shared tokenizat
 });
 
 it("borrowed tool definitions and family fallback are admission-only even on complete over-limit envelopes", () => {
-    recordToolDefinition("other", "route", "build", "probe", "word ".repeat(20000), {});
+    // The session's last request flew another route; this route is unmeasured.
+    recordToolDefinition("other", "route", "build", "probe", "word ".repeat(20000), {}, "session");
     const messages = [toolMessage("word ".repeat(20000))];
     const borrowed = estimateFinalWireInputTokens({
         messages,
@@ -72,6 +73,7 @@ it("borrowed tool definitions and family fallback are admission-only even on com
         providerID: "anthropic",
         modelID: "claude-fable-5-1",
         agentName: "build",
+        sessionId: "session",
     });
     expect(borrowed.trusted).toBe(true);
     expect(borrowed.tokens).toBeGreaterThan(16000);
@@ -478,7 +480,15 @@ it("unknown-model fit inflates raw mass instead of admitting a locally-fitting r
     expect(result.trusted).toBe(true);
 });
 it("uses a conservative measured tool-definition envelope when the current model is unmeasured", () => {
-    recordToolDefinition("test-provider", "measured-model", "build", "read", "A".repeat(4000), {});
+    recordToolDefinition(
+        "test-provider",
+        "measured-model",
+        "build",
+        "read",
+        "A".repeat(4000),
+        {},
+        "switching-session",
+    );
     const result = estimateFinalWireInputTokens({
         messages: [
             {
@@ -490,11 +500,47 @@ it("uses a conservative measured tool-definition envelope when the current model
         providerID: "test-provider",
         modelID: "unmeasured-model",
         agentName: "build",
+        sessionId: "switching-session",
     });
     expect(result.trusted).toBe(true);
     expect(result.toolDefinitionTokens).toBeGreaterThanOrEqual(
-        2 * (getLargestMeasuredToolDefinitionTokens() ?? 0),
+        2 * (getSessionToolDefinitionTokens("switching-session") ?? 0),
     );
+});
+
+it("a route with no measurement never borrows another session's or the largest stored tool set", () => {
+    // Another session's request on another route carried a very large tool set.
+    recordToolDefinition(
+        "test-provider",
+        "measured-model",
+        "build",
+        "mcp_everything",
+        "word ".repeat(20_000),
+        {},
+        "other-session",
+    );
+    const request = {
+        messages: [
+            {
+                info: { id: "m", role: "user" },
+                parts: [{ type: "text", text: "hello" }],
+            } as MessageLike,
+        ],
+        systemPromptTokens: 10_000,
+        providerID: "test-provider",
+        modelID: "unmeasured-model",
+        agentName: "build",
+    };
+    for (const result of [
+        estimateFinalWireInputTokens({ ...request, sessionId: "new-session" }),
+        estimateFinalWireInputTokens(request),
+    ]) {
+        expect(result.toolDefinitionsMeasured).toBe(false);
+        expect(result.toolDefinitionTokens).toBeUndefined();
+        // Pressure counts the request's own content only.
+        expect(result.pressureTokens ?? 0).toBeLessThan(11_000);
+        expect(result.trusted).toBe(false);
+    }
 });
 
 it("unsupported nontext parts never produce a trusted fit estimate", () => {
