@@ -7475,7 +7475,9 @@ function spawnPiHistorianRun(args: {
 	boundarySnapshot:
 		| ProtectedTailBoundarySnapshot
 		| (() => ProtectedTailBoundarySnapshot | undefined);
-	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: (
+		stale: ProtectedTailBoundarySnapshot,
+	) => ProtectedTailBoundarySnapshot;
 	currentContextLimit: number;
 	fallbackModelId?: string;
 }): void {
@@ -7960,6 +7962,7 @@ function maybeFireHistorian(args: {
 	const unregister = setRawMessageProvider(sessionId, provider);
 	const resolvePiBoundarySnapshot = (
 		emergencyTailScale?: 0.5 | 0.25,
+		liftLivePromptFloor = false,
 	): ProtectedTailBoundarySnapshot =>
 		resolveProtectedTailBoundary(
 			resolveBoundaryContext({
@@ -7973,26 +7976,36 @@ function maybeFireHistorian(args: {
 				providerShapeVersion: "pi-folded-v1",
 				cacheNamespace: `pi:${sessionId}`,
 				emergencyTailScale,
+				liftLivePromptFloor,
 			}),
 		);
-	const resolveRunnablePiBoundarySnapshot =
-		(): ProtectedTailBoundarySnapshot => {
-			let snapshot = ensureRunnablePiBoundaryForTests(
-				resolvePiBoundarySnapshot(),
+	// `stale` is the snapshot a historian run is refreshing. Only a snapshot the
+	// trigger resolved with the one-pass live-prompt floor lift passes that lift
+	// on; every other caller (and the recovery paths, which pass nothing) keeps
+	// the floor.
+	const resolveRunnablePiBoundarySnapshot = (
+		stale?: ProtectedTailBoundarySnapshot,
+	): ProtectedTailBoundarySnapshot => {
+		const liftLivePromptFloor = stale?.liftLivePromptFloor === true;
+		let snapshot = ensureRunnablePiBoundaryForTests(
+			resolvePiBoundarySnapshot(undefined, liftLivePromptFloor),
+		);
+		// Derived band, not literal 80: under a raised execute threshold the
+		// emergency-scaled retry must not relax the boundary below the force
+		// band (same escalation class as the OpenCode trigger's force gate).
+		if (
+			!hasRunnableCompartmentWindow(snapshot) &&
+			usage.percentage >= historianForceMaterializationPercentage
+		) {
+			snapshot = ensureRunnablePiBoundaryForTests(
+				resolvePiBoundarySnapshot(
+					usage.percentage >= 95 ? 0.25 : 0.5,
+					liftLivePromptFloor,
+				),
 			);
-			// Derived band, not literal 80: under a raised execute threshold the
-			// emergency-scaled retry must not relax the boundary below the force
-			// band (same escalation class as the OpenCode trigger's force gate).
-			if (
-				!hasRunnableCompartmentWindow(snapshot) &&
-				usage.percentage >= historianForceMaterializationPercentage
-			) {
-				snapshot = ensureRunnablePiBoundaryForTests(
-					resolvePiBoundarySnapshot(usage.percentage >= 95 ? 0.25 : 0.5),
-				);
-			}
-			return snapshot;
-		};
+		}
+		return snapshot;
+	};
 	let boundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
 
 	let triggered = false;
