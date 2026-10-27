@@ -129,6 +129,12 @@ const GATED_VERSION: u8 = 3;
 /// `tool_held` pause reason; this reader skips record types it doesn't use and
 /// never reads pause reasons. `tool-schema-pins/v1` adds frozen `schema_pins`
 /// to the run's plan manifest; this reader never reads the manifest.
+/// `provider-fallback-block/v1` adds a `provider_fallback` message content
+/// part (a provider's server-side model handoff); this reader never reads
+/// message content. `refusal-fallback/v1` adds a `model_step_refused` record,
+/// which this reader skips, and optional `model_step_finished` members
+/// (`served_model`, `usage_iterations`, `route`, `refusal_fallback`,
+/// `refusal_after_tool_use`), which it ignores.
 const KNOWN_FEATURES: &[&str] = &[
     "flow-scopes/v1",
     "plan-manifest/v1",
@@ -170,6 +176,8 @@ const KNOWN_FEATURES: &[&str] = &[
     "provider-declarations/v1",
     "provider-held/v1",
     "tool-schema-pins/v1",
+    "provider-fallback-block/v1",
+    "refusal-fallback/v1",
 ];
 
 #[derive(serde::Deserialize)]
@@ -1917,6 +1925,8 @@ pub(crate) mod tests {
             "provider-declarations/v1",
             "provider-held/v1",
             "tool-schema-pins/v1",
+            "provider-fallback-block/v1",
+            "refusal-fallback/v1",
         ] {
             let bytes = wal_bytes(&[
                 json!({"requires": [feature], "record": run_started("r1", 1)}),
@@ -2108,6 +2118,46 @@ pub(crate) mod tests {
         ]);
         let runs = decode(&bytes).expect("tool-schema-pins/v1 run decodes");
         assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `provider-fallback-block/v1` puts a `provider_fallback` part in a
+    /// message's content. This reader never reads message content, so a step
+    /// whose assistant message carries one still counts.
+    #[test]
+    fn a_provider_fallback_block_run_keeps_its_steps() {
+        let mut finished = step_finished(1, usage(1, 2, 3, 4));
+        finished["assistant_message"]["content"] = json!([
+            {"type": "provider_fallback", "from_model": "claude-opus-5", "to_model": "claude-sonnet-5"},
+        ]);
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["provider-fallback-block/v1"], "record": finished}),
+        ]);
+        let runs = decode(&bytes).expect("provider-fallback-block/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+    }
+
+    /// `refusal-fallback/v1` writes a `model_step_refused` record, which this
+    /// reader skips, and adds optional members to `model_step_finished`, which
+    /// it ignores. The refused attempt adds no step; the finished one does,
+    /// with its usage.
+    #[test]
+    fn a_refusal_fallback_run_keeps_its_steps() {
+        let mut finished = step_finished(1, usage(1, 2, 3, 4));
+        finished["served_model"] = json!("claude-sonnet-5");
+        finished["usage_iterations"] = json!([]);
+        finished["route"] = json!("fallback");
+        finished["refusal_fallback"] = json!(true);
+        finished["refusal_after_tool_use"] = json!(false);
+        let bytes = wal_bytes(&[
+            json!(run_started("r1", 1)),
+            json!({"requires": ["refusal-fallback/v1"],
+                   "record": {"type": "model_step_refused", "step_id": 1}}),
+            json!({"requires": ["refusal-fallback/v1"], "record": finished}),
+        ]);
+        let runs = decode(&bytes).expect("refusal-fallback/v1 run decodes");
+        assert_eq!(step_ids(&runs), [("r1".to_string(), 1)]);
+        assert_eq!(runs[0].steps[0].usage.output_tokens, Some(4));
     }
 
     /// `structured-output-paragraph/v1` marks a structured-output run whose
