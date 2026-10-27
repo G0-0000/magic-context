@@ -954,6 +954,40 @@ export function readRawSessionMessageOrdinalById(
     );
 }
 
+/** The newest stored compartment boundary a historian chunk continues from. */
+export interface HistorianChunkStartBoundary {
+    endMessage: number;
+    endMessageId?: string | null;
+    endBlockIndex?: number | null;
+}
+
+/**
+ * Where the next historian chunk starts: the message after the newest
+ * compartment's end id, resolved through the host's own order. OpenCode 1
+ * and 2 answer the id lookup exactly (the serving-thread canonical read and
+ * the seq-based SQL read); Pi answers it from its branch walk. The stored
+ * `endMessage` number is only the fallback: when the id is no longer in the
+ * host's history (a revert retired or rewrote it) there is no position to
+ * resolve, so the run continues at the stored number exactly as before and
+ * the host's boundary repair decides what survives. A compartment that ends
+ * mid-message (`endBlockIndex` set) leaves that message's later blocks
+ * uncovered, so the chunk re-reads the end message itself instead of
+ * skipping past it.
+ */
+export function resolveHistorianChunkStart(
+    sessionId: string,
+    newest: HistorianChunkStartBoundary | null | undefined,
+): number {
+    if (!newest) return 1;
+    const fallback = newest.endMessage + 1;
+    const endId = newest.endMessageId;
+    if (typeof endId !== "string" || endId.length === 0) return fallback;
+    const ordinal = readRawSessionMessageOrdinalById(sessionId, endId);
+    if (typeof ordinal !== "number" || !Number.isFinite(ordinal) || ordinal < 1) return fallback;
+    if (newest.endBlockIndex !== null && newest.endBlockIndex !== undefined) return ordinal;
+    return ordinal + 1;
+}
+
 /** Store positions order persisted rows; raw ordinals number only messages selected for compression. */
 function readRawSessionMessageOrderPosition(sessionId: string, messageId: string): number | null {
     const provider = sessionProviders.get(sessionId)?.provider;

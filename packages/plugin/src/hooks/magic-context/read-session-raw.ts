@@ -1263,6 +1263,34 @@ const ordinalSummarySeeds = new WeakMap<
     Database,
     Map<string, { epoch: number; scan: RawSessionSummaryScan }>
 >();
+/**
+ * Whether the retained scan still counts the session's stored rows: the rows
+ * it knew plus the rows just read above its newest checkpoint must be every
+ * stored row. A late commit behind the checkpoint (or a deletion) alongside
+ * new rows breaks the equality; extending the retained ranks would then bake
+ * a one-short drift into every later number. The count reads the session
+ * index only, never message JSON, and it runs only while the extension is
+ * already reading new rows above the checkpoint — quiet passes do no new
+ * work, and an extension that reads nothing above the checkpoint (including
+ * the install-time check, where a behind-checkpoint summary insert must not
+ * disturb still-valid ranks) keeps its retained ranks.
+ */
+function sessionRowsAgreeWithStore(
+    db: Database,
+    sessionId: string,
+    scan: RawSessionSummaryScan,
+    newRows: number,
+): boolean {
+    const live = countStoredRawSessionRowsIndexed(db, sessionId);
+    return live === scan.sessionRows + newRows;
+}
+
+/** Drop retained ranks and warm-up seeds without touching the summary epoch. */
+function discardRetainedOrdinalRanks(db: Database, sessionId: string): void {
+    ordinalCheckpoints.get(db)?.delete(sessionId);
+    ordinalSummarySeeds.get(db)?.delete(sessionId);
+}
+
 const ORDINAL_LOOKUP_LIMIT = 512;
 
 function currentOrdinalCheckpoints(
@@ -1279,7 +1307,11 @@ function currentOrdinalCheckpoints(
     });
 }
 
-/** Retain prefix ranks across commits; OpenCode reverts remove only a suffix. */
+/** Retain prefix ranks across commits; OpenCode reverts remove only a suffix. A
+ * commit that lands behind the newest checkpoint (or deletes rows) breaks the
+ * stored-row agreement checked below; extending then would bake a one-short
+ * drift into every later number, so the retained ranks are dropped instead and
+ * the next warm-up scans from scratch. */
 function extendOrdinalCheckpoints(
     db: Database,
     sessionId: string,
@@ -1317,6 +1349,25 @@ function extendOrdinalCheckpoints(
     >;
     ordinalJsonRowsRead += rows.length;
     if (limit !== undefined && rows.length > limit) return false;
+    // The stored-row agreement above runs only while the extension already
+    // read new rows (or the capped-page early return above skipped it):
+    // with no new rows the retained ranks cannot have fallen behind, and a
+    // behind-checkpoint summary insert must not disturb them.
+    if (rows.length > 0 && !sessionRowsAgreeWithStore(db, sessionId, scan, rows.length)) {
+        // A commit landed behind the newest checkpoint (or deleted rows): the
+        // retained prefix ranks are short, and extending them would bake the
+        // drift into every later number. Drop them so the next warm-up scans
+        // from scratch, and report not-warm so callers defer and re-warm. The
+        // serving thread additionally bumps the summary epoch, rejecting a
+        // warm-up already in flight that was built from the drifted ranks. A
+        // worker never bumps it: its install carries the serving thread's
+        // epoch, and any install the bump would have rejected is caught by the
+        // next agreement check instead — the store necessarily changed after
+        // those ranks were taken.
+        discardRetainedOrdinalRanks(db, sessionId);
+        if (isMainThread) forgetRawSessionSummaryRows(sessionId);
+        return false;
+    }
     let total = scan.total ?? 0;
     // Only page boundaries and the current tail are retained, even after years
     // of one-message appends. The previous partial-page tail is redundant.
@@ -1353,6 +1404,22 @@ export function rawOrdinalSummarySeed(
         ...seed.scan,
         ids: [...new Set([...seed.scan.ids, ...(writtenSummaryIds.get(sessionId) ?? [])])],
     };
+}
+
+/**
+ * Drop this connection's retained ordinal ranks for a session after an exact
+ * read proved them wrong (a row committed behind the newest checkpoint is
+ * invisible to checkpoint extension, so every later rank is one short).
+ * Deleting both the serving ranks and the warm-up seed forces the next
+ * warm-up to scan the session from scratch instead of extending the drifted
+ * ranks. The epoch bump additionally rejects a warm-up that is already in
+ * flight but was built from those ranks, so only a post-drop full scan can
+ * install. Callers re-warm with {@link prewarmRawSessionOrdinalsForDb} (see
+ * raw-ordinal-warmup.ts) and read nothing until it reports warm.
+ */
+export function dropRawSessionOrdinalCheckpoints(db: Database, sessionId: string): void {
+    discardRetainedOrdinalRanks(db, sessionId);
+    forgetRawSessionSummaryRows(sessionId);
 }
 
 function boundedOrdinalPrefix(db: Database, sessionId: string, through: OrdinalKey | null): number {
@@ -1397,10 +1464,12 @@ export function scanRawSessionSummaryRows(
     previous?: RawSessionSummaryScan,
 ): RawSessionSummaryScan {
     return withReadSnapshot(db, () => {
-        if (previous?.checkpoints) {
-            extendOrdinalCheckpoints(db, sessionId, previous);
+        if (previous?.checkpoints && extendOrdinalCheckpoints(db, sessionId, previous)) {
             return previous;
         }
+        // A retained checkpoint the store has moved behind (a late commit or
+        // a deletion) is not extended: the full scan below rebuilds ranks
+        // from scratch instead of baking the drift in.
         if (previous) {
             const sessions = summaryCandidateSets.get(db) ?? new Map();
             sessions.set(sessionId, {

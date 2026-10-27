@@ -7514,9 +7514,6 @@ function spawnPiHistorianRun(args: {
 	boundarySnapshot:
 		| ProtectedTailBoundarySnapshot
 		| (() => ProtectedTailBoundarySnapshot | undefined);
-	refreshBoundarySnapshot?: (
-		stale: ProtectedTailBoundarySnapshot,
-	) => ProtectedTailBoundarySnapshot;
 	currentContextLimit: number;
 	fallbackModelId?: string;
 }): void {
@@ -7529,7 +7526,6 @@ function spawnPiHistorianRun(args: {
 		provider,
 		unregister,
 		boundarySnapshot,
-		refreshBoundarySnapshot,
 		currentContextLimit,
 		fallbackModelId,
 	} = args;
@@ -7602,7 +7598,6 @@ function spawnPiHistorianRun(args: {
 						return isSaneLimit(window) ? window : undefined;
 					},
 					boundarySnapshot: runBoundary,
-					refreshBoundarySnapshot,
 					currentContextLimit,
 					historianTimeoutMs: historian.timeoutMs,
 					temperature: historian.temperature,
@@ -8088,7 +8083,6 @@ function maybeFireHistorian(args: {
 				provider,
 				unregister,
 				boundarySnapshot: snapshot,
-				refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 				currentContextLimit: boundaryContextLimit,
 				fallbackModelId: modelKey,
 			});
@@ -8124,7 +8118,6 @@ function maybeFireHistorian(args: {
 					provider,
 					unregister,
 					boundarySnapshot: prepareRecoveryBoundary,
-					refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 					currentContextLimit: boundaryContextLimit,
 					fallbackModelId: modelKey,
 				});
@@ -8260,7 +8253,6 @@ function maybeFireHistorian(args: {
 					resolveRunnablePiBoundarySnapshot(),
 				triggerBoundarySnapshot: trigger.boundarySnapshot,
 			}),
-			refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 			currentContextLimit: boundaryContextLimit,
 			fallbackModelId: modelKey,
 		});

@@ -43,7 +43,7 @@ test("pi floor stall marks, holds, fires next pass and drains in one publication
 });
 
 for (const lifted of [true, false]) {
-	test(`pi stale-snapshot refresh ${lifted ? "keeps the trigger's floor lift and publishes" : "of an unlifted snapshot still clamps at the live prompt"}`, async () => {
+	test(`pi stale snapshot ${lifted ? "with the trigger floor lift still refuses to publish" : "of an unlifted snapshot still refuses to publish"}`, async () => {
 		const h = rideHarness(true, "floor");
 		const logSpy = spyOn(loggerModule, "sessionLog");
 		const validate = boundaryModule.validateBoundarySnapshot;
@@ -86,23 +86,32 @@ for (const lifted of [true, false]) {
 					"historian: refreshed stale protected-tail snapshot at run time",
 				),
 			);
-			const noop = lines.some((line) =>
+			const refused = lines.some((line) =>
 				line.includes(
-					"historian no-op: stale protected-tail snapshot (raw range fingerprint changed)",
+					"historian: refusing to publish over a stale protected-tail snapshot (was: raw range fingerprint changed)",
 				),
 			);
-			const compartments = getCompartments(h.db, h.id);
+			// A stale snapshot is never refreshed into a publishable boundary: the
+			// run ends without publishing, whatever the trigger had lifted.
+			expect(refreshed).toBe(false);
+			expect(refused).toBe(true);
+			expect(h.historianRuns).toBe(0);
+			expect(getCompartments(h.db, h.id)).toHaveLength(1);
+			// The next trigger retries from the current branch: with the live
+			// validation restored, the lifted snapshot publishes its head. (The
+			// fresh trigger re-grants the one-pass lift itself, so this liveness
+			// check only applies to the lifted half.)
 			if (lifted) {
-				expect(refreshed).toBe(true);
-				expect(noop).toBe(false);
+				validateSpy.mockRestore();
+				// The one-pass live-prompt floor lift fires every other pass: the
+				// next pass re-arms the mark, the one after consumes it and fires.
+				await h.pass(78);
+				await h.pass(79);
+				await h.finishHistorian();
 				expect(h.historianRuns).toBeGreaterThan(0);
+				const compartments = getCompartments(h.db, h.id);
 				expect(compartments).toHaveLength(2);
 				expect(compartments[1]?.startMessage).toBe(3);
-			} else {
-				expect(refreshed).toBe(false);
-				expect(noop).toBe(true);
-				expect(h.historianRuns).toBe(0);
-				expect(compartments).toHaveLength(1);
 			}
 		} finally {
 			await h.finishHistorian();
