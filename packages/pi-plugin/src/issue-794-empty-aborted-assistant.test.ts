@@ -293,6 +293,109 @@ test("issue 794: two readings of one optional turn refuse", () => {
 	);
 });
 
+test("foreign reasoning remains required as demoted text or native thinking", () => {
+	for (const replayUnsignedThinking of [false, true]) {
+		for (const signature of ["", "foreign-signature"]) {
+			const target = { ...model, compat: { replayUnsignedThinking } };
+			const messages = [
+				user("before"),
+				{
+					...thinkingOnly(signature, "foreign reasoning must survive"),
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5",
+				},
+				user("after"),
+			];
+			const prepared = piPreparedStructure(messages, target);
+			const wire = convert(structuredClone(messages), target, false, {});
+			expect(wire[1].role).toBe("assistant");
+			expect(wire[1].content).toEqual([
+				replayUnsignedThinking
+					? {
+							type: "thinking",
+							thinking: "foreign reasoning must survive",
+							signature: "",
+						}
+					: { type: "text", text: "foreign reasoning must survive" },
+			]);
+			expect(
+				piPreparedStructureMismatch({ messages: wire }, prepared),
+			).toBeUndefined();
+			expect(
+				piPreparedStructureMismatch(
+					{ messages: wire.filter((_, index) => index !== 1) },
+					prepared,
+				),
+			).toContain("comparison=");
+			const dropped = convert(structuredClone(messages), target, false, {
+				dropAllThinking: true,
+			});
+			// Preparation cannot see the effective per-attempt replay override.
+			// Refuse omitted foreign reasoning even when native replay permits
+			// the converter to drop it, rather than guess it was not required text.
+			expect(
+				piPreparedStructureMismatch({ messages: dropped }, prepared) !==
+					undefined,
+			).toBe(replayUnsignedThinking);
+		}
+	}
+});
+
+test("foreign blank signatures and foreign redacted thinking do not survive API conversion", () => {
+	for (const content of [
+		[{ type: "thinking", thinking: " ", thinkingSignature: "foreign-sig" }],
+		[{ type: "redactedThinking", data: "foreign-opaque" }],
+	]) {
+		const messages = [
+			user("before"),
+			{
+				...answer(""),
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-5",
+				content,
+			},
+			user("after"),
+		];
+		const wire = convert(structuredClone(messages), model, false, {});
+		expect(wire.map((row) => row.role)).toEqual(["user", "user"]);
+		expect(
+			piPreparedStructureMismatch(
+				{ messages: wire },
+				piPreparedStructure(messages, model),
+			),
+		).toBeUndefined();
+	}
+});
+
+test("only same-provider Anthropic thinking can make an assistant optional", () => {
+	for (const content of [
+		[{ type: "thinking", thinking: "foreign", thinkingSignature: "sig" }],
+		[{ type: "redactedThinking", data: "opaque" }],
+	]) {
+		expect(
+			piAnthropicAssistantReplay(
+				{ ...answer(""), content, provider: "other-provider" },
+				model,
+				"omp",
+			),
+		).toBe("kept");
+		expect(
+			piAnthropicAssistantReplay(
+				{ ...answer(""), content, model: "another-anthropic-model" },
+				model,
+				"omp",
+			),
+		).toBe("optional");
+	}
+	for (const api of ["openai-completions", "openai-responses", "custom-api"]) {
+		expect(
+			piAnthropicAssistantReplay(abortedEmptyText(), { ...model, api }, "omp"),
+		).toBe("kept");
+	}
+});
+
 test("issue 794: Plain Pi drops a whitespace-only finished assistant", () => {
 	clock = 0;
 	const blank = { ...answer(" "), stopReason: "stop" };

@@ -27,7 +27,8 @@ export function piOmitsTruncatedAssistant(
 /**
  * What the Anthropic Messages converter does with an assistant that the
  * host's replay pass kept (see piOmitsTruncatedAssistant):
- * - "kept": a block always reaches the wire, so the assistant row is sent.
+ * - "kept": a block can reach the wire and its omission is not established,
+ *   so the assistant row is required.
  * - "dropped": every block is always skipped, so the converter sends no row.
  * - "optional": the only blocks that could reach the wire are thinking or
  *   redacted thinking, and whether they do depends on request-time state the
@@ -93,7 +94,10 @@ function wellFormed(text: string): string {
  * drop thinking for another credential or deployment, or demote thinking to
  * text (:1022-1161). Those choices, dropAllThinking and droppedThinkingBlocks
  * depend on the request, the credential and the model catalog, so an
- * assistant whose only possible survivors are thinking blocks is "optional".
+ * assistant whose only possible survivors are thinking blocks from the same
+ * provider on this API is "optional". Foreign thinking is required when it
+ * could survive: it normally becomes text before the converter's thinking
+ * filters, and preparation cannot see per-attempt native-replay overrides.
  * A fallback block survives only on requests that opt into server-side
  * fallback (collapseFallbackSegments at 5744 / 5915 / 6063), so an assistant
  * whose only possible survivor is a fallback block can also be absent. That
@@ -147,12 +151,27 @@ export function piAnthropicAssistantReplay(
 				continue;
 			}
 			if (typeof block.thinking !== "string") return "kept";
+			if (message.api !== model.api) {
+				// Foreign nonblank reasoning normally becomes required text. Even
+				// with native replay enabled, refuse its omission rather than guess
+				// whether a per-attempt override demoted it before thinking drops.
+				if (nonblank(block.thinking)) return "kept";
+				continue;
+			}
+			if (
+				message.provider !== model.provider &&
+				(nonblank(block.thinking) || nonblank(block.thinkingSignature))
+			)
+				return "kept";
 			if (nonblank(block.thinking) || nonblank(block.thinkingSignature))
 				thinking = true;
 			continue;
 		}
 		if (host === "omp" && block.type === "redactedThinking") {
 			if (typeof block.data !== "string") return "kept";
+			if (message.api !== model.api) continue;
+			if (message.provider !== model.provider && nonblank(block.data))
+				return "kept";
 			if (nonblank(block.data)) thinking = true;
 			continue;
 		}

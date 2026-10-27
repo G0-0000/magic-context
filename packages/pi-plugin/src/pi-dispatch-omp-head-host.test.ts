@@ -89,6 +89,7 @@ const descriptors =
 	process.platform === "linux"
 		? execFileSync("lsof", ["-nP", "-p", String(process.pid)], {
 				encoding: "utf8",
+				windowsHide: true,
 			})
 		: "";
 for (const line of descriptors.split("\n")) {

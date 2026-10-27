@@ -12,9 +12,10 @@ import {
 // Randomized proof for issue 794: generated histories with blank, thinking-only
 // and aborted assistants are encoded by each pinned Oh My Pi version's real
 // Anthropic converter, with its request-time thinking options varied. The
-// dispatch check must admit every wire the converter produced, and must still
-// refuse the same wire with an always-sent assistant removed or an extra
-// assistant added.
+// dispatch check admits those wires except omitted foreign native reasoning:
+// preparation cannot see per-attempt replay overrides, so it refuses that
+// omission rather than guess the reasoning was not demoted to required text.
+// It also refuses an always-required assistant removed or an extra one added.
 
 const require = createRequire(import.meta.url);
 
@@ -208,8 +209,38 @@ function generate(seed: number): Case {
 function alwaysSent(message: Msg, model: Msg): boolean {
 	return (
 		message.role === "assistant" &&
-		piAnthropicAssistantReplay(message, model, "omp") === "kept" &&
-		!["aborted", "error", "length"].includes(String(message.stopReason))
+		!piOmitsTruncatedAssistant(message) &&
+		(message.content as Msg[]).some(
+			(block) =>
+				block.type === "toolCall" ||
+				(block.type === "text" && String(block.text).trim().length > 0) ||
+				(message.api !== model.api &&
+					block.type === "thinking" &&
+					String(block.thinking).trim().length > 0),
+		)
+	);
+}
+
+function omitsForeignNativeThinking({ messages, model, opts }: Case): boolean {
+	return (
+		(model.compat as Msg).replayUnsignedThinking === true &&
+		opts.dropAllThinking === true &&
+		messages.some(
+			(message) =>
+				message.role === "assistant" &&
+				message.api !== model.api &&
+				!piOmitsTruncatedAssistant(message) &&
+				(message.content as Msg[]).some(
+					(block) =>
+						block.type === "thinking" &&
+						String(block.thinking).trim().length > 0,
+				) &&
+				!(message.content as Msg[]).some(
+					(block) =>
+						block.type === "toolCall" ||
+						(block.type === "text" && String(block.text).trim().length > 0),
+				),
+		)
 	);
 }
 
@@ -223,6 +254,8 @@ for (const { version, convert } of converters) {
 			placeholder: 0,
 			padded: 0,
 			negatives: 0,
+			foreignNegatives: 0,
+			refusedForeignNative: 0,
 		};
 		for (let seed = 1; seed <= CASES; seed++) {
 			const { messages, model, opts } = generate(seed);
@@ -233,12 +266,17 @@ for (const { version, convert } of converters) {
 				{ messages: wire },
 				prepared,
 			);
+			totals.cases++;
+			if (omitsForeignNativeThinking({ messages, model, opts })) {
+				expect(mismatch).toContain("comparison=");
+				totals.refusedForeignNative++;
+				continue;
+			}
 			if (mismatch)
 				console.log(
 					`seed=${SEED} case=${seed} ${version} mismatch=${mismatch} opts=${JSON.stringify({ ...opts, droppedThinkingBlocks: opts.droppedThinkingBlocks ? [...(opts.droppedThinkingBlocks as Set<string>)] : undefined })} prepared=${JSON.stringify(prepared?.messages.map((row) => row.role))} wire=${JSON.stringify(wire)} history=${JSON.stringify(messages)}`,
 				);
 			expect(mismatch).toBeUndefined();
-			totals.cases++;
 			for (const message of messages)
 				if (
 					message.role === "assistant" &&
@@ -267,6 +305,11 @@ for (const { version, convert } of converters) {
 					(block) =>
 						block.type === "text" && String(block.text).trim().length > 0,
 				);
+				const thinking = content.find(
+					(block) =>
+						block.type === "thinking" &&
+						String(block.thinking).trim().length > 0,
+				);
 				const index = wire.findIndex(
 					(row) =>
 						row.role === "assistant" &&
@@ -274,7 +317,12 @@ for (const { version, convert } of converters) {
 						(row.content as Msg[]).some((block) =>
 							call
 								? block.type === "tool_use" && block.id === call.id
-								: block.type === "text" && block.text === text?.text,
+								: text
+									? block.type === "text" && block.text === text.text
+									: (block.type === "text" || block.type === "thinking") &&
+										String(block.text ?? block.thinking).includes(
+											String(thinking?.thinking).trim(),
+										),
 						),
 				);
 				if (index >= 0) {
@@ -283,6 +331,8 @@ for (const { version, convert } of converters) {
 						piPreparedStructureMismatch({ messages: missing }, prepared),
 					).toContain("comparison=");
 					totals.negatives++;
+					if (target.api !== model.api && !text && !call)
+						totals.foreignNegatives++;
 				}
 			}
 			// Negative: add an extra assistant before the final wire row.
@@ -298,6 +348,8 @@ for (const { version, convert } of converters) {
 		console.log(
 			`issue 794 randomized: OMP ${version} seed=${SEED} ${JSON.stringify(totals)}`,
 		);
+		expect(totals.foreignNegatives).toBeGreaterThan(0);
+		expect(totals.refusedForeignNative).toBeGreaterThan(0);
 		// The corpus must reach every case the fix is about.
 		expect(totals.dropped).toBeGreaterThan(100);
 		expect(totals.optional).toBeGreaterThan(50);
