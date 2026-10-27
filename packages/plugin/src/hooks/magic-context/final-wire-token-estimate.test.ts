@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { runMigrations } from "../../features/magic-context/migrations";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     __resetToolDefinitionMeasurements,
     getLargestMeasuredToolDefinitionTokens,
+    loadToolDefinitionMeasurements,
     recordToolDefinition,
+    setDatabase,
 } from "../../features/magic-context/tool-definition-tokens";
 import * as logger from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { outgoingContextRefusal } from "./emergency-fail-closed";
 import {
     createFinalWireUsageTracker,
@@ -142,6 +148,50 @@ it("OpenCode correlated provider usage wins over full-prefix estimates and rejec
         {},
     );
     expect(tracker.estimate("session", { messages, ...envelope }).refusalBasis).toBe("calibrated");
+});
+
+it("rows reloaded at startup stop disabling provider-measured evidence once the route flies", () => {
+    // Before a restart the route offered read and lsp. After it, the host
+    // offers only read: the reloaded lsp row, whose content this process never
+    // measured, must not keep every later request from reusing provider usage.
+    const route = { providerID: "anthropic", modelID: "claude-fable-5-1", agentName: "build" };
+    const db = new Database(":memory:");
+    try {
+        initializeDatabase(db);
+        runMigrations(db);
+        setDatabase(db);
+        for (const tool of ["read", "lsp"])
+            recordToolDefinition(route.providerID, route.modelID, route.agentName, tool, tool, {});
+        __resetToolDefinitionMeasurements();
+        loadToolDefinitionMeasurements(db);
+        setDatabase(db);
+        recordToolDefinition(route.providerID, route.modelID, route.agentName, "read", "read", {});
+        const tracker = createFinalWireUsageTracker();
+        const prefix = [
+            { info: { id: "input", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+        ] as MessageLike[];
+        const envelope = { systemPromptTokens: 100, systemPromptHash: "system-v1", ...route };
+        tracker.capture("restarted", { messages: prefix, ...envelope });
+        const reply = {
+            info: {
+                id: "reply",
+                role: "assistant",
+                parentID: "input",
+                ...route,
+                finish: "stop",
+                time: { completed: Date.now() + 1 },
+                tokens: { input: 100, cache: { read: 20, write: 10 } },
+            },
+            parts: [{ type: "text", text: "New reply" }],
+        } as unknown as MessageLike;
+        const measured = tracker.estimate("restarted", {
+            messages: [...prefix, reply],
+            ...envelope,
+        });
+        expect(measured.refusalBasis).toBe("provider-prefix");
+    } finally {
+        closeQuietly(db);
+    }
 });
 
 it("signed requests use exact provider-prefix fit and emit one estimate drift line", () => {

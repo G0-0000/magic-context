@@ -7,9 +7,12 @@ import {
     __resetToolDefinitionMeasurements,
     getCurrentToolSetHash,
     getMeasuredToolDefinitionTokens,
+    getSessionToolDefinitionTokens,
+    getToolDefinitionMeasurementSignature,
     getToolDefinitionSnapshot,
     loadToolDefinitionMeasurements,
     recordToolDefinition,
+    recordToolDefinitionSet,
     setDatabase,
 } from "./tool-definition-tokens";
 
@@ -140,6 +143,113 @@ describe("tool-definition-tokens", () => {
         expect(snapshot.length).toBe(2);
         expect(snapshot.every((s) => s.totalTokens > 0)).toBe(true);
         expect(snapshot.every((s) => s.toolCount === 1)).toBe(true);
+    });
+});
+
+describe("tool-definition-tokens current tool set", () => {
+    afterEach(() => {
+        __resetToolDefinitionMeasurements();
+    });
+
+    const fly = (tools: string[], sessionId?: string) => {
+        for (const id of tools)
+            recordToolDefinition("p", "m", "a", id, `${id} `.repeat(50), {}, sessionId);
+    };
+    const single = (id: string) => {
+        fly([id]);
+        const tokens = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+        __resetToolDefinitionMeasurements();
+        return tokens;
+    };
+
+    test("OpenCode 1: a tool the host stopped offering leaves the total two flights later", () => {
+        const read = single("read");
+        const lsp = single("lsp");
+        fly(["read", "lsp"]);
+        expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(read + lsp);
+        const withLsp = getCurrentToolSetHash("p", "m", "a");
+        fly(["read"]);
+        // The previous flight still counts: a read in the middle of a flight
+        // must not undercount the tools that flight has not fired yet.
+        expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(read + lsp);
+        fly(["read"]);
+        expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(read);
+        expect(getCurrentToolSetHash("p", "m", "a")).not.toBe(withLsp);
+        expect(getToolDefinitionSnapshot()).toEqual([
+            { key: "p/m/a", totalTokens: read, toolCount: 1 },
+        ]);
+    });
+
+    test("OpenCode 1: repeated flights of one tool set keep one total", () => {
+        fly(["read", "edit", "bash"]);
+        const total = getMeasuredToolDefinitionTokens("p", "m", "a");
+        for (let flight = 0; flight < 5; flight += 1) fly(["read", "edit", "bash"]);
+        expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(total);
+    });
+
+    test("OpenCode 2: each request's tool set replaces the route's and the session's", () => {
+        const db = createTestDb();
+        try {
+            setDatabase(db);
+            const set = (ids: string[], sessionId: string) =>
+                recordToolDefinitionSet(
+                    "p",
+                    "m",
+                    "a",
+                    ids.map((id) => ({ id, description: `${id} `.repeat(50), parameters: {} })),
+                    sessionId,
+                );
+            set(["read", "lsp"], "wide");
+            const both = getMeasuredToolDefinitionTokens("p", "m", "a", "wide") ?? 0;
+            const wideHash = getCurrentToolSetHash("p", "m", "a", "wide");
+            set(["read"], "narrow");
+            const read = getMeasuredToolDefinitionTokens("p", "m", "a", "narrow") ?? 0;
+            expect(read).toBeGreaterThan(0);
+            expect(read).toBeLessThan(both);
+            // Each session keeps its own request's set, whichever wrote last.
+            expect(getMeasuredToolDefinitionTokens("p", "m", "a", "wide")).toBe(both);
+            expect(getCurrentToolSetHash("p", "m", "a", "wide")).toBe(wideHash);
+            expect(getCurrentToolSetHash("p", "m", "a", "narrow")).not.toBe(wideHash);
+            // Without a session, the route's figure is its last request's set.
+            expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(read);
+            expect(getSessionToolDefinitionTokens("wide")).toBe(both);
+            expect(getSessionToolDefinitionTokens("unknown")).toBeUndefined();
+            // The stored rows follow the route's current set.
+            expect(db.prepare("SELECT tool_id FROM tool_definition_measurements").all()).toEqual([
+                { tool_id: "read" },
+            ]);
+            set([], "empty");
+            expect(getMeasuredToolDefinitionTokens("p", "m", "a", "empty")).toBe(0);
+            expect(getCurrentToolSetHash("p", "m", "a", "empty")).toBe("");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("rows loaded at startup count only until the route's first live flight", () => {
+        const db = createTestDb();
+        try {
+            setDatabase(db);
+            fly(["read", "lsp", "edit"]);
+            const all = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+            // Restart.
+            __resetToolDefinitionMeasurements();
+            loadToolDefinitionMeasurements(db);
+            setDatabase(db);
+            expect(getMeasuredToolDefinitionTokens("p", "m", "a")).toBe(all);
+            // Loaded content is unverified: no signature can vouch for it.
+            expect(getToolDefinitionMeasurementSignature("p", "m", "a")).toBeUndefined();
+            fly(["read"]);
+            const read = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+            expect(read).toBeGreaterThan(0);
+            expect(read).toBeLessThan(all);
+            expect(getToolDefinitionMeasurementSignature("p", "m", "a")).toBeDefined();
+            expect(db.prepare("SELECT tool_id FROM tool_definition_measurements").all()).toEqual([
+                { tool_id: "read" },
+            ]);
+        } finally {
+            closeQuietly(db);
+        }
     });
 });
 
