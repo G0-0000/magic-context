@@ -255,8 +255,9 @@ export interface FinalWireTokenEstimateInput {
     agentName: string | undefined;
     /**
      * The session the request belongs to. On OpenCode 2 it selects the exact
-     * tool set this session's request carries; for a route with no measurement
-     * it names the session whose own last tool set may stand in.
+     * tool set this session's request carries. For a route with no measurement
+     * it names the session whose last known tool figure may stand in: its
+     * exact set on OpenCode 2, or its last route's activity total on OpenCode 1.
      */
     sessionId?: string;
     systemPromptHash?: string;
@@ -518,7 +519,8 @@ export interface FinalWireTokenEstimate {
     /**
      * True when the tool-definition figure is this route's own measurement. When
      * false, `toolDefinitionTokens` is either unknown or an upper envelope taken
-     * from the tool set this session's last measured request carried.
+     * from this session's last known tool figure (its exact set on OpenCode 2,
+     * its last route's activity total on OpenCode 1).
      */
     toolDefinitionsMeasured?: boolean;
     /** Unscaled transform-array/system/tool measurement; provider framing is unmeasured. */
@@ -528,7 +530,7 @@ export interface FinalWireTokenEstimate {
      * Calibrated provider mass for reading context pressure, not for fit. A
      * seeded model gets its measured ratios, an unseeded model counts at the
      * neutral 1:1 ratio, and tool definitions this route has not measured count
-     * at the session's last measured tool set, without the fit envelope.
+     * at the session's last known tool figure, without the fit envelope.
      * `tokens` keeps the fit envelope for admission and must not be read as a
      * pressure reading: for an unseeded model it doubles the whole request.
      */
@@ -627,9 +629,11 @@ export function estimateFinalWireInputTokens(
               )
             : undefined);
     const calibration = resolveDecisionCalibration(input.providerID, input.modelID);
-    // A route with no measurement of its own borrows the tools this session's
-    // last measured request carried (typically the same tools under the model
-    // it just switched from), never another session's or route's tool set.
+    // A route with no measurement of its own borrows this session's last known
+    // tool figure (typically the same tools under the model it just switched
+    // from), never the largest figure in the store. On OpenCode 1 that is the
+    // last route's activity total, which can include tools other sessions on
+    // that route were offered.
     const borrowedToolDefinitions =
         measuredToolDefinitions === undefined
             ? getSessionToolDefinitionTokens(input.sessionId)

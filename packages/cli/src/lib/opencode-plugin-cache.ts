@@ -198,8 +198,8 @@ export type OpenCodeHostGeneration = "v1" | "v2";
 
 /**
  * The name OpenCode 2 gives the cache slot of `spec`: on Windows the host
- * replaces each character Windows forbids in file names (`<>:"|?*` and control
- * characters) with `_`, so a range spec such as `>=0.49` lives in `_=0.49`.
+ * replaces `< > : " | ? *` and control characters in the spec with `_`, so a
+ * range spec such as `>=0.49` lives in `_=0.49`.
  */
 export function openCodeV2SlotSpec(spec: string, platform: NodeJS.Platform = process.platform) {
     if (platform !== "win32") return spec;
