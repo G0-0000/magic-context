@@ -54,6 +54,30 @@ const definitions = [
 	},
 ];
 const aliases = definitions.flatMap(({ agent, ai }) => [agent, ai]);
+// Open OMP log files of this process as `<fd> <path>`. lsof's field output is
+// used because its table pads columns to the widest row, so the same
+// descriptor prints differently once other files are open.
+const ompLogDescriptors = (): string[] => {
+	if (process.platform !== "linux") return [];
+	const fields = execFileSync(
+		"lsof",
+		["-nP", "-p", String(process.pid), "-F", "fn"],
+		{ encoding: "utf8", windowsHide: true },
+	).split("\n");
+	const open: string[] = [];
+	let fd = "";
+	for (const field of fields) {
+		if (field.startsWith("f")) fd = field.slice(1);
+		else if (field.startsWith("n") && /omp\..*\.log/.test(field)) {
+			open.push(`${fd} ${field.slice(1).replace(/ \(deleted\)$/, "")}`);
+		}
+	}
+	return open;
+};
+// Another OMP fixture that ran earlier in this Bun process can leave its own
+// log descriptor open after its temporary root is deleted. Only descriptors
+// this file's pin opens are checked against this root.
+const inheritedOmpLogs = new Set(ompLogDescriptors());
 await pinOmpLoggerFiles(root, aliases);
 const hosts = await Promise.all(
 	definitions.map(async (definition) => {
@@ -92,11 +116,17 @@ const descriptors =
 				windowsHide: true,
 			})
 		: "";
+const pinnedOmpLogs = ompLogDescriptors().filter(
+	(line) => !inheritedOmpLogs.has(line),
+);
+if (process.platform === "linux") {
+	expect(pinnedOmpLogs.length).toBeGreaterThan(0);
+}
+for (const line of pinnedOmpLogs) {
+	expect(line).toContain(root);
+	console.log("isolated OMP host descriptor:", line);
+}
 for (const line of descriptors.split("\n")) {
-	if (/omp\..*\.log/.test(line)) {
-		expect(line).toContain(root);
-		console.log("isolated OMP host descriptor:", line);
-	}
 	expect(line).not.toMatch(/\/(?:context|store)\.db\b/);
 }
 afterAll(() => {
