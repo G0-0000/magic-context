@@ -137,6 +137,8 @@ export interface V2Context {
                             sessionID: string;
                             messageID: string;
                             agent: string;
+                            /** Per-call abort from @opencode/plugin ToolContext.signal. */
+                            signal?: AbortSignal;
                             progress(value: Record<string, unknown>): Promise<void>;
                         },
                     ): Promise<{ content: string }>;

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
@@ -21,6 +21,7 @@ import { estimateTokens } from "../../hooks/magic-context/read-session-formattin
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { resolveOpenCodeStrataAsk } from "./strata-ask";
 import { createCtxSearchTools } from "./tools";
 
 const toolContext = (sessionID = "ses-search", directory?: string) =>
@@ -721,5 +722,335 @@ describe("createCtxSearchTools", () => {
         } finally {
             spy.mockRestore();
         }
+    });
+
+    describe("strata session-file cache", () => {
+        const query = "where is the sqlite path";
+        const prefix = JSON.stringify([
+            { role: "system", content: "sys" },
+            { role: "user", content: "mem" },
+            { role: "assistant", content: "ack" },
+        ]);
+        const connection = {
+            baseUrl: "http://127.0.0.1:9",
+            apiKey: "strata-tool-key",
+            apiKeyEnv: null,
+            model: "qwen-test",
+            slotFile: "mc-mem-v1.bin",
+            prefixPath: "/tmp/unused-prefix.json",
+            project: "/repo/project",
+            maxTokens: 64,
+            timeoutMs: 1500,
+        };
+
+        async function classic(): Promise<string> {
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                readMessages: () => [],
+            });
+            return String(
+                await tools.ctx_search.execute({ query }, toolContext("ses-search", "/repo/project")),
+            );
+        }
+
+        it("does not resolve or call the network when the query is not a bare query", async () => {
+            let calls = 0;
+            let resolved = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    calls++;
+                    return Response.json({ n_restored: 1 });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            try {
+                const baseline = await classic();
+                const tools = createCtxSearchTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: false,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => {
+                        resolved++;
+                        return {
+                            ...connection,
+                            baseUrl: String(server.url).replace(/\/$/, ""),
+                            prefixPath,
+                        };
+                    },
+                });
+                const result = await tools.ctx_search.execute(
+                    { query, sources: [] },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(result).toBe(baseline);
+                expect(calls).toBe(0);
+                expect(resolved).toBe(0);
+            } finally {
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("returns synthesized text and does not run classic search on a bare hit", async () => {
+            const spy = spyOn(searchModule, "unifiedSearch");
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    const url = new URL(req.url);
+                    if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
+                    return Response.json({
+                        choices: [{ message: { content: "答案一行\n#1032：概括", reasoning_content: "skip" } }],
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            try {
+                const tools = createCtxSearchTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: false,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
+                });
+                const result = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(result).toContain("答案一行");
+                expect(result).toContain("本答案由项目记忆缓存合成");
+                expect(result).not.toContain("Found ");
+                expect(result).not.toContain("skip");
+                expect(spy).not.toHaveBeenCalled();
+            } finally {
+                spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("falls through to a byte-identical classic result on a cache miss", async () => {
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    const url = new URL(req.url);
+                    if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
+                    return Response.json({ choices: [{ message: { content: "记忆库中无" } }] });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            try {
+                const baseline = await classic();
+                const tools = createCtxSearchTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: false,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
+                });
+                const result = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(result).toBe(baseline);
+            } finally {
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("does not call the network for sources, dates, limit, or an id list", async () => {
+            let calls = 0;
+            let resolved = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    calls++;
+                    return Response.json({ n_restored: 1 });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                resolveStrataAsk: () => {
+                    resolved++;
+                    return {
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    };
+                },
+            });
+            const ctx = toolContext("ses-search", "/repo/project");
+            try {
+                await tools.ctx_search.execute({ query, sources: [] }, ctx);
+                await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx);
+                await tools.ctx_search.execute({ query, from: "2026-01-01" }, ctx);
+                await tools.ctx_search.execute({ query, to: "2026-02-01" }, ctx);
+                await tools.ctx_search.execute({ query, limit: 2 }, ctx);
+                await tools.ctx_search.execute({ query: "#1035" }, ctx);
+                expect(calls).toBe(0);
+                expect(resolved).toBe(0);
+            } finally {
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("does not call the network when the project identity does not match", async () => {
+            let calls = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    calls++;
+                    return Response.json({ n_restored: 1 });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const live = {
+                ...connection,
+                baseUrl: String(server.url).replace(/\/$/, ""),
+                prefixPath,
+                project: "git:bound",
+            };
+            try {
+                let resolved = 0;
+                const forProject = (projectPath: string | undefined, useStrata: boolean) =>
+                    createCtxSearchTools({
+                        db,
+                        resolveProjectPath: () => projectPath,
+                        memoryEnabled: false,
+                        embeddingEnabled: false,
+                        readMessages: () => [],
+                        ...(useStrata
+                            ? {
+                                  resolveStrataAsk: () => {
+                                      resolved++;
+                                      return live;
+                                  },
+                              }
+                            : {}),
+                    });
+                const ctx = toolContext("ses-search", "/repo/project");
+                const mismatchBaseline = await forProject("git:other", false).ctx_search.execute(
+                    { query },
+                    ctx,
+                );
+                const unresolvedBaseline = await forProject(undefined, false).ctx_search.execute(
+                    { query },
+                    ctx,
+                );
+                expect(String(unresolvedBaseline)).toContain(
+                    "Error: Could not resolve project identity for search:",
+                );
+                expect(await forProject("git:other", true).ctx_search.execute({ query }, ctx)).toBe(
+                    mismatchBaseline,
+                );
+                expect(await forProject(undefined, true).ctx_search.execute({ query }, ctx)).toBe(
+                    unresolvedBaseline,
+                );
+                expect(resolved).toBe(1);
+                expect(calls).toBe(0);
+            } finally {
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("treats a substitution failure as disabled with zero network", async () => {
+            let calls = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    calls++;
+                    return Response.json({ n_restored: 1 });
+                },
+            });
+            const xdg = createTestTempDirFromPath(join(tmpdir(), "mc-strata-xdg-"));
+            const prefixDir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(prefixDir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            mkdirSync(join(xdg, "cortexkit"), { recursive: true });
+            writeFileSync(
+                join(xdg, "cortexkit", "magic-context.jsonc"),
+                JSON.stringify({
+                    memory: {
+                        strata_ask: {
+                            enabled: true,
+                            base_url: String(server.url).replace(/\/$/, ""),
+                            api_key: "still-valid",
+                            model: "qwen-test",
+                            slot_file: "mc-mem-v1.bin",
+                            prefix_path: `${prefixPath}{env:MC_STRATA_MISSING_LANG}`,
+                            project: "/repo/project",
+                        },
+                    },
+                }),
+            );
+            const previous = process.env.XDG_CONFIG_HOME;
+            const previousLang = process.env.MC_STRATA_MISSING_LANG;
+            delete process.env.MC_STRATA_MISSING_LANG;
+            process.env.XDG_CONFIG_HOME = xdg;
+            try {
+                const baseline = await classic();
+                const tools = createCtxSearchTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: false,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => resolveOpenCodeStrataAsk("/repo/project"),
+                });
+                const result = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(result).toBe(baseline);
+                expect(calls).toBe(0);
+            } finally {
+                server.stop(true);
+                if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+                else process.env.XDG_CONFIG_HOME = previous;
+                if (previousLang === undefined) delete process.env.MC_STRATA_MISSING_LANG;
+                else process.env.MC_STRATA_MISSING_LANG = previousLang;
+                rmSync(xdg, { recursive: true, force: true });
+                rmSync(prefixDir, { recursive: true, force: true });
+            }
+        });
     });
 });

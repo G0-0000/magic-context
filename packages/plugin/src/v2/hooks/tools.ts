@@ -14,7 +14,34 @@ import { createCtxMemoryListTools, createCtxMemoryTools } from "../../tools/ctx-
 import { createCtxNoteTools } from "../../tools/ctx-note";
 import { createCtxReduceTools } from "../../tools/ctx-reduce";
 import { createCtxSearchTools } from "../../tools/ctx-search";
+import { resolveOpenCodeStrataAsk } from "../../tools/ctx-search/strata-ask";
 import type { V2Context } from "./types";
+
+/** Registration dispose and one OC2 call both cancel that call's Strata requests. */
+function mergeAbortSignals(
+    lifecycle: AbortSignal,
+    call: AbortSignal | undefined,
+): { signal: AbortSignal; dispose: () => void } {
+    if (!call || call === lifecycle) return { signal: lifecycle, dispose: () => undefined };
+    if (typeof AbortSignal.any === "function") {
+        return { signal: AbortSignal.any([lifecycle, call]), dispose: () => undefined };
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (lifecycle.aborted || call.aborted) {
+        controller.abort();
+        return { signal: controller.signal, dispose: () => undefined };
+    }
+    lifecycle.addEventListener("abort", abort, { once: true });
+    call.addEventListener("abort", abort, { once: true });
+    return {
+        signal: controller.signal,
+        dispose: () => {
+            lifecycle.removeEventListener("abort", abort);
+            call.removeEventListener("abort", abort);
+        },
+    };
+}
 
 /**
  * OpenCode 2 requires explicit tool-editor registration; it does not load the v1
@@ -70,6 +97,10 @@ export async function registerTools(
             ...project,
             rerankConnectionFile: config.subc?.connection_file,
             rerankConfig: config.rerank,
+            // v2 has no per-tool cwd. `context.location.directory` is the
+            // session workspace and is read at execute time, then resolved
+            // through the same trust-filtered loader as OpenCode 1.
+            resolveStrataAsk: resolveOpenCodeStrataAsk,
         }),
         ...(config.memory.enabled
             ? {
@@ -92,7 +123,13 @@ export async function registerTools(
                 description: definition.description,
                 input: tool.schema.toJSONSchema(tool.schema.object(definition.args)),
                 options: { codemode: false },
-                async execute(input, call) {
+                async execute(input, call: {
+                    sessionID: string;
+                    messageID: string;
+                    agent: string;
+                    signal?: AbortSignal;
+                    progress(value: Record<string, unknown>): Promise<void>;
+                }) {
                     // A stale or invented call must not bypass request-local hiding,
                     // reach a module backend, or acquire a write transaction.
                     const refusal = subagentToolRefusal(db, name, call.sessionID, isInternalChild);
@@ -109,28 +146,33 @@ export async function registerTools(
                         .object(definition.args)
                         .passthrough()
                         .safeParse(input);
-                    const result = await definition.execute(
-                        (parsedInput.success ? parsedInput.data : input) as Parameters<
-                            typeof definition.execute
-                        >[0],
-                        {
-                            sessionID: call.sessionID,
-                            messageID: call.messageID,
-                            agent: call.agent,
-                            directory: context.location.directory,
-                            worktree: context.location.directory,
-                            abort: controller.signal,
-                            metadata: (value) => {
-                                void call.progress(value);
+                    const abort = mergeAbortSignals(controller.signal, call.signal);
+                    try {
+                        const result = await definition.execute(
+                            (parsedInput.success ? parsedInput.data : input) as Parameters<
+                                typeof definition.execute
+                            >[0],
+                            {
+                                sessionID: call.sessionID,
+                                messageID: call.messageID,
+                                agent: call.agent,
+                                directory: context.location.directory,
+                                worktree: context.location.directory,
+                                abort: abort.signal,
+                                metadata: (value) => {
+                                    void call.progress(value);
+                                },
+                                ask: async () => {
+                                    throw new Error(
+                                        "This tool requires an unavailable permission request",
+                                    );
+                                },
                             },
-                            ask: async () => {
-                                throw new Error(
-                                    "This tool requires an unavailable permission request",
-                                );
-                            },
-                        },
-                    );
-                    return { content: typeof result === "string" ? result : result.output };
+                        );
+                        return { content: typeof result === "string" ? result : result.output };
+                    } finally {
+                        abort.dispose();
+                    }
                 },
             });
         }
