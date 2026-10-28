@@ -1853,8 +1853,8 @@ export async function registerContext(context: V2Context) {
                 stripCopiedTagNotation(text, providerID === "anthropic"),
             refreshSourceContents: (sessionID) =>
                 nativeFoldReplay?.needsHeadRebuild(sessionID) ?? false,
-            // GA owns its native checkpoints; this adapter never writes the v1
-            // synthetic marker rows that the shared off-transition deletes.
+            // OpenCode 2 owns its native checkpoints; this adapter never writes the
+            // OpenCode 1 synthetic marker rows that the shared off-transition deletes.
             hostCleanupCompactionMarkers: () => ({
                 verified: true,
                 removedLineages: 0,
