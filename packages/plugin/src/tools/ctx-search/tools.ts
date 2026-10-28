@@ -24,6 +24,7 @@ import {
     DEFAULT_CTX_SEARCH_LIMIT,
 } from "./constants";
 import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
+import { isStrataAskEligible, tryStrataAsk } from "./strata-ask";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
 export { CTX_SEARCH_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -116,6 +117,33 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             } catch (error) {
                 if (error instanceof SearchDateRangeError) return `Error: ${error.message}`;
                 throw error;
+            }
+
+            // Bare queries may be answered from the session-file cache before any
+            // classic read. Identity is resolved first, with the same per-directory
+            // function the classic path uses. A mismatch, an unresolved identity, a
+            // null answer, a disabled resolver, or a thrown resolver is the classic
+            // path, byte-for-byte. No Strata call happens before that identity check.
+            if (isStrataAskEligible(args) && deps.resolveStrataAsk) {
+                const directory =
+                    typeof toolContext.directory === "string" ? toolContext.directory : "";
+                const projectPath = directory ? deps.resolveProjectPath(directory) : undefined;
+                if (projectPath) {
+                    let connection: ReturnType<typeof deps.resolveStrataAsk> = null;
+                    try {
+                        connection = deps.resolveStrataAsk(directory);
+                    } catch {
+                        connection = null;
+                    }
+                    if (connection && connection.project === projectPath) {
+                        const synthesized = await tryStrataAsk({
+                            query,
+                            config: connection,
+                            signal: toolContext.abort,
+                        });
+                        if (synthesized !== null) return synthesized;
+                    }
+                }
             }
 
             // Only search message history up to the last compartment boundary —

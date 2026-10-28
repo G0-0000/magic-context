@@ -343,6 +343,10 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    where private memory/search/commit text is embedded. Query/document prefix
  *    overrides also remain user-owned so a repository cannot alter the text sent
  *    to that destination or silently force a corpus re-embed.
+ *  - `memory.strata_ask` connection fields — a repo may opt in with `enabled`
+ *    only. Endpoint, bearer material, model, slot basename, prefix path and the
+ *    bound project identity stay user-level so a clone cannot redirect private
+ *    memory text, read an arbitrary client file, or retarget another project's cache.
  *  - `transform_mode` is intentionally allowed at project tier so a repository
  *    can opt its own runtime into the experimental Rust pipeline. The resolver
  *    requires trusted user-level `subc` configuration before Rust can activate.
@@ -527,6 +531,35 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
             warnings.push(
                 `Ignoring embedding.${removed.join("/")} from project config ` +
                     "(security: a repository cannot choose where or how private text is embedded).",
+            );
+        }
+    }
+
+    const STRATA_ASK_USER_ONLY_FIELDS = [
+        "base_url",
+        "api_key",
+        "api_key_env",
+        "model",
+        "slot_file",
+        "prefix_path",
+        "project",
+        "max_tokens",
+        "timeout_ms",
+    ] as const;
+    const memory = projectRaw.memory;
+    if (isPlainObject(memory) && isPlainObject(memory.strata_ask)) {
+        const strata = memory.strata_ask;
+        const removed: string[] = [];
+        for (const field of STRATA_ASK_USER_ONLY_FIELDS) {
+            if (field in strata) {
+                delete strata[field];
+                removed.push(field);
+            }
+        }
+        if (removed.length > 0) {
+            warnings.push(
+                `Ignoring memory.strata_ask.${removed.join("/")} from project config ` +
+                    "(security: a repository may only opt in with memory.strata_ask.enabled; endpoint, credentials, model, slot file, prefix path and bound project identity are user-level).",
             );
         }
     }
