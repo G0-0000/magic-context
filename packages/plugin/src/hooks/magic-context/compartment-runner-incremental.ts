@@ -102,7 +102,9 @@ import {
     type BoundarySnapshotValidationResult,
     createDefaultBoundarySnapshotForTests,
     describeBoundaryDiagnostics,
+    hasRunnableCompartmentWindow,
     recordHighPressureNoEligibleHead,
+    resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
 } from "./protected-tail-boundary";
 import {
@@ -225,16 +227,29 @@ function shouldSuppressHistorianAlert(sessionId: string): boolean {
 
 /**
  * Whether a stale-snapshot detail proves the serving thread's ordinal ranks
- * disagree with the exact read: one of the boundary id checks (`offset`,
- * `last`, `protectedTailStart`, `eligibleEnd`) found a different message id
- * at its ordinal, or the session shrank (deleted rows shift every later
- * ordinal). Other stale reasons — stored compartments moved, raw content
- * changed, the model or limit changed — say nothing about the ranks.
+ * disagree with the exact read on a check that never moves by itself: one of
+ * the `offset`, `protectedTailStart` or `eligibleEnd` boundary id checks found
+ * a different message id at its ordinal, or the session shrank (deleted rows
+ * shift every later ordinal). The `last` id moves every turn as the live tail
+ * grows, so a changed last id alone never proves drift. Other stale reasons —
+ * stored compartments moved, raw content changed, the model or limit changed
+ * — say nothing about the ranks.
  */
 export function isServingOrdinalDriftSignal(detail: string | undefined): boolean {
     if (!detail) return false;
     if (detail === "raw message count shrank") return true;
-    return /(?:offset|last|protectedTailStart|eligibleEnd) ordinal \d+ id changed$/.test(detail);
+    return /(?:offset|protectedTailStart|eligibleEnd) ordinal \d+ id changed$/.test(detail);
+}
+
+/**
+ * Refuse only a file-store session (OpenCode 1 reads straight from its store
+ * file; provider sessions on OpenCode 2, Pi and in-memory test stores keep
+ * no serving-thread ranks) whose stale detail is a drift signal from the
+ * check above. Anything else refreshes and adopts as before.
+ */
+function shouldRefuseStaleSnapshotForDrift(sessionId: string, detail: string | undefined): boolean {
+    if (hasRawMessageProvider(sessionId) || !openCodeDbExists()) return false;
+    return isServingOrdinalDriftSignal(detail);
 }
 
 /**
@@ -533,7 +548,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             throw error;
         }
 
-        const boundarySnapshot =
+        let boundarySnapshot =
             deps.boundarySnapshot ??
             (process.env.NODE_ENV === "test"
                 ? createDefaultBoundarySnapshotForTests(sessionId)
@@ -575,19 +590,25 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             }
             validation = checked.result;
         }
-        // An exact worker-thread read proved this snapshot's message ids wrong.
-        // A snapshot re-resolved from the same serving-thread reads carries the
-        // same wrong numbers, so it is never adopted: the run ends here without
-        // publishing and without a failure count, and the next trigger retries
-        // from current state. (Adopting a refresh published drifted summaries
-        // whose numbers disagreed with the exact read.)
-        if (!validation.ok && validation.reason === "stale_snapshot") {
-            if (isServingOrdinalDriftSignal(validation.detail)) {
-                dropDriftedServingOrdinalRanks(
-                    sessionId,
-                    validation.detail ?? validation.reason ?? "stale_snapshot",
-                );
-            }
+        // Refuse only a drifted OpenCode 1 file-store snapshot: when the exact
+        // read disagrees on a check that never moves by itself (`offset`,
+        // `protectedTailStart` or `eligibleEnd`, or a shrunk count), the
+        // serving-thread ranks are wrong, so a refreshed snapshot would carry
+        // the same wrong numbers. The chunk already continues after the stored
+        // end id in the chunk reader's own coordinates, so ending this run
+        // without publishing loses nothing: the ranks rebuild and the next
+        // trigger retries. Every other stale snapshot — a `last` id that moves
+        // every turn, stored compartments that moved, changed content —
+        // refreshes and adopts below as before.
+        if (
+            !validation.ok &&
+            validation.reason === "stale_snapshot" &&
+            shouldRefuseStaleSnapshotForDrift(sessionId, validation.detail)
+        ) {
+            dropDriftedServingOrdinalRanks(
+                sessionId,
+                validation.detail ?? validation.reason ?? "stale_snapshot",
+            );
             sessionLog(
                 sessionId,
                 `historian: refusing to publish over a stale protected-tail snapshot (was: ${validation.detail ?? "stale"}); ending the run without publishing`,
@@ -596,6 +617,47 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             telemetry.failureReason = "stale_snapshot";
             rollbackDrainReservation();
             return;
+        }
+        // In an active session the protected tail's newest message changes every
+        // turn (a fresh user/assistant message lands), so a snapshot captured at
+        // trigger time goes stale on the "last ordinal id" check by the time the
+        // historian actually runs — even though the ELIGIBLE HEAD (offset →
+        // eligibleEnd) it would compact is untouched. Left as-is the runner no-ops
+        // forever while the trigger refires each turn, and queued drop ops starve
+        // (observed in production: 27 consecutive stale-snapshot no-ops, 179
+        // pending drops, zero reduction). Re-resolve the boundary ONCE from the
+        // CURRENT session state and adopt the fresh snapshot when it still exposes
+        // a runnable head. This does NOT weaken the protected-tail guarantee: the
+        // refreshed snapshot recomputes protectedTailStart/eligibleEnd from the
+        // live messages, so the head can never include a message that now belongs
+        // to the current protected tail.
+        if (!validation.ok && validation.reason === "stale_snapshot") {
+            const refreshed = deps.refreshBoundarySnapshot
+                ? deps.refreshBoundarySnapshot(boundarySnapshot, validation)
+                : resolveOpenCodeProtectedTailBoundary({
+                      db,
+                      sessionId,
+                      mode: "incremental-runner",
+                      contextLimit: deps.currentContextLimit ?? boundarySnapshot.contextLimit,
+                      executeThresholdPercentage: boundarySnapshot.executeThresholdPercentage,
+                      usage: {
+                          percentage: boundarySnapshot.usagePercentage,
+                          inputTokens: boundarySnapshot.usageInputTokens,
+                      },
+                      usageSource: boundarySnapshot.usageSource,
+                      emergencyTailScale: boundarySnapshot.emergencyTailScale,
+                      // Honour exactly the trigger's one-pass floor lift for this run;
+                      // the protected tail is still recomputed from live messages.
+                      liftLivePromptFloor: boundarySnapshot.liftLivePromptFloor === true,
+                  });
+            if (refreshed && hasRunnableCompartmentWindow(refreshed)) {
+                sessionLog(
+                    sessionId,
+                    `historian: refreshed stale protected-tail snapshot at run time (was: ${validation.detail ?? "stale"}) — eligible head ${refreshed.offset}-${refreshed.eligibleEndOrdinal - 1}`,
+                );
+                boundarySnapshot = refreshed;
+                validation = { ok: true };
+            }
         }
         if (!validation.ok) {
             sessionLog(

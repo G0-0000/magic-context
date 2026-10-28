@@ -235,6 +235,7 @@ async function runWithLease(args: {
     snapshot: ProtectedTailBoundarySnapshot;
     forceKeepLastCompartment?: boolean;
     forceDrainQuota?: boolean;
+    refreshBoundarySnapshot?: Parameters<typeof runCompartmentAgent>[0]["refreshBoundarySnapshot"];
     historianChunkTokens?: number;
     output?: string;
     beforeHistorianCollect?: () => void;
@@ -261,6 +262,7 @@ async function runWithLease(args: {
                 forceKeepLastCompartment: args.forceKeepLastCompartment,
                 forceDrainQuota: args.forceDrainQuota,
                 preserveInjectionCacheUntilConsumed: true,
+                refreshBoundarySnapshot: args.refreshBoundarySnapshot,
             }),
         );
     } finally {
@@ -739,7 +741,7 @@ describe("runCompartmentAgent wrapup controls", () => {
         }
     });
 
-    it("refuses a stale initial boundary snapshot without publishing", async () => {
+    it("uses refreshBoundarySnapshot when the initial boundary snapshot is stale", async () => {
         const db = createDb();
         const sessionId = "ses-refresh-boundary";
         try {
@@ -751,14 +753,17 @@ describe("runCompartmentAgent wrapup controls", () => {
                     rawLastMessageIdAtTrigger: "m-1",
                     rawRangeFingerprint: "stale-fingerprint",
                 };
+                const refresh = mock(() => fresh);
                 await runWithLease({
                     db,
                     sessionId,
                     snapshot: stale,
                     forceDrainQuota: true,
+                    refreshBoundarySnapshot: refresh,
                 });
+                expect(refresh).toHaveBeenCalled();
             });
-            expect(getCompartments(db, sessionId)).toHaveLength(0);
+            expect(getCompartments(db, sessionId)[0]?.endMessage).toBe(1);
         } finally {
             closeQuietly(db);
         }

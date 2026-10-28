@@ -1252,6 +1252,14 @@ export interface RawSessionSummaryScan {
     sessionRows: number;
     checkpoints?: Array<OrdinalKey & { ordinal: number; storedCount?: number }>;
     total?: number;
+    /**
+     * Highest `message` rowid the scan has observed (any session). Extension
+     * only trusts ranks taken at or below this mark: a row this session
+     * gains above it that sorts behind the newest checkpoint is a late
+     * commit the checkpoints missed (see hasLateCommitBehindCheckpoint).
+     * Absent on scans built before the mark existed; those skip the check.
+     */
+    maxRowid?: number;
 }
 
 interface OrdinalCheckpointState {
@@ -1264,25 +1272,35 @@ const ordinalSummarySeeds = new WeakMap<
     Map<string, { epoch: number; scan: RawSessionSummaryScan }>
 >();
 /**
- * Whether the retained scan still counts the session's stored rows: the rows
- * it knew plus the rows just read above its newest checkpoint must be every
- * stored row. A late commit behind the checkpoint (or a deletion) alongside
- * new rows breaks the equality; extending the retained ranks would then bake
- * a one-short drift into every later number. The count reads the session
- * index only, never message JSON, and it runs only while the extension is
- * already reading new rows above the checkpoint — quiet passes do no new
- * work, and an extension that reads nothing above the checkpoint (including
- * the install-time check, where a behind-checkpoint summary insert must not
- * disturb still-valid ranks) keeps its retained ranks.
+ * Whether a late commit landed behind the newest checkpoint since the scan
+ * last observed the store: rows this session gained with a rowid above the
+ * scan's high-water mark that sort at or behind the checkpoint key. Such a
+ * row is invisible to checkpoint extension, so extending would bake a
+ * one-short drift into every later number. The rowid range seek touches only
+ * rows written after the high-water mark, and message JSON is read only for
+ * those rows to skip finished summaries (which never bear ordinals); with no
+ * late commit the check reads nothing, however large the session. Deletions
+ * behind the checkpoint are not visible here; they stay with the boundary
+ * validation backstop and the newest-checkpoint truncation below.
  */
-function sessionRowsAgreeWithStore(
+function hasLateCommitBehindCheckpoint(
     db: Database,
     sessionId: string,
     scan: RawSessionSummaryScan,
-    newRows: number,
 ): boolean {
-    const live = countStoredRawSessionRowsIndexed(db, sessionId);
-    return live === scan.sessionRows + newRows;
+    const tail = scan.checkpoints?.at(-1);
+    if (!tail || scan.maxRowid === undefined) return false;
+    const row = db
+        .prepare(
+            `SELECT COUNT(*) AS count FROM message
+             WHERE rowid > ? AND +session_id = ?
+               AND (time_created, id) <= (?, ?)
+               AND NOT (${EXCLUDED_ROW_SQL})`,
+        )
+        .get(scan.maxRowid, sessionId, tail.timeCreated, tail.id) as {
+        count?: unknown;
+    } | null;
+    return typeof row?.count === "number" && row.count > 0;
 }
 
 /** Drop retained ranks and warm-up seeds without touching the summary epoch. */
@@ -1308,10 +1326,9 @@ function currentOrdinalCheckpoints(
 }
 
 /** Retain prefix ranks across commits; OpenCode reverts remove only a suffix. A
- * commit that lands behind the newest checkpoint (or deletes rows) breaks the
- * stored-row agreement checked below; extending then would bake a one-short
- * drift into every later number, so the retained ranks are dropped instead and
- * the next warm-up scans from scratch. */
+ * late commit behind the newest checkpoint is invisible to extension, so when
+ * the check below finds one the retained ranks are dropped instead and the
+ * next warm-up scans from scratch. */
 function extendOrdinalCheckpoints(
     db: Database,
     sessionId: string,
@@ -1341,33 +1358,29 @@ function extendOrdinalCheckpoints(
     }
     const tail = points.at(-1);
     const rows = db
-        .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message
+        .prepare(`SELECT id, time_created AS timeCreated, rowid AS rowid, ${EXCLUDED_ROW_SQL} AS excluded FROM message
         WHERE session_id=?${tail ? " AND (time_created,id) > (?,?)" : ""}
         ORDER BY time_created,id${limit === undefined ? "" : ` LIMIT ${limit + 1}`}`)
         .all(sessionId, ...(tail ? [tail.timeCreated, tail.id] : [])) as Array<
-        OrdinalKey & { excluded: number }
+        OrdinalKey & { excluded: number; rowid: number }
     >;
     ordinalJsonRowsRead += rows.length;
-    if (limit !== undefined && rows.length > limit) return false;
-    // The stored-row agreement above runs only while the extension already
-    // read new rows (or the capped-page early return above skipped it):
-    // with no new rows the retained ranks cannot have fallen behind, and a
-    // behind-checkpoint summary insert must not disturb them.
-    if (rows.length > 0 && !sessionRowsAgreeWithStore(db, sessionId, scan, rows.length)) {
-        // A commit landed behind the newest checkpoint (or deleted rows): the
-        // retained prefix ranks are short, and extending them would bake the
-        // drift into every later number. Drop them so the next warm-up scans
-        // from scratch, and report not-warm so callers defer and re-warm. The
-        // serving thread additionally bumps the summary epoch, rejecting a
-        // warm-up already in flight that was built from the drifted ranks. A
-        // worker never bumps it: its install carries the serving thread's
-        // epoch, and any install the bump would have rejected is caught by the
-        // next agreement check instead — the store necessarily changed after
-        // those ranks were taken.
+    if (hasLateCommitBehindCheckpoint(db, sessionId, scan)) {
+        // A commit landed behind the newest checkpoint: the retained prefix
+        // ranks are short, and extending them would bake the drift into every
+        // later number. Drop them so the next warm-up scans from scratch,
+        // and report not-warm so callers defer and re-warm. The serving thread
+        // additionally bumps the summary epoch, rejecting a warm-up already
+        // in flight that was built from the drifted ranks. A worker never
+        // bumps it: its install carries the serving thread's epoch, and any
+        // install the bump would have rejected is caught by the next check
+        // instead — the store necessarily changed after those ranks were
+        // taken.
         discardRetainedOrdinalRanks(db, sessionId);
         if (isMainThread) forgetRawSessionSummaryRows(sessionId);
         return false;
     }
+    if (limit !== undefined && rows.length > limit) return false;
     let total = scan.total ?? 0;
     // Only page boundaries and the current tail are retained, even after years
     // of one-message appends. The previous partial-page tail is redundant.
@@ -1382,6 +1395,13 @@ function extendOrdinalCheckpoints(
     scan.checkpoints = points;
     scan.sessionRows += rows.length;
     scan.total = total;
+    // The rows above are complete (the capped-page case returned early), so
+    // the highest rowid seen is the new high-water mark for the next check.
+    if (rows.length > 0) {
+        let maxRowid = scan.maxRowid ?? -1;
+        for (const row of rows) if (row.rowid > maxRowid) maxRowid = row.rowid;
+        scan.maxRowid = maxRowid;
+    }
     return true;
 }
 
@@ -1467,9 +1487,9 @@ export function scanRawSessionSummaryRows(
         if (previous?.checkpoints && extendOrdinalCheckpoints(db, sessionId, previous)) {
             return previous;
         }
-        // A retained checkpoint the store has moved behind (a late commit or
-        // a deletion) is not extended: the full scan below rebuilds ranks
-        // from scratch instead of baking the drift in.
+        // A retained checkpoint the store has moved behind (a late commit) is
+        // not extended: the full scan below rebuilds ranks from scratch
+        // instead of baking the drift in.
         if (previous) {
             const sessions = summaryCandidateSets.get(db) ?? new Map();
             sessions.set(sessionId, {
@@ -1507,13 +1527,16 @@ export function scanRawSessionSummaryRows(
         // construction therefore evaluates the current predicate for every row
         // on the worker snapshot, including IDs absent from the seed.
         const keys = db
-            .prepare(`SELECT id, time_created AS timeCreated, ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE session_id = ?
+            .prepare(`SELECT id, time_created AS timeCreated, rowid AS rowid, ${EXCLUDED_ROW_SQL} AS excluded FROM message WHERE session_id = ?
         ORDER BY time_created, id`)
-            .all(sessionId) as Array<OrdinalKey & { excluded: number }>;
+            .all(sessionId) as Array<OrdinalKey & { excluded: number; rowid: number }>;
         const checkpoints: Array<OrdinalKey & { ordinal: number; storedCount: number }> = [];
         let total = 0;
+        let maxRowid: number | undefined;
         for (let index = 0; index < keys.length; index++) {
             const key = keys[index];
+            if (typeof key.rowid === "number")
+                maxRowid = maxRowid === undefined ? key.rowid : Math.max(maxRowid, key.rowid);
             if (key.excluded !== 1) total++;
             if (index % 256 === 255 || index === keys.length - 1)
                 checkpoints.push({
@@ -1523,7 +1546,7 @@ export function scanRawSessionSummaryRows(
                     storedCount: index + 1,
                 });
         }
-        return { anchors, ids, sessionRows, checkpoints, total };
+        return { anchors, ids, sessionRows, checkpoints, total, maxRowid };
     });
 }
 

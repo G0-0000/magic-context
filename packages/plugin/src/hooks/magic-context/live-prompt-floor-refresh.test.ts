@@ -194,7 +194,7 @@ describe("stale-snapshot refresh and the trigger's live-prompt floor lift", () =
         expect(floored.protectedTailStart).toBe(1);
     });
 
-    it("refuses a stale lifted snapshot without publishing, then publishes from a fresh snapshot", async () => {
+    it("refreshes a stale lifted snapshot to a runnable window and publishes a compartment", async () => {
         const sessionId = "ses-floor-lift-stale-refresh";
         const { db, messages, logged } = setup(sessionId);
         const snapshot = triggerSnapshot(db, sessionId, true);
@@ -214,33 +214,29 @@ describe("stale-snapshot refresh and the trigger's live-prompt floor lift", () =
             parts: [{ type: "text", text: "A newer step landed after the trigger." }],
         });
 
+        // The boundary the refresh should rebuild from the live messages.
+        const expectedRefresh = triggerSnapshot(db, sessionId, true);
+        expect(hasRunnableCompartmentWindow(expectedRefresh)).toBe(true);
+
         const prompts: string[] = [];
         await runHistorian(db, sessionId, snapshot, prompts);
 
-        // A stale snapshot is never refreshed into a publishable boundary:
-        // the run ends without publishing, with no failure recorded.
-        expect(prompts).toHaveLength(0);
-        expect(getCompartments(db, sessionId)).toHaveLength(0);
+        const lines = logged();
         expect(
-            logged().some((line) =>
-                line.includes(
-                    "historian: refusing to publish over a stale protected-tail snapshot (was: raw range fingerprint changed)",
-                ),
+            lines.some((line) => line.includes("historian no-op: stale protected-tail snapshot")),
+        ).toBe(false);
+        expect(
+            lines.some((line) =>
+                line.includes("historian: refreshed stale protected-tail snapshot at run time"),
             ),
         ).toBe(true);
-
-        // The next trigger retries from the current messages and publishes.
-        const fresh = triggerSnapshot(db, sessionId, true);
-        expect(hasRunnableCompartmentWindow(fresh)).toBe(true);
-        await runHistorian(db, sessionId, fresh, prompts);
-        expect(prompts.length).toBeGreaterThan(0);
         const compartments = getCompartments(db, sessionId);
         expect(compartments).toHaveLength(1);
         expect(compartments[0]?.startMessage).toBe(1);
         // The protected tail is recomputed from live messages: the published
-        // range ends inside the fresh eligible head, never in the tail.
-        expect(compartments[0]?.endMessage).toBeLessThan(fresh.eligibleEndOrdinal);
-        expect(compartments[0]?.endMessage).toBeLessThan(fresh.protectedTailStart);
+        // range ends inside the refreshed eligible head, never in the tail.
+        expect(compartments[0]?.endMessage).toBeLessThan(expectedRefresh.eligibleEndOrdinal);
+        expect(compartments[0]?.endMessage).toBeLessThan(expectedRefresh.protectedTailStart);
     });
 
     it("keeps clamping at the live prompt when the stale snapshot was not lifted", async () => {
@@ -267,7 +263,7 @@ describe("stale-snapshot refresh and the trigger's live-prompt floor lift", () =
         expect(
             logged().some((line) =>
                 line.includes(
-                    "historian: refusing to publish over a stale protected-tail snapshot (was: raw range fingerprint changed)",
+                    "historian no-op: stale protected-tail snapshot (raw range fingerprint changed)",
                 ),
             ),
         ).toBe(true);

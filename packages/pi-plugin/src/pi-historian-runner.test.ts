@@ -24,7 +24,6 @@ import {
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { producerPromptFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import type { ProtectedTailBoundarySnapshot } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
-import { hasRunnableCompartmentWindow } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-session-raw";
 import * as loggerModule from "@magic-context/core/shared/logger";
@@ -256,6 +255,7 @@ async function runHistorianWith(args: {
 	appendCompaction?: Parameters<typeof runPiHistorian>[0]["appendCompaction"];
 	readBranchEntries?: () => unknown[];
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	providerMessages?: RawMessage[];
 	forceKeepLastCompartment?: boolean;
 	historianChunkTokens?: number;
@@ -317,6 +317,7 @@ async function runHistorianWith(args: {
 		readBranchEntries: args.readBranchEntries,
 		notifyIssue: args.notifyIssue,
 		boundarySnapshot: args.boundarySnapshot,
+		refreshBoundarySnapshot: args.refreshBoundarySnapshot,
 		compartmentLeaseHolderId: holderId,
 		ensureProjectRegistered: args.ensureProjectRegistered,
 		forceKeepLastCompartment: args.forceKeepLastCompartment,
@@ -583,64 +584,63 @@ describe("runPiHistorian", () => {
 		}
 	});
 
-	it("refuses to publish when the trigger snapshot is stale, even when the live boundary is runnable", async () => {
-		const staleBoundary = makeBoundarySnapshot({
-			rawMessageCountAtTrigger: 13,
-			rawRangeFingerprint: "stale-fingerprint",
-		});
-		// The live boundary admits a head: the refusal below comes from the
-		// staleness alone, not from having nothing to compact.
-		expect(hasRunnableCompartmentWindow(makeBoundarySnapshot())).toBe(true);
-		const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(
-			() => {},
-		);
-		const { db, runner } = await runHistorianWith({
-			outputs: [successXml()],
-			boundarySnapshot: staleBoundary,
-		});
-		try {
-			expect(runner.run).not.toHaveBeenCalled();
-			expect(getCompartments(db, "ses-historian")).toEqual([]);
-			expect(latestHistorianFailureReason(db)).toBe(
-				"stale protected-tail boundary snapshot",
-			);
-			const lines = logSpy.mock.calls.map((call) => call.slice(1).join(" "));
-			const refused = lines.some((line) =>
-				line.includes(
-					"historian: refusing to publish over a stale protected-tail snapshot (was: raw message count shrank)",
-				),
-			);
-			expect(refused).toBe(true);
-		} finally {
-			logSpy.mockRestore();
-			closeQuietly(db);
-		}
-	});
-
-	it("refuses to publish when a single boundary id moved", async () => {
+	it("refreshes a stale protected-tail snapshot and proceeds when the current boundary is runnable", async () => {
 		const staleBoundary = makeBoundarySnapshot({
 			rawLastMessageIdAtTrigger: "old-m12",
 			rawRangeFingerprint: "stale-fingerprint",
 		});
-		const logSpy = spyOn(loggerModule, "sessionLog").mockImplementation(
-			() => {},
+		const refreshedBoundary = makeBoundarySnapshot({
+			protectedTailStart: 3,
+			protectedTailStartMessageId: "m3",
+			eligibleEndOrdinal: 3,
+			eligibleEndMessageId: "m2",
+		});
+		const refreshBoundarySnapshot = mock(() => refreshedBoundary);
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: staleBoundary,
+			refreshBoundarySnapshot,
+		});
+		try {
+			expect(refreshBoundarySnapshot).toHaveBeenCalledTimes(1);
+			expect(runner.run).toHaveBeenCalledTimes(1);
+			expect(getCompartments(db, "ses-historian")).toEqual([
+				expect.objectContaining({
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					title: "Initial Pi slice",
+				}),
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps the stale-snapshot no-op fallback when the refreshed boundary is not runnable", async () => {
+		const staleBoundary = makeBoundarySnapshot({
+			rawLastMessageIdAtTrigger: "old-m12",
+			rawRangeFingerprint: "stale-fingerprint",
+		});
+		const refreshBoundarySnapshot = mock(() =>
+			makeBoundarySnapshot({
+				protectedTailStart: 1,
+				protectedTailStartMessageId: "m1",
+				eligibleEndOrdinal: 1,
+				eligibleEndMessageId: null,
+				trueRawEligibleTokens: 0,
+			}),
 		);
 		const { db, runner } = await runHistorianWith({
 			outputs: [successXml()],
 			boundarySnapshot: staleBoundary,
+			refreshBoundarySnapshot,
 		});
 		try {
+			expect(refreshBoundarySnapshot).toHaveBeenCalledTimes(1);
 			expect(runner.run).not.toHaveBeenCalled();
 			expect(getCompartments(db, "ses-historian")).toEqual([]);
-			const lines = logSpy.mock.calls.map((call) => call.slice(1).join(" "));
-			const refused = lines.some((line) =>
-				line.includes(
-					"historian: refusing to publish over a stale protected-tail snapshot (was: last ordinal 12 id changed)",
-				),
-			);
-			expect(refused).toBe(true);
 		} finally {
-			logSpy.mockRestore();
 			closeQuietly(db);
 		}
 	});

@@ -210,7 +210,7 @@ async function runOneWrapupIteration(args: {
     anchorRawMessageCount: number;
     renewWrapupMarker: (updates: WrapupProgressUpdate) => boolean;
 }): Promise<WrapupIterationResult> {
-    const { ctx, sessionId, plan } = args;
+    const { ctx, sessionId, plan, messagesToKeep, anchorRawMessageCount } = args;
     const acquired = await acquireCompartmentLeaseForWrapup(ctx, sessionId, args.renewWrapupMarker);
     if (!acquired.ok) return { ran: false, reason: acquired.reason };
     const leaseHolderId = acquired.holderId;
@@ -266,6 +266,8 @@ async function runOneWrapupIteration(args: {
         // window reaches the wrapup's full drain target; the runner still downgrades
         // the hint if its own chunk reader stops early within the window.
         forceKeepLastCompartment: plan.snapshot.eligibleEndOrdinal >= plan.targetEligibleEndOrdinal,
+        refreshBoundarySnapshot: () =>
+            buildPlan(ctx, sessionId, messagesToKeep, anchorRawMessageCount).snapshot,
         onCompartmentStatePublished: (sid) => {
             markActiveCompartmentRunPublished(sid);
             ctx.liveSessionState.deferredHistoryRefreshSessions.add(sid);

@@ -3106,16 +3106,14 @@ describe("runCompartmentAgent", () => {
         expect(loadProtectedTailMeta(db, sessionId).priorBoundaryOrdinal).toBe(8);
     });
 
-    // A stale boundary snapshot is never refreshed into a publishable one.
-    // In an active session the protected tail's newest message changes every
-    // turn, so the trigger-time snapshot can fail validation on the "last
-    // ordinal id changed" check by the time the historian runs — even though
-    // the eligible HEAD it would compact is untouched. The runner ends the
-    // run without publishing (and without a failure count) instead of
-    // re-resolving from the same serving-thread reads, which once published
-    // drifted summaries; the next trigger retries from current state, so
-    // queued drop ops wait one pass rather than starving behind bad numbers.
-    it("refuses a stale-tail boundary snapshot at run time, then publishes from a fresh one", async () => {
+    // Regression: production livelock (ses_157f877e2ffepme9doYf3RTnRx). In an
+    // active session the protected tail's newest message changes every turn, so
+    // the trigger-time boundary snapshot fails validation on the "last ordinal
+    // id changed" check by the time the historian runs — even though the eligible
+    // HEAD it would compact is untouched. The runner used to no-op forever while
+    // the trigger refired each turn and queued drop ops starved. It must now
+    // re-resolve the boundary at run time and make real progress.
+    it("refreshes a stale-tail boundary snapshot at run time instead of no-op'ing forever", async () => {
         useTempDataHome("compartment-runner-stale-tail-refresh-");
         createOpenCodeDb("ses-stale-tail", [
             { id: "m-1", role: "user", text: `eligible head one ${"detail ".repeat(150)}` },
@@ -3197,41 +3195,13 @@ describe("runCompartmentAgent", () => {
             currentContextLimit: 8_000,
         });
 
-        // Nothing publishes off the stale snapshot: no compartment, no drop
-        // ops queued, no failure recorded. The next trigger retries from the
-        // current messages — with the serving ranks rebuilt when the exact
-        // read exposed drift — and publishes real progress.
-        expect(getCompartments(db, "ses-stale-tail")).toHaveLength(0);
-        expect(getPendingOps(db, "ses-stale-tail")).toHaveLength(0);
-        expect(getHistorianFailureState(db, "ses-stale-tail").failureCount).toBe(0);
-        expect(getOrCreateSessionMeta(db, "ses-stale-tail").compartmentInProgress).toBe(false);
-
-        const freshSnapshot = resolveOpenCodeProtectedTailBoundary({
-            db,
-            sessionId: "ses-stale-tail",
-            mode: "trigger",
-            contextLimit: 8_000,
-            executeThresholdPercentage: 65,
-            usage: { percentage: 95, inputTokens: 7_600 },
-            usageSource: "live",
-        });
-        await runCompartmentAgentWithLease({
-            client,
-            db,
-            sessionId: "ses-stale-tail",
-            historianChunkTokens: 10_000,
-            directory: "/tmp",
-            boundarySnapshot: freshSnapshot,
-            currentContextLimit: 8_000,
-        });
-
-        // Progress is made: one compartment over the eligible head, which
-        // queues drops for its covered tags so the accumulated pending ops
-        // can finally drain.
+        // Re-derived and PUBLISHED rather than no-op'ing: progress is made.
         const compartments = getCompartments(db, "ses-stale-tail");
         expect(compartments).toHaveLength(1);
         expect(compartments[0]?.startMessage).toBe(1);
         expect(compartments[0]?.endMessage).toBe(2);
+        // And the published compartment queued drops for its covered tags, so the
+        // accumulated pending ops can finally drain (no starvation).
         expect(getPendingOps(db, "ses-stale-tail").length).toBeGreaterThan(0);
         expect(getOrCreateSessionMeta(db, "ses-stale-tail").compartmentInProgress).toBe(false);
     });

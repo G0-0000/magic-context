@@ -5,7 +5,10 @@ import type { ModelInput } from "../../shared/model-resolution";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { Database } from "../../shared/sqlite";
 import type { ParsedEvent } from "./compartment-parser";
-import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
+import type {
+    BoundarySnapshotValidationResult,
+    ProtectedTailBoundarySnapshot,
+} from "./protected-tail-boundary";
 import type { NotificationParams } from "./send-session-notification";
 
 /**
@@ -153,6 +156,13 @@ export interface CompartmentRunnerDeps<
     historianTimeoutMs?: number;
     /** Immutable protected-tail boundary resolved by the trigger/force path. Tests may omit it and use the default-snapshot factory. */
     boundarySnapshot?: ProtectedTailBoundarySnapshot;
+    /** Optional stale-snapshot refresh hook. Manual wrapup uses this so stale
+     *  snapshots re-resolve with the keep-watermark override instead of falling
+     *  back to normal pressure math. */
+    refreshBoundarySnapshot?: (
+        snapshot: ProtectedTailBoundarySnapshot,
+        validation: BoundarySnapshotValidationResult,
+    ) => ProtectedTailBoundarySnapshot | null;
     /** Current resolved main-model context limit used to reject stale boundary snapshots after model switches. */
     currentContextLimit?: number;
     /** Active OpenCode historian entry, including its request variant. */

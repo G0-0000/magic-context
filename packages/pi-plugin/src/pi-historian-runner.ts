@@ -124,6 +124,7 @@ import {
 import {
 	createDefaultBoundarySnapshotForTests,
 	describeBoundaryDiagnostics,
+	hasRunnableCompartmentWindow,
 	type ProtectedTailBoundarySnapshot,
 	recordHighPressureNoEligibleHead,
 	selectPerRunCap,
@@ -421,6 +422,15 @@ export interface PiHistorianDeps {
 	resolveHostOutputLimit?: (model: string) => number | undefined;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	/**
+	 * Optional live boundary resolver used only to recover a stale trigger snapshot.
+	 * It must recompute against the currently registered Pi raw-message provider.
+	 * It receives the stale snapshot so it can carry that snapshot's one-pass
+	 * live-prompt floor lift into the re-resolved boundary.
+	 */
+	refreshBoundarySnapshot?: (
+		stale: ProtectedTailBoundarySnapshot,
+	) => ProtectedTailBoundarySnapshot;
 	/** Current resolved context limit used to reject stale snapshots after model switches. */
 	currentContextLimit?: number;
 	/** Optional per-call timeout (default 600s). */
@@ -496,6 +506,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		historianChunkTokens: providerHistorianChunkTokens,
 		historianContextLimit,
 		boundarySnapshot: providedBoundarySnapshot,
+		refreshBoundarySnapshot,
 		currentContextLimit,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
 		temperature,
@@ -649,7 +660,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				priorCompartments[priorCompartments.length - 1] ?? null,
 			);
 
-			const boundarySnapshot =
+			let boundarySnapshot =
 				providedBoundarySnapshot ??
 				(process.env.NODE_ENV === "test"
 					? createDefaultBoundarySnapshotForTests(sessionId)
@@ -663,7 +674,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 				return;
 			}
-			const validation =
+			let validation =
 				boundarySnapshot.rawRangeFingerprint.length > 0
 					? validateBoundarySnapshot({
 							db,
@@ -672,20 +683,34 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 								currentContextLimit ?? boundarySnapshot.contextLimit,
 						})
 					: { ok: true as const };
-			// An exact read proved this snapshot's message ids wrong. A snapshot
-			// re-resolved from the same branch walk carries the same wrong numbers,
-			// so it is never adopted: the run ends here without publishing, and the
-			// next trigger retries from the current branch. (Adopting a refresh
-			// published compartments whose numbers disagreed with the validation
-			// read.)
-			if (!validation.ok && validation.reason === "stale_snapshot") {
-				sessionLog(
-					sessionId,
-					`historian: refusing to publish over a stale protected-tail snapshot (was: ${validation.detail ?? "stale"}); ending the run without publishing`,
-				);
-				telemetry.status = "noop";
-				telemetry.failureReason = "stale protected-tail boundary snapshot";
-				return;
+			// A boundary captured at trigger time can go stale before the detached
+			// historian validates it because new live-tail messages may arrive. Re-resolve
+			// once from the current Pi messages and adopt the result only when it still
+			// exposes an eligible head. The refreshed snapshot recomputes the protected
+			// tail from live messages, so the compacted head cannot include a message that
+			// now belongs to the protected tail.
+			if (
+				!validation.ok &&
+				validation.reason === "stale_snapshot" &&
+				refreshBoundarySnapshot
+			) {
+				try {
+					const refreshed = refreshBoundarySnapshot(boundarySnapshot);
+					if (hasRunnableCompartmentWindow(refreshed)) {
+						sessionLog(
+							sessionId,
+							`historian: refreshed stale protected-tail snapshot at run time (was: ${validation.detail ?? "stale"}) — eligible head ${refreshed.offset}-${refreshed.eligibleEndOrdinal - 1}`,
+						);
+						boundarySnapshot = refreshed;
+						validation = { ok: true };
+					}
+				} catch (error) {
+					const desc = describeError(error);
+					sessionLog(
+						sessionId,
+						`historian: failed to refresh stale protected-tail snapshot at run time (${validation.detail ?? "stale"}): ${desc.brief}`,
+					);
+				}
 			}
 			if (!validation.ok) {
 				telemetry.status = "noop";
