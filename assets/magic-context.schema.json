@@ -2674,6 +2674,11 @@
         },
         "subagent_inject": {
           "enabled": true
+        },
+        "strata_ask": {
+          "enabled": false,
+          "max_tokens": 2048,
+          "timeout_ms": 60000
         }
       },
       "description": "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",
@@ -2777,6 +2782,78 @@
               "default": true,
               "description": "Append the FULL content of memories explicitly named in a user task via the ⟦mc-mem: 11, 55⟧ marker (Pi-only v1). On by default; set false to stop NEW injections (already-persisted per-task snapshots still replay — this is not a privacy-revocation switch). Independent of memory.enabled.",
               "type": "boolean"
+            }
+          }
+        },
+        "strata_ask": {
+          "default": {
+            "enabled": false,
+            "max_tokens": 2048,
+            "timeout_ms": 60000
+          },
+          "description": "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity equals memory.strata_ask.project. A project may set only enabled. A miss, transport error, identity mismatch, or incomplete connection falls through to classic retrieval without changing its format. Not sampled by live reload.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Opt in so bare ctx_search queries may be answered from a user-configured Strata session-file cache. The only memory.strata_ask field a project config may set. Default false. Independent of memory.enabled. Not a live-reload key: OpenCode and Pi re-read the trust-filtered config for the call directory on each ctx_search call. Tool description text still follows the host's registration lifecycle.",
+              "type": "boolean"
+            },
+            "base_url": {
+              "description": "User-level Strata origin (http or https). Project values are ignored. Missing or invalid connection material disables the cache path and ctx_search continues on the classic path.",
+              "type": "string"
+            },
+            "api_key": {
+              "description": "User-level Bearer token, or null to use api_key_env. Project values are ignored. The token is never written to logs.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "api_key_env": {
+              "description": "User-level environment variable name holding the Bearer token when api_key is unset or null. Project values are ignored.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "model": {
+              "description": "User-level model id for POST /v1/chat/completions. Project values are ignored.",
+              "type": "string"
+            },
+            "slot_file": {
+              "description": "User-level server-side session-file basename under the Strata slot-save directory. Not a client filesystem path. Project values are ignored.",
+              "type": "string"
+            },
+            "prefix_path": {
+              "description": "User-level absolute path to the frozen prefix JSON replayed before the query. Project values are ignored.",
+              "type": "string"
+            },
+            "project": {
+              "description": "User-level project identity this cache may answer. Must equal the identity classic ctx_search resolves for the call directory. Not a directory path. Project values are ignored. Missing, mismatched, or unresolvable identity disables the cache path.",
+              "type": "string"
+            },
+            "max_tokens": {
+              "default": 2048,
+              "description": "User-level completion max_tokens (min: 1, max: 32768, default: 2048). Project values are ignored.",
+              "type": "number",
+              "minimum": 1,
+              "maximum": 32768
+            },
+            "timeout_ms": {
+              "default": 60000,
+              "description": "User-level deadline in milliseconds for each Strata HTTP call, and separately for the prefix-file read (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
+              "type": "number",
+              "minimum": 1,
+              "maximum": 600000
             }
           }
         }

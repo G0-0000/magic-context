@@ -816,6 +816,25 @@ Opt-in (default off; independent of `memory.enabled`). When enabled, Magic Conte
 - **Non-blocking.** Initial sweep runs at startup; incremental tick runs every 15 minutes from the dream timer. The sweep skips already-indexed SHAs.
 - **ctx_search integration.** Results appear as a `git_commit` source alongside `memory`, `session_fact`, and `message_history`. Each result carries the SHA, short SHA, author, and commit timestamp.
 
+### `memory.strata_ask`
+
+| Key | Type | Default |
+|-----|------|---------|
+| `memory.strata_ask.enabled` | `boolean` | `false` |
+| `memory.strata_ask.base_url` | `string` | user-level |
+| `memory.strata_ask.api_key` | `string \| null` | user-level |
+| `memory.strata_ask.api_key_env` | `string \| null` | user-level |
+| `memory.strata_ask.model` | `string` | user-level |
+| `memory.strata_ask.slot_file` | `string` | user-level |
+| `memory.strata_ask.prefix_path` | `string` | user-level |
+| `memory.strata_ask.project` | `string` | user-level |
+| `memory.strata_ask.max_tokens` | `number` | `2048` |
+| `memory.strata_ask.timeout_ms` | `number` | `60000` |
+
+Opt-in (default off). When a project sets `enabled: true`, the user config supplies a complete connection, and `memory.strata_ask.project` equals the project identity classic `ctx_search` resolves for the call directory, a bare `ctx_search` query (query only; not an id list) may be answered from a Strata session-file cache instead of classic retrieval. The answer cites `#id`s and is not subject to the already-visible filter. Explicit `sources`, `from`, `to`, `limit`, or id-shaped queries always stay on the classic path. A miss, timeout, identity mismatch, unresolved identity, or incomplete connection falls through without changing classic output. No Strata request is made until that identity is resolved and matches.
+
+Project config may set only `enabled`. `base_url`, `api_key`, `api_key_env`, `model`, `slot_file`, `prefix_path`, `project`, `max_tokens`, and `timeout_ms` are stripped from project config. These keys are not live-reload keys. OpenCode and Pi re-read the trust-filtered config for the call directory on each `ctx_search` call. Tool description text still follows the host's registration lifecycle. `timeout_ms` bounds each HTTP call and, separately, the prefix-file read. The in-process restore/chat queue does not prevent another process from clobbering slot 0.
+
 ### `memory.subagent_inject`
 
 | Key | Type | Default |
@@ -1004,7 +1023,8 @@ Emergency, age, supersession (including edit-marker compression), and duplicate 
     "auto_promote": true,
     "auto_search": { "enabled": true, "score_threshold": 0.6, "min_prompt_chars": 20 },
     "git_commit_indexing": { "enabled": false, "since_days": 365, "max_commits": 2000 },
-    "subagent_inject": { "enabled": true }
+    "subagent_inject": { "enabled": true },
+    "strata_ask": { "enabled": false }
   },
 }
 ```

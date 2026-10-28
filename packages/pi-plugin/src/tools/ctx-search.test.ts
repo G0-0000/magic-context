@@ -1,11 +1,14 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb, fakeContext } from "../test-utils.test";
-import { createCtxSearchTool } from "./ctx-search";
+import { createCtxSearchTool, resolvePiStrataAsk } from "./ctx-search";
 
 describe("createCtxSearchTool", () => {
 	it("hosted reranking reaches Pi output and cancellation without exposing the key", async () => {
@@ -424,6 +427,218 @@ describe("createCtxSearchTool", () => {
 			expect(fillerOpts.limit).toBe(10);
 		} finally {
 			spy.mockRestore();
+		}
+	});
+
+	it("routes a bare query through strata and leaves classic search untouched on a miss", async () => {
+		const db = createTestDb();
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		writeFileSync(
+			prefixPath,
+			JSON.stringify([
+				{ role: "system", content: "sys" },
+				{ role: "assistant", content: "ack" },
+			]),
+		);
+		let calls = 0;
+		let mode = "hit";
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				calls++;
+				const url = new URL(req.url);
+				if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
+				return Response.json({
+					choices: [
+						{
+							message: {
+								content: mode === "hit" ? "答案一行\n#1032：概括" : "记忆库中无",
+								reasoning_content: "skip",
+							},
+						},
+					],
+				});
+			},
+		});
+		const spy = spyOn(searchModule, "unifiedSearch");
+		const ctx = fakeContext("ses-search", "/repo/pi-strata") as never;
+		const invoke = async (
+			args: { query: string; sources?: ["memory"]; limit?: number; from?: string },
+			resolve: boolean,
+		) => {
+			const tool = createCtxSearchTool({
+				db,
+				memoryEnabled: false,
+				embeddingEnabled: false,
+				resolveProjectIdentity: () => "git:pi-strata",
+				resolveStrataAsk: resolve
+					? () => ({
+							baseUrl: String(server.url).replace(/\/$/, ""),
+							apiKey: "pi-strata-key",
+							apiKeyEnv: null,
+							model: "qwen-test",
+								slotFile: "mc-mem-v1.bin",
+								prefixPath,
+								project: "git:pi-strata",
+								maxTokens: 64,
+							timeoutMs: 1500,
+						})
+					: () => null,
+			});
+			const result = await tool.execute(
+				"strata-call",
+				args,
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			return result.content[0]?.text ?? "";
+		};
+		try {
+			const baseline = await invoke({ query: "where is sqlite" }, false);
+			expect(calls).toBe(0);
+			const before = spy.mock.calls.length;
+			const hit = await invoke({ query: "where is sqlite" }, true);
+			expect(hit).toContain("答案一行");
+			expect(hit).toContain("本答案由项目记忆缓存合成");
+			expect(hit).not.toContain("Found ");
+			expect(spy.mock.calls.length).toBe(before);
+			mode = "miss";
+			const missed = await invoke({ query: "where is sqlite" }, true);
+			expect(missed).toBe(baseline);
+			const networked = calls;
+			await invoke({ query: "where is sqlite", sources: ["memory"] }, true);
+			await invoke({ query: "where is sqlite", limit: 2 }, true);
+			await invoke({ query: "where is sqlite", from: "2026-01-01" }, true);
+			await invoke({ query: "#1035" }, true);
+			expect(calls).toBe(networked);
+		} finally {
+			spy.mockRestore();
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("does not call the network when the resolved identity is not the bound project", async () => {
+		const db = createTestDb();
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		writeFileSync(prefixPath, JSON.stringify([{ role: "system", content: "sys" }]));
+		let calls = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				calls++;
+				return Response.json({ n_restored: 1 });
+			},
+		});
+		const connection = {
+			baseUrl: String(server.url).replace(/\/$/, ""),
+			apiKey: "pi-strata-key",
+			apiKeyEnv: null,
+			model: "qwen-test",
+			slotFile: "mc-mem-v1.bin",
+			prefixPath,
+			project: "git:bound",
+			maxTokens: 64,
+			timeoutMs: 1500,
+		};
+		const tool = createCtxSearchTool({
+			db,
+			memoryEnabled: false,
+			embeddingEnabled: false,
+			resolveProjectIdentity: () => "git:other",
+			resolveStrataAsk: () => connection,
+		});
+		try {
+			const result = await tool.execute(
+				"strata-mismatch",
+				{ query: "where is sqlite" },
+				new AbortController().signal,
+				undefined,
+				fakeContext("ses-search", "/repo/other") as never,
+			);
+			expect(result.content[0]?.text ?? "").toContain("No hidden results found");
+			expect(result.content[0]?.text ?? "").not.toContain("本答案由项目记忆缓存合成");
+			expect(calls).toBe(0);
+		} finally {
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("treats a substitution failure as disabled with zero network", async () => {
+		const db = createTestDb();
+		const home = mkdtempSync(join(tmpdir(), "mc-pi-strata-home-"));
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		writeFileSync(prefixPath, JSON.stringify([{ role: "system", content: "sys" }]));
+		let calls = 0;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				calls++;
+				return Response.json({ n_restored: 1 });
+			},
+		});
+		mkdirSync(join(home, ".config", "cortexkit"), { recursive: true });
+		writeFileSync(
+			join(home, ".config", "cortexkit", "magic-context.jsonc"),
+			JSON.stringify({
+				memory: {
+					strata_ask: {
+						enabled: true,
+						base_url: String(server.url).replace(/\/$/, ""),
+						api_key: "still-valid",
+						model: "qwen-test",
+						slot_file: "mc-mem-v1.bin",
+						prefix_path: `${prefixPath}{env:MC_PI_STRATA_MISSING_LANG}`,
+						project: "git:bound",
+					},
+				},
+			}),
+		);
+		const previousHome = process.env.HOME;
+		const previousXdg = process.env.XDG_CONFIG_HOME;
+		const previousLang = process.env.MC_PI_STRATA_MISSING_LANG;
+		delete process.env.MC_PI_STRATA_MISSING_LANG;
+		process.env.HOME = home;
+		process.env.XDG_CONFIG_HOME = join(home, ".config");
+		const tool = createCtxSearchTool({
+			db,
+			memoryEnabled: false,
+			embeddingEnabled: false,
+			resolveProjectIdentity: () => "git:bound",
+			resolveStrataAsk: (cwd) => resolvePiStrataAsk(cwd),
+		});
+		try {
+			const result = await tool.execute(
+				"strata-subst",
+				{ query: "where is sqlite" },
+				new AbortController().signal,
+				undefined,
+				fakeContext("ses-search", "/repo/pi-subst") as never,
+			);
+			expect(result.content[0]?.text ?? "").toContain("No hidden results found");
+			expect(result.content[0]?.text ?? "").not.toContain("本答案由项目记忆缓存合成");
+			expect(calls).toBe(0);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = previousXdg;
+			if (previousLang === undefined) delete process.env.MC_PI_STRATA_MISSING_LANG;
+			else process.env.MC_PI_STRATA_MISSING_LANG = previousLang;
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
+			rmSync(home, { recursive: true, force: true });
+			closeQuietly(db);
 		}
 	});
 });

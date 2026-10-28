@@ -31,6 +31,14 @@ export interface CtxSearchToolDeps {
     gitCommitsEnabled?: boolean;
     rerankConnectionFile?: string;
     rerankConfig?: import("../../config/schema/magic-context").RerankConfig;
+    /**
+     * Trust-filtered strata connection for the call directory, or null when
+     * the project has not opted in or the user connection is incomplete.
+     * Omitted means the cache path is off (tests and hosts that have not wired it).
+     */
+    resolveStrataAsk?: (
+        directory: string,
+    ) => import("./strata-ask").StrataAskConnection | null;
     /** Override message reader for testing (avoids opening OpenCode DB in CI). */
     readMessages?: (sessionId: string) => Array<{
         ordinal: number;

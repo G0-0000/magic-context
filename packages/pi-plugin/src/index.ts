@@ -130,6 +130,7 @@ import {
 } from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import { registerStandalonePluginMarker } from "@magic-context/core/standalone-plugin-marker";
+
 import { startHostStallProfilerSwitch } from "../../plugin/src/shared/host-stall-profiler";
 import packageMetadata from "../package.json";
 import {
@@ -266,6 +267,7 @@ import {
 } from "./tag-snapshot-pi";
 import { withTimeout } from "./timeout";
 import { registerMagicContextTools, syncCtxMemoryToolEnabled } from "./tools";
+import { resolvePiStrataAsk } from "./tools/ctx-search";
 import {
 	parseTodos,
 	registerTodoOverlay,
@@ -1946,6 +1948,9 @@ async function startPiMagicContextRuntime(
 	registerMagicContextTools(pi, {
 		rerankConnectionFile: config.subc?.connection_file,
 		rerankConfig: config.rerank,
+		// Call cwd, not the boot project. Re-read every search; a file edit is
+		// visible on the next call. Parse/schema failure disables the cache path.
+		resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
 		expandTools: config.historian?.expand_tools,
 		db,
 		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,

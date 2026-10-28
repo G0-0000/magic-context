@@ -64,6 +64,7 @@ import { loadPiConfig } from "./config";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { registerMagicContextTools } from "./tools";
+import { resolvePiStrataAsk } from "./tools/ctx-search";
 
 const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
 
@@ -120,6 +121,9 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 			registerMagicContextTools(pi, {
 				rerankConnectionFile: cfg.subc?.connection_file,
 				rerankConfig: cfg.rerank,
+				// Lean children have no resolveCurrentProjectDeps cache. Re-read the
+				// call cwd; a parse/schema failure disables the cache path.
+				resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
 				db,
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				resolveProjectIdentity: (ctx) =>

@@ -1,6 +1,6 @@
 {
-  "generation": "6070f6d414718531de24169d04ea2a8881c602215638f92b0684c2475311d414",
-  "catalog_digest": "6070f6d414718531de24169d04ea2a8881c602215638f92b0684c2475311d414",
+  "generation": "83e4a6c8f9c2e00deb08622d33a5219e420c50a8147671227837e29f61259227",
+  "catalog_digest": "83e4a6c8f9c2e00deb08622d33a5219e420c50a8147671227837e29f61259227",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -148,7 +148,7 @@
       "capabilities": [
         "magic-context:archive.search/v1"
       ],
-      "description": "Search the archive — everything that ever happened in this project, not just what is on your desk.\n\nRetrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.\n- \"where is the opencode source code path?\"  (a location you once knew)\n- \"why did we choose SQLite over postgres?\"  (a decision and its reasons)\n- \"how does the dreamer lease work?\"  (a mechanism discussed or implemented earlier)\n- Not: \"upload client retry backoff config\"\n\nResults only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.\n\nSources (omit for all):\n- memory — rules, constraints, conventions; \"what's our convention for X\"\n- message — the raw conversation behind compacted history; \"did we discuss this\"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)\n- git_commit — commit history; \"when did this change\" (pair with message for regression hunts)\n- primer — reusable project Q&A the dreamer distils from recurring questions; \"have we answered this before\"\n- note — parked follow-ups with their recorded text; \"did we leave a follow-up\"\nUse from/to to restrict every source to an inclusive UTC date range.",
+      "description": "Search the archive — everything that ever happened in this project, not just what is on your desk.\n\nRetrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (paths, symbols, config keys, error strings); a bare keyword stack finds less.\n- \"where is the opencode source code path?\"  (a location you once knew)\n- \"why did we choose SQLite over postgres?\"  (a decision and its reasons)\n- \"how does the dreamer lease work?\"  (a mechanism discussed or implemented earlier)\n- Not: \"upload client retry backoff config\"\n\nClassic retrieval results only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (`#7234`, `12, 34`) resolves them directly.\n\nSources (omit for all):\n- memory — rules, constraints, conventions; \"what's our convention for X\"\n- message — the raw conversation behind compacted history; \"did we discuss this\"; hits carry ordinals for ctx_expand(start=N-10, end=N+5)\n- git_commit — commit history; \"when did this change\" (pair with message for regression hunts)\n- primer — reusable project Q&A the dreamer distils from recurring questions; \"have we answered this before\"\n- note — parked follow-ups with their recorded text; \"did we leave a follow-up\"\nUse from/to to restrict every source to an inclusive UTC date range.\n\nBare queries may return a synthesized memory-cache answer when the project enables it (cites #ids, NOT subject to the already-visible filter; when ctx_memory is available, ctx_memory get reads those originals). Explicit sources/from/to/limit/id queries always run classic retrieval. The classic path is unchanged.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive: what earlier sessions said and decided, commits and notes. Ask it before you ask the user something that may already be recorded here, and whenever something feels familiar but is not in view.\n\n`ctx_memory` pins facts about this project that stay true for the months this work lasts, for you and for every other agent working on this project. Pin one when you learn something that must not have to be found again, and especially when it cost you several turns to find. Pinned facts are not shown to you automatically: `ctx_search` recalls them.\n\n`ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note. When the user says \"take a note\", it always goes in the tray.",
     "item_digest": "73c679706bf3e65cc5f7a3de7e7d52600e8e9d071e8b5bdc074ee66cc316bec0",
-    "preflight_digest": "fbb5d6cdb477e9889872be8d5e14df78b3714682c96c80896664cc3c8ae0f65b",
+    "preflight_digest": "f2f50fdff0ae04cbf27348eab55745e84265c27f3d64b5d494abfc25480f0d8d",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

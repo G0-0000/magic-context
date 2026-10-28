@@ -78,6 +78,10 @@ export interface RegisterToolsOptions {
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
 	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
+	/** Trust-filtered strata connection for the call cwd. Null disables the cache path. */
+	resolveStrataAsk?: (
+		ctx: { cwd: string },
+	) => import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection | null;
 	/** Resolve the current directory's project identity using the user-level home-project setting. */
 	resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
 	/** When true, register the separate ctx_memory_list tool and enable Curate-only
@@ -124,6 +128,9 @@ export function registerMagicContextTools(
 ): void {
 	const resolveProjectIdentity = opts.resolveProjectIdentity
 		? (directory: string) => opts.resolveProjectIdentity?.({ cwd: directory })
+		: undefined;
+	const resolveStrataAsk = opts.resolveStrataAsk
+		? (directory: string) => opts.resolveStrataAsk?.({ cwd: directory }) ?? null
 		: undefined;
 	const promptSurfaceRuntime =
 		opts.promptSurfaceRuntime ??
@@ -192,6 +199,7 @@ export function registerMagicContextTools(
 				rerankConnectionFile: opts.rerankConnectionFile,
 				rerankConfig: opts.rerankConfig,
 				resolveProjectIdentity,
+				resolveStrataAsk,
 			}),
 		),
 	);

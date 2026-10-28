@@ -1188,6 +1188,20 @@ export interface MagicContextConfig {
             /** Max commits kept per project; oldest evicted (default: 2000) */
             max_commits: number;
         };
+        /** Bare ctx_search cache. Project config may set only `enabled`. */
+        strata_ask: {
+            enabled: boolean;
+            base_url?: string;
+            api_key?: string | null;
+            api_key_env?: string | null;
+            model?: string;
+            slot_file?: string;
+            prefix_path?: string;
+            /** Identity classic ctx_search resolves for the one allowed project. */
+            project?: string;
+            max_tokens: number;
+            timeout_ms: number;
+        };
     };
 }
 
@@ -1686,6 +1700,77 @@ export const MagicContextConfigSchema = z
                     .describe(
                         "Task-requested memory injection (Pi-only v1): when a real user task message carries a ⟦mc-mem: …⟧ marker, fetch the named memories by ID and append their full content in a <ctx-subagent-inject> snapshot block to the end of that message. Up to 10 deduplicated IDs per task; missing/unauthorized/ineligible IDs get an explicit unavailable note (no metadata leak); oversized payloads fail explicitly instead of truncating. The snapshot is frozen at first decision and replayed byte-identically for as long as the original message stays visible; it never moves into m[0]/m[1] or a newer message. Bypasses injection_budget_tokens but NOT the model hard context window. Not supported on the compaction-off path; OpenCode is not implemented in v1.",
                     ),
+                strata_ask: z
+                    .object({
+                        enabled: z
+                            .boolean()
+                            .default(false)
+                            .describe(
+                                "Opt in so bare ctx_search queries may be answered from a user-configured Strata session-file cache. The only memory.strata_ask field a project config may set. Default false. Independent of memory.enabled. Not a live-reload key: OpenCode and Pi re-read the trust-filtered config for the call directory on each ctx_search call. Tool description text still follows the host's registration lifecycle.",
+                            ),
+                        base_url: z
+                            .string()
+                            .optional()
+                            .describe(
+                                "User-level Strata origin (http or https). Project values are ignored. Missing or invalid connection material disables the cache path and ctx_search continues on the classic path.",
+                            ),
+                        api_key: z
+                            .union([z.string(), z.null()])
+                            .optional()
+                            .describe(
+                                "User-level Bearer token, or null to use api_key_env. Project values are ignored. The token is never written to logs.",
+                            ),
+                        api_key_env: z
+                            .union([z.string(), z.null()])
+                            .optional()
+                            .describe(
+                                "User-level environment variable name holding the Bearer token when api_key is unset or null. Project values are ignored.",
+                            ),
+                        model: z
+                            .string()
+                            .optional()
+                            .describe(
+                                "User-level model id for POST /v1/chat/completions. Project values are ignored.",
+                            ),
+                        slot_file: z
+                            .string()
+                            .optional()
+                            .describe(
+                                "User-level server-side session-file basename under the Strata slot-save directory. Not a client filesystem path. Project values are ignored.",
+                            ),
+                        prefix_path: z
+                            .string()
+                            .optional()
+                            .describe(
+                                "User-level absolute path to the frozen prefix JSON replayed before the query. Project values are ignored.",
+                            ),
+                        project: z
+                            .string()
+                            .optional()
+                            .describe(
+                                "User-level project identity this cache may answer. Must equal the identity classic ctx_search resolves for the call directory. Not a directory path. Project values are ignored. Missing, mismatched, or unresolvable identity disables the cache path.",
+                            ),
+                        max_tokens: z
+                            .number()
+                            .min(1)
+                            .max(32768)
+                            .default(2048)
+                            .describe(
+                                "User-level completion max_tokens (min: 1, max: 32768, default: 2048). Project values are ignored.",
+                            ),
+                        timeout_ms: z
+                            .number()
+                            .min(1)
+                            .max(600000)
+                            .default(60000)
+                            .describe(
+                                "User-level deadline in milliseconds for each Strata HTTP call, and separately for the prefix-file read (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
+                            ),
+                    })
+                    .default({ enabled: false, max_tokens: 2048, timeout_ms: 60000 })
+                    .describe(
+                        "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity equals memory.strata_ask.project. A project may set only enabled. A miss, transport error, identity mismatch, or incomplete connection falls through to classic retrieval without changing its format. Not sampled by live reload.",
+                    ),
             })
             .default({
                 enabled: true,
@@ -1695,6 +1780,7 @@ export const MagicContextConfigSchema = z
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
                 subagent_inject: { enabled: true },
+                strata_ask: { enabled: false, max_tokens: 2048, timeout_ms: 60000 },
             })
             .describe(
                 "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",
@@ -1759,6 +1845,9 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "memory.git_commit_indexing.enabled",
     "memory.git_commit_indexing.since_days",
     "memory.git_commit_indexing.max_commits",
+    // memory.strata_ask.* is intentionally absent. ctx_search re-reads the
+    // trust-filtered file per call and must not ride historian/dreamer live
+    // sampling. Do not add these keys here.
 ] as const;
 
 // Mark the input schema nodes, not their parsed defaults, so the JSON schema,

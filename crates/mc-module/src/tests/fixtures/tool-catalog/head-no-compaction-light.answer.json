@@ -1,6 +1,6 @@
 {
-  "generation": "9de5b6d68b0e5205019f4dfaf11af3bd62f366dc057ec56b50c2ffcca2d8bce0",
-  "catalog_digest": "9de5b6d68b0e5205019f4dfaf11af3bd62f366dc057ec56b50c2ffcca2d8bce0",
+  "generation": "c4ff262765967e4e0acb71081aa70b0bfce970ed42d70acdac5976380168cede",
+  "catalog_digest": "c4ff262765967e4e0acb71081aa70b0bfce970ed42d70acdac5976380168cede",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -148,7 +148,7 @@
       "capabilities": [
         "magic-context:archive.search/v1"
       ],
-      "description": "Search the archive — everything that ever happened here that is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect (\"where is the opencode source code path?\", \"why did we choose SQLite over postgres?\", \"how does the dreamer lease work?\") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), primer (reusable project Q&A the dreamer distils from recurring questions), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range.",
+      "description": "Search the archive — everything that ever happened here. Classic retrieval returns only what is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect (\"where is the opencode source code path?\", \"why did we choose SQLite over postgres?\", \"how does the dreamer lease work?\") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), primer (reusable project Q&A the dreamer distils from recurring questions), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range. Bare queries may return a synthesized memory-cache answer when the project enables it (cites #ids, NOT subject to the already-visible filter; when ctx_memory is available, ctx_memory get reads those originals). Explicit sources/from/to/limit/id queries always run classic retrieval. The classic path is unchanged.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "293f232cc8357835948b41a3586fed656b1675ec4d3638c5ba7ba50d7be9d7a3",
+    "preflight_digest": "caf60f2144daa4dd1bb3b0af3ac9e3fbd7e795dbbf88dd87b83e438685ddbcb9",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

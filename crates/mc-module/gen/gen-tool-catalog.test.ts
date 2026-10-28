@@ -1,6 +1,35 @@
 import { describe, expect, test } from "bun:test";
-import { answer, checkPlanMagicContext, compactsSession, EXAMPLE_CONFIG, parsePreset } from "./gen-tool-catalog";
+import { answer, checkPlanMagicContext, compactsSession, EXAMPLE_CONFIG, parsePreset, pluginStringDiff } from "./gen-tool-catalog";
 import type { Json, JsonObject } from "./gen-tool-catalog";
+
+describe("plugin string parity", () => {
+    test("reports all mismatched paths across descriptions and parameter descriptions", () => {
+        const catalog: Json = {
+            descriptions: { full: { ctx_memory: "catalog", ctx_search: "same" } },
+            parameter_descriptions: {
+                full: { ctx_note: { action: "catalog", note_ids: null } },
+                light: { ctx_memory: { category: "catalog" } },
+            },
+        };
+        const plugin: Json = {
+            descriptions: { full: { ctx_memory: "plugin", ctx_search: "same" } },
+            parameter_descriptions: {
+                full: { ctx_note: { action: "plugin", extra: "added" } },
+                light: { ctx_memory: { category: "plugin" } },
+            },
+        };
+        const differences = pluginStringDiff(catalog, plugin, "");
+        expect(differences.map((difference) => difference.split(":", 1)[0])).toEqual([
+            "descriptions.full.ctx_memory",
+            "parameter_descriptions.full.ctx_note.action",
+            "parameter_descriptions.full.ctx_note.extra",
+            "parameter_descriptions.full.ctx_note.note_ids",
+            "parameter_descriptions.light.ctx_memory.category",
+        ]);
+        expect(differences[2]).toContain("catalog <missing>");
+        expect(differences[3]).toContain("plugin <missing>");
+    });
+});
 
 describe("role catalogs", () => {
     const head = ["ctx_reduce", "ctx_expand", "ctx_note", "ctx_memory", "ctx_search"];
