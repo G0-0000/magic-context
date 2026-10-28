@@ -7,7 +7,7 @@ Retrieval matches meaning and exact words and fuses them, so phrase \`query\` as
 - "how does the dreamer lease work?"  (a mechanism discussed or implemented earlier)
 - Not: "upload client retry backoff config"
 
-Results only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (\`#7234\`, \`12, 34\`) resolves them directly.
+Classic retrieval results only contain what you CANNOT currently see — memories already in <project-memory> and the live tail are filtered out. A query that is just memory ids (\`#7234\`, \`12, 34\`) resolves them directly.
 
 Sources (omit for all):
 - memory — rules, constraints, conventions; "what's our convention for X"
@@ -15,5 +15,7 @@ Sources (omit for all):
 - git_commit — commit history; "when did this change" (pair with message for regression hunts)
 - primer — reusable project Q&A the dreamer distils from recurring questions; "have we answered this before"
 - note — parked follow-ups with their recorded text; "did we leave a follow-up"
-Use from/to to restrict every source to an inclusive UTC date range.`;
+Use from/to to restrict every source to an inclusive UTC date range.
+
+Bare queries may return a synthesized memory-cache answer when the project enables it (cites #ids, NOT subject to the already-visible filter; when ctx_memory is available, ctx_memory get reads those originals). Explicit sources/from/to/limit/id queries always run classic retrieval. The classic path is unchanged.`;
 export const DEFAULT_CTX_SEARCH_LIMIT = 10;
