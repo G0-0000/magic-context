@@ -132,8 +132,14 @@ test("Pi: a missing end id falls back to the stored number", () => {
 	).toBe(1);
 });
 
-test("Pi: a mid-message end re-reads the end message", () => {
+test("Pi: a block-indexed end still continues at the next message", () => {
 	const sessionId = "pi-chunk-start-partial";
+	const whole = withBranchProvider(sessionId, () =>
+		resolveHistorianChunkStart(sessionId, {
+			endMessage: 2,
+			endMessageId: "u2",
+		}),
+	);
 	expect(
 		withBranchProvider(sessionId, () =>
 			resolveHistorianChunkStart(sessionId, {
@@ -142,5 +148,5 @@ test("Pi: a mid-message end re-reads the end message", () => {
 				endBlockIndex: 0,
 			}),
 		),
-	).toBe(3);
+	).toBe(whole);
 });

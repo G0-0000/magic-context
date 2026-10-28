@@ -969,10 +969,12 @@ export interface HistorianChunkStartBoundary {
  * `endMessage` number is only the fallback: when the id is no longer in the
  * host's history (a revert retired or rewrote it) there is no position to
  * resolve, so the run continues at the stored number exactly as before and
- * the host's boundary repair decides what survives. A compartment that ends
- * mid-message (`endBlockIndex` set) leaves that message's later blocks
- * uncovered, so the chunk re-reads the end message itself instead of
- * skipping past it.
+ * the host's boundary repair decides what survives. A compartment whose end
+ * carries a block index (written by the Rust historian) also continues at
+ * the next message, as the stored-number start always did: a TypeScript
+ * summary starting inside that message would carry no block index, and the
+ * uncovered-end rule (`getUncoveredCompartmentEndsThrough`) would then treat
+ * the earlier end as uncovered for good and stop history trimming there.
  */
 export function resolveHistorianChunkStart(
     sessionId: string,
@@ -984,7 +986,6 @@ export function resolveHistorianChunkStart(
     if (typeof endId !== "string" || endId.length === 0) return fallback;
     const ordinal = readRawSessionMessageOrdinalById(sessionId, endId);
     if (typeof ordinal !== "number" || !Number.isFinite(ordinal) || ordinal < 1) return fallback;
-    if (newest.endBlockIndex !== null && newest.endBlockIndex !== undefined) return ordinal;
     return ordinal + 1;
 }
 

@@ -104,15 +104,15 @@ test("OpenCode 1: a stored end_message one short of its end id continues after t
         ).toBe(9);
         expect(resolveHistorianChunkStart("ses-chunk-start", null)).toBe(1);
 
-        // A compartment that ends mid-message leaves that message's later
-        // blocks uncovered, so the chunk re-reads the end message itself.
+        // A block-indexed end (Rust historian) still continues at the next
+        // message; starting inside it would leave the earlier end uncovered.
         expect(
             resolveHistorianChunkStart("ses-chunk-start", {
                 endMessage: 8,
                 endMessageId: id(8),
                 endBlockIndex: 0,
             }),
-        ).toBe(9);
+        ).toBe(10);
     } finally {
         closeReadOnlySessionDb();
         if (previousPath === undefined) delete process.env.OPENCODE_DB;
@@ -165,7 +165,7 @@ test("OpenCode 2: a stored end_message one short of its end id continues after t
                     endMessageId: "m-9",
                     endBlockIndex: 0,
                 }),
-            ).toBe(9);
+            ).toBe(10);
         } finally {
             unregister();
         }
