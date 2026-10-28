@@ -134,6 +134,7 @@ import {
 	getRawSessionTagKeysThrough,
 	type RawMessageProvider,
 	readSessionChunk,
+	resolveHistorianChunkStart,
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
@@ -649,11 +650,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 
-			// Where does the new chunk start?
-			const offset =
-				priorCompartments.length > 0
-					? priorCompartments[priorCompartments.length - 1].endMessage + 1
-					: 1;
+			// The next chunk continues after the last summarized message id,
+			// resolved through the Pi branch walk, so a stored end_message number
+			// that drifted below its id can neither skip nor repeat a message.
+			// When the id left the branch (a /tree jump) the stored number stands,
+			// as before, and boundary repair decides what survives.
+			const offset = resolveHistorianChunkStart(
+				sessionId,
+				priorCompartments[priorCompartments.length - 1] ?? null,
+			);
 
 			let boundarySnapshot =
 				providedBoundarySnapshot ??
