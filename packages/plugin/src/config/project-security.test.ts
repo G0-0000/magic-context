@@ -336,6 +336,34 @@ describe("stripUnsafeProjectConfigFields", () => {
         const raw: Record<string, unknown> = { dreamer: true, historian: "x" };
         expect(stripUnsafeProjectConfigFields(raw)).toHaveLength(0);
     });
+
+    it("strips strata connection fields from project config and keeps enabled", () => {
+        const raw: Record<string, unknown> = {
+            memory: {
+                enabled: true,
+                strata_ask: {
+                    enabled: true,
+                    base_url: "http://evil.example",
+                    api_key: "project-key",
+                    api_key_env: "PROJECT_KEY",
+                    model: "project-model",
+                    slot_file: "../secret.bin",
+                    prefix_path: "/etc/passwd",
+                    project: "git:evil",
+                    max_tokens: 1,
+                    timeout_ms: 1,
+                },
+            },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect(raw.memory).toEqual({
+            enabled: true,
+            strata_ask: { enabled: true },
+        });
+        expect(warnings.join("\n")).toContain("memory.strata_ask.base_url");
+        expect(warnings.join("\n")).toContain("/prefix_path/project/");
+        expect(warnings.join("\n")).not.toContain("project-key");
+    });
 });
 
 describe("constrainProjectThresholdOverrides", () => {

@@ -305,13 +305,55 @@ function renderVariant(
     return renderText(`${variant}/${inputs.surface}`, flags, values);
 }
 
+function pluginValuePreview(value: Json | undefined): string {
+    if (value === undefined) return "<missing>";
+    const text = typeof value === "string" ? value : jcs(value);
+    return JSON.stringify(text.length > 160 ? `${text.slice(0, 160)}…` : text);
+}
+
+/**
+ * Paths where the catalog and the plugin strings differ. The parity check
+ * compares each whole object, so a failure must name the field; otherwise a
+ * drift in one tool is reported as if it were whichever description was just edited.
+ */
+export function pluginStringDiff(catalog: Json, plugin: Json, path: string): string[] {
+    if (jcs(catalog) === jcs(plugin)) return [];
+    if (
+        catalog !== null &&
+        plugin !== null &&
+        typeof catalog === "object" &&
+        typeof plugin === "object" &&
+        !Array.isArray(catalog) &&
+        !Array.isArray(plugin)
+    ) {
+        const keys = [...new Set([...Object.keys(catalog), ...Object.keys(plugin)])].sort();
+        return keys.flatMap((key) => {
+            const childPath = path ? `${path}.${key}` : key;
+            const catalogValue = Object.hasOwn(catalog, key) ? catalog[key] : undefined;
+            const pluginValue = Object.hasOwn(plugin, key) ? plugin[key] : undefined;
+            if (catalogValue === undefined || pluginValue === undefined) {
+                return [`${childPath}: catalog ${pluginValuePreview(catalogValue)} != plugin ${pluginValuePreview(pluginValue)}`];
+            }
+            return pluginStringDiff(catalogValue, pluginValue, childPath);
+        });
+    }
+    return [`${path}: catalog ${pluginValuePreview(catalog)} != plugin ${pluginValuePreview(plugin)}`];
+}
+
 /**
  * Check the definition against the plugin's shipped strings: descriptions and
  * parameter descriptions are equal, and every text the plugin's builder makes
  * is what the definition renders for the same inputs. The tools-only texts
  * have no plugin counterpart.
+ *
+ * `--check` loads `tool_catalog_v1.json` once and compares it to the plugin
+ * source constants. Write mode still emits fixtures from that catalog when the
+ * comparison fails, so a known pre-existing description drift can be regenerated
+ * without being treated as a fixture error. This script does not rewrite the
+ * catalog; a wording change has to land in the JSON before generate refreshes
+ * the fixtures. `--check` remains the plugin-string gate.
  */
-function checkDefinitionMatchesPlugin(): void {
+function checkDefinitionMatchesPlugin(): string[] {
     const plugin = {
         descriptions: {
             full: {
@@ -334,11 +376,14 @@ function checkDefinitionMatchesPlugin(): void {
             light: LIGHT_PARAMETER_DESCRIPTIONS,
         },
     };
-    for (const key of ["descriptions", "parameter_descriptions"] as const) {
-        if (jcs(DEFINITION[key] as unknown as Json) !== jcs(plugin[key] as unknown as Json)) {
-            throw new Error(`tool_catalog_v1.json ${key} differ from the plugin's`);
-        }
-    }
+    const diff = pluginStringDiff(
+        {
+            descriptions: DEFINITION.descriptions as unknown as Json,
+            parameter_descriptions: DEFINITION.parameter_descriptions as unknown as Json,
+        },
+        plugin as unknown as Json,
+        "",
+    );
     for (const inputs of everyTextInput()) {
         const { memory, dreamer, temporal, caveman, language, surface } = inputs;
         const lang = language ?? undefined;
@@ -348,22 +393,23 @@ function checkDefinitionMatchesPlugin(): void {
                 null, 0, reduce, dreamer, temporal, caveman, false, lang, memory, surface,
             );
             if (renderVariant(variant, inputs) !== expected) {
-                throw new Error(`${variant} differs from the plugin for ${JSON.stringify(inputs)}`);
+                diff.push(`${variant} differs from the plugin for ${JSON.stringify(inputs)}`);
             }
             const overridden = buildMagicContextSection(
                 null, 0, reduce, dreamer, temporal, caveman, false, lang, memory, surface, OVERRIDE_SAMPLE,
             );
             if (renderVariant(variant, inputs, OVERRIDE_SAMPLE) !== overridden) {
-                throw new Error(`the override text differs from the plugin for ${JSON.stringify(inputs)}`);
+                diff.push(`the override text differs from the plugin for ${JSON.stringify(inputs)}`);
             }
         }
         const subagent = buildMagicContextSection(
             null, 0, true, dreamer, temporal, caveman, true, lang, memory, surface,
         );
         if (renderVariant("subagent", inputs) !== subagent) {
-            throw new Error(`subagent differs from the plugin for ${JSON.stringify(inputs)}`);
+            diff.push(`subagent differs from the plugin for ${JSON.stringify(inputs)}`);
         }
     }
+    return diff;
 }
 
 /** A stand-in for a user's guidance override, for the parity check and the matrix. */
@@ -991,7 +1037,6 @@ const EXAMPLES: Example[] = [
 const MATRIX_PATH = "../../../../testdata/tool-catalog-guidance-matrix.json";
 
 function outputs(): Map<string, string> {
-    checkDefinitionMatchesPlugin();
     checkTextRevisionCoversAssets();
     const files = new Map<string, string>();
     for (const { name, request, rustAsset } of EXAMPLES) {
@@ -1239,6 +1284,21 @@ function main(): void {
         console.error(`cross-check failed: ${crossChecks.failures.join("; ")}`);
         process.exit(1);
     }
+    let parityFailed = false;
+    try {
+        const differences = checkDefinitionMatchesPlugin();
+        if (differences.length > 0) {
+            parityFailed = true;
+            console.error(`tool_catalog_v1.json differs from the plugin:\n${differences.join("\n")}`);
+        }
+    } catch (error) {
+        if (check) throw error;
+        parityFailed = true;
+        console.error(error instanceof Error ? error.message : String(error));
+    }
+    if (!check && parityFailed) {
+        console.error("write mode continues from the catalog; --check remains the plugin-string gate");
+    }
     const differing: string[] = [];
     const generated = outputs();
     for (const [relative, content] of generated) {
@@ -1258,8 +1318,8 @@ function main(): void {
     }
     if (check && differing.length > 0) {
         console.error(`out of date: ${differing.join(", ")}`);
-        process.exit(1);
     }
+    if (check && (parityFailed || differing.length > 0)) process.exit(1);
     console.log(`${check ? "all example files are current" : "wrote example files"}: ${EXAMPLES.length} examples, ${generated.size} files, ${(guidanceMatrix().cases as Json[]).length} guidance cases`);
 }
 

@@ -38,8 +38,31 @@ import {
 	parseSearchDateRange,
 	SearchDateRangeError,
 } from "@magic-context/core/tools/ctx-search/date-range";
+import {
+	isStrataAskEligible,
+	isStrataConfigResolutionFailure,
+	strataAskConnectionFromConfig,
+	tryStrataAsk,
+	type StrataAskConnection,
+} from "@magic-context/core/tools/ctx-search/strata-ask";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
+import { loadPiConfigDetailed } from "../config";
+
+/**
+ * Call-cwd strata connection. Substitution failure, parse/schema failure, and
+ * incomplete connection material all disable the cache path. The caller still
+ * has to match `project` against the resolved identity before any network call.
+ */
+export function resolvePiStrataAsk(cwd: string): StrataAskConnection | null {
+	try {
+		const loaded = loadPiConfigDetailed({ cwd }, false);
+		if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
+		return strataAskConnectionFromConfig(loaded.config);
+	} catch {
+		return null;
+	}
+}
 
 const DEFAULT_LIMIT = 10;
 
@@ -113,6 +136,10 @@ export interface CtxSearchToolDeps {
 	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
 	/** Resolve a directory's project identity, allowing home only when user-level configuration enables it. */
 	resolveProjectIdentity?: (directory: string) => string | undefined;
+	/** Trust-filtered strata connection for the call cwd, or null when disabled. */
+	resolveStrataAsk?: (
+		directory: string,
+	) => import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection | null;
 }
 
 export function createCtxSearchTool(
@@ -162,6 +189,36 @@ export function createCtxSearchTool(
 					details: undefined,
 					isError: true,
 				};
+			}
+
+			// Same per-directory identity the classic path uses, before any
+			// Strata call. Unresolved or not the user-level bound project:
+			// classic path, no network.
+			if (isStrataAskEligible(params) && deps.resolveStrataAsk && ctx.cwd) {
+				const projectIdentity = resolveProject(ctx.cwd);
+				if (projectIdentity) {
+					let connection: ReturnType<
+						NonNullable<typeof deps.resolveStrataAsk>
+					> = null;
+					try {
+						connection = deps.resolveStrataAsk(ctx.cwd);
+					} catch {
+						connection = null;
+					}
+					if (connection && connection.project === projectIdentity) {
+						const synthesized = await tryStrataAsk({
+							query,
+							config: connection,
+							signal,
+						});
+						if (synthesized !== null) {
+							return {
+								content: [{ type: "text", text: synthesized }],
+								details: undefined,
+							};
+						}
+					}
+				}
 			}
 
 			const sessionId = ctx.sessionManager.getSessionId();

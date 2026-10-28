@@ -30,6 +30,7 @@ import { createCtxNoteTools } from "../tools/ctx-note";
 import { withoutSmartNoteText } from "../tools/ctx-note/constants";
 import { createCtxReduceTools } from "../tools/ctx-reduce";
 import { createCtxSearchTools } from "../tools/ctx-search";
+import { resolveOpenCodeStrataAsk } from "../tools/ctx-search/strata-ask";
 import { CTX_NOTE_LIGHT_DESCRIPTION } from "../tools/light-descriptions";
 import { parameterDescriptionsFor } from "../tools/parameter-descriptions";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
@@ -177,6 +178,9 @@ export function createToolRegistry(args: {
             rerankConfig: pluginConfig.rerank,
             resolveProjectPath,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+            // Call directory, not the plugin launch directory. Re-reads the
+            // trust-filtered config; a file edit is visible on the next search.
+            resolveStrataAsk: resolveOpenCodeStrataAsk,
         }),
         ...(memoryEnabled
             ? createCtxMemoryTools({
