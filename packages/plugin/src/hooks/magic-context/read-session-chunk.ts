@@ -962,14 +962,13 @@ export interface HistorianChunkStartBoundary {
 }
 
 /**
- * Where the next historian chunk starts: the message after the newest
- * compartment's end id, resolved through the host's own order. OpenCode 1
- * and 2 answer the id lookup exactly (the serving-thread canonical read and
- * the seq-based SQL read); Pi answers it from its branch walk. The stored
- * `endMessage` number is only the fallback: when the id is no longer in the
- * host's history (a revert retired or rewrote it) there is no position to
- * resolve, so the run continues at the stored number exactly as before and
- * the host's boundary repair decides what survives. A compartment whose end
+ * Where the next historian chunk starts. On OpenCode 1, read straight from
+ * its store file, it is the message after the newest compartment's end id,
+ * resolved through the canonical read, so a stored `endMessage` that drifted
+ * below its id can neither skip nor repeat a message. Every other case keeps
+ * the stored number: provider sessions (see below), and an end id no longer
+ * in the history (a revert retired or rewrote it), where there is no position
+ * to resolve and the host's boundary repair decides what survives. A compartment whose end
  * carries a block index (written by the Rust historian) also continues at
  * the next message, as the stored-number start always did: a TypeScript
  * summary starting inside that message would carry no block index, and the
@@ -982,6 +981,11 @@ export function resolveHistorianChunkStart(
 ): number {
     if (!newest) return 1;
     const fallback = newest.endMessage + 1;
+    // Only OpenCode 1's store-file count can drift behind a late-saved row.
+    // Provider sessions (OpenCode 2, Pi) number messages in their own
+    // coordinates, and Pi's carry a persisted alignment offset that an id
+    // lookup would ignore, so they keep the stored-number start.
+    if (hasRawMessageProvider(sessionId)) return fallback;
     const endId = newest.endMessageId;
     if (typeof endId !== "string" || endId.length === 0) return fallback;
     const ordinal = readRawSessionMessageOrdinalById(sessionId, endId);

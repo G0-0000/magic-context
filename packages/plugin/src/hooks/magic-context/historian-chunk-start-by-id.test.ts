@@ -123,7 +123,7 @@ test("OpenCode 1: a stored end_message one short of its end id continues after t
     }
 }, 30_000);
 
-test("OpenCode 2: a stored end_message one short of its end id continues after the id", () => {
+test("OpenCode 2: a provider session keeps the stored-number start", () => {
     const temp = createTestTempDir("mc-chunk-start-oc2-");
     const path = join(temp.dir, "opencode.db");
     const db = new RawDatabase(path);
@@ -147,25 +147,10 @@ test("OpenCode 2: a stored end_message one short of its end id continues after t
             createV2RawMessageProvider(reader, "s"),
         );
         try {
-            expect(resolveHistorianChunkStart("s", { endMessage: 8, endMessageId: "m-9" })).toBe(
-                10,
-            );
-            const chunk = readSessionChunk("s", 1_000_000, 10);
-            expect(chunk.startIndex).toBe(10);
-            expect(chunk.startMessageId).toBe("m-10");
-            expect(chunk.endMessageId).toBe("m-10");
-
-            expect(resolveHistorianChunkStart("s", { endMessage: 8, endMessageId: "m-gone" })).toBe(
-                9,
-            );
+            // Provider sessions number in their own coordinates; only OpenCode
+            // 1's store-file count can drift, so the end id is not consulted.
+            expect(resolveHistorianChunkStart("s", { endMessage: 8, endMessageId: "m-9" })).toBe(9);
             expect(resolveHistorianChunkStart("s", null)).toBe(1);
-            expect(
-                resolveHistorianChunkStart("s", {
-                    endMessage: 8,
-                    endMessageId: "m-9",
-                    endBlockIndex: 0,
-                }),
-            ).toBe(10);
         } finally {
             unregister();
         }

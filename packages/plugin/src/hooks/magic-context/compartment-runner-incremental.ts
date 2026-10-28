@@ -528,10 +528,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
 
-        // The next chunk continues after the last summarized message id,
-        // resolved through the host's own order, so a stored end_message number
-        // that drifted below its id can neither skip nor repeat a message. When
-        // the id is gone (a revert) the stored number stands, as before. The
+        // On OpenCode 1 the next chunk continues after the last summarized
+        // message id, so a stored end_message number that drifted below its id
+        // can neither skip nor repeat a message. Provider sessions, and an id
+        // a revert removed, keep the stored number, as before. The
         // id read can outrun a cold or just-rebuilt rank cache and defer like
         // any other unreadable ordinal.
         let offset: number;

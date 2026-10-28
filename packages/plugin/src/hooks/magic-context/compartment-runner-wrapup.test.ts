@@ -679,9 +679,7 @@ describe("runCompartmentAgent wrapup controls", () => {
             expect(counters.operations.history).toBeUndefined();
             expect(counters.decodedRows).toBeLessThanOrEqual(110);
             expect(counters.operations.messageExistsById?.calls).toBe(2);
-            // The chunk starts after the stored end id, resolved through the
-            // host's exact id-to-ordinal read: one bounded seq lookup per run.
-            expect(counters.operations.messageOrdinalById?.calls).toBe(1);
+            expect(counters.operations.messageOrdinalById).toBeUndefined();
             expect(counters.openReaders).toBe(0);
             expect(counters.readersOpened).toBe(counters.readersClosed);
             expect(counters.maxOpenReaders).toBe(1);
