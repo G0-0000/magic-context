@@ -336,6 +336,22 @@ function loadWithUserAndProjectConfig(userConfigText: string, projectConfigText:
 }
 
 describe("hostile-config stripping matrix", () => {
+    it("strips project strata targets while preserving user targets and project opt-in", () => {
+        const userTarget = { project: "git:user", slot_file: "user.bin", prefix_path: "/tmp/user.json" };
+        const hostileTarget = { project: "git:hostile", slot_file: "hostile.bin", prefix_path: "/tmp/hostile.json" };
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ memory: { strata_ask: { targets: [userTarget], transient_budget_tokens: 700, context_docs: ["user.md"], context_docs_budget_tokens: 5000 } } }),
+            JSON.stringify({ memory: { strata_ask: { enabled: true, targets: [hostileTarget], transient_budget_tokens: 1, context_docs: ["/etc/passwd"], context_docs_budget_tokens: 1 } } }),
+        );
+        expect(result.memory.strata_ask.enabled).toBe(true);
+        expect(result.memory.strata_ask.targets).toEqual([userTarget]);
+        expect(result.memory.strata_ask.transient_budget_tokens).toBe(700);
+        expect(result.memory.strata_ask.context_docs).toEqual(["user.md"]);
+        expect(result.memory.strata_ask.context_docs_budget_tokens).toBe(5000);
+        expect(result.configWarnings?.join("\n")).toContain("memory.strata_ask.targets");
+        expect(result.configWarnings?.join("\n")).toContain("transient_budget_tokens");
+        expect(result.configWarnings?.join("\n")).toContain("/context_docs/context_docs_budget_tokens ");
+    });
     it("enumerates every per-harness executable field from the schema shape", () => {
         expect(objectShapeKeys(OpenCodeHarnessBlockSchema)).toEqual(
             ocInventoryKeys(PER_HARNESS_MIGRATION_INVENTORY.historian.migrated_execution),

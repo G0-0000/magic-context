@@ -73,6 +73,8 @@ export interface TaskExecOutcome {
     failureDetail?: string;
     /** Completed task detail or explicit skip reason surfaced by `/ctx-dream`. */
     detail?: string;
+    /** A checkout-specific opt-out must leave a shared due slot untouched. */
+    preserveSchedule?: boolean;
     /** Run-local backlog when a task's scope differs from its next scheduled scope. */
     backlog?: DreamTaskBacklog;
     schedulePatch?: {
@@ -94,10 +96,13 @@ export interface TaskExecutorContext {
     leaseAcquisition?: LeaseAcquisition;
 }
 
-export type TaskExecutor = (
+export type TaskExecutor = ((
     task: DreamTaskRuntimeConfig,
     ctx: TaskExecutorContext,
-) => Promise<TaskExecOutcome>;
+) => Promise<TaskExecOutcome>) & {
+    /** Re-resolve this checkout's Strata config and compare its bound project identity. */
+    strataCacheEnabled?: (projectIdentity: string) => boolean;
+};
 
 export interface RunDueTasksDeps {
     db: Database;
@@ -116,18 +121,36 @@ export interface RunDueTasksDeps {
 }
 
 /**
- * The caller's tasks that the project's settings allow: projectMemoryEnabled
- * gates the project-memory tasks and smartNotesEnabled gates
- * evaluate-smart-notes (see dreamTaskAllowedBySettings). A task left out here
- * is not seeded, run or advanced, so its schedule rows stay untouched for any
- * other worktree or host whose caller shares the same project identity.
+ * Resolve a checkout-specific eligibility probe without trusting a missing or
+ * failing probe. Each invocation re-reads the effective configuration.
  */
+function strataCacheEnabledForTask(
+    task: DreamTaskName,
+    projectIdentity: string,
+    probe?: TaskExecutor["strataCacheEnabled"],
+): boolean {
+    if (task !== "strata-cache-maintain" || !probe) return false;
+    try {
+        return probe(projectIdentity) === true;
+    } catch {
+        return false;
+    }
+}
+
+/** Leave disallowed tasks' shared rows untouched for other worktrees or hosts. */
 function tasksAllowedBySettings(deps: RunDueTasksDeps): readonly DreamTaskRuntimeConfig[] {
-    return deps.tasks.filter((config) =>
-        dreamTaskAllowedBySettings(config.task, {
-            projectMemoryEnabled: deps.projectMemoryEnabled,
-            smartNotesEnabled: deps.smartNotesEnabled,
-        }),
+    return deps.tasks.filter(
+        (config) =>
+            dreamTaskAllowedBySettings(config.task, {
+                projectMemoryEnabled: deps.projectMemoryEnabled,
+                smartNotesEnabled: deps.smartNotesEnabled,
+            }) &&
+            (config.task !== "strata-cache-maintain" ||
+                strataCacheEnabledForTask(
+                    config.task,
+                    deps.projectIdentity,
+                    deps.executor.strataCacheEnabled,
+                )),
     );
 }
 
@@ -137,16 +160,26 @@ function tasksAllowedBySettings(deps: RunDueTasksDeps): readonly DreamTaskRuntim
  *  Idempotent — ON CONFLICT DO NOTHING (see storage).
  *
  *  A task is seeded only once the identity has the input it works on (see
- *  taskHasSchedulableInput); until then it gets no row, so a directory that
- *  never produces a memory never carries memory-maintenance schedules. */
+ *  taskHasSchedulableInput); Strata instead seeds on its explicit project opt-in,
+ *  even if no active memories remain to be compacted. */
 function ensureSeeded(
     db: Database,
     projectIdentity: string,
     config: DreamTaskRuntimeConfig,
     now: number,
+    strataCacheEnabled?: TaskExecutor["strataCacheEnabled"],
 ): void {
     if (getTaskScheduleState(db, projectIdentity, config.task)) return;
-    if (!taskHasSchedulableInput(config.task, db, projectIdentity, now)) return;
+    if (
+        !taskHasSchedulableInput(
+            config.task,
+            db,
+            projectIdentity,
+            now,
+            strataCacheEnabledForTask(config.task, projectIdentity, strataCacheEnabled),
+        )
+    )
+        return;
     const legacy = getDreamState(db, `last_dream_at:${projectIdentity}`);
     const legacyLastRun = legacy ? Number(legacy) : null;
     const lastRunAt = legacyLastRun && Number.isFinite(legacyLastRun) ? legacyLastRun : null;
@@ -185,8 +218,9 @@ function reconcileSchedule(
     projectIdentity: string,
     config: DreamTaskRuntimeConfig,
     now: number,
+    strataCacheEnabled?: TaskExecutor["strataCacheEnabled"],
 ): void {
-    ensureSeeded(db, projectIdentity, config, now);
+    ensureSeeded(db, projectIdentity, config, now, strataCacheEnabled);
     const current = getTaskScheduleState(db, projectIdentity, config.task);
     // No row means the task has no input yet: nothing to reconcile, and
     // reconciling must not create the row seeding just declined to create.
@@ -260,6 +294,7 @@ export function planDueTasks(
     projectIdentity: string,
     tasks: readonly DreamTaskRuntimeConfig[],
     now: number,
+    strataCacheEnabled?: TaskExecutor["strataCacheEnabled"],
 ): DueTask[] {
     // GC retired task rows against the canonical registry, never the caller's
     // execution list. Capability-filtered callers must not delete durable
@@ -281,7 +316,12 @@ export function planDueTasks(
     for (const config of tasks) {
         // Disabling is local to this worktree, not a cancellation of shared work.
         if (config.schedule.trim() === "") continue;
-        reconcileSchedule(db, projectIdentity, config, now);
+        if (
+            config.task === "strata-cache-maintain" &&
+            !strataCacheEnabledForTask(config.task, projectIdentity, strataCacheEnabled)
+        )
+            continue;
+        reconcileSchedule(db, projectIdentity, config, now, strataCacheEnabled);
         const state = getTaskScheduleState(db, projectIdentity, config.task);
         if (!state || state.nextDueAt === null) continue; // disabled / impossible cron
         if (now >= state.nextDueAt) {
@@ -466,6 +506,11 @@ async function runDomainGroupWithCooldown(
                 const gatePass = evaluateTaskGate(due.config.task, {
                     db,
                     projectIdentity,
+                    strataCacheEnabled: strataCacheEnabledForTask(
+                        due.config.task,
+                        projectIdentity,
+                        executor.strataCacheEnabled,
+                    ),
                     lastRunAt: readLastRunAt(db, projectIdentity, due.config.task),
                     retrospectiveWatermarkMs: readRetrospectiveWatermark(
                         db,
@@ -479,7 +524,9 @@ async function runDomainGroupWithCooldown(
                             : DREAM_TASK_PROMOTION_DEFAULTS["review-user-memories"]),
                 });
                 if (!gatePass) {
-                    advanceAfterRun(db, projectIdentity, due, Date.now(), "skipped", null);
+                    // An opt-out in this checkout must not consume a shared due slot.
+                    if (due.config.task !== "strata-cache-maintain")
+                        advanceAfterRun(db, projectIdentity, due, Date.now(), "skipped", null);
                     continue;
                 }
             }
@@ -500,14 +547,15 @@ async function runDomainGroupWithCooldown(
 
             const finishedAt = Date.now();
             if (outcome.status === "skipped") {
-                advanceAfterRun(
-                    db,
-                    projectIdentity,
-                    due,
-                    finishedAt,
-                    "skipped",
-                    outcome.detail ?? null,
-                );
+                if (!outcome.preserveSchedule)
+                    advanceAfterRun(
+                        db,
+                        projectIdentity,
+                        due,
+                        finishedAt,
+                        "skipped",
+                        outcome.detail ?? null,
+                    );
                 cb?.onSkipped?.(due.config.task, outcome.detail);
             } else if (outcome.status === "completed") {
                 advanceAfterRun(
@@ -620,7 +668,8 @@ export async function runManualDream(
     // Seed rows for tasks that have input. A forced run of a task without a row
     // still records its outcome: the completion and failure writes create the
     // row when it is missing.
-    for (const cfg of selected) ensureSeeded(deps.db, deps.projectIdentity, cfg, now);
+    for (const cfg of selected)
+        ensureSeeded(deps.db, deps.projectIdentity, cfg, now, deps.executor.strataCacheEnabled);
 
     // Build synthetic DueTasks (scheduledAt = now, since manual ignores schedule).
     const dueAll: DueTask[] = selected.map((config) => ({ config, scheduledAt: now }));
@@ -635,6 +684,11 @@ export async function runManualDream(
         const pass = evaluateTaskGate(d.config.task, {
             db: deps.db,
             projectIdentity: deps.projectIdentity,
+            strataCacheEnabled: strataCacheEnabledForTask(
+                d.config.task,
+                deps.projectIdentity,
+                deps.executor.strataCacheEnabled,
+            ),
             lastRunAt: readLastRunAt(deps.db, deps.projectIdentity, d.config.task),
             retrospectiveWatermarkMs: readRetrospectiveWatermark(
                 deps.db,
@@ -715,16 +769,27 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
     const tasks = tasksAllowedBySettings(deps);
     if (tasks.length === 0) return 0;
     const now = deps.now ?? Date.now();
-    const due = planDueTasks(deps.db, deps.projectIdentity, tasks, now);
+    const due = planDueTasks(
+        deps.db,
+        deps.projectIdentity,
+        tasks,
+        now,
+        deps.executor.strataCacheEnabled,
+    );
     if (due.length === 0) return 0;
 
-    // Pre-lease gate: cheap filter so we don't even acquire a lease for a task
-    // with no work. Gate-fail → advance to next cron, mark skipped.
+    // Pre-lease gate: cheap filter before acquiring a lease. A failed Strata
+    // eligibility check leaves the shared due slot for an enabled checkout.
     const gated: DueTask[] = [];
     for (const d of due) {
         const pass = evaluateTaskGate(d.config.task, {
             db: deps.db,
             projectIdentity: deps.projectIdentity,
+            strataCacheEnabled: strataCacheEnabledForTask(
+                d.config.task,
+                deps.projectIdentity,
+                deps.executor.strataCacheEnabled,
+            ),
             lastRunAt: readLastRunAt(deps.db, deps.projectIdentity, d.config.task),
             retrospectiveWatermarkMs: readRetrospectiveWatermark(
                 deps.db,
@@ -739,7 +804,7 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
         });
         if (pass) {
             gated.push(d);
-        } else {
+        } else if (d.config.task !== "strata-cache-maintain") {
             advanceAfterRun(deps.db, deps.projectIdentity, d, now, "skipped", null);
         }
     }

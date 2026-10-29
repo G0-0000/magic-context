@@ -51,6 +51,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `dreamer.tasks.retrospective.schedule`
 - `dreamer.tasks.review-user-memories.promotion_threshold`
 - `dreamer.tasks.review-user-memories.schedule`
+- `dreamer.tasks.strata-cache-maintain.schedule`
 - `dreamer.tasks.verify-broad.schedule`
 - `dreamer.tasks.verify.schedule`
 - `historian.expand_tools`
@@ -829,11 +830,14 @@ Opt-in (default off; independent of `memory.enabled`). When enabled, Magic Conte
 | `memory.strata_ask.prefix_path` | `string` | user-level |
 | `memory.strata_ask.project` | `string` | user-level |
 | `memory.strata_ask.max_tokens` | `number` | `2048` |
+| `memory.strata_ask.transient_budget_tokens` | `number` | `2000` (user-level only) |
+| `memory.strata_ask.context_docs` | `string[]` | `[]` (user-level only; per-target override allowed) |
+| `memory.strata_ask.context_docs_budget_tokens` | `number` | `4000` (user-level only; shared across slots) |
 | `memory.strata_ask.timeout_ms` | `number` | `60000` |
 
-Opt-in (default off). When a project sets `enabled: true`, the user config supplies a complete connection, and `memory.strata_ask.project` equals the project identity classic `ctx_search` resolves for the call directory, a bare `ctx_search` query (query only; not an id list) may be answered from a Strata session-file cache instead of classic retrieval. The answer cites `#id`s and is not subject to the already-visible filter. Explicit `sources`, `from`, `to`, `limit`, or id-shaped queries always stay on the classic path. A miss, timeout, identity mismatch, unresolved identity, or incomplete connection falls through without changing classic output. No Strata request is made until that identity is resolved and matches.
+Opt-in (default off). When a project sets `enabled: true`, the user config supplies a complete connection, and `memory.strata_ask.project` equals the project identity classic `ctx_search` resolves for the call directory, a bare `ctx_search` query (query only; not an id list) may be answered from a Strata session-file cache. The answer cites `#id`s and is not subject to the already-visible filter. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for `sources: ["memory"]` queries a slot miss is terminal (`记忆库中无`, no classic run). Explicit `sources` other than `["memory"]`, `from`, `to`, `limit`, or id-shaped queries stay on the classic path. Transport errors, timeouts, identity mismatches, unresolved identity, and incomplete connections fall back to classic output. No Strata request is made until that identity is resolved and matches.
 
-Project config may set only `enabled`. `base_url`, `api_key`, `api_key_env`, `model`, `slot_file`, `prefix_path`, `project`, `max_tokens`, and `timeout_ms` are stripped from project config. These keys are not live-reload keys. OpenCode and Pi re-read the trust-filtered config for the call directory on each `ctx_search` call. Tool description text still follows the host's registration lifecycle. `timeout_ms` bounds each HTTP call and, separately, the prefix-file read. The in-process restore/chat queue does not prevent another process from clobbering slot 0.
+Project config may set only `enabled`. `base_url`, `api_key`, `api_key_env`, `model`, `slot_file`, `prefix_path`, `project`, `targets`, `max_tokens`, `transient_budget_tokens`, `context_docs`, `context_docs_budget_tokens`, and `timeout_ms` are stripped from project config. These keys are not live-reload keys. OpenCode and Pi re-read the trust-filtered config for the call directory on each `ctx_search` call. Tool description text still follows the host's registration lifecycle. `transient_budget_tokens` sets the token budget for the transient non-memory classic-retrieval material block appended to Strata slot fusion queries (integer, 1–8192). `context_docs` lists project reference document files folded into the slot's fixed context; it supports `~/`, absolute, and project-relative paths, but not globs or directories. Each target may provide its own list; a target without one has no reference documents. `context_docs_budget_tokens` is the shared reference-docs section budget (integer, 1–32768), not a per-target setting. `timeout_ms` bounds each HTTP call and, separately, the prefix-file read. The in-process restore/chat queue does not prevent another process from clobbering slot 0.
 
 ### `memory.subagent_inject`
 

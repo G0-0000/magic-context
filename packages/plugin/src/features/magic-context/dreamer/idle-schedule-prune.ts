@@ -1,7 +1,6 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { getDreamState, setDreamState } from "./storage-dream-state";
-import { deleteTaskScheduleRowsForProject } from "./storage-task-schedule";
 import { identityHasProjectInput } from "./task-gates";
 
 /**
@@ -14,7 +13,8 @@ export const IDLE_SCHEDULE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const IDLE_SCHEDULE_PRUNE_AT_KEY = "schedule_idle_prune_at";
 
 /**
- * Delete every schedule row of identities that can do nothing now.
+ * Delete idle identities' schedule rows, except strata-cache-maintain: its
+ * configured cache may still need compaction after the last memory is removed.
  *
  * Any directory that hosted a session used to keep a full set of schedule rows
  * forever, even when it never produced a memory (chat folders, downloads,
@@ -45,12 +45,17 @@ export function pruneIdleScheduleIdentities(db: Database, now: number): string[]
     const pruned: string[] = [];
     for (const identity of identities) {
         if (identityHasProjectInput(db, identity, now)) continue;
-        const removed = deleteTaskScheduleRowsForProject(db, identity);
-        if (removed > 0) pruned.push(identity);
+        // Configuration is per checkout and unavailable in this global sweep.
+        // Keep the one Strata row so another checkout's prune cannot lose an
+        // enabled project's due slot after its last active memory is removed.
+        const result = db
+            .prepare("DELETE FROM task_schedule_state WHERE project_path = ? AND task <> ?")
+            .run(identity, "strata-cache-maintain");
+        if (Number(result.changes ?? 0) > 0) pruned.push(identity);
     }
     if (pruned.length > 0) {
         log(
-            `[dreamer] pruned schedule rows of ${pruned.length} idle identit${pruned.length === 1 ? "y" : "ies"} (no memories, no recent sessions, no task input)`,
+            `[dreamer] pruned idle schedule rows of ${pruned.length} identit${pruned.length === 1 ? "y" : "ies"} (retaining any strata-cache-maintain row)`,
         );
     }
     return pruned;

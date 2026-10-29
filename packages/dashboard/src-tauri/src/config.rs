@@ -30,7 +30,7 @@ pub fn resolve_project_config_path(project_path: &str) -> PathBuf {
 /// frontend DreamerTasksField list). The dashboard renders this fixed set so
 /// every project shows the same tasks regardless of its (possibly stale) per-
 /// project scheduler snapshot in task_schedule_state.
-pub const CANONICAL_DREAM_TASKS: [&str; 12] = [
+pub const CANONICAL_DREAM_TASKS: [&str; 13] = [
     "map-memories",
     "verify",
     "verify-broad",
@@ -43,6 +43,7 @@ pub const CANONICAL_DREAM_TASKS: [&str; 12] = [
     "review-user-memories",
     "promote-primers",
     "refresh-primers",
+    "strata-cache-maintain",
 ];
 
 /// Default cron per task (mirrors DEFAULT_TASK_SCHEDULES in the plugin schema and
@@ -62,6 +63,7 @@ pub fn default_task_schedule(task: &str) -> &'static str {
         "review-user-memories" => "0 3 * * *",
         "promote-primers" => "0 3 * * *",
         "refresh-primers" => "0 3 * * *",
+        "strata-cache-maintain" => "30 8 * * *",
         _ => "",
     }
 }

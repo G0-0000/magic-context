@@ -347,6 +347,7 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    only. Endpoint, bearer material, model, slot basename, prefix path and the
  *    bound project identity stay user-level so a clone cannot redirect private
  *    memory text, read an arbitrary client file, or retarget another project's cache.
+ *    The reference-docs list and its budget are also user-level only.
  *  - `transform_mode` is intentionally allowed at project tier so a repository
  *    can opt its own runtime into the experimental Rust pipeline. The resolver
  *    requires trusted user-level `subc` configuration before Rust can activate.
@@ -543,7 +544,11 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         "slot_file",
         "prefix_path",
         "project",
+        "targets",
         "max_tokens",
+        "transient_budget_tokens",
+        "context_docs",
+        "context_docs_budget_tokens",
         "timeout_ms",
     ] as const;
     const memory = projectRaw.memory;
@@ -559,7 +564,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring memory.strata_ask.${removed.join("/")} from project config ` +
-                    "(security: a repository may only opt in with memory.strata_ask.enabled; endpoint, credentials, model, slot file, prefix path and bound project identity are user-level).",
+                    "(security: a repository may only opt in with memory.strata_ask.enabled; endpoint, credentials, model, slot file, prefix path, bound project identity, and reference-docs list and budget are user-level).",
             );
         }
     }
