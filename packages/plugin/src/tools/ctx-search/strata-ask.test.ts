@@ -3,15 +3,20 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "../../config";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { LIVE_RELOAD_CONFIG_PATHS, MagicContextConfigSchema } from "../../config/schema/magic-context";
 import * as logger from "../../shared/logger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
+    DEFAULT_TRANSIENT_BUDGET_TOKENS,
     isStrataAskEligible,
+    strataRouteFor,
+    tryStrataAskDetailed,
     resolveOpenCodeStrataAsk,
     STRATA_ASK_FOOTER,
     STRATA_ASK_T4,
     strataAskConnectionFromConfig,
+    strataAskConnectionForProject,
     tryStrataAsk,
     type StrataAskConnection,
 } from "./strata-ask";
@@ -33,6 +38,9 @@ function connection(baseUrl: string, patch: Partial<StrataAskConnection> = {}): 
         project: "git:bound",
         maxTokens: 2048,
         timeoutMs: 60_000,
+        transientBudgetTokens: 1000,
+        contextDocs: [],
+        contextDocsBudgetTokens: 4000,
         ...patch,
     };
 }
@@ -49,10 +57,15 @@ describe("isStrataAskEligible", () => {
         );
     });
 
-    it("rejects explicit limit, sources including [], from, to, and id-shaped queries", () => {
+    it("routes memory-only sources and rejects other explicit filters and id-shaped queries", () => {
+        expect(strataRouteFor({ query: "where" })).toBe("fusion");
+        expect(strataRouteFor({ query: "where", sources: ["memory"] })).toBe("memory-only");
+        expect(strataRouteFor({ query: "where", sources: ["memory", "memory"] })).toBe("memory-only");
+        expect(strataRouteFor({ query: "where", sources: [] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"] })).toBeNull();
         expect(isStrataAskEligible({ query: "where", limit: 3 })).toBe(false);
         expect(isStrataAskEligible({ query: "where", sources: [] })).toBe(false);
-        expect(isStrataAskEligible({ query: "where", sources: ["memory"] })).toBe(false);
+        expect(isStrataAskEligible({ query: "where", sources: ["memory"] })).toBe(true);
         expect(isStrataAskEligible({ query: "where", from: "2026-01-01" })).toBe(false);
         expect(isStrataAskEligible({ query: "where", to: "2026-02-01" })).toBe(false);
         expect(isStrataAskEligible({ query: "#1035" })).toBe(false);
@@ -72,8 +85,56 @@ describe("strata ask config", () => {
             enabled: false,
             max_tokens: 2048,
             timeout_ms: 60_000,
+            transient_budget_tokens: 2000,
+            context_docs: [],
+            context_docs_budget_tokens: 4000,
         });
         expect(strataAskConnectionFromConfig(parsed)).toBeNull();
+    });
+
+    it("uses the raw transient budget or the default for invalid values", () => {
+        const raw = {
+            enabled: true, base_url: "http://localhost:9", api_key: "key", model: "model",
+            project: "git:main", slot_file: "main.bin", prefix_path: "/tmp/main.json",
+            max_tokens: 2048, timeout_ms: 60000,
+        };
+        const resolve = (value?: number) => strataAskConnectionFromConfig({
+            memory: { strata_ask: { ...raw, transient_budget_tokens: value } },
+        })?.transientBudgetTokens;
+        expect(resolve()).toBe(DEFAULT_TRANSIENT_BUDGET_TOKENS);
+        expect(resolve(321.5)).toBe(321.5);
+        expect(resolve(0)).toBe(DEFAULT_TRANSIENT_BUDGET_TOKENS);
+        expect(resolve(Infinity)).toBe(DEFAULT_TRANSIENT_BUDGET_TOKENS);
+        expect(resolve(8193)).toBe(DEFAULT_TRANSIENT_BUDGET_TOKENS);
+    });
+
+    it("requires exactly the three target strings", () => {
+        const parse = (target: object) => MagicContextConfigSchema.safeParse({ memory: { strata_ask: { targets: [target] } } });
+        const target = { project: "git:other", slot_file: "other.bin", prefix_path: "/tmp/other.json" };
+        expect(parse(target).success).toBe(true);
+        expect(parse({ project: target.project, slot_file: target.slot_file }).success).toBe(false);
+        expect(parse({ ...target, model: "override" }).success).toBe(false);
+    });
+
+    it("routes primary first, then targets, and disables unmatched or non-enabled projects", () => {
+        const raw = {
+            enabled: true, base_url: "http://localhost:9", api_key: "key", model: "model",
+            project: "git:main", slot_file: "main.bin", prefix_path: "/tmp/main.json",
+            max_tokens: 2048, timeout_ms: 60000,
+            targets: [
+                { project: "git:main", slot_file: "shadow.bin", prefix_path: "/tmp/shadow.json" },
+                { project: "git:other", slot_file: "other.bin", prefix_path: "/tmp/other.json" },
+                { project: "git:other", slot_file: "later.bin", prefix_path: "/tmp/later.json" },
+            ],
+        };
+        const config = { memory: { strata_ask: raw } };
+        expect(strataAskConnectionForProject(config, "git:main")?.slotFile).toBe("main.bin");
+        expect(strataAskConnectionForProject(config, "git:other")?.slotFile).toBe("other.bin");
+        expect(strataAskConnectionForProject(config, "git:other")?.prefixPath).toBe("/tmp/other.json");
+        expect(strataAskConnectionForProject(config, "git:missing")).toBeNull();
+        expect(strataAskConnectionForProject({ memory: { strata_ask: { ...raw, enabled: false } } }, "git:other")).toBeNull();
+        expect(strataAskConnectionForProject({ memory: { strata_ask: { ...raw, enabled: undefined } } }, "git:other")).toBeNull();
+        expect(strataAskConnectionFromConfig({ memory: { strata_ask: { ...raw, project: undefined } } })).toBeNull();
     });
 
     it("keeps a project enabled opt-in and strips project connection fields", () => {
@@ -81,6 +142,7 @@ describe("strata ask config", () => {
         const projectDir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-proj-"));
         mkdirSync(join(xdg, "cortexkit"), { recursive: true });
         mkdirSync(join(projectDir, ".cortexkit"), { recursive: true });
+        const projectIdentity = resolveProjectIdentityForSession(projectDir)!;
         writeFileSync(
             join(xdg, "cortexkit", "magic-context.jsonc"),
             JSON.stringify({
@@ -92,7 +154,7 @@ describe("strata ask config", () => {
                         model: "user-model",
                         slot_file: "mc-mem-v1.bin",
                         prefix_path: "/var/lib/strata/prefix.json",
-                        project: "git:bound",
+                        project: projectIdentity,
                         max_tokens: 1024,
                         timeout_ms: 1500,
                     },
@@ -128,7 +190,7 @@ describe("strata ask config", () => {
             expect(loaded.memory.strata_ask.model).toBe("user-model");
             expect(loaded.memory.strata_ask.slot_file).toBe("mc-mem-v1.bin");
             expect(loaded.memory.strata_ask.prefix_path).toBe("/var/lib/strata/prefix.json");
-            expect(loaded.memory.strata_ask.project).toBe("git:bound");
+            expect(loaded.memory.strata_ask.project).toBe(projectIdentity);
             expect(loaded.memory.strata_ask.max_tokens).toBe(1024);
             expect(loaded.memory.strata_ask.timeout_ms).toBe(1500);
             expect(loaded.configWarnings?.join("\n")).toContain("memory.strata_ask.base_url");
@@ -142,9 +204,12 @@ describe("strata ask config", () => {
                 model: "user-model",
                 slotFile: "mc-mem-v1.bin",
                 prefixPath: "/var/lib/strata/prefix.json",
-                project: "git:bound",
+                project: projectIdentity,
                 maxTokens: 1024,
                 timeoutMs: 1500,
+                transientBudgetTokens: 2000,
+                contextDocs: [],
+                contextDocsBudgetTokens: 4000,
             });
         } finally {
             if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -254,7 +319,7 @@ describe("tryStrataAsk", () => {
 
     it("locks the T4 template and replays prefix bytes in restore-then-chat order", async () => {
         expect(STRATA_ASK_T4).toBe(
-            "问题：{q}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 记忆库无相关信息，则只答「记忆库中无」。",
+            "问题：{q}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。",
         );
         const seen: Array<{ path: string; body: unknown; auth: string | null }> = [];
         const server = serve(async (req) => {
@@ -301,9 +366,53 @@ describe("tryStrataAsk", () => {
             role: "user",
             content: STRATA_ASK_T4.replace("{q}", "sqlite 在哪"),
         });
+        expect(STRATA_ASK_FOOTER).toBe(
+            "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数",
+        );
         expect(result).toBe(`答案一行\n#1032：概括\n${STRATA_ASK_FOOTER}`);
         expect(result).not.toContain("do-not-surface");
         expect(result).not.toContain("Found ");
+    });
+
+    it("distinguishes answered, miss and failed outcomes", async () => {
+        let mode = "answered";
+        const fetchImpl: typeof fetch = async (input) => {
+            if (mode === "failed") return new Response(null, { status: 404 });
+            if (String(input).includes("/slots/")) return Response.json({ n_restored: 1 });
+            return Response.json({ choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "答案" } }] });
+        };
+        const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl, readFileImpl: readPrefix };
+        expect(await tryStrataAskDetailed(args)).toEqual({ status: "answered", text: `答案\n${STRATA_ASK_FOOTER}` });
+        mode = "miss";
+        expect(await tryStrataAskDetailed(args)).toEqual({ status: "miss" });
+        mode = "failed";
+        expect(await tryStrataAskDetailed(args)).toEqual({ status: "failed", reason: "http_404" });
+    });
+
+    it("places transient materials before the question and preserves the legacy request bytes without them", async () => {
+        const bodies: string[] = [];
+        const fetchImpl: typeof fetch = async (input, init) => {
+            if (String(input).includes("/slots/")) return Response.json({ n_restored: 1 });
+            bodies.push(String(init?.body));
+            return Response.json({ choices: [{ message: { content: "答案" } }] });
+        };
+        const args = { query: "哪里", config: connection("http://127.0.0.1:9"), fetchImpl, readFileImpl: readPrefix };
+        await tryStrataAskDetailed(args);
+        await tryStrataAskDetailed({ ...args, transient: "" });
+        await tryStrataAskDetailed({ ...args, transient: "[message] ord=42 :: 材料 {q}" });
+        const legacy = JSON.stringify({
+            model: "qwen-test", messages: [...PREFIX, { role: "user", content: STRATA_ASK_T4.replace("{q}", "哪里") }],
+            max_tokens: 2048, stream: false,
+        });
+        expect(bodies[0]).toBe(legacy);
+        expect(bodies[1]).toBe(legacy);
+        const fused = JSON.parse(bodies[2]!) as { messages: Array<{ content: string }> };
+        const content = fused.messages[3]!.content;
+        expect(content).toContain("【期外材料】");
+        expect(content).toContain("[message] ord=42 :: 材料 {q}");
+        expect(content).toContain("问题：哪里");
+        expect(content.indexOf("ord=42")).toBeLessThan(content.indexOf("问题：哪里"));
+        expect(content.endsWith("记忆库与期外材料皆无相关信息，则只答「记忆库中无」。")).toBe(true);
     });
 
     it("returns null for an exact miss, empty content, 404, 401, malformed JSON, and a missing file", async () => {

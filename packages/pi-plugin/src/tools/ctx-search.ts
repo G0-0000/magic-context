@@ -33,32 +33,36 @@ import {
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { log } from "@magic-context/core/shared/logger";
 import { CTX_SEARCH_DESCRIPTION } from "@magic-context/core/tools/ctx-search/constants";
 import {
 	parseSearchDateRange,
 	SearchDateRangeError,
 } from "@magic-context/core/tools/ctx-search/date-range";
 import {
-	isStrataAskEligible,
+	STRATA_ASK_FOOTER,
+	STRATA_ASK_MISS,
 	isStrataConfigResolutionFailure,
-	strataAskConnectionFromConfig,
-	tryStrataAsk,
+	strataAskConnectionForProject,
+	strataRouteFor,
+	tryStrataAskDetailed,
 	type StrataAskConnection,
 } from "@magic-context/core/tools/ctx-search/strata-ask";
+import { buildTransientMaterial } from "@magic-context/core/tools/ctx-search/transient-material";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import { loadPiConfigDetailed } from "../config";
 
 /**
  * Call-cwd strata connection. Substitution failure, parse/schema failure, and
- * incomplete connection material all disable the cache path. The caller still
- * has to match `project` against the resolved identity before any network call.
+ * incomplete connection material or an unmatched project disable the cache path.
  */
 export function resolvePiStrataAsk(cwd: string): StrataAskConnection | null {
 	try {
 		const loaded = loadPiConfigDetailed({ cwd }, false);
 		if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
-		return strataAskConnectionFromConfig(loaded.config);
+		const project = resolveProjectIdentityForSession(cwd, loaded.config.allow_home_project);
+		return strataAskConnectionForProject(loaded.config, project);
 	} catch {
 		return null;
 	}
@@ -191,11 +195,143 @@ export function createCtxSearchTool(
 				};
 			}
 
-			// Same per-directory identity the classic path uses, before any
-			// Strata call. Unresolved or not the user-level bound project:
-			// classic path, no network.
-			if (isStrataAskEligible(params) && deps.resolveStrataAsk && ctx.cwd) {
-				const projectIdentity = resolveProject(ctx.cwd);
+			let projectResolved = false;
+			let resolvedProjectIdentity: string | undefined;
+			const resolveProjectForCall = () => {
+				if (!projectResolved) {
+					resolvedProjectIdentity = resolveProject(ctx.cwd);
+					projectResolved = true;
+				}
+				return resolvedProjectIdentity;
+			};
+			const sessionId = ctx.sessionManager.getSessionId();
+			const runClassic = async (overrides?: {
+				sources?: CtxSearchParams["sources"];
+			}) => {
+				const projectIdentity = resolveProjectForCall();
+				if (!projectIdentity) {
+					return {
+						ok: false as const,
+						text: "Error: Could not resolve project identity for search.",
+						results: [],
+						diagnostics: createUnifiedSearchDiagnostics(),
+					};
+				}
+				await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
+				const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+				const memoryEnabled =
+					snapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+				// Query embedding follows the provider alone; each lane applies its
+				// own feature gate, and history search ignores `memory.enabled`.
+				const embeddingEnabled = snapshot
+					? snapshot.historyEnabled
+					: deps.embeddingEnabled;
+				const gitCommitsEnabled =
+					snapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;
+
+				// Only search message history up to the last compartment boundary —
+				// anything after that (the live tail, including the current turn) is
+				// still in context and already visible to the agent. When NO compartment
+				// exists yet, the historian hasn't scrolled anything out of context, so
+				// the boundary is 0: every indexed message (ordinals are 1-based) is in
+				// the live tail and must be excluded. A negative sentinel here would mean
+				// "search everything" and leak the current prompt back to the agent — the
+				// exact opposite of the intent (issue #131).
+				const lastCompartmentEnd = getLastCompartmentEndMessage(
+					deps.db,
+					sessionId,
+				);
+				const messageOrdinalCutoff =
+					lastCompartmentEnd >= 0 ? lastCompartmentEnd : 0;
+
+				// Hard-filter memories already rendered in <session-history>.
+				const visibleMemoryIds = getVisibleMemoryIds(deps.db, sessionId);
+				const diagnostics = createUnifiedSearchDiagnostics();
+
+				// ID-shaped short-circuit (parity with OpenCode ctx_search).
+				// Unresolved IDs still fall through to normal text search.
+				const idShape = parseIdShapedQuery(query);
+				if (idShape && memoryEnabled) {
+					const idResults = resolveMemoriesByIdsForSearch({
+						db: deps.db,
+						projectPath: projectIdentity,
+						ids: idShape,
+						limit: Math.max(normalizeLimit(params.limit), idShape.length),
+						visibleMemoryIds,
+						diagnostics,
+						...dateRange,
+					});
+					if (
+						idResults !== null ||
+						diagnostics.suppressedVisibleMemoryIds.length > 0
+					) {
+						const results = idResults ?? [];
+						return {
+							ok: true as const,
+							text: formatSearchResults(query, results, sessionId, diagnostics),
+							results,
+							diagnostics,
+						};
+					}
+				}
+
+				let rerankSkipped = "";
+				const results = await unifiedSearch(
+					deps.db,
+					sessionId,
+					projectIdentity,
+					query,
+					{
+						limit: normalizeLimit(params.limit),
+						memoryEnabled,
+						embeddingEnabled,
+						embedQuery: async (text, signal) => {
+							const result = await embedTextForProject(
+								projectIdentity,
+								text,
+								signal,
+								"query",
+							);
+							return result?.vector ?? null;
+						},
+						isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
+						maxMessageOrdinal: messageOrdinalCutoff,
+						gitCommitsEnabled,
+						sources: overrides?.sources ?? normalizeSources(params.sources),
+						visibleMemoryIds,
+						diagnostics,
+						gitRepositoryAvailable: directoryHasGitMetadata(ctx.cwd),
+						// Explicit agent search enables literal-probe multi-query recall.
+						explicitSearch: true,
+						rerankConnectionFile: deps.rerankConnectionFile,
+						rerankConfig: deps.rerankConfig,
+						// Cancellation also stops history-chunk pool building.
+						signal,
+						onRerankSkipped: (line) => {
+							rerankSkipped = line;
+						},
+						...dateRange,
+					},
+				);
+				return {
+					ok: true as const,
+					text:
+						formatSearchResults(query, results, sessionId, diagnostics) +
+						(rerankSkipped ? `\n${rerankSkipped}` : ""),
+					results,
+					diagnostics,
+				};
+			};
+
+			const wrap = (text: string, isError = false) => ({
+				content: [{ type: "text" as const, text }],
+				details: undefined,
+				...(isError ? { isError: true } : {}),
+			});
+			// Resolve identity before any Strata call, exactly as the classic path does.
+			const route = strataRouteFor(params);
+			if (route && deps.resolveStrataAsk && ctx.cwd) {
+				const projectIdentity = resolveProjectForCall();
 				if (projectIdentity) {
 					let connection: ReturnType<
 						NonNullable<typeof deps.resolveStrataAsk>
@@ -206,156 +342,51 @@ export function createCtxSearchTool(
 						connection = null;
 					}
 					if (connection && connection.project === projectIdentity) {
-						const synthesized = await tryStrataAsk({
+						if (route === "memory-only") {
+							const answer = await tryStrataAskDetailed({
+								query,
+								config: connection,
+								signal,
+							});
+							if (answer.status === "answered") return wrap(answer.text);
+							if (answer.status === "miss") {
+								return wrap(`${STRATA_ASK_MISS}\n${STRATA_ASK_FOOTER}`);
+							}
+							const classic = await runClassic({ sources: ["memory"] });
+							return wrap(classic.text, !classic.ok);
+						}
+						// Fusion runs classic once without memory; miss/failure reuses it.
+						const classic = await runClassic({
+							sources: ["git_commit", "primer", "note", "message"],
+						});
+						if (!classic.ok) return wrap(classic.text, true);
+						let transient: string | undefined;
+						try {
+							transient = buildTransientMaterial({
+								db: deps.db,
+								sessionId,
+								query,
+								results: classic.results,
+								budgetTokens: connection.transientBudgetTokens,
+							})?.text;
+						} catch (error) {
+							const reason = (error instanceof Error ? error.message : String(error))
+								.replace(/[\r\n]+/g, " ");
+							log(`[ctx_search] transient-material fallback: ${reason}`);
+							return wrap(classic.text);
+						}
+						const answer = await tryStrataAskDetailed({
 							query,
 							config: connection,
 							signal,
+							transient,
 						});
-						if (synthesized !== null) {
-							return {
-								content: [{ type: "text", text: synthesized }],
-								details: undefined,
-							};
-						}
+						return wrap(answer.status === "answered" ? answer.text : classic.text);
 					}
 				}
 			}
-
-			const sessionId = ctx.sessionManager.getSessionId();
-			const projectIdentity = resolveProject(ctx.cwd);
-			if (!projectIdentity) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Error: Could not resolve project identity for search.",
-						},
-					],
-					details: undefined,
-					isError: true,
-				};
-			}
-			await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
-			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-			const memoryEnabled =
-				snapshot?.features.memoryEnabled ?? deps.memoryEnabled;
-			// Query embedding follows the provider alone; each lane applies its
-			// own feature gate, and history search ignores `memory.enabled`.
-			const embeddingEnabled = snapshot
-				? snapshot.historyEnabled
-				: deps.embeddingEnabled;
-			const gitCommitsEnabled =
-				snapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;
-
-			// Only search message history up to the last compartment boundary —
-			// anything after that (the live tail, including the current turn) is
-			// still in context and already visible to the agent. When NO compartment
-			// exists yet, the historian hasn't scrolled anything out of context, so
-			// the boundary is 0: every indexed message (ordinals are 1-based) is in
-			// the live tail and must be excluded. A negative sentinel here would mean
-			// "search everything" and leak the current prompt back to the agent — the
-			// exact opposite of the intent (issue #131).
-			const lastCompartmentEnd = getLastCompartmentEndMessage(
-				deps.db,
-				sessionId,
-			);
-			const messageOrdinalCutoff =
-				lastCompartmentEnd >= 0 ? lastCompartmentEnd : 0;
-
-			// Hard-filter memories already rendered in <session-history>.
-			const visibleMemoryIds = getVisibleMemoryIds(deps.db, sessionId);
-			const diagnostics = createUnifiedSearchDiagnostics();
-
-			// ID-shaped short-circuit (parity with OpenCode ctx_search): when the
-			// whole query is one or more memory ids, bypass the lexical+semantic
-			// lanes and look the ids up directly. If nothing resolves we fall
-			// through to the normal lanes so a numeric query with no matching
-			// memory still searches text.
-			const idShape = parseIdShapedQuery(query);
-			if (idShape && memoryEnabled) {
-				const idResults = resolveMemoriesByIdsForSearch({
-					db: deps.db,
-					projectPath: projectIdentity,
-					ids: idShape,
-					limit: Math.max(normalizeLimit(params.limit), idShape.length),
-					visibleMemoryIds,
-					diagnostics,
-					...dateRange,
-				});
-				if (
-					idResults !== null ||
-					diagnostics.suppressedVisibleMemoryIds.length > 0
-				) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: formatSearchResults(
-									query,
-									idResults ?? [],
-									sessionId,
-									diagnostics,
-								),
-							},
-						],
-						details: undefined,
-					};
-				}
-			}
-
-			let rerankSkipped = "";
-			const results = await unifiedSearch(
-				deps.db,
-				sessionId,
-				projectIdentity,
-				query,
-				{
-					limit: normalizeLimit(params.limit),
-					memoryEnabled,
-					embeddingEnabled,
-					embedQuery: async (text, signal) => {
-						const result = await embedTextForProject(
-							projectIdentity,
-							text,
-							signal,
-							"query",
-						);
-						return result?.vector ?? null;
-					},
-					isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
-					maxMessageOrdinal: messageOrdinalCutoff,
-					gitCommitsEnabled,
-					sources: normalizeSources(params.sources),
-					visibleMemoryIds,
-					diagnostics,
-					gitRepositoryAvailable: directoryHasGitMetadata(ctx.cwd),
-					// Explicit agent search → literal-probe multi-query recall
-					// (parity with OpenCode's ctx_search). Pi auto-search leaves
-					// this off to protect its latency budget.
-					explicitSearch: true,
-					rerankConnectionFile: deps.rerankConnectionFile,
-					rerankConfig: deps.rerankConfig,
-					// A cancelled call stops building the history-chunk pool
-					// between batches instead of finishing it for nobody.
-					signal,
-					onRerankSkipped: (line) => {
-						rerankSkipped = line;
-					},
-					...dateRange,
-				},
-			);
-
-			return {
-				content: [
-					{
-						type: "text",
-						text:
-							formatSearchResults(query, results, sessionId, diagnostics) +
-							(rerankSkipped ? `\n${rerankSkipped}` : ""),
-					},
-				],
-				details: undefined,
-			};
+			const classic = await runClassic();
+			return wrap(classic.text, !classic.ok);
 		},
 	};
 }
