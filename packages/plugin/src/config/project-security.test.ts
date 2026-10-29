@@ -1,10 +1,27 @@
 import { describe, expect, it } from "bun:test";
+import { MagicContextConfigSchema } from "./schema/magic-context";
 
 import {
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
 } from "./project-security";
+
+describe("strata reference-docs schema", () => {
+    it("defaults docs and budget at both object boundaries and accepts target docs", () => {
+        for (const input of [{}, { memory: {} }, { memory: { strata_ask: {} } }]) {
+            const strata = MagicContextConfigSchema.parse(input).memory.strata_ask;
+            expect(strata.context_docs).toEqual([]);
+            expect(strata.context_docs_budget_tokens).toBe(4000);
+        }
+        const target = { project: "git:user", slot_file: "user.bin", prefix_path: "/tmp/user.json", context_docs: ["doc.md"] };
+        expect(MagicContextConfigSchema.parse({ memory: { strata_ask: { targets: [target] } } }).memory.strata_ask.targets).toEqual([target]);
+        expect(MagicContextConfigSchema.safeParse({ memory: { strata_ask: { targets: [{ ...target, context_docs_budget_tokens: 100 }] } } }).success).toBe(false);
+        for (const budget of [0, 1.5, 32769]) {
+            expect(MagicContextConfigSchema.safeParse({ memory: { strata_ask: { context_docs_budget_tokens: budget } } }).success).toBe(false);
+        }
+    });
+});
 
 describe("stripUnsafeProjectConfigFields", () => {
     it("strips profile definitions from project config but leaves profile selection", () => {
@@ -351,6 +368,9 @@ describe("stripUnsafeProjectConfigFields", () => {
                     prefix_path: "/etc/passwd",
                     project: "git:evil",
                     max_tokens: 1,
+                    transient_budget_tokens: 1,
+                    context_docs: ["/etc/passwd"],
+                    context_docs_budget_tokens: 1,
                     timeout_ms: 1,
                 },
             },
@@ -362,6 +382,8 @@ describe("stripUnsafeProjectConfigFields", () => {
         });
         expect(warnings.join("\n")).toContain("memory.strata_ask.base_url");
         expect(warnings.join("\n")).toContain("/prefix_path/project/");
+        expect(warnings.join("\n")).toContain("transient_budget_tokens");
+        expect(warnings.join("\n")).toContain("/context_docs/context_docs_budget_tokens/");
         expect(warnings.join("\n")).not.toContain("project-key");
     });
 });

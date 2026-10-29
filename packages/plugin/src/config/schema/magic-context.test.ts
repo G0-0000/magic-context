@@ -173,6 +173,14 @@ describe("MagicContextConfigSchema", () => {
                         since_days: 365,
                         max_commits: 2000,
                     },
+                    strata_ask: {
+                        context_docs: [],
+                        context_docs_budget_tokens: 4000,
+                        enabled: false,
+                        max_tokens: 2048,
+                        timeout_ms: 60000,
+                        transient_budget_tokens: 2000,
+                    },
                     subagent_inject: {
                         enabled: false,
                     },

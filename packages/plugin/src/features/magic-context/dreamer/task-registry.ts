@@ -25,6 +25,7 @@ export const CANONICAL_DREAM_TASKS = [
     "review-user-memories",
     "promote-primers",
     "refresh-primers",
+    "strata-cache-maintain",
 ] as const;
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
@@ -57,8 +58,8 @@ export const DREAM_TOOL_LOOP_TOKEN_BUDGETS = {
  *  - "single-shot": one or more no-tool completions whose entire answer is the
  *    returned text. Any transport that can deliver a prompt and return text runs
  *    these, including a hidden completion carrier.
- *  - "host-only": no model call at all. The task is database work done in this
- *    process, so it needs no completion transport whatsoever.
+ *  - "host-only": the task runs in this process without a host completion
+ *    transport or child session. It may call an external service itself.
  */
 export type DreamTaskTransport = "tool-loop" | "single-shot" | "host-only";
 
@@ -123,6 +124,7 @@ export const DREAM_TASK_CAPABILITIES: Record<DreamTaskName, DreamTaskCapability>
         transport: "tool-loop",
         toolLoopPurpose: "needs read-only investigation tools to answer each standing question",
     },
+    "strata-cache-maintain": { requiresTools: false, transport: "host-only" },
 };
 
 /** Tasks a host without a tool loop cannot run, in canonical order. */
@@ -260,9 +262,9 @@ export const AGENTIC_DREAM_TASKS = ["curate", "maintain-docs"] as const;
 
 /**
  * Tasks that read-modify-write the project `memories` table (+ epoch +
- * supersede-delta rows). They SHARE one per-project "memory" lease so they
- * serialize with each other — concurrent runs race semantically (stale-view
- * merges/splits). Canonical run order when several are due in one drain.
+ * supersede-delta rows), plus the Strata cache derived from them. They SHARE one
+ * per-project "memory" lease so they serialize with each other. Canonical run
+ * order applies when several are due in one drain.
  */
 export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "map-memories",
@@ -274,6 +276,7 @@ export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "retrospective",
     "promote-primers",
     "refresh-primers",
+    "strata-cache-maintain",
 ];
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);

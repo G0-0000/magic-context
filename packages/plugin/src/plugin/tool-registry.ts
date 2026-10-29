@@ -31,6 +31,7 @@ import { withoutSmartNoteText } from "../tools/ctx-note/constants";
 import { createCtxReduceTools } from "../tools/ctx-reduce";
 import { createCtxSearchTools } from "../tools/ctx-search";
 import { resolveOpenCodeStrataAsk } from "../tools/ctx-search/strata-ask";
+import { recordMemoryChange } from "../tools/ctx-search/strata-cache";
 import { CTX_NOTE_LIGHT_DESCRIPTION } from "../tools/light-descriptions";
 import { parameterDescriptionsFor } from "../tools/parameter-descriptions";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./embedding-bootstrap";
@@ -193,6 +194,7 @@ export function createToolRegistry(args: {
                   // enumeration) stays dreamer-only (runtime-gated via
                   // toolContext.agent in tools.ts).
                   allowedActions: [...CTX_MEMORY_ACTIONS],
+                  onMemoryChanged: (event, projectDir) => recordMemoryChange(projectDir, event),
                   rustToolBackends,
               })
             : {}),

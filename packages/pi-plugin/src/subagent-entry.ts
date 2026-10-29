@@ -60,6 +60,7 @@ import { openDatabase } from "@magic-context/core/features/magic-context/storage
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
+import { recordMemoryChange } from "@magic-context/core/tools/ctx-search/strata-cache";
 import { loadPiConfig } from "./config";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
@@ -124,6 +125,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 				// Lean children have no resolveCurrentProjectDeps cache. Re-read the
 				// call cwd; a parse/schema failure disables the cache path.
 				resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
+				onMemoryChanged: (event, projectDir) => recordMemoryChange(projectDir, event),
 				db,
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				resolveProjectIdentity: (ctx) =>
