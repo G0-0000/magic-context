@@ -13,25 +13,33 @@
  * on every search, for the call directory, with runtime globals left untouched.
  * A resolution failure (including `{env:}` / `{file:}` substitution failure), an
  * incomplete connection, or a project identity that is missing or not equal to
- * `memory.strata_ask.project` is disabled: this module returns null and the
+ * a configured project target is disabled: this module returns null and the
  * caller continues on the classic path. Identity is resolved before any network
  * call. `timeout_ms` bounds the prefix read and each HTTP call separately.
  */
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import PROMPTS from "./strata-prompts.json";
 import { loadPluginConfigDetailed } from "../../config";
 import { parseIdShapedQuery } from "../../features/magic-context/search";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { log } from "../../shared/logger";
 
-/** Verbatim T4 template from the strata session-file cache jig (`mc_slot_test.py`). */
-export const STRATA_ASK_T4 =
-    "问题：{q}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 记忆库无相关信息，则只答「记忆库中无」。";
+/** Query template; copy lives in strata-prompts.json (edit there, rebuild dists). */
+export const STRATA_ASK_T4 = PROMPTS.t4;
 
 export const STRATA_ASK_MISS = "记忆库中无";
+export const DEFAULT_TRANSIENT_BUDGET_TOKENS = 2000;
+export const DEFAULT_CONTEXT_DOCS_BUDGET_TOKENS = 4000;
+
+export type StrataAskOutcome =
+    | { status: "answered"; text: string }
+    | { status: "miss" }
+    | { status: "failed"; reason: string };
 
 export const STRATA_ASK_FOOTER =
-    "——本答案由项目记忆缓存合成；若 ctx_memory 可用，按 #id 可以 ctx_memory get 取原文；欲检索历史/提交/便签请用 sources 参数";
+    "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数";
 
 const RESOLUTION_FAILURES = new Set([
     "project-file-parse-error",
@@ -63,6 +71,9 @@ export interface StrataAskConnection {
     project: string;
     maxTokens: number;
     timeoutMs: number;
+    transientBudgetTokens: number;
+    contextDocs: string[];
+    contextDocsBudgetTokens: number;
 }
 
 export interface StrataAskConfigSource {
@@ -76,8 +87,12 @@ export interface StrataAskConfigSource {
             slot_file?: string;
             prefix_path?: string;
             project?: string;
+            targets?: Array<{ project: string; slot_file: string; prefix_path: string; context_docs?: string[] }>;
+            context_docs?: string[];
+            context_docs_budget_tokens?: number;
             max_tokens?: number;
             timeout_ms?: number;
+            transient_budget_tokens?: number;
         };
     };
 }
@@ -87,22 +102,31 @@ export function isStrataConfigResolutionFailure(outcome: string): boolean {
 }
 
 /** Known business params only. Host metadata keys do not affect the verdict. */
-export function isStrataAskEligible(normalizedArgs: object): boolean {
+export function strataRouteFor(normalizedArgs: object): "fusion" | "memory-only" | null {
     const args = normalizedArgs as Record<string, unknown>;
-    if ("limit" in args || "sources" in args || "from" in args || "to" in args) return false;
-    if (typeof args.query !== "string") return false;
+    if ("limit" in args || "from" in args || "to" in args) return null;
+    if (typeof args.query !== "string") return null;
     const query = args.query.trim();
-    if (!query) return false;
-    return parseIdShapedQuery(query) === null;
+    if (!query || parseIdShapedQuery(query) !== null) return null;
+    if (!("sources" in args)) return "fusion";
+    if (Array.isArray(args.sources)) {
+        const sources = new Set(args.sources);
+        if (sources.size === 1 && sources.has("memory")) return "memory-only";
+    }
+    return null;
 }
 
-function nonEmpty(value: string | null | undefined): string | null {
+export function isStrataAskEligible(normalizedArgs: object): boolean {
+    return strataRouteFor(normalizedArgs) !== null;
+}
+
+export function nonEmpty(value: string | null | undefined): string | null {
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
 }
 
-function safeBearer(value: string | null): string | null {
+export function safeBearer(value: string | null): string | null {
     if (!value || /[\r\n]/.test(value)) return null;
     return value;
 }
@@ -141,6 +165,7 @@ export function strataAskConnectionFromConfig(
     if (!apiKey && !apiKeyEnv) return null;
     const maxTokens = raw.max_tokens;
     const timeoutMs = raw.timeout_ms;
+    const contextDocsBudgetTokens = raw.context_docs_budget_tokens;
     if (
         typeof maxTokens !== "number" ||
         !Number.isFinite(maxTokens) ||
@@ -161,7 +186,38 @@ export function strataAskConnectionFromConfig(
         project,
         maxTokens: Math.floor(maxTokens),
         timeoutMs: Math.floor(timeoutMs),
+        transientBudgetTokens: typeof raw.transient_budget_tokens === "number" &&
+            Number.isFinite(raw.transient_budget_tokens) && raw.transient_budget_tokens >= 1 &&
+            raw.transient_budget_tokens <= 8192
+            ? raw.transient_budget_tokens : DEFAULT_TRANSIENT_BUDGET_TOKENS,
+        contextDocs: Array.isArray(raw.context_docs)
+            ? raw.context_docs.filter((path) => typeof path === "string" && path.length > 0)
+            : [],
+        contextDocsBudgetTokens: typeof contextDocsBudgetTokens === "number" &&
+            Number.isInteger(contextDocsBudgetTokens) && contextDocsBudgetTokens >= 1 && contextDocsBudgetTokens <= 32768
+            ? contextDocsBudgetTokens : DEFAULT_CONTEXT_DOCS_BUDGET_TOKENS,
     };
+}
+
+/** Select the first matching user-level target; shared connection settings remain unchanged. */
+export function strataAskConnectionForProject(
+    config: StrataAskConfigSource,
+    projectIdentity: string | null | undefined,
+): StrataAskConnection | null {
+    const raw = config.memory?.strata_ask;
+    if (!raw || raw.enabled !== true || !projectIdentity) return null;
+    if (nonEmpty(raw.project) === projectIdentity) return strataAskConnectionFromConfig(config);
+    const target = raw.targets?.find((entry) => nonEmpty(entry.project) === projectIdentity);
+    if (!target) return null;
+    return strataAskConnectionFromConfig({
+        memory: { strata_ask: {
+            ...raw,
+            project: target.project,
+            slot_file: target.slot_file,
+            prefix_path: target.prefix_path,
+            context_docs: target.context_docs ?? [],
+        } },
+    });
 }
 
 /** Trust-filtered effective config for the call directory. Failure ⇒ disabled. */
@@ -170,7 +226,8 @@ export function resolveOpenCodeStrataAsk(directory: string): StrataAskConnection
     try {
         const loaded = loadPluginConfigDetailed(directory, false);
         if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
-        return strataAskConnectionFromConfig(loaded.config);
+        const project = resolveProjectIdentityForSession(directory, loaded.config.allow_home_project);
+        return strataAskConnectionForProject(loaded.config, project);
     } catch {
         log("strata-ask disabled: resolution_failure");
         return null;
@@ -181,6 +238,13 @@ function renderT4(query: string): string {
     const token = "{q}";
     const at = STRATA_ASK_T4.indexOf(token);
     return STRATA_ASK_T4.slice(0, at) + query + STRATA_ASK_T4.slice(at + token.length);
+}
+
+function renderQueryMessage(query: string, transient?: string): string {
+    if (!transient) return renderT4(query);
+    return PROMPTS.t4Fused.replace(/\{materials\}|\{q\}/g, (token) =>
+        token === "{materials}" ? transient : query,
+    );
 }
 
 function isExactMiss(content: string): boolean {
@@ -202,14 +266,14 @@ function isExactMiss(content: string): boolean {
     return text === STRATA_ASK_MISS;
 }
 
-function fallback(reason: string): null {
+function fallback(reason: string): StrataAskOutcome {
     const safe = /^(?:file_error|invalid_prefix|invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3})$/.test(
         reason,
     )
         ? reason
         : "network_error";
     log(`strata-ask fallback: ${safe}`);
-    return null;
+    return { status: "failed", reason: safe };
 }
 
 const ABORTED = Symbol("strata-ask-aborted");
@@ -222,7 +286,7 @@ let queue: Promise<void> = Promise.resolve();
  * is still held until the previous turn finishes, so a later caller cannot
  * restore over an in-flight completion.
  */
-function enqueue<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T | typeof ABORTED> {
+export function enqueue<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T | typeof ABORTED> {
     const previous = queue;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -371,14 +435,14 @@ function linkedSignal(
     };
 }
 
-function isRestoreSuccess(json: unknown): boolean {
+export function isRestoreSuccess(json: unknown): boolean {
     if (!json || typeof json !== "object" || Array.isArray(json)) return false;
     const restored = (json as { n_restored?: unknown }).n_restored;
     return typeof restored === "number" && Number.isFinite(restored);
 }
 
 /** One `timeout_ms` budget per HTTP call, not one budget shared across both. */
-async function postWithDeadline(args: {
+export async function postWithDeadline(args: {
     url: string;
     body: unknown;
     apiKey: string;
@@ -411,7 +475,8 @@ async function askOnce(args: {
     signal?: AbortSignal;
     fetchImpl: typeof fetch;
     readFileImpl: (path: string) => Promise<string> | string;
-}): Promise<string | null> {
+    transient?: string;
+}): Promise<StrataAskOutcome> {
     if (args.signal?.aborted) return fallback("aborted");
     const apiKey = safeBearer(args.config.apiKey) ?? safeBearer(nonEmpty(process.env[args.config.apiKeyEnv ?? ""]));
     if (!apiKey) return fallback("missing_key");
@@ -448,7 +513,7 @@ async function askOnce(args: {
         url: `${args.config.baseUrl}/v1/chat/completions`,
         body: {
             model: args.config.model,
-            messages: [...prefix, { role: "user", content: renderT4(args.query) }],
+            messages: [...prefix, { role: "user", content: renderQueryMessage(args.query, args.transient) }],
             max_tokens: args.config.maxTokens,
             stream: false,
         },
@@ -466,25 +531,27 @@ async function askOnce(args: {
     if (!message || typeof message !== "object") return fallback("invalid_reply");
     const content = (message as { content?: unknown }).content;
     if (typeof content !== "string" || content.trim().length === 0) return fallback("invalid_reply");
-    if (isExactMiss(content)) return null;
-    return `${content.trimEnd()}\n${STRATA_ASK_FOOTER}`;
+    if (isExactMiss(content)) return { status: "miss" };
+    return { status: "answered", text: `${content.trimEnd()}\n${STRATA_ASK_FOOTER}` };
 }
 
-export async function tryStrataAsk(args: {
+export async function tryStrataAskDetailed(args: {
     query: string;
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
     readFileImpl?: (path: string) => Promise<string> | string;
-}): Promise<string | null> {
+    transient?: string;
+}): Promise<StrataAskOutcome> {
     const query = args.query.trim();
-    if (!query) return null;
+    if (!query) return fallback("invalid_reply");
     if (args.signal?.aborted) return fallback("aborted");
     try {
         const result = await enqueue(
             () =>
                 askOnce({
                     query,
+                    transient: args.transient,
                     config: args.config,
                     signal: args.signal,
                     fetchImpl: args.fetchImpl ?? fetch,
@@ -497,4 +564,15 @@ export async function tryStrataAsk(args: {
     } catch {
         return fallback("network_error");
     }
+}
+
+export async function tryStrataAsk(args: {
+    query: string;
+    config: StrataAskConnection;
+    signal?: AbortSignal;
+    fetchImpl?: typeof fetch;
+    readFileImpl?: (path: string) => Promise<string> | string;
+}): Promise<string | null> {
+    const outcome = await tryStrataAskDetailed(args);
+    return outcome.status === "answered" ? outcome.text : null;
 }
