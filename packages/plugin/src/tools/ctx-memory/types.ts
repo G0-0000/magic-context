@@ -39,6 +39,11 @@ export interface CtxMemoryArgs extends ImitatedReducedArgs {
     superseded_by?: number;
 }
 
+export type MemoryChangeEvent =
+    | { op: "add"; memoryId: number }
+    | { op: "update"; memoryId: number }
+    | { op: "remove"; memoryId: number; kind: "archive" | "delete" | "superseded" };
+
 export interface CtxMemoryToolDeps {
     db: Database;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
@@ -59,4 +64,5 @@ export interface CtxMemoryToolDeps {
     allowedActions?: CtxMemoryAction[];
     sourceType?: MemorySourceType;
     rustToolBackends?: RustToolBackends;
+    onMemoryChanged?: (event: MemoryChangeEvent, projectDir: string) => void;
 }

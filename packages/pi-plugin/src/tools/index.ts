@@ -27,7 +27,7 @@ import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/
 import { restoreOmpMentions } from "../omp-mentions";
 import { resolvePiHarnessKind } from "../pi-harness-kind";
 import { createCtxExpandTool } from "./ctx-expand";
-import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
+import { createCtxMemoryListTool, createCtxMemoryTool, type CtxMemoryToolDeps } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
 import { createCtxSearchTool } from "./ctx-search";
@@ -74,6 +74,7 @@ export interface RegisterToolsOptions {
 		db: ContextDatabase,
 	) => Promise<void>;
 	memoryEnabled?: boolean;
+	onMemoryChanged?: CtxMemoryToolDeps["onMemoryChanged"];
 	embeddingEnabled?: boolean;
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
@@ -211,6 +212,7 @@ export function registerMagicContextTools(
 			memoryEnabled: opts.memoryEnabled,
 			embeddingEnabled: opts.embeddingEnabled,
 			allowDreamerActions: opts.allowDreamerActions ?? false,
+			onMemoryChanged: opts.onMemoryChanged,
 			resolveProjectIdentity,
 		};
 		pi.registerTool(surfaceTool(createCtxMemoryTool(memoryDeps)));

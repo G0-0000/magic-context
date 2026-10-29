@@ -44,6 +44,8 @@ const MEMORY_TASKS: DreamTaskName[] = [
 function expectedTasks(memory: boolean, smartNotes: boolean): DreamTaskName[] {
     return CANONICAL_DREAM_TASKS.filter((task) => {
         if (MEMORY_TASKS.includes(task)) return memory;
+        // These test executors supply no Strata eligibility probe (fail closed).
+        if (task === "strata-cache-maintain") return false;
         if (task === "evaluate-smart-notes") return smartNotes;
         return true; // maintain-docs, review-user-memories
     });
