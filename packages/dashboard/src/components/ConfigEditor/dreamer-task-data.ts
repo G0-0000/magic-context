@@ -82,4 +82,10 @@ export const TASKS: TaskMeta[] = [
     description: "Refresh answers for active project Primers",
     defaultSchedule: String(configDefault("dreamer.tasks.refresh-primers.schedule")),
   },
+  {
+    name: "strata-cache-maintain",
+    label: "Maintain strata cache",
+    description: "Maintain the strata memory cache (daily compaction)",
+    defaultSchedule: "30 8 * * *",
+  },
 ];

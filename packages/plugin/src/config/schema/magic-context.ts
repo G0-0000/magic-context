@@ -567,6 +567,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "review-user-memories": "0 3 * * *",
     "promote-primers": "0 3 * * *",
     "refresh-primers": "0 3 * * *",
+    "strata-cache-maintain": "30 8 * * *",
 };
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
@@ -629,6 +630,9 @@ export const DreamTasksSchema = z
         ),
         "refresh-primers": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("refresh-primers")),
+        ),
+        "strata-cache-maintain": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("strata-cache-maintain")),
         ),
     })
     .describe(
@@ -1216,9 +1220,13 @@ export interface MagicContextConfig {
             model?: string;
             slot_file?: string;
             prefix_path?: string;
-            /** Identity classic ctx_search resolves for the one allowed project. */
+            /** Identity classic ctx_search resolves for the primary project. */
             project?: string;
+            targets?: Array<{ project: string; slot_file: string; prefix_path: string; context_docs?: string[] }>;
+            context_docs?: string[];
+            context_docs_budget_tokens: number;
             max_tokens: number;
+            transient_budget_tokens: number;
             timeout_ms: number;
         };
     };
@@ -1769,6 +1777,18 @@ export const MagicContextConfigSchema = z
                             .describe(
                                 "User-level project identity this cache may answer. Must equal the identity classic ctx_search resolves for the call directory. Not a directory path. Project values are ignored. Missing, mismatched, or unresolvable identity disables the cache path.",
                             ),
+                        targets: z.array(z.strictObject({
+                            project: z.string(),
+                            slot_file: z.string(),
+                            prefix_path: z.string(),
+                            context_docs: z.array(z.string()).optional().describe("User-level file paths for this target's project reference documents; supports ~/, absolute, and project-relative paths, but not globs or directories."),
+                        })).optional().describe("User-level additional project cache targets; connection settings are shared."),
+                        context_docs: z.array(z.string()).default([]).describe(
+                            "User-level project reference document file paths folded into the slot's fixed context. Supports ~/, absolute, and project-relative paths; no globs or directories. Targets may specify their own list. Project values are ignored.",
+                        ),
+                        context_docs_budget_tokens: z.number().int().min(1).max(32768).default(4000).describe(
+                            "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). Project values are ignored.",
+                        ),
                         max_tokens: z
                             .number()
                             .min(1)
@@ -1776,6 +1796,15 @@ export const MagicContextConfigSchema = z
                             .default(2048)
                             .describe(
                                 "User-level completion max_tokens (min: 1, max: 32768, default: 2048). Project values are ignored.",
+                            ),
+                        transient_budget_tokens: z
+                            .number()
+                            .int()
+                            .min(1)
+                            .max(8192)
+                            .default(2000)
+                            .describe(
+                                "User-level token budget for the transient non-memory classic-retrieval material block appended to Strata slot fusion queries (min: 1, max: 8192, default: 2000). Project values are ignored.",
                             ),
                         timeout_ms: z
                             .number()
@@ -1786,9 +1815,9 @@ export const MagicContextConfigSchema = z
                                 "User-level deadline in milliseconds for each Strata HTTP call, and separately for the prefix-file read (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
                             ),
                     })
-                    .default({ enabled: false, max_tokens: 2048, timeout_ms: 60000 })
+                    .default({ enabled: false, context_docs: [], context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 })
                     .describe(
-                        "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity equals memory.strata_ask.project. A project may set only enabled. A miss, transport error, identity mismatch, or incomplete connection falls through to classic retrieval without changing its format. Not sampled by live reload.",
+                        "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. Not sampled by live reload.",
                     ),
             })
             .default({
@@ -1799,7 +1828,7 @@ export const MagicContextConfigSchema = z
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
                 subagent_inject: { enabled: true },
-                strata_ask: { enabled: false, max_tokens: 2048, timeout_ms: 60000 },
+                strata_ask: { enabled: false, context_docs: [], context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 },
             })
             .describe(
                 "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",
@@ -1861,6 +1890,7 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "dreamer.tasks.promote-primers.schedule",
     "dreamer.tasks.promote-primers.promotion_threshold",
     "dreamer.tasks.refresh-primers.schedule",
+    "dreamer.tasks.strata-cache-maintain.schedule",
     "memory.git_commit_indexing.enabled",
     "memory.git_commit_indexing.since_days",
     "memory.git_commit_indexing.max_commits",

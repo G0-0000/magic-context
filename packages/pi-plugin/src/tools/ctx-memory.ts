@@ -87,6 +87,7 @@ import {
 	CTX_MEMORY_DESCRIPTION,
 	CTX_MEMORY_LIST_DESCRIPTION,
 } from "@magic-context/core/tools/ctx-memory/constants";
+import type { MemoryChangeEvent } from "@magic-context/core/tools/ctx-memory/types";
 import { runImmediateTransaction } from "@magic-context/core/tools/ctx-memory/verification-recording";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
@@ -397,6 +398,7 @@ export interface CtxMemoryToolDeps {
 	/** When true, Curate-only execution fields and guards are enabled. The separate
 	 *  ctx_memory_list registration uses this mode to reuse the list handler. */
 	allowDreamerActions?: boolean;
+	onMemoryChanged?: (event: MemoryChangeEvent, projectDir: string) => void;
 }
 
 export function createCtxMemoryTool(
@@ -539,6 +541,14 @@ export function createCtxMemoryTool(
 				workspaceIdentitySet.identities.length > 1
 					? targetIdentityForStoredPath(memory.projectPath) === projectIdentity
 					: storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
+			const notifyMemoryChanged = (event: MemoryChangeEvent, identity: string) => {
+				if (identity !== projectIdentity) return;
+				try {
+					deps.onMemoryChanged?.(event, ctx.cwd);
+				} catch {
+					// A cache registration failure must not affect the memory tool.
+				}
+			};
 			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
 			if (
 				snapshot
@@ -637,6 +647,7 @@ export function createCtxMemoryTool(
 				});
 
 				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
+				notifyMemoryChanged({ op: "add", memoryId: memory.id }, projectIdentity);
 				// Do NOT invalidate the m[0]/m[1] cache here. An additive write is a
 				// supersede-delta operation: it surfaces in m[1] via the maxMemoryId
 				// watermark (renderM1 reads memories with id > cachedM0MaxMemoryId) on
@@ -756,6 +767,7 @@ export function createCtxMemoryTool(
 					memoryId: memory.id,
 					content,
 				});
+				notifyMemoryChanged({ op: "update", memoryId: memory.id }, targetIdentity);
 				return ok(`Updated memory [ID: ${memory.id}] in ${targetCategory}.`);
 			}
 
@@ -900,6 +912,7 @@ export function createCtxMemoryTool(
 					: "active";
 
 				let canonicalMemory!: Memory;
+				const canonicalChange: { op: "add" | "update" | null } = { op: null };
 				deps.db
 					.transaction(() => {
 						let canonicalContentChanged = false;
@@ -957,6 +970,7 @@ export function createCtxMemoryTool(
 							});
 						}
 
+						canonicalChange.op = canonicalExisting ? (canonicalContentChanged ? "update" : null) : "add";
 						if (canonicalExisting && canonicalContentChanged) {
 							queueMemoryMutation(deps.db, {
 								projectPath: normalizeStoredProjectPath(
@@ -977,6 +991,14 @@ export function createCtxMemoryTool(
 					memoryId: canonicalMemory.id,
 					content,
 				});
+				for (const memory of sourceMemories) {
+					if (memory.id !== canonicalMemory.id) {
+						notifyMemoryChanged({ op: "remove", memoryId: memory.id, kind: "superseded" }, normalizeStoredProjectPath(memory.projectPath));
+					}
+				}
+				if (canonicalChange.op) {
+					notifyMemoryChanged({ op: canonicalChange.op, memoryId: canonicalMemory.id }, normalizeStoredProjectPath(canonicalMemory.projectPath));
+				}
 				const supersededIds = sourceMemories
 					.map((memory) => memory.id)
 					.filter((id) => id !== canonicalMemory.id);
@@ -1046,6 +1068,9 @@ export function createCtxMemoryTool(
 						}
 					}
 				});
+				for (const target of targets) {
+					notifyMemoryChanged({ op: "remove", memoryId: target.memoryId, kind: dreamerAllowed && curateSuccessor ? "superseded" : "archive" }, target.projectIdentity);
+				}
 				const reasonSuffix = params.reason ? ` (${params.reason})` : "";
 				const idList = archiveIds.join(", ");
 				const plural = archiveIds.length > 1 ? "memories" : "memory";
