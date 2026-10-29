@@ -62,6 +62,7 @@ import {
     type CtxMemoryAction,
     type CtxMemoryArgs,
     type CtxMemoryToolDeps,
+    type MemoryChangeEvent,
 } from "./types";
 import { runImmediateTransaction } from "./verification-recording";
 
@@ -516,6 +517,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 visibility.identityFor(rawProjectPath);
             const memoryVisibleToTool = (memory: Memory): boolean => visibility.visible(memory);
             const memoryOwnedByTool = (memory: Memory): boolean => visibility.owned(memory);
+            const notifyMemoryChanged = (event: MemoryChangeEvent, identity: string) => {
+                if (identity !== projectPath) return;
+                try {
+                    deps.onMemoryChanged?.(event, toolContext.directory);
+                } catch {
+                    // A cache registration failure must not affect the memory tool.
+                }
+            };
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (
                 embeddingSnapshot
@@ -573,6 +582,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
+                notifyMemoryChanged({ op: "add", memoryId: insertResult.memory.id }, projectPath);
 
                 return `Saved memory [ID: ${insertResult.memory.id}] in ${category}.`;
             }
@@ -709,6 +719,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
+                notifyMemoryChanged({ op: "update", memoryId: memory.id }, projectIdentity);
 
                 return `Updated memory [ID: ${memory.id}] in ${targetCategory}.`;
             }
@@ -821,6 +832,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     : "active";
 
                 let mergeConflict: string | null = null;
+                const canonicalChange: { op: "add" | "update" | null } = { op: null };
                 const canonicalMemory = runImmediateTransaction(deps.db, () => {
                     const lockedDuplicate = getMemoryByHash(
                         deps.db,
@@ -885,6 +897,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         });
                     }
 
+                    canonicalChange.op = canonicalExisting ? (canonicalContentChanged ? "update" : null) : "add";
                     if (canonicalExisting && canonicalContentChanged) {
                         queueMemoryMutation(deps.db, {
                             projectPath: projectIdentityForStoredPath(nextCanonical.projectPath),
@@ -910,6 +923,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
 
+                for (const memory of sourceMemories) {
+                    if (memory.id !== canonicalMemory.id) {
+                        notifyMemoryChanged({ op: "remove", memoryId: memory.id, kind: "superseded" }, projectIdentityForStoredPath(memory.projectPath));
+                    }
+                }
+                if (canonicalChange.op) {
+                    notifyMemoryChanged({ op: canonicalChange.op, memoryId: canonicalMemory.id }, projectIdentityForStoredPath(canonicalMemory.projectPath));
+                }
                 const supersededIds = sourceMemories
                     .map((memory) => memory.id)
                     .filter((id) => id !== canonicalMemory.id);
@@ -981,6 +1002,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     }
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
+                for (const target of targets) {
+                    notifyMemoryChanged({ op: "remove", memoryId: target.memoryId, kind: toolContext.agent === DREAMER_AGENT && curatePreflight.successor ? "superseded" : "archive" }, target.projectIdentity);
+                }
                 const idList = targets.map((t) => t.memoryId).join(", ");
                 const plural = targets.length > 1 ? "memories" : "memory";
                 return args.reason?.trim()

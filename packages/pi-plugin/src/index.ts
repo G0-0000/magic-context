@@ -29,6 +29,7 @@ import {
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
 import { logConfigDependencyNotesOnce } from "@magic-context/core/config/dependency-notes";
+import { recordMemoryChange } from "@magic-context/core/tools/ctx-search/strata-cache";
 import {
 	changedLiveKeys,
 	dreamerRunConfig,
@@ -1980,6 +1981,7 @@ async function startPiMagicContextRuntime(
 		// Call cwd, not the boot project. Re-read every search; a file edit is
 		// visible on the next call. Parse/schema failure disables the cache path.
 		resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
+		onMemoryChanged: (event, projectDir) => recordMemoryChange(projectDir, event),
 		expandTools: config.historian?.expand_tools,
 		db,
 		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,

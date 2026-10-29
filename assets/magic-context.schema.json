@@ -46,7 +46,7 @@
       "type": "boolean"
     },
     "language": {
-      "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
+      "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the six memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
       "type": "string"
     },
     "profile": {
@@ -1755,6 +1755,9 @@
             },
             "refresh-primers": {
               "schedule": "0 3 * * *"
+            },
+            "strata-cache-maintain": {
+              "schedule": "30 8 * * *"
             }
           },
           "type": "object",
@@ -2029,6 +2032,27 @@
             "refresh-primers": {
               "default": {
                 "schedule": "0 3 * * *"
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "x-mc-live-reload": true,
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "token_budget": {
+                  "description": "Cumulative prompt-token investigation budget (input + cache read + cache write) for one tool-loop child. Defaults: 2,500,000 for map-memories and verify; 3,000,000 for verify-broad; other tool-loop tasks vary. Completed answers are retained even if their usage crosses the budget.",
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
+            },
+            "strata-cache-maintain": {
+              "default": {
+                "schedule": "30 8 * * *"
               },
               "type": "object",
               "properties": {
@@ -2683,7 +2707,10 @@
         },
         "strata_ask": {
           "enabled": false,
+          "context_docs": [],
+          "context_docs_budget_tokens": 4000,
           "max_tokens": 2048,
+          "transient_budget_tokens": 2000,
           "timeout_ms": 60000
         }
       },
@@ -2794,10 +2821,13 @@
         "strata_ask": {
           "default": {
             "enabled": false,
+            "context_docs": [],
+            "context_docs_budget_tokens": 4000,
             "max_tokens": 2048,
+            "transient_budget_tokens": 2000,
             "timeout_ms": 60000
           },
-          "description": "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity equals memory.strata_ask.project. A project may set only enabled. A miss, transport error, identity mismatch, or incomplete connection falls through to classic retrieval without changing its format. Not sampled by live reload.",
+          "description": "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. Not sampled by live reload.",
           "type": "object",
           "properties": {
             "enabled": {
@@ -2811,24 +2841,16 @@
             },
             "api_key": {
               "description": "User-level Bearer token, or null to use api_key_env. Project values are ignored. The token is never written to logs.",
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "type": [
+                "string",
+                "null"
               ]
             },
             "api_key_env": {
               "description": "User-level environment variable name holding the Bearer token when api_key is unset or null. Project values are ignored.",
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "type": [
+                "string",
+                "null"
               ]
             },
             "model": {
@@ -2847,12 +2869,65 @@
               "description": "User-level project identity this cache may answer. Must equal the identity classic ctx_search resolves for the call directory. Not a directory path. Project values are ignored. Missing, mismatched, or unresolvable identity disables the cache path.",
               "type": "string"
             },
+            "targets": {
+              "description": "User-level additional project cache targets; connection settings are shared.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "slot_file": {
+                    "type": "string"
+                  },
+                  "prefix_path": {
+                    "type": "string"
+                  },
+                  "context_docs": {
+                    "description": "User-level file paths for this target's project reference documents; supports ~/, absolute, and project-relative paths, but not globs or directories.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "project",
+                  "slot_file",
+                  "prefix_path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "context_docs": {
+              "default": [],
+              "description": "User-level project reference document file paths folded into the slot's fixed context. Supports ~/, absolute, and project-relative paths; no globs or directories. Targets may specify their own list. Project values are ignored.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "context_docs_budget_tokens": {
+              "default": 4000,
+              "description": "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). Project values are ignored.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768
+            },
             "max_tokens": {
               "default": 2048,
               "description": "User-level completion max_tokens (min: 1, max: 32768, default: 2048). Project values are ignored.",
               "type": "number",
               "minimum": 1,
               "maximum": 32768
+            },
+            "transient_budget_tokens": {
+              "default": 2000,
+              "description": "User-level token budget for the transient non-memory classic-retrieval material block appended to Strata slot fusion queries (min: 1, max: 8192, default: 2000). Project values are ignored.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
             },
             "timeout_ms": {
               "default": 60000,

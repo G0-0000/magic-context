@@ -40,6 +40,8 @@ export interface TaskGateContext {
     retrospectiveWatermarkMs?: number | null;
     /** review-user-memories: min candidate observations before a review is worthwhile. */
     promotionThreshold: number;
+    /** Resolved for this checkout and project identity on this gate evaluation. */
+    strataCacheEnabled?: boolean;
 }
 
 /** Raw status count used only to let curate transition expired active rows. */
@@ -336,6 +338,7 @@ export function taskHasSchedulableInput(
     db: Database,
     projectPath: string,
     now: number,
+    strataCacheEnabled = false,
 ): boolean {
     switch (task) {
         case "map-memories":
@@ -364,6 +367,8 @@ export function taskHasSchedulableInput(
             return countPrimerCandidatesForProject(db, projectPath) > 0;
         case "refresh-primers":
             return countActivePrimers(db, projectPath) > 0;
+        case "strata-cache-maintain":
+            return strataCacheEnabled;
         default: {
             const _exhaustive: never = task;
             return Boolean(_exhaustive);
@@ -487,6 +492,9 @@ export function getDreamTaskBacklog(
             const total = countActivePrimers(db, projectPath);
             return { pending: countStalePrimers(db, projectPath), total };
         }
+        case "strata-cache-maintain":
+            // Cache watermark and pending-file state are checked by maintainCache.
+            return { pending: 0, total: 0 };
         default: {
             const _exhaustive: never = task;
             return _exhaustive;
@@ -699,6 +707,9 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
                     primer.answerRefreshedAt == null ||
                     (primer.lastObservedAt ?? 0) > primer.answerRefreshedAt,
             );
+
+        case "strata-cache-maintain":
+            return ctx.strataCacheEnabled === true;
 
         default: {
             const _exhaustive: never = task;

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
-import { MagicContextConfigSchema } from "../../../config/schema/magic-context";
+import {
+    LIVE_RELOAD_CONFIG_PATHS,
+    MagicContextConfigSchema,
+} from "../../../config/schema/magic-context";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -8,6 +11,21 @@ import { buildDreamTaskRuntimeConfigs } from "./task-config";
 import { evaluateTaskGate } from "./task-gates";
 
 describe("per-harness dream task runtime config", () => {
+    it("defaults strata-cache-maintain to 08:30 and accepts a project schedule override", () => {
+        const defaults = MagicContextConfigSchema.parse({ dreamer: { tasks: {} } }).dreamer;
+        expect(defaults.tasks["strata-cache-maintain"].schedule).toBe("30 8 * * *");
+        expect(
+            buildDreamTaskRuntimeConfigs(defaults, "opencode").find(
+                (config) => config.task === "strata-cache-maintain",
+            )?.schedule,
+        ).toBe("30 8 * * *");
+        expect(
+            MagicContextConfigSchema.parse({
+                dreamer: { tasks: { "strata-cache-maintain": { schedule: "45 9 * * *" } } },
+            }).dreamer.tasks["strata-cache-maintain"].schedule,
+        ).toBe("45 9 * * *");
+        expect(LIVE_RELOAD_CONFIG_PATHS).toContain("dreamer.tasks.strata-cache-maintain.schedule");
+    });
     it("defaults partial promotion task blocks and preserves explicit and absent task defaults", () => {
         const parsed = MagicContextConfigSchema.parse({
             dreamer: {

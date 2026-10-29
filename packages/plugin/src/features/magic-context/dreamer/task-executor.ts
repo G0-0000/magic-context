@@ -40,6 +40,8 @@ import {
 } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { dreamFailureCode, userFacingFailureCode } from "../../../shared/user-facing-codes";
+import { nonEmpty, resolveOpenCodeStrataAsk, safeBearer } from "../../../tools/ctx-search/strata-ask";
+import { maintainCache } from "../../../tools/ctx-search/strata-cache";
 import { getCompartmentEvents } from "../compartment-events";
 import {
     getMemoriesByProject,
@@ -540,7 +542,18 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
         return parentSessionIdPromise;
     };
 
-    return async (
+    // The scheduler sees only an identity; resolve this executor's actual
+    // checkout on every probe so project opt-ins and trust filtering stay current.
+    const strataCacheEnabled = (projectIdentity: string): boolean => {
+        const connection = resolveOpenCodeStrataAsk(deps.sessionDirectory);
+        if (!connection || connection.project !== projectIdentity) return false;
+        return (
+            safeBearer(connection.apiKey) !== null ||
+            safeBearer(nonEmpty(process.env[connection.apiKeyEnv ?? ""])) !== null
+        );
+    };
+
+    const executor: TaskExecutor = async (
         config: DreamTaskRuntimeConfig,
         ctx: TaskExecutorContext,
     ): Promise<TaskExecOutcome> => {
@@ -605,7 +618,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             }
         }
         const parent =
-            migrationRequired || config.modelChainUnavailable
+            migrationRequired ||
+            config.modelChainUnavailable ||
+            config.task === "strata-cache-maintain"
                 ? deps.parentSessionId
                 : await resolveParentSessionId(deadline);
         if (!leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)) {
@@ -774,7 +789,12 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun("skipped", reason);
                 return { status: "skipped", detail: reason };
             };
-            if (config.modelChainUnavailable)
+            if (config.task === "strata-cache-maintain" && !strataCacheEnabled(projectIdentity))
+                return {
+                    ...skip("strata cache is disabled for this project"),
+                    preserveSchedule: true,
+                };
+            if (config.modelChainUnavailable && config.task !== "strata-cache-maintain")
                 return skip("Pi model chain is empty (no configured model resolves in Pi)");
             if (migrationRequired) return skip(renderSingleStoreMigrationRequiredRefusal());
             // A visible host must not create a background root. Skip the whole
@@ -1104,6 +1124,45 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 return { status: "completed" };
             }
 
+            if (config.task === "strata-cache-maintain") {
+                // The task owns the shared memory lease while the remote cache is
+                // being rebuilt, even on a host without a completion transport.
+                const heartbeat = startLeaseHeartbeat(
+                    db,
+                    holderId,
+                    leaseKey,
+                    (reason) => log(`[dreamer] strata-cache-maintain: ${reason}`),
+                    leaseAcquisition,
+                );
+                try {
+                    if (
+                        heartbeat.lost ||
+                        !leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)
+                    )
+                        throw new Error("Dream lease lost before strata-cache-maintain");
+                    const result = await maintainCache(deps.sessionDirectory);
+                    if (
+                        heartbeat.lost ||
+                        !leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)
+                    )
+                        throw new Error("Dream lease lost during strata-cache-maintain");
+                    const detail = sanitizeDiagnosticText(result.detail).slice(0, 500);
+                    const progress = `strata-cache-maintain: ${result.action}${detail ? ` — ${detail}` : ""}`;
+                    log(`[dreamer] ${progress}`);
+                    if (result.action === "error") {
+                        recordRun("failed", progress);
+                        return { status: "failed", transient: true, error: progress };
+                    }
+                    if (result.action === "disabled")
+                        return { ...skip(progress), preserveSchedule: true };
+                    if (result.action === "skipped") return skip(progress);
+                    recordRun("completed", null, { progress });
+                    return { status: "completed", detail: progress };
+                } finally {
+                    heartbeat.stop();
+                }
+            }
+
             if (config.task === "refresh-primers") {
                 const result = await refreshPrimers({
                     db,
@@ -1238,6 +1297,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             deps.onProgress?.(null, config.task);
         }
     };
+    executor.strataCacheEnabled = strataCacheEnabled;
+    return executor;
 }
 
 function resolveRetrospectiveProvider(
