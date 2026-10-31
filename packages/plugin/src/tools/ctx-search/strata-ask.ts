@@ -41,6 +41,18 @@ export type StrataAskOutcome =
 export const STRATA_ASK_FOOTER =
     "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数";
 
+/**
+ * Temporary: every Strata chat call (ctx_search cache query, ACK, count
+ * self-check) asks the server to answer without reasoning, because shared-slot
+ * locking is unsolved — slot 0 can still be clobbered between restore and chat,
+ * so a reasoning prefix is both wasted and unsafe to reuse. Restore `low` (or the
+ * server default) once locking spans processes. Restore and save carry only a
+ * slot filename and never reach the template, so they get no fragment.
+ */
+export function strataNoThinking(): { chat_template_kwargs: { enable_thinking: false } } {
+    return { chat_template_kwargs: { enable_thinking: false } };
+}
+
 const RESOLUTION_FAILURES = new Set([
     "project-file-parse-error",
     "project-file-io-error",
@@ -101,10 +113,14 @@ export function isStrataConfigResolutionFailure(outcome: string): boolean {
     return RESOLUTION_FAILURES.has(outcome);
 }
 
-/** Known business params only. Host metadata keys do not affect the verdict. */
+/**
+ * Known business params only. Host metadata keys do not affect the verdict.
+ * `limit` is not a disqualifier: it bounds classic results and the transient
+ * materials, never the synthesized cache answer.
+ */
 export function strataRouteFor(normalizedArgs: object): "fusion" | "memory-only" | null {
     const args = normalizedArgs as Record<string, unknown>;
-    if ("limit" in args || "from" in args || "to" in args) return null;
+    if ("from" in args || "to" in args) return null;
     if (typeof args.query !== "string") return null;
     const query = args.query.trim();
     if (!query || parseIdShapedQuery(query) !== null) return null;
@@ -516,6 +532,7 @@ async function askOnce(args: {
             messages: [...prefix, { role: "user", content: renderQueryMessage(args.query, args.transient) }],
             max_tokens: args.config.maxTokens,
             stream: false,
+            ...strataNoThinking(),
         },
         apiKey,
         caller: args.signal,

@@ -513,10 +513,17 @@ describe("createCtxSearchTool", () => {
 			expect(await invoke({ query, sources: ["memory"] })).toBe(memoryBaseline);
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["memory"]);
+			mode = "hit";
+			spy.mockClear();
+			expect(await invoke({ query, limit: 2 })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+			expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
+			expect(await invoke({ query, sources: ["memory"], limit: 2 })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(spy).toHaveBeenCalledTimes(1);
 			const networked = calls;
 			await invoke({ query, sources: [] });
 			await invoke({ query, sources: ["note"] });
-			await invoke({ query, limit: 2 });
 			await invoke({ query, from: "2026-01-01" });
 			await invoke({ query: "#1035" });
 			expect(calls).toBe(networked);
