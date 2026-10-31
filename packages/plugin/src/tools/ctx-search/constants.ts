@@ -17,5 +17,5 @@ Sources (omit for all):
 - note — parked follow-ups with their recorded text; "did we leave a follow-up"
 Use from/to to restrict every source to an inclusive UTC date range.
 
-When enabled, bare queries may synthesize a memory-cache answer fused with non-memory retrieval summaries (not subject to the already-visible memory filter; ctx_memory get reads #id originals). sources:["memory"] queries the memory bank directly; an absent answer is terminal. Other explicit sources (including []), from/to/limit, and id queries use classic retrieval.`;
+When enabled, bare queries may synthesize a memory-cache answer fused with non-memory retrieval summaries (not subject to the already-visible memory filter; ctx_memory get reads #id originals). sources:["memory"] queries the memory bank directly; an absent answer is terminal. Other explicit sources (including []), from/to, and id queries use classic retrieval. A \`limit\` still routes to the cache; it bounds only the classic materials and the classic fallback, not the synthesized answer.`;
 export const DEFAULT_CTX_SEARCH_LIMIT = 10;

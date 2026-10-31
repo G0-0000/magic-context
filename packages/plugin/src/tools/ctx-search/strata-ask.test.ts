@@ -17,6 +17,7 @@ import {
     STRATA_ASK_T4,
     strataAskConnectionFromConfig,
     strataAskConnectionForProject,
+    strataNoThinking,
     tryStrataAsk,
     type StrataAskConnection,
 } from "./strata-ask";
@@ -57,17 +58,22 @@ describe("isStrataAskEligible", () => {
         );
     });
 
-    it("routes memory-only sources and rejects other explicit filters and id-shaped queries", () => {
+    it("routes cache queries with or without limit and rejects dates, other sources and id queries", () => {
         expect(strataRouteFor({ query: "where" })).toBe("fusion");
+        expect(strataRouteFor({ query: "where", limit: 3 })).toBe("fusion");
         expect(strataRouteFor({ query: "where", sources: ["memory"] })).toBe("memory-only");
-        expect(strataRouteFor({ query: "where", sources: ["memory", "memory"] })).toBe("memory-only");
+        expect(strataRouteFor({ query: "where", sources: ["memory"], limit: 3 })).toBe("memory-only");
+        expect(strataRouteFor({ query: "where", sources: ["memory", "memory"], limit: 3 })).toBe("memory-only");
         expect(strataRouteFor({ query: "where", sources: [] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: [], limit: 3 })).toBeNull();
         expect(strataRouteFor({ query: "where", sources: ["memory", "note"] })).toBeNull();
-        expect(isStrataAskEligible({ query: "where", limit: 3 })).toBe(false);
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"], limit: 3 })).toBeNull();
+        expect(isStrataAskEligible({ query: "where", limit: 3 })).toBe(true);
         expect(isStrataAskEligible({ query: "where", sources: [] })).toBe(false);
         expect(isStrataAskEligible({ query: "where", sources: ["memory"] })).toBe(true);
         expect(isStrataAskEligible({ query: "where", from: "2026-01-01" })).toBe(false);
         expect(isStrataAskEligible({ query: "where", to: "2026-02-01" })).toBe(false);
+        expect(isStrataAskEligible({ query: "where", from: "2026-01-01", limit: 3 })).toBe(false);
         expect(isStrataAskEligible({ query: "#1035" })).toBe(false);
         expect(isStrataAskEligible({ query: "1032, 1035" })).toBe(false);
         expect(isStrataAskEligible({ query: "   " })).toBe(false);
@@ -402,7 +408,7 @@ describe("tryStrataAsk", () => {
         await tryStrataAskDetailed({ ...args, transient: "[message] ord=42 :: 材料 {q}" });
         const legacy = JSON.stringify({
             model: "qwen-test", messages: [...PREFIX, { role: "user", content: STRATA_ASK_T4.replace("{q}", "哪里") }],
-            max_tokens: 2048, stream: false,
+            max_tokens: 2048, stream: false, chat_template_kwargs: { enable_thinking: false },
         });
         expect(bodies[0]).toBe(legacy);
         expect(bodies[1]).toBe(legacy);
@@ -413,6 +419,39 @@ describe("tryStrataAsk", () => {
         expect(content).toContain("问题：哪里");
         expect(content.indexOf("ord=42")).toBeLessThan(content.indexOf("问题：哪里"));
         expect(content.endsWith("记忆库与期外材料皆无相关信息，则只答「记忆库中无」。")).toBe(true);
+    });
+
+    it("asks for no reasoning on the chat call and leaves the restore body alone", async () => {
+        const seen: Array<{ path: string; body: Record<string, unknown> }> = [];
+        const fetchImpl: typeof fetch = async (input, init) => {
+            seen.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+            if (String(input).includes("/slots/")) return Response.json({ n_restored: 1 });
+            return Response.json({ choices: [{ message: { content: "答案" } }] });
+        };
+        await tryStrataAskDetailed({
+            query: "q",
+            config: connection("http://127.0.0.1:9"),
+            fetchImpl,
+            readFileImpl: readPrefix,
+        });
+        expect(seen.map((row) => row.path)).toEqual(["/slots/0", "/v1/chat/completions"]);
+        expect(seen[0]?.body).toEqual({ filename: "mc-mem-v1.bin" });
+        expect(JSON.stringify(strataNoThinking())).toBe('{"chat_template_kwargs":{"enable_thinking":false}}');
+        const chat = seen[1]!.body;
+        expect(chat.chat_template_kwargs).toEqual({ enable_thinking: false });
+        // No other field appears, and the existing four keep their values.
+        const { model, messages, max_tokens, stream } = chat;
+        expect(chat).toEqual({
+            model,
+            messages,
+            max_tokens,
+            stream,
+            chat_template_kwargs: { enable_thinking: false },
+        });
+        expect(model).toBe("qwen-test");
+        expect(max_tokens).toBe(2048);
+        expect(stream).toBe(false);
+        expect(messages).toEqual([...PREFIX, { role: "user", content: STRATA_ASK_T4.replace("{q}", "q") }]);
     });
 
     it("returns null for an exact miss, empty content, 404, 401, malformed JSON, and a missing file", async () => {
