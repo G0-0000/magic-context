@@ -1061,7 +1061,46 @@ describe("createCtxSearchTools", () => {
             }
         });
 
-        it("does not call the network for other sources, dates, limit, or an id list", async () => {
+        it("accepts limit on cache-routed queries and keeps it on the classic materials", async () => {
+            let chatMessages: Array<{ role: string; content: string }> = [];
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    if (new URL(req.url).pathname === "/slots/0") return Response.json({ n_restored: 1 });
+                    chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
+                    return Response.json({ choices: [{ message: { content: "限额答案" } }] });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const spy = spyOn(searchModule, "unifiedSearch");
+            const tools = createCtxSearchTools({
+                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
+                embeddingEnabled: false, readMessages: () => [],
+                resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+            });
+            const ctx = toolContext("ses-search", "/repo/project");
+            try {
+                const fused = await tools.ctx_search.execute({ query, limit: 2 }, ctx);
+                expect(fused).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
+                expect(spy).toHaveBeenCalledTimes(1);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
+                spy.mockClear();
+                const memoryOnly = await tools.ctx_search.execute({ query, sources: ["memory"], limit: 2 }, ctx);
+                expect(memoryOnly).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
+                expect(spy).toHaveBeenCalledTimes(0);
+                expect(chatMessages[3]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+            } finally {
+                spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("does not call the network for other sources, dates, or an id list", async () => {
             let calls = 0;
             let resolved = 0;
             const server = Bun.serve({
@@ -1096,7 +1135,6 @@ describe("createCtxSearchTools", () => {
                 await tools.ctx_search.execute({ query, sources: ["note"] }, ctx);
                 await tools.ctx_search.execute({ query, from: "2026-01-01" }, ctx);
                 await tools.ctx_search.execute({ query, to: "2026-02-01" }, ctx);
-                await tools.ctx_search.execute({ query, limit: 2 }, ctx);
                 await tools.ctx_search.execute({ query: "#1035" }, ctx);
                 expect(calls).toBe(0);
                 expect(resolved).toBe(0);

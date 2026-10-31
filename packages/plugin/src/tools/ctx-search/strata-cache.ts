@@ -3,6 +3,7 @@ import {
     existsSync,
     mkdirSync,
     openSync,
+    readdirSync,
     readFileSync,
     renameSync,
     statSync,
@@ -10,7 +11,7 @@ import {
     writeFileSync,
     writeSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { loadPluginConfigDetailed } from "../../config";
@@ -32,6 +33,7 @@ import {
     postWithDeadline,
     safeBearer,
     strataAskConnectionForProject,
+    strataNoThinking,
     type StrataAskConnection,
 } from "./strata-ask";
 
@@ -88,6 +90,22 @@ const DOCS_EMPTY_BUDGET_NOTE = "（未载：预算已用尽）";
 const COUNT_QUESTION = "记忆库正文条目及变更流水中现行有效之条目（含新增、不含已作废者）共多少条？参考文档一节不计入。只回复阿拉伯数字，不要其他文字。";
 const DEBOUNCE_MS = 60_000;
 const FALLBACK_MS = 5 * 60_000;
+// Maintenance starts at least this long after the previous maintenance finished.
+const MAINTENANCE_COOLDOWN_MS = 60_000;
+// One prefix directory (normally one slot server) is guarded by one lock directory.
+const CACHE_LOCK_DIR = "cache.lock.d";
+// A malformed or empty candidate older than this is an abandoned write, not a
+// lock still being created. Live candidates are judged by pid identity instead.
+const CACHE_LOCK_STALE_MS = 15 * 60_000;
+// A live pid without a process-start token (legacy payload, or a platform with no
+// /proc) can only be judged by file age. The bound sits far beyond the longest
+// bounded restore/chat/save/self-check chain (timeout_ms may exceed 15 minutes),
+// so a legitimate long operation is never preempted; the fallback is logged.
+const CACHE_LOCK_LEGACY_STALE_MS = 24 * 60 * 60_000;
+const CACHE_LOCK_RETRY_MS = 50;
+// A candidate must be visible this long before it may own the slot, so every
+// caller that registered in the same clock tick is seen before one is elected.
+const CACHE_LOCK_SETTLE_MS = 50;
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const scheduledProjects = new Set<string>();
 let fallbackTimer: ReturnType<typeof setInterval> | undefined;
@@ -237,8 +255,36 @@ function failure(error: unknown): CacheActionResult {
     return { action: "error", detail };
 }
 
+/**
+ * A slot's basename is one path component (strata-ask rejects separators), but not
+ * necessarily a filename. Sanitize it, and append a digest whenever sanitizing
+ * changed it, so two slots can never collide on one pending file.
+ */
+function slotKeyOf(slotFile: string): string {
+    const name = basename(slotFile);
+    const safe = name.replace(/[^A-Za-z0-9._-]/g, "_");
+    if (safe === name && safe.length > 0 && safe !== "." && safe !== "..") return safe;
+    const digest = createHash("sha256").update(name).digest("hex").slice(0, 8);
+    return `${safe.replace(/^\.+/, "") || "slot"}-${digest}`;
+}
+
+/**
+ * Pending events of one slot, beside its prefix file; slots sharing a directory
+ * never mix. A legacy shared `pending-changes.jsonl` is deliberately ignored,
+ * not migrated: these events only accelerate an append, and the next maintenance
+ * rebuild reconciles whatever a dropped event would have carried.
+ */
+export function pendingChangesPathFor(prefixPath: string, slotFile: string): string {
+    return join(dirname(prefixPath), `pending-changes.${slotKeyOf(slotFile)}.jsonl`);
+}
+
+/** One maintenance completion stamp shared by every slot beside the cache lock. */
+export function maintenanceStatePathFor(prefixPath: string): string {
+    return join(dirname(prefixPath), "maintenance.json");
+}
+
 function pendingPath(connection: StrataAskConnection): string {
-    return join(dirname(connection.prefixPath), "pending-changes.jsonl");
+    return pendingChangesPathFor(connection.prefixPath, connection.slotFile);
 }
 
 function readPending(path: string): string {
@@ -264,9 +310,364 @@ function atomicWrite(path: string, content: string): void {
     }
 }
 
-// No await in this loop: local registrations cannot interleave. The optimistic
-// re-read incorporates other processes' appends except in the final stat/rename
-// window; there is deliberately no cross-process lock.
+interface CacheLockOwner {
+    pid: number;
+    nonce: string;
+    /**
+     * Field 22 of /proc/<pid>/stat at creation: the process start time. Pid plus
+     * this token identifies one process instance; null for legacy payloads or a
+     * platform without /proc.
+     */
+    procStart: string | null;
+}
+
+interface CacheLockCandidate {
+    directory: string;
+    name: string;
+    path: string;
+    payload: string;
+    /** Process-monotonic registration time; the settle window is measured on it. */
+    registeredAt: number;
+}
+
+interface CacheLockEntry {
+    name: string;
+    path: string;
+    raw: string;
+    owner: CacheLockOwner | null;
+    /** Arrival order key: birth time when the filesystem records it, else mtime. */
+    createdAt: number;
+    /** Last write; the only evidence for malformed or tokenless candidates. */
+    modifiedAt: number;
+}
+
+/** The lock directory shared by every slot beside the same prefix file. */
+export function cacheLockDirectoryFor(prefixPath: string): string {
+    return join(dirname(prefixPath), CACHE_LOCK_DIR);
+}
+
+function readLockFile(path: string): { raw: string; owner: CacheLockOwner | null } | null {
+    let raw: string;
+    try {
+        raw = readFileSync(path, "utf8");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+    }
+    try {
+        const value = JSON.parse(raw) as {
+            pid?: unknown;
+            nonce?: unknown;
+            procStart?: unknown;
+        };
+        if (
+            Number.isSafeInteger(value.pid) &&
+            (value.pid as number) > 0 &&
+            typeof value.nonce === "string" &&
+            value.nonce.length > 0
+        ) {
+            const procStart =
+                typeof value.procStart === "string" && /^\d+$/.test(value.procStart)
+                    ? value.procStart
+                    : null;
+            return { raw, owner: { pid: value.pid as number, nonce: value.nonce, procStart } };
+        }
+    } catch {
+        // A fresh empty or truncated payload may still be writing; age decides below.
+    }
+    return { raw, owner: null };
+}
+
+/** Process-monotonic milliseconds; a wall-clock adjustment cannot move it. */
+function monotonicNowMs(): number {
+    return performance.now();
+}
+
+/**
+ * Field 22 of /proc/<pid>/stat (start time in clock ticks since boot), as a
+ * string token, or null when this platform cannot supply one. Everything after
+ * the final ')' is parsed because comm may itself contain spaces or parentheses.
+ */
+function readProcStart(pid: number): string | null {
+    let raw: string;
+    try {
+        raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+    } catch {
+        return null;
+    }
+    const close = raw.lastIndexOf(")");
+    if (close < 0) return null;
+    // After "pid (comm)": field 3 (state) is index 0, so field 22 is index 19.
+    const fields = raw.slice(close + 1).trim().split(/\s+/);
+    const token = fields[19];
+    return token !== undefined && /^\d+$/.test(token) ? token : null;
+}
+
+/** True once the observed candidate can no longer own the slot. */
+function lockIsStale(entry: CacheLockEntry): boolean {
+    const owner = entry.owner;
+    if (owner) {
+        try {
+            process.kill(owner.pid, 0);
+        } catch (error) {
+            // ESRCH proves the holder is gone. Any other failure (EPERM) only means
+            // the pid cannot be probed here; instance identity decides below.
+            if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+        }
+        if (owner.procStart !== null) {
+            // A live pid may be a reused one. The start token is exact, so a
+            // matching instance stays the holder for as long as it runs, and a
+            // different or now unreadable instance is stale at once.
+            return readProcStart(owner.pid) !== owner.procStart;
+        }
+        // No instance token (legacy payload or no /proc): file age is the only
+        // evidence, and it is deliberately generous so a long valid rebuild is
+        // not preempted. Logged because this path weakens reuse detection.
+        if (Date.now() - entry.modifiedAt > CACHE_LOCK_LEGACY_STALE_MS) {
+            log(`strata-cache lock reclaimed without process-start token: pid ${owner.pid} ${entry.name}`);
+            return true;
+        }
+        return false;
+    }
+    // A malformed fresh candidate is a write in progress, not a stale lock; only
+    // one that has been abandoned this long is reclaimed.
+    return Date.now() - entry.modifiedAt > CACHE_LOCK_STALE_MS;
+}
+
+/**
+ * Live candidates in arrival order. The ordering key is the directory entry's
+ * birth time, not the timestamp the caller wrote into the name, so a caller
+ * paused between reading its clock and creating its file cannot insert itself
+ * ahead of an owner that is already running. Where the filesystem records no
+ * birth time, the name's timestamp is the fallback and the settle window covers
+ * same-tick registrations.
+ */
+function readCacheLockEntries(directory: string): CacheLockEntry[] {
+    const entries: CacheLockEntry[] = [];
+    for (const name of readdirSync(directory)) {
+        const path = join(directory, name);
+        const observed = readLockFile(path);
+        if (!observed) continue;
+        let stats: ReturnType<typeof statSync>;
+        try {
+            stats = statSync(path);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw error;
+        }
+        // Birth time is the true arrival order. Without it, the name's timestamp
+        // is stable across payload writes; mtime is the last resort.
+        const namedAt = Number(name.slice(0, 13));
+        let createdAt = stats.mtimeMs;
+        if (stats.birthtimeMs > 0) createdAt = stats.birthtimeMs;
+        else if (Number.isFinite(namedAt)) createdAt = namedAt;
+        entries.push({
+            name,
+            path,
+            raw: observed.raw,
+            owner: observed.owner,
+            createdAt,
+            modifiedAt: stats.mtimeMs,
+        });
+    }
+    return entries.sort((left, right) =>
+        left.createdAt - right.createdAt ||
+        (left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+    );
+}
+
+/** Remove only the exact unique candidate judged stale, if its payload is unchanged. */
+function breakStaleLock(path: string, observed: string): boolean {
+    const current = readLockFile(path);
+    if (!current) return true;
+    if (current.raw !== observed) return false;
+    try {
+        unlinkSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return true;
+}
+
+function createLockFile(path: string, payload: string): boolean {
+    let fd: number;
+    try {
+        fd = openSync(path, "wx", 0o600);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+    }
+    try {
+        writeSync(fd, payload);
+        return true;
+    } catch (error) {
+        // Never leave an empty candidate behind if the payload write fails.
+        try {
+            unlinkSync(path);
+        } catch (cleanup) {
+            if ((cleanup as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache lock cleanup failed", cleanup);
+        }
+        throw error;
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/** Register once; the same candidate retains its arrival place across every poll. */
+function registerCacheLockCandidate(connection: Pick<StrataAskConnection, "prefixPath">): CacheLockCandidate {
+    const directory = cacheLockDirectoryFor(connection.prefixPath);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // The name keeps the wall-clock stamp as its ordering fallback; the settle
+    // window uses the process-monotonic clock instead, so a clock rollback cannot
+    // stall it.
+    const namedAt = Date.now();
+    const registeredAt = monotonicNowMs();
+    const nonce = randomBytes(8).toString("hex");
+    const name = `${String(namedAt).padStart(13, "0")}-${String(process.pid).padStart(10, "0")}-${nonce}`;
+    const path = join(directory, name);
+    const procStart = readProcStart(process.pid);
+    if (procStart === null)
+        log("strata-cache lock: no process-start token; liveness falls back to file age");
+    const payload = `${JSON.stringify({ pid: process.pid, nonce, startedAt: new Date().toISOString(), procStart })}\n`;
+    if (!createLockFile(path, payload)) throw new Error("cache lock candidate collision");
+    return { directory, name, path, payload, registeredAt };
+}
+
+/**
+ * Own the mutex only when every candidate that arrived earlier is gone or has
+ * been reclaimed. False means an older live candidate remains; the caller keeps
+ * its candidate and polls. Candidate liveness is probed in this pid namespace,
+ * so the lock presumes writers on one host.
+ */
+function tryAcquireCacheLock(candidate: CacheLockCandidate): boolean {
+    // Wait until every caller that registered in the same clock tick has created
+    // its candidate; only then is "I am the oldest live candidate" stable.
+    if (monotonicNowMs() - candidate.registeredAt < CACHE_LOCK_SETTLE_MS) return false;
+    let own = false;
+    for (const entry of readCacheLockEntries(candidate.directory)) {
+        if (entry.name === candidate.name) {
+            if (entry.raw !== candidate.payload) throw new Error("cache lock candidate changed");
+            own = true;
+            break;
+        }
+        if (!lockIsStale(entry)) return false;
+        if (!breakStaleLock(entry.path, entry.raw)) return false;
+    }
+    if (!own) {
+        // Registration completed before the directory scan; absence means an
+        // external removal, and waiting without a candidate could never progress.
+        throw new Error("cache lock candidate disappeared");
+    }
+    return true;
+}
+
+function releaseCacheLock(path: string): void {
+    try {
+        // This path is unique to the caller and is never reused by a new owner.
+        unlinkSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache lock release failed", error);
+    }
+}
+
+function sleep(ms: number): Promise<void> {
+    // Keep the timer referenced: an awaited caller must not lose its operation
+    // merely because this wait is the process's only remaining work.
+    return new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+    });
+}
+
+/**
+ * Cross-process mutex. Every caller keeps a unique candidate while it waits and
+ * removes only that candidate when it finishes. Exported so the regression tests
+ * can drive two waiters against one lock directory directly.
+ * @internal
+ */
+export async function withCacheLock<T>(
+    connection: Pick<StrataAskConnection, "prefixPath">,
+    work: () => Promise<T>,
+): Promise<T> {
+    const candidate = registerCacheLockCandidate(connection);
+    try {
+        while (true) {
+            if (tryAcquireCacheLock(candidate)) return await work();
+            await sleep(CACHE_LOCK_RETRY_MS);
+        }
+    } finally {
+        releaseCacheLock(candidate.path);
+    }
+}
+
+/** Last maintenance completion, or null when there is no readable stamp. */
+function readMaintenanceCompletion(connection: StrataAskConnection): number | null {
+    let raw: string;
+    try {
+        raw = readFileSync(maintenanceStatePathFor(connection.prefixPath), "utf8");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache maintenance state unreadable", error);
+        return null;
+    }
+    try {
+        const value = JSON.parse(raw) as { completedAt?: unknown };
+        const at = typeof value.completedAt === "string" ? Date.parse(value.completedAt) : Number.NaN;
+        return Number.isFinite(at) ? at : null;
+    } catch {
+        return null;
+    }
+}
+
+function recordMaintenanceCompletion(connection: StrataAskConnection): void {
+    try {
+        const path = maintenanceStatePathFor(connection.prefixPath);
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        atomicWrite(path, `${JSON.stringify({ completedAt: new Date().toISOString() }, null, 2)}\n`);
+    } catch (error) {
+        log("strata-cache maintenance state write failed", error);
+    }
+}
+
+interface MaintenanceCooldown {
+    completion: number;
+    remainingMs: number;
+    /** The stamp sits more than one full cooldown in the future (clock skew). */
+    cappedBySkew: boolean;
+}
+
+/**
+ * How long the next maintenance start still owes the previous completion, across
+ * processes and restarts. Read under the lock, so an attempt that just finished
+ * always sees its own stamp.
+ */
+function maintenanceCooldown(connection: StrataAskConnection): MaintenanceCooldown | null {
+    const completedAt = readMaintenanceCompletion(connection);
+    if (completedAt === null) return null;
+    const rawRemaining = completedAt + MAINTENANCE_COOLDOWN_MS - Date.now();
+    // A stamp far in the future (clock skew) buys at most one full cooldown.
+    return {
+        completion: completedAt,
+        remainingMs: Math.max(0, Math.min(rawRemaining, MAINTENANCE_COOLDOWN_MS)),
+        cappedBySkew: rawRemaining > MAINTENANCE_COOLDOWN_MS,
+    };
+}
+
+/** Internal only: release the locks, sleep, then retry the cooldown check. */
+interface MaintenanceDeferral {
+    retryAfterMs: number;
+    completion: number;
+    cappedBySkew: boolean;
+}
+
+type MaintenanceOutcome = CacheActionResult | MaintenanceDeferral;
+
+function isMaintenanceDeferral(outcome: MaintenanceOutcome): outcome is MaintenanceDeferral {
+    return "retryAfterMs" in outcome;
+}
+
+// No await in this loop: local registrations cannot interleave. Appends are not
+// locked across processes, so the optimistic re-read incorporates their events
+// except in the final stat/rename window; drains holding the cache lock cannot
+// interleave with each other.
 function consumePending(path: string, consumed: string): void {
     if (!consumed) return;
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -487,6 +888,7 @@ async function chat(context: CacheContext, messages: Message[]): Promise<string>
         messages,
         max_tokens: context.connection.maxTokens,
         stream: false,
+        ...strataNoThinking(),
     });
     if (!result || typeof result !== "object") throw new Error("invalid chat reply");
     const choices = (result as { choices?: unknown }).choices;
@@ -519,7 +921,33 @@ async function generateAndSave(context: CacheContext, system: string, user: stri
     return prefix;
 }
 
-async function rebuildLocked(context: CacheContext, reason: string): Promise<CacheActionResult> {
+/**
+ * Restore this project's saved slot so the next chat reuses it as the KV prefix.
+ * A missing remote slot (http_404) is the only tolerated failure: there is
+ * nothing to reuse yet. Any other failure aborts, since the slot state is then
+ * unknown. Returns whether a saved slot was restored.
+ */
+async function restoreSavedSlot(context: CacheContext): Promise<boolean> {
+    if (!existsSync(context.connection.prefixPath)) return false;
+    try {
+        await restore(context);
+        return true;
+    } catch (error) {
+        if (error instanceof Error && error.message === "http_404") return false;
+        throw error;
+    }
+}
+
+/**
+ * Full rebuild. `restoreFirst` is cleared by callers that restored or probed the
+ * slot immediately before (maintenance, append self-check fallback), so one
+ * operation restores the slot exactly once.
+ */
+async function rebuildLocked(
+    context: CacheContext,
+    reason: string,
+    restoreFirst = true,
+): Promise<CacheActionResult> {
     const path = pendingPath(context.connection);
     // Only events present before the DB snapshot may be consumed; events arriving
     // while the model is running stay in the file for the next drain.
@@ -533,6 +961,9 @@ async function rebuildLocked(context: CacheContext, reason: string): Promise<Cac
     const docs = renderDocsSection(context.projectRoot, context.connection.contextDocs, context.connection.contextDocsBudgetTokens);
     const user = composeSlotUser(INTRO, blocks, docs?.section ?? null, ACK_REQUEST, watermarkLine(watermark));
     mkdirSync(dirname(context.connection.prefixPath), { recursive: true, mode: 0o700 });
+    // Reuse the saved prefix first: the system message is unchanged, so the
+    // rebuilt chat only pays for the new user turn.
+    if (restoreFirst) await restoreSavedSlot(context);
     const prefix = await generateAndSave(context, system, user);
     try {
         await selfCheck(context, prefix, watermark);
@@ -577,17 +1008,18 @@ async function drainLocked(context: CacheContext): Promise<CacheActionResult> {
         await selfCheck(context, updatedPrefix, watermark);
     } catch (error) {
         log("strata-cache append self-check failed; rebuilding", error);
-        return rebuildLocked(context, "self-check");
+        // The failed self-check just restored this prefix, so rebuild needs no restore.
+        return rebuildLocked(context, "self-check", false);
     }
     atomicWrite(context.connection.prefixPath, `${JSON.stringify(updatedPrefix, null, 2)}\n`);
     consumePending(path, pending);
     return { action: "appended", detail: `applied ${lines.length} change(s)`, watermark };
 }
 
-async function queued(work: () => Promise<CacheActionResult>): Promise<CacheActionResult> {
+async function queued<T>(work: () => Promise<T>): Promise<T> {
     const result = await enqueue(work);
     if (typeof result === "symbol") throw new Error("cache queue aborted");
-    return result;
+    return result as T;
 }
 
 export function recordMemoryChange(projectRoot: string, event: MemoryChangeEvent): void {
@@ -643,7 +1075,7 @@ export async function drainPendingChanges(projectRoot: string): Promise<CacheAct
     try {
         const context = resolveContext(projectRoot);
         if (!context) return { action: "disabled", detail: "strata-ask-disabled" };
-        return await queued(() => drainLocked(context));
+        return await queued(() => withCacheLock(context.connection, () => drainLocked(context)));
     } catch (error) {
         return failure(error);
     }
@@ -653,45 +1085,73 @@ export async function rebuildCache(projectRoot: string, reason: string): Promise
     try {
         const context = resolveContext(projectRoot);
         if (!context) return { action: "disabled", detail: "strata-ask-disabled" };
-        return await queued(() => rebuildLocked(context, reason));
+        return await queued(() => withCacheLock(context.connection, () => rebuildLocked(context, reason)));
     } catch (error) {
         return failure(error);
     }
+}
+
+async function maintainLocked(context: CacheContext): Promise<CacheActionResult> {
+    // Restore first: a saved slot is reused as the KV prefix, and only a 404 says
+    // there is no cache to maintain yet.
+    const exists = await restoreSavedSlot(context);
+    const pending = readPending(pendingPath(context.connection));
+    const snapshot = readMemorySnapshot(context.project);
+    if (!exists) {
+        const estimate = estimateTokens(renderMemoryBlockV2(snapshot.memories));
+        if (estimate <= context.budget && context.connection.contextDocs.length === 0) {
+            return { action: "skipped", detail: "below-threshold" };
+        }
+        return rebuildLocked(context, "create", false);
+    }
+    const watermark = readCacheWatermark(context.connection);
+    const latest = watermarkFor(snapshot, new Date().toISOString());
+    if (
+        !watermark ||
+        watermark.maxMemoryId < latest.maxMemoryId ||
+        watermark.maxMutationId < latest.maxMutationId ||
+        pending.length > 0
+    ) return rebuildLocked(context, "daily-compaction", false);
+    return { action: "skipped", detail: "unchanged", watermark };
 }
 
 export async function maintainCache(projectRoot: string): Promise<CacheActionResult> {
     try {
         const context = resolveContext(projectRoot);
         if (!context) return { action: "disabled", detail: "strata-ask-disabled" };
-        return await queued(async () => {
-            let exists = existsSync(context.connection.prefixPath);
-            if (exists) {
-                try {
-                    await restore(context);
-                } catch (error) {
-                    if (error instanceof Error && error.message === "http_404") exists = false;
-                    else throw error;
-                }
-            }
-            const pending = readPending(pendingPath(context.connection));
-            const snapshot = readMemorySnapshot(context.project);
-            if (!exists) {
-                const estimate = estimateTokens(renderMemoryBlockV2(snapshot.memories));
-                if (estimate <= context.budget && context.connection.contextDocs.length === 0) {
-                    return { action: "skipped", detail: "below-threshold" };
-                }
-                return rebuildLocked(context, "create");
-            }
-            const watermark = readCacheWatermark(context.connection);
-            const latest = watermarkFor(snapshot, new Date().toISOString());
-            if (
-                !watermark ||
-                watermark.maxMemoryId < latest.maxMemoryId ||
-                watermark.maxMutationId < latest.maxMutationId ||
-                pending.length > 0
-            ) return rebuildLocked(context, "daily-compaction");
-            return { action: "skipped", detail: "unchanged", watermark };
-        });
+        // A stamp skewed into the future buys one full cooldown, then is treated as
+        // elapsed; a newer stamp always starts a new wait.
+        let waitedOutSkew: number | null = null;
+        while (true) {
+            const outcome = await queued(() =>
+                withCacheLock(context.connection, async (): Promise<MaintenanceOutcome> => {
+                    // The previous attempt records completion before releasing the
+                    // lock, so a caller that acquires the lock reads the true gap.
+                    const cooldown = maintenanceCooldown(context.connection);
+                    const skewAlreadyWaited =
+                        cooldown !== null && cooldown.cappedBySkew && cooldown.completion === waitedOutSkew;
+                    if (cooldown && cooldown.remainingMs > 0 && !skewAlreadyWaited) {
+                        return {
+                            retryAfterMs: cooldown.remainingMs,
+                            completion: cooldown.completion,
+                            cappedBySkew: cooldown.cappedBySkew,
+                        };
+                    }
+                    try {
+                        return await maintainLocked(context);
+                    } finally {
+                        // Failed attempts cool down too, so an error cannot be hammered.
+                        recordMaintenanceCompletion(context.connection);
+                    }
+                }),
+            );
+            if (!isMaintenanceDeferral(outcome)) return outcome;
+            // The cache lock and the process-local queue are both released here:
+            // an ordinary ask must never wait behind a maintenance caller that is
+            // merely sleeping out its cooldown.
+            waitedOutSkew = outcome.cappedBySkew ? outcome.completion : null;
+            await sleep(outcome.retryAfterMs);
+        }
     } catch (error) {
         return failure(error);
     }
