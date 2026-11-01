@@ -806,7 +806,7 @@ describe("createCtxSearchTools", () => {
             }
         });
 
-        it("pre-runs non-memory classic once, sends its materials and preserves prefix bytes on a bare hit", async () => {
+        it("pre-runs non-memory classic once, sends its materials and leaves prefix.json untouched on a bare hit", async () => {
             const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
                 source: "message", content: "sqlite archive marker", score: 1,
                 messageOrdinal: 3, messageId: "m3", role: "user",
@@ -816,11 +816,10 @@ describe("createCtxSearchTools", () => {
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    const url = new URL(req.url);
-                    if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
                     chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
                     return Response.json({
                         choices: [{ message: { content: "答案一行\n#1032：概括", reasoning_content: "skip" } }],
+                        session: { splice: { resume_ok: true } },
                     });
                 },
             });
@@ -850,8 +849,8 @@ describe("createCtxSearchTools", () => {
                 expect(result).not.toContain("skip");
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
-                expect(chatMessages[3]?.content).toContain("sqlite archive marker");
-                expect(chatMessages[3]?.content).toContain(`问题：${query}`);
+                expect(chatMessages[0]?.content).toContain("sqlite archive marker");
+                expect(chatMessages[0]?.content).toContain(`问题：${query}`);
                 expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
             } finally {
                 spy.mockRestore();
@@ -866,8 +865,6 @@ describe("createCtxSearchTools", () => {
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    const url = new URL(req.url);
-                    if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
                     chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
                     return Response.json({ choices: [{ message: { content: "记忆库中无" } }] });
                 },
@@ -898,7 +895,7 @@ describe("createCtxSearchTools", () => {
                 expect(result).toBe(baseline);
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
-                expect(chatMessages[3]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
             } finally {
                 spy.mockRestore();
                 server.stop(true);
@@ -1014,9 +1011,8 @@ describe("createCtxSearchTools", () => {
                 port: 0, hostname: "127.0.0.1",
                 async fetch(req) {
                     if (mode === "failed") return new Response(null, { status: 404 });
-                    if (new URL(req.url).pathname === "/slots/0") return Response.json({ n_restored: 1 });
                     chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
-                    return Response.json({ choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "记忆答案" } }] });
+                    return Response.json({ choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "记忆答案" } }], session: { restored: { tokens: 3 } } });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1044,7 +1040,7 @@ describe("createCtxSearchTools", () => {
                 const answered = await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx);
                 expect(answered).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
-                expect(chatMessages[3]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
                 mode = "miss";
                 expect(await tools.ctx_search.execute({ query, sources: ["memory", "memory"] }, ctx)).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
@@ -1067,9 +1063,8 @@ describe("createCtxSearchTools", () => {
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    if (new URL(req.url).pathname === "/slots/0") return Response.json({ n_restored: 1 });
                     chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
-                    return Response.json({ choices: [{ message: { content: "限额答案" } }] });
+                    return Response.json({ choices: [{ message: { content: "限额答案" } }], session: { splice: { resume_ok: true } } });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1092,7 +1087,7 @@ describe("createCtxSearchTools", () => {
                 const memoryOnly = await tools.ctx_search.execute({ query, sources: ["memory"], limit: 2 }, ctx);
                 expect(memoryOnly).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
-                expect(chatMessages[3]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
             } finally {
                 spy.mockRestore();
                 server.stop(true);

@@ -450,9 +450,11 @@ describe("createCtxSearchTool", () => {
 			async fetch(req) {
 				calls++;
 				if (mode === "failed") return new Response(null, { status: 404 });
-				if (new URL(req.url).pathname === "/slots/0") return Response.json({ n_restored: 1 });
 				chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
-				return Response.json({ choices: [{ message: { content: mode === "hit" ? "答案一行" : "记忆库中无", reasoning_content: "skip" } }] });
+				return Response.json({
+					choices: [{ message: { content: mode === "hit" ? "答案一行" : "记忆库中无", reasoning_content: "skip" } }],
+					session: { splice: { resume_ok: true } },
+				});
 			},
 		});
 		const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
@@ -488,8 +490,8 @@ describe("createCtxSearchTool", () => {
 			expect(hit).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
-			expect(chatMessages[3]?.content).toContain("sqlite archive marker");
-			expect(chatMessages[3]?.content).toContain(`问题：${query}`);
+			expect(chatMessages[0]?.content).toContain("sqlite archive marker");
+			expect(chatMessages[0]?.content).toContain(`问题：${query}`);
 			expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
 			spy.mockClear();
 			mode = "miss";
@@ -505,7 +507,7 @@ describe("createCtxSearchTool", () => {
 			mode = "hit";
 			expect(await invoke({ query, sources: ["memory"] })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);
-			expect(chatMessages[3]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+			expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
 			mode = "miss";
 			expect(await invoke({ query, sources: ["memory", "memory"] })).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);

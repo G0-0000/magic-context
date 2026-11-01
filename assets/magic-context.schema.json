@@ -2821,12 +2821,12 @@
             "transient_budget_tokens": 2000,
             "timeout_ms": 60000
           },
-          "description": "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. Not sampled by live reload.",
+          "description": "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. A query is one composite POST /v1/chat/completions that carries only the new user turn plus strata_session restore and splice: the server restores the slot, splices the base from its token sidecar and answers inside one serialized turn, so timeout_ms bounds that single request and the client never replays prefix.json. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. A splice the sidecar cannot serve (splice_stale, splice_base_seam, splice_render_mismatch) is answered through the older restore-then-replay flow, byte-identically, and leaves a rebuild marker beside prefix_path for the write side. Not sampled by live reload.",
           "type": "object",
           "properties": {
             "enabled": {
               "default": false,
-              "description": "Opt in so bare ctx_search queries may be answered from a user-configured Strata session-file cache. The only memory.strata_ask field a project config may set. Default false. Independent of memory.enabled. Not a live-reload key: OpenCode and Pi re-read the trust-filtered config for the call directory on each ctx_search call. Tool description text still follows the host's registration lifecycle.",
+              "description": "Opt in so bare ctx_search queries may be answered from a user-configured Strata session-file cache. The only memory.strata_ask field a project config may set. Default false. Independent of memory.enabled. Not a live-reload key: OpenCode and Pi re-read the trust-filtered config for the call directory on each ctx_search call. Tool description text still follows the host's registration lifecycle. A ctx_search call that supplies `limit` still qualifies: limit bounds classic results and the classic fallback only, never the synthesized answer. from/to, non-memory sources, and id queries stay on the classic path.",
               "type": "boolean"
             },
             "base_url": {
@@ -2856,7 +2856,7 @@
               "type": "string"
             },
             "prefix_path": {
-              "description": "User-level absolute path to the frozen prefix JSON replayed before the query. Project values are ignored.",
+              "description": "User-level absolute path to the project's prefix JSON: the ingest input, the write side's watermark and pending-change anchor, and the directory holding the cache lock and the sidecar-stale marker. The query path no longer replays it. Project values are ignored.",
               "type": "string"
             },
             "project": {
@@ -2925,7 +2925,7 @@
             },
             "timeout_ms": {
               "default": 60000,
-              "description": "User-level deadline in milliseconds for each Strata HTTP call, and separately for the prefix-file read (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
+              "description": "User-level deadline in milliseconds for the one composite query request and for each write-side HTTP call (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
               "type": "number",
               "minimum": 1,
               "maximum": 600000
