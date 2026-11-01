@@ -3,7 +3,7 @@
  *
  * The query path never saves, so it cannot rebuild the server-side token
  * sidecar itself. When a splice request cannot be served (the sidecar is
- * missing, stale or corrupt), the query is answered through the legacy flow and
+ * missing, stale or corrupt), the query falls back to classic retrieval and
  * this marker is left behind. The write side (strata-cache.ts) sees it on its
  * next maintenance run, rebuilds the slot — which rewrites the sidecar — and
  * clears it.

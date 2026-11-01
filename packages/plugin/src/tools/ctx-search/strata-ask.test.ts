@@ -23,12 +23,6 @@ import {
 } from "./strata-ask";
 import { readSidecarStale, staleMarkerPathFor } from "./sidecar-stale";
 
-const PREFIX = [
-    { role: "system", content: "sys-bytes" },
-    { role: "user", content: "memory-bytes" },
-    { role: "assistant", content: "ack-bytes" },
-];
-
 function connection(baseUrl: string, patch: Partial<StrataAskConnection> = {}): StrataAskConnection {
     return {
         baseUrl,
@@ -45,10 +39,6 @@ function connection(baseUrl: string, patch: Partial<StrataAskConnection> = {}): 
         contextDocsBudgetTokens: 4000,
         ...patch,
     };
-}
-
-function readPrefix(): string {
-    return JSON.stringify(PREFIX);
 }
 
 describe("isStrataAskEligible", () => {
@@ -372,9 +362,6 @@ describe("tryStrataAsk", () => {
         const result = await tryStrataAsk({
             query: "sqlite 在哪",
             config: connection(String(server.url).replace(/\/$/, "")),
-            readFileImpl: () => {
-                throw new Error("the query path must not read prefix.json");
-            },
         });
         expect(seen.map((row) => row.path)).toEqual(["/v1/chat/completions"]);
         expect(seen[0]?.auth).toBe("Bearer strata-test-key");
@@ -395,7 +382,7 @@ describe("tryStrataAsk", () => {
             if (mode === "failed") return new Response(null, { status: 404 });
             return Response.json({ choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "答案" } }] });
         };
-        const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl, readFileImpl: readPrefix };
+        const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl };
         expect(await tryStrataAskDetailed(args)).toEqual({ status: "answered", text: `答案\n${STRATA_ASK_FOOTER}` });
         mode = "miss";
         expect(await tryStrataAskDetailed(args)).toEqual({ status: "miss" });
@@ -409,7 +396,7 @@ describe("tryStrataAsk", () => {
             bodies.push(JSON.parse(String(init?.body)));
             return Response.json({ choices: [{ message: { content: "答案" } }] });
         };
-        const args = { query: "哪里", config: connection("http://127.0.0.1:9"), fetchImpl, readFileImpl: readPrefix };
+        const args = { query: "哪里", config: connection("http://127.0.0.1:9"), fetchImpl };
         await tryStrataAskDetailed(args);
         await tryStrataAskDetailed({ ...args, transient: "" });
         await tryStrataAskDetailed({ ...args, transient: "[message] ord=42 :: 材料 {q}" });
@@ -436,7 +423,6 @@ describe("tryStrataAsk", () => {
             query: "q",
             config: connection("http://127.0.0.1:9"),
             fetchImpl,
-            readFileImpl: readPrefix,
         });
         expect(seen.map((row) => row.path)).toEqual(["/v1/chat/completions"]);
         expect(JSON.stringify(strataNoThinking())).toBe('{"chat_template_kwargs":{"enable_thinking":false}}');
@@ -479,18 +465,18 @@ describe("tryStrataAsk", () => {
         });
         const config = connection(String(server.url).replace(/\/$/, ""), { apiKey: key });
         try {
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
             mode = "quoted";
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
             mode = "empty";
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
             mode = "404";
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
             mode = "401";
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
             mode = "malformed";
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
-            // The composite path is the only network call: no restore, no legacy retry.
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
+            // The composite path is the only network call: no restore follow-up.
             expect(calls.filter((path) => path === "/v1/chat/completions")).toHaveLength(6);
             expect(calls.filter((path) => path === "/slots/0")).toHaveLength(0);
             const dumped = JSON.stringify(logged.mock.calls);
@@ -501,32 +487,26 @@ describe("tryStrataAsk", () => {
         }
     });
 
-    it("answers through the byte-identical legacy flow on splice errors and marks the sidecar stale", async () => {
+    it("marks the sidecar stale on a splice failure and falls back to classic retrieval", async () => {
         const rows: Array<{ path: string; raw: string }> = [];
         let mode: "splice_stale" | "splice_base_seam" | "splice_render_mismatch" = "splice_stale";
         const server = serve(async (req) => {
             const url = new URL(req.url);
             rows.push({ path: `${url.pathname}${url.search}`, raw: await req.text() });
-            if (url.pathname === "/slots/0") return Response.json({ n_restored: 1 });
-            if (rows.filter((row) => row.path === "/v1/chat/completions").length === 1) {
-                if (mode === "splice_render_mismatch") {
-                    return Response.json(
-                        { error: { type: "invalid_request_error", message: "splice_render_mismatch: no anchor" } },
-                        { status: 400 },
-                    );
-                }
-                return Response.json({ error: { type: mode, message: "sidecar cannot splice" } }, { status: 409 });
+            if (mode === "splice_render_mismatch") {
+                return Response.json(
+                    { error: { type: "invalid_request_error", message: "splice_render_mismatch: no anchor" } },
+                    { status: 400 },
+                );
             }
-            return Response.json({ choices: [{ message: { content: "旧路答案" } }] });
+            return Response.json({ error: { type: mode, message: "sidecar cannot splice" } }, { status: 409 });
         });
         const baseUrl = String(server.url).replace(/\/$/, "");
-        const legacy = JSON.stringify({
-            model: "qwen-test",
-            messages: [...PREFIX, { role: "user", content: STRATA_ASK_T4.replace("{q}", "q") }],
-            max_tokens: 2048,
-            stream: false,
-            chat_template_kwargs: { enable_thinking: false },
-        });
+        const expected = {
+            splice_stale: "http_409",
+            splice_base_seam: "http_409",
+            splice_render_mismatch: "http_400",
+        } as const;
         const tmp = tempPrefix();
         try {
             for (const reason of ["splice_stale", "splice_base_seam", "splice_render_mismatch"] as const) {
@@ -535,19 +515,13 @@ describe("tryStrataAsk", () => {
                 const result = await tryStrataAskDetailed({
                     query: "q",
                     config: connection(baseUrl, { prefixPath: tmp.prefixPath }),
-                    readFileImpl: readPrefix,
                 });
-                expect(result).toEqual({ status: "answered", text: `旧路答案\n${STRATA_ASK_FOOTER}` });
-                expect(rows.map((row) => row.path)).toEqual([
-                    "/v1/chat/completions",
-                    "/slots/0?action=restore",
-                    "/v1/chat/completions",
-                ]);
-                // The query write is splice-only; the legacy replay is byte-identical
-                // to the request this module sent before the composite endpoint.
+                // The failed splice is the only request: classic retrieval answers,
+                // and the rebuild is left to the write side.
+                expect(result).toEqual({ status: "failed", reason: expected[reason] });
+                expect(rows.map((row) => row.path)).toEqual(["/v1/chat/completions"]);
                 expect((JSON.parse(rows[0]!.raw) as { strata_session: unknown }).strata_session)
                     .toEqual({ restore: "mc-mem-v1.bin", splice: true });
-                expect(rows[2]!.raw).toBe(legacy);
                 expect(readSidecarStale(tmp.prefixPath)?.reason).toBe(reason);
             }
         } finally {
@@ -555,7 +529,7 @@ describe("tryStrataAsk", () => {
         }
     });
 
-    it("treats a 409 model_busy as a plain failure and never replays the legacy flow", async () => {
+    it("treats a 409 model_busy as a plain failure and leaves no stale marker", async () => {
         const tmp = tempPrefix();
         const seen: string[] = [];
         const server = serve((req) => {
@@ -566,59 +540,10 @@ describe("tryStrataAsk", () => {
             const result = await tryStrataAskDetailed({
                 query: "q",
                 config: connection(String(server.url).replace(/\/$/, ""), { prefixPath: tmp.prefixPath }),
-                readFileImpl: readPrefix,
             });
             expect(result).toEqual({ status: "failed", reason: "http_409" });
             expect(seen).toEqual(["/v1/chat/completions"]);
             expect(readSidecarStale(tmp.prefixPath)).toBeNull();
-        } finally {
-            tmp.cleanup();
-        }
-    });
-
-    it("fails when the legacy fallback fails too and keeps the stale marker", async () => {
-        const tmp = tempPrefix();
-        const seen: string[] = [];
-        const server = serve((req) => {
-            const path = new URL(req.url).pathname;
-            seen.push(path);
-            if (path === "/slots/0") return Response.json({ n_restored: 1 });
-            if (seen.filter((entry) => entry === "/v1/chat/completions").length === 1) {
-                return Response.json({ error: { type: "splice_stale", message: "stale" } }, { status: 409 });
-            }
-            return new Response("boom", { status: 500 });
-        });
-        try {
-            const result = await tryStrataAskDetailed({
-                query: "q",
-                config: connection(String(server.url).replace(/\/$/, ""), { prefixPath: tmp.prefixPath }),
-                readFileImpl: readPrefix,
-            });
-            expect(result).toEqual({ status: "failed", reason: "http_500" });
-            expect(readSidecarStale(tmp.prefixPath)?.reason).toBe("splice_stale");
-        } finally {
-            tmp.cleanup();
-        }
-    });
-
-    it("fails with file_error when the legacy prefix is unreadable", async () => {
-        const tmp = tempPrefix();
-        const seen: string[] = [];
-        const server = serve((req) => {
-            seen.push(new URL(req.url).pathname);
-            return Response.json({ error: { type: "splice_stale", message: "stale" } }, { status: 409 });
-        });
-        try {
-            const result = await tryStrataAskDetailed({
-                query: "q",
-                config: connection(String(server.url).replace(/\/$/, ""), { prefixPath: tmp.prefixPath }),
-                readFileImpl: () => {
-                    throw new Error("missing");
-                },
-            });
-            expect(result).toEqual({ status: "failed", reason: "file_error" });
-            // The prefix read happens before the legacy restore, so nothing else is sent.
-            expect(seen).toEqual(["/v1/chat/completions"]);
         } finally {
             tmp.cleanup();
         }
@@ -629,7 +554,6 @@ describe("tryStrataAsk", () => {
         const result = await tryStrataAsk({
             query: "q",
             config: connection(String(server.url).replace(/\/$/, ""), { timeoutMs: 80 }),
-            readFileImpl: readPrefix,
         });
         expect(result).toBeNull();
         const follow = serve(async () => Response.json({ choices: [{ message: { content: "答案" } }] }));
@@ -637,7 +561,6 @@ describe("tryStrataAsk", () => {
             await tryStrataAsk({
                 query: "q",
                 config: connection(String(follow.url).replace(/\/$/, "")),
-                readFileImpl: readPrefix,
             }),
         ).toContain(STRATA_ASK_FOOTER);
     });
@@ -655,11 +578,11 @@ describe("tryStrataAsk", () => {
             return Response.json({ choices: [{ message: { content: `一行答案${index}\n#1：概括` } }] });
         };
         const config = connection("http://127.0.0.1:9");
-        const first = tryStrataAsk({ query: "one", config, fetchImpl, readFileImpl: readPrefix });
+        const first = tryStrataAsk({ query: "one", config, fetchImpl });
         for (let i = 0; i < 50 && started < 1; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
         }
-        const second = tryStrataAsk({ query: "two", config, fetchImpl, readFileImpl: readPrefix });
+        const second = tryStrataAsk({ query: "two", config, fetchImpl });
         await new Promise((resolve) => setTimeout(resolve, 30));
         expect(started).toBe(1);
         release();
@@ -679,7 +602,7 @@ describe("tryStrataAsk", () => {
         });
         const config = connection(String(server.url).replace(/\/$/, ""));
         for (let i = 0; i < bodies.length; i++) {
-            expect(await tryStrataAsk({ query: "q", config, readFileImpl: readPrefix })).toBeNull();
+            expect(await tryStrataAsk({ query: "q", config })).toBeNull();
         }
         expect(index).toBe(bodies.length);
     });
@@ -696,7 +619,7 @@ describe("tryStrataAsk", () => {
             return Response.json({ choices: [{ message: { content: "一行答案" } }] });
         };
         const config = connection("http://127.0.0.1:9");
-        const first = tryStrataAsk({ query: "one", config, fetchImpl, readFileImpl: readPrefix });
+        const first = tryStrataAsk({ query: "one", config, fetchImpl });
         for (let i = 0; i < 50 && started < 1; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
         }
@@ -705,7 +628,6 @@ describe("tryStrataAsk", () => {
             query: "two",
             config,
             fetchImpl,
-            readFileImpl: readPrefix,
             signal: controller.signal,
         });
         controller.abort();
@@ -715,65 +637,18 @@ describe("tryStrataAsk", () => {
         expect(await first).toContain(STRATA_ASK_FOOTER);
     });
 
-    it("bounds a hung legacy prefix read and lets the next request proceed", async () => {
-        const server = serve(() => Response.json({ error: { type: "splice_stale", message: "stale" } }, { status: 409 }));
-        const tmp = tempPrefix();
-        try {
-            const config = connection(String(server.url).replace(/\/$/, ""), {
-                timeoutMs: 40,
-                prefixPath: tmp.prefixPath,
-            });
-            const hung = tryStrataAsk({
-                query: "q",
-                config,
-                readFileImpl: () => new Promise<string>(() => {}),
-            });
-            expect(await hung).toBeNull();
-            expect(
-                await tryStrataAsk({
-                    query: "q",
-                    config: connection(String(server.url).replace(/\/$/, ""), {
-                        timeoutMs: 40,
-                        prefixPath: tmp.prefixPath,
-                    }),
-                    readFileImpl: () => {
-                        throw new Error("stop");
-                    },
-                }),
-            ).toBeNull();
-        } finally {
-            tmp.cleanup();
-        }
-    });
-
-    it("gives each HTTP call its own timeout signal", async () => {
+    it("gives each query its own timeout signal", async () => {
         const signals: AbortSignal[] = [];
-        let index = 0;
-        const fetchImpl: typeof fetch = async (input, init) => {
-            index++;
+        const fetchImpl: typeof fetch = async (_input, init) => {
             if (init?.signal) signals.push(init.signal);
-            if (index === 1) {
-                return Response.json({ error: { type: "splice_stale", message: "stale" } }, { status: 409 });
-            }
-            if (new URL(String(input)).pathname === "/slots/0") return Response.json({ n_restored: 1 });
             return Response.json({ choices: [{ message: { content: "一行答案" } }] });
         };
-        const tmp = tempPrefix();
-        try {
-            expect(
-                await tryStrataAsk({
-                    query: "q",
-                    config: connection("http://127.0.0.1:9", { prefixPath: tmp.prefixPath }),
-                    fetchImpl,
-                    readFileImpl: readPrefix,
-                }),
-            ).toContain(STRATA_ASK_FOOTER);
-            // Composite query, then the legacy restore and chat: one deadline each.
-            expect(signals).toHaveLength(3);
-            expect(new Set(signals).size).toBe(3);
-        } finally {
-            tmp.cleanup();
-        }
+        const config = connection("http://127.0.0.1:9");
+        expect(await tryStrataAsk({ query: "one", config, fetchImpl })).toContain(STRATA_ASK_FOOTER);
+        expect(await tryStrataAsk({ query: "two", config, fetchImpl })).toContain(STRATA_ASK_FOOTER);
+        // One request per query, and no two queries share a deadline.
+        expect(signals).toHaveLength(2);
+        expect(new Set(signals).size).toBe(2);
     });
 
     it("places the stale marker beside the prefix file it belongs to", () => {
