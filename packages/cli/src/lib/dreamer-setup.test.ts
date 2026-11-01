@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { CANONICAL_DREAM_TASKS } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { runDreamerSetup } from "./dreamer-setup";
 import type { PromptIO, PromptLog, PromptSpinner, SelectOption } from "./prompts";
 
@@ -77,11 +78,11 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: Array(12).fill("cron:0 3 * * *"),
+            selects: Array(CANONICAL_DREAM_TASKS.length).fill("cron:0 3 * * *"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks).toBeDefined();
-        expect(Object.keys(result.tasks ?? {}).length).toBe(12);
+        expect(Object.keys(result.tasks ?? {}).length).toBe(CANONICAL_DREAM_TASKS.length);
         expect(result.tasks?.verify.schedule).toBe("0 3 * * *");
         expect(result.tasks?.curate.schedule).toBe("0 3 * * *");
         expect(result.tasks?.["classify-memories"].schedule).toBe("0 3 * * *");
@@ -95,7 +96,7 @@ describe("runDreamerSetup", () => {
             confirms: [false],
             autos: ["x/y"],
             // all disabled
-            selects: Array(11).fill("cron:"),
+            selects: Array(CANONICAL_DREAM_TASKS.length).fill("cron:"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks?.verify.schedule).toBe("");
@@ -108,7 +109,7 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: ["__custom__", ...Array(10).fill("cron:0 3 * * *")],
+            selects: ["__custom__", ...Array(CANONICAL_DREAM_TASKS.length - 1).fill("cron:0 3 * * *")],
             texts: ["30 4 * * 1"],
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);

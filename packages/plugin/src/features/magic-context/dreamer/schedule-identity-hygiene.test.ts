@@ -17,6 +17,7 @@ import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-sch
 import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskName,
+    isStrataCacheDreamTask,
     PROJECT_MEMORY_DREAM_TASKS,
 } from "./task-registry";
 import {
@@ -106,7 +107,7 @@ function addCompartment(d: Database, sessionId: string, createdAt: number): void
 function writeLegacyRows(d: Database, project: string, nextDueAt: number): void {
     for (const task of CANONICAL_DREAM_TASKS) {
         // These are pre-Strata legacy rows, not an opt-in cache schedule.
-        if (task === "strata-cache-maintain") continue;
+        if (isStrataCacheDreamTask(task)) continue;
         writeTaskScheduleState(d, {
             projectPath: project,
             task,
@@ -239,12 +240,12 @@ describe("schedule rows are seeded only for tasks with input", () => {
         planDueTasks(db, chat, ALL_TASKS, NOW);
         expect(changes()).toBe(before);
         // Other identities' rows are not visited by this identity's pass.
-        expect(scheduledTasks(db, dead)).toHaveLength(CANONICAL_DREAM_TASKS.length - 1);
+        expect(scheduledTasks(db, dead)).toHaveLength(CANONICAL_DREAM_TASKS.length - 2);
     });
 });
 
 describe("idle identities are pruned", () => {
-    it("retains only the strata-cache-maintain row for an otherwise idle identity", () => {
+    it("retains only the Strata cache rows for an otherwise idle identity", () => {
         db = freshDb();
         const project = "git:cache-after-last-archive";
         writeLegacyRows(db, project, NOW - DAY_MS);
@@ -258,11 +259,27 @@ describe("idle identities are pruned", () => {
             lastError: null,
             retryCount: 0,
         });
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: "strata-cache-consolidate",
+            lastRunAt: null,
+            nextDueAt: NOW - 30_000,
+            schedule: "17 * * * *",
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+        });
         makePruneDue(db);
         expect(pruneIdleScheduleIdentities(db, NOW)).toContain(project);
-        expect(scheduledTasks(db, project)).toEqual(["strata-cache-maintain"]);
+        expect(scheduledTasks(db, project)).toEqual([
+            "strata-cache-consolidate",
+            "strata-cache-maintain",
+        ]);
         expect(getTaskScheduleState(db, project, "strata-cache-maintain")?.nextDueAt).toBe(
             NOW - 60_000,
+        );
+        expect(getTaskScheduleState(db, project, "strata-cache-consolidate")?.nextDueAt).toBe(
+            NOW - 30_000,
         );
     });
     it("removes a memory-less identity with no recent session and keeps the others", () => {
@@ -284,8 +301,8 @@ describe("idle identities are pruned", () => {
         planDueTasks(db, live, ALL_TASKS, NOW);
 
         expect(scheduledTasks(db, deadChat)).toEqual([]);
-        expect(scheduledTasks(db, withMemories)).toHaveLength(CANONICAL_DREAM_TASKS.length - 1);
-        expect(scheduledTasks(db, recentSession)).toHaveLength(CANONICAL_DREAM_TASKS.length - 1);
+        expect(scheduledTasks(db, withMemories)).toHaveLength(CANONICAL_DREAM_TASKS.length - 2);
+        expect(scheduledTasks(db, recentSession)).toHaveLength(CANONICAL_DREAM_TASKS.length - 2);
     });
 
     it("global user-memory candidates do not keep an idle identity scheduled", () => {
@@ -325,7 +342,7 @@ describe("idle identities are pruned", () => {
         // An idle identity appearing after today's prune survives later passes today...
         writeLegacyRows(db, deadChat, NOW - 60 * DAY_MS);
         planDueTasks(db, live, ALL_TASKS, NOW + 60 * 60_000);
-        expect(scheduledTasks(db, deadChat)).toHaveLength(CANONICAL_DREAM_TASKS.length - 1);
+        expect(scheduledTasks(db, deadChat)).toHaveLength(CANONICAL_DREAM_TASKS.length - 2);
 
         // ...and is pruned by the first pass once the interval has elapsed.
         planDueTasks(db, live, ALL_TASKS, NOW + IDLE_SCHEDULE_PRUNE_INTERVAL_MS);

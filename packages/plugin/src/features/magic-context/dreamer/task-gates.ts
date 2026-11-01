@@ -368,6 +368,7 @@ export function taskHasSchedulableInput(
         case "refresh-primers":
             return countActivePrimers(db, projectPath) > 0;
         case "strata-cache-maintain":
+        case "strata-cache-consolidate":
             return strataCacheEnabled;
         default: {
             const _exhaustive: never = task;
@@ -493,7 +494,8 @@ export function getDreamTaskBacklog(
             return { pending: countStalePrimers(db, projectPath), total };
         }
         case "strata-cache-maintain":
-            // Cache watermark and pending-file state are checked by maintainCache.
+        case "strata-cache-consolidate":
+            // Cache watermark and status-ledger state are checked by the cache tasks.
             return { pending: 0, total: 0 };
         default: {
             const _exhaustive: never = task;
@@ -709,6 +711,7 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             );
 
         case "strata-cache-maintain":
+        case "strata-cache-consolidate":
             return ctx.strataCacheEnabled === true;
 
         default: {

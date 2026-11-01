@@ -36,6 +36,7 @@ import { handleUntrustedLoad } from "../../plugin/embedding-bootstrap-helpers";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import type { MemoryChangeEvent } from "./types";
 
 const { createCtxMemoryListTools, createCtxMemoryTools } = await import("./tools");
 
@@ -426,6 +427,54 @@ describe("createCtxMemoryTools", () => {
             homeContext,
         );
         expect(read).toContain("Retain global troubleshooting context.");
+    });
+
+    it("keeps dreamer curate writes out of the strata ledger while other callers record", async () => {
+        const changes: { event: MemoryChangeEvent; projectDir: string }[] = [];
+        const recordingTools = createCtxMemoryTools({
+            db,
+            resolveProjectPath: () => "/repo/project",
+            memoryEnabled: true,
+            embeddingEnabled: false,
+            onMemoryChanged: (event, projectDir) => changes.push({ event, projectDir }),
+        });
+
+        const primary = await recordingTools.ctx_memory.execute(
+            {
+                action: "write",
+                category: "OPS_RULES",
+                content: "Primary sessions record their memory writes.",
+            },
+            toolContext("ses-primary", "general"),
+        );
+        expect(primary).toContain("Saved memory [ID:");
+        expect(changes).toHaveLength(1);
+        expect(changes[0]?.event).toEqual({ op: "add", memoryId: expect.any(Number) });
+        expect(changes[0]?.projectDir).toBe("/repo/project");
+
+        // A regular subagent carries a different agent id, so it still records.
+        const subagent = await recordingTools.ctx_memory.execute(
+            {
+                action: "write",
+                category: "OPS_RULES",
+                content: "Subagent memory writes keep recording.",
+            },
+            toolContext("ses-scout", "scout"),
+        );
+        expect(subagent).toContain("Saved memory [ID:");
+        expect(changes).toHaveLength(2);
+
+        // The dreamer curate task writes the memory normally but records nothing.
+        const dreamer = await recordingTools.ctx_memory.execute(
+            {
+                action: "write",
+                category: "OPS_RULES",
+                content: "Dreamer curate writes stay out of the strata ledger.",
+            },
+            toolContext("ses-dreamer", DREAMER_AGENT),
+        );
+        expect(dreamer).toContain("Saved memory [ID:");
+        expect(changes).toHaveLength(2);
     });
 
     it("refuses unmigrated memory writes with MC-C14 and otherwise writes the shared store", async () => {

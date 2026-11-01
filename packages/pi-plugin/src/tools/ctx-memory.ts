@@ -33,6 +33,7 @@
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { isDreamerCurateContext } from "@magic-context/core/agents/dreamer";
 import {
 	curateCategoryForMemoryCategory,
 	getActiveCurateCategory,
@@ -542,6 +543,13 @@ export function createCtxMemoryTool(
 					? targetIdentityForStoredPath(memory.projectPath) === projectIdentity
 					: storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
 			const notifyMemoryChanged = (event: MemoryChangeEvent, identity: string) => {
+				// Dreamer (curate) writes stay out of the strata status document;
+				// the daily rebuild re-renders the cache from the DB. The memory
+				// write itself is unaffected — only the ledger registration is
+				// skipped. `dreamerAllowed` is the lean Dreamer extension's
+				// `--magic-context-dreamer-actions` flag, so ordinary subagents
+				// (scout, fixer, …) keep recording their writes.
+				if (isDreamerCurateContext({ dreamerActions: dreamerAllowed })) return;
 				if (identity !== projectIdentity) return;
 				try {
 					deps.onMemoryChanged?.(event, ctx.cwd);
