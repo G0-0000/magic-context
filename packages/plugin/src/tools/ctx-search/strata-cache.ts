@@ -32,10 +32,15 @@ import {
     nonEmpty,
     postWithDeadline,
     safeBearer,
+    sessionBlockOf,
     strataAskConnectionForProject,
     strataNoThinking,
     type StrataAskConnection,
+    type StrataPostFailure,
+    type StrataSessionReply,
+    type StrataSessionRequest,
 } from "./strata-ask";
+import { clearSidecarStale, markSidecarStale, readSidecarStale } from "./sidecar-stale";
 
 export interface CacheWatermark {
     count: number;
@@ -99,8 +104,9 @@ const CACHE_LOCK_DIR = "cache.lock.d";
 const CACHE_LOCK_STALE_MS = 15 * 60_000;
 // A live pid without a process-start token (legacy payload, or a platform with no
 // /proc) can only be judged by file age. The bound sits far beyond the longest
-// bounded restore/chat/save/self-check chain (timeout_ms may exceed 15 minutes),
-// so a legitimate long operation is never preempted; the fallback is logged.
+// bounded composite write plus self-check chain (timeout_ms may exceed 15
+// minutes), so a legitimate long operation is never preempted; the fallback is
+// logged.
 const CACHE_LOCK_LEGACY_STALE_MS = 24 * 60 * 60_000;
 const CACHE_LOCK_RETRY_MS = 50;
 // A candidate must be visible this long before it may own the slot, so every
@@ -864,6 +870,18 @@ function renderChanges(
     return { lines, watermark };
 }
 
+class StrataCacheRequestError extends Error {
+    readonly status: number | null;
+    readonly errorType: string | null;
+
+    constructor(failure: StrataPostFailure) {
+        super(failure.reason);
+        this.name = "StrataCacheRequestError";
+        this.status = failure.status ?? null;
+        this.errorType = failure.errorType ?? null;
+    }
+}
+
 async function post(context: CacheContext, path: string, body: unknown): Promise<unknown> {
     const response = await postWithDeadline({
         url: `${context.connection.baseUrl}${path}`,
@@ -873,52 +891,122 @@ async function post(context: CacheContext, path: string, body: unknown): Promise
         timeoutMs: context.connection.timeoutMs,
         fetchImpl: fetch,
     });
-    if (!response.ok) throw new Error(response.reason);
+    if (!response.ok) throw new StrataCacheRequestError(response);
     return response.json;
 }
 
+/** Restore probe for maintenance: is there a saved slot to maintain? */
 async function restore(context: CacheContext): Promise<void> {
     const result = await post(context, "/slots/0?action=restore", { filename: context.connection.slotFile });
     if (!isRestoreSuccess(result)) throw new Error("invalid restore reply");
 }
 
-async function chat(context: CacheContext, messages: Message[]): Promise<string> {
+interface ChatReply {
+    content: string;
+    session: StrataSessionReply | null;
+}
+
+function chatContentOf(result: unknown): string {
+    if (!result || typeof result !== "object") throw new Error("invalid chat reply");
+    const choices = (result as { choices?: unknown }).choices;
+    if (!Array.isArray(choices) || choices.length === 0) throw new Error("invalid chat reply");
+    const content = (choices[0] as { message?: { content?: unknown } } | null)?.message?.content;
+    if (typeof content !== "string" || !content.trim()) throw new Error("invalid chat reply");
+    return content;
+}
+
+async function chat(context: CacheContext, messages: Message[], session?: StrataSessionRequest): Promise<ChatReply> {
     const result = await post(context, "/v1/chat/completions", {
         model: context.connection.model,
         messages,
         max_tokens: context.connection.maxTokens,
         stream: false,
+        ...(session ? { strata_session: session } : {}),
         ...strataNoThinking(),
     });
-    if (!result || typeof result !== "object") throw new Error("invalid chat reply");
-    const choices = (result as { choices?: unknown }).choices;
-    if (!Array.isArray(choices) || choices.length === 0) throw new Error("invalid chat reply");
-    const content = choices[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) throw new Error("invalid chat reply");
-    return content;
-}
-
-async function save(context: CacheContext): Promise<void> {
-    await post(context, "/slots/0?action=save", { filename: context.connection.slotFile });
+    return { content: chatContentOf(result), session: sessionBlockOf(result) };
 }
 
 async function selfCheck(context: CacheContext, prefix: Message[], watermark: CacheWatermark): Promise<void> {
-    await restore(context);
-    const answer = await chat(context, [...prefix, { role: "user", content: COUNT_QUESTION }]);
-    if (!/^\s*\d+\s*$/.test(answer) || Number(answer.trim()) !== watermark.count) {
+    // One composite restore-only request: the restore and the count question run
+    // in the same server turn, and nothing is saved.
+    const reply = await chat(
+        context,
+        [...prefix, { role: "user", content: COUNT_QUESTION }],
+        { restore: context.connection.slotFile },
+    );
+    if (!/^\s*\d+\s*$/.test(reply.content) || Number(reply.content.trim()) !== watermark.count) {
         throw new Error("count self-check failed");
     }
 }
 
-async function generateAndSave(context: CacheContext, system: string, user: string): Promise<Message[]> {
+/**
+ * Write the slot and its token sidecar in ONE composite request. `restore` folds
+ * the saved slot into the same server turn, so restore → generate → save is
+ * atomic and no other client can change slot 0 in between.
+ *
+ * Two failures are retried once each, and both are side-effect free:
+ * - any 409: a concurrent same-name save (`splice_stale`) or explicit model
+ *   control reporting the model busy (`model_busy`); the server writes nothing
+ *   on that reply, so replaying the whole request is safe.
+ * - 404 while restoring: there is no slot to reuse yet (first build). The retry
+ *   drops the restore and creates it instead of failing the run.
+ *
+ * A `save_error` reply means the slot was not written: the run fails so pending
+ * changes are kept for the next attempt. A `skipped_recovery` sidecar is flagged
+ * for maintenance, because splice queries cannot resume until a save rewrites it.
+ */
+async function generateAndSave(
+    context: CacheContext,
+    system: string,
+    user: string,
+    restore: boolean,
+): Promise<Message[]> {
     const input: Message[] = [
         { role: "system", content: system },
         { role: "user", content: user },
     ];
-    const ack = await chat(context, input);
-    const prefix: Message[] = [...input, { role: "assistant", content: ack }];
-    await save(context);
-    return prefix;
+    const slotFile = context.connection.slotFile;
+    let session: StrataSessionRequest = restore
+        ? { restore: slotFile, save: slotFile }
+        : { save: slotFile };
+    let conflictRetried = false;
+    let missingRetried = false;
+    while (true) {
+        try {
+            const reply = await chat(context, input, session);
+            if (reply.session?.save_error !== undefined) {
+                log("strata-cache save: the server reported save_error; the sidecar is unchanged", reply.session.save_error);
+                throw new Error("slot save failed");
+            }
+            if (reply.session?.sidecar === "skipped_recovery") {
+                log("strata-cache save: sidecar skipped after a reasoning-loop recovery");
+                markSidecarStale(context.connection.prefixPath, "skipped_recovery");
+            } else if (reply.session) {
+                // A written sidecar is fresh again, so any earlier marker is spent.
+                clearSidecarStale(context.connection.prefixPath);
+            } else {
+                // Without a session block there is no evidence the sidecar was
+                // rewritten, so an earlier marker stays until a reply proves it.
+                log("strata-cache save: reply carried no session block; sidecar marker left as is");
+            }
+            return [...input, { role: "assistant", content: reply.content }];
+        } catch (error) {
+            const failure = error instanceof StrataCacheRequestError ? error : null;
+            if (failure?.status === 409 && !conflictRetried) {
+                conflictRetried = true;
+                log("strata-cache save: the server replied 409; retrying the composite save once", failure.errorType);
+                continue;
+            }
+            if (failure?.status === 404 && session.restore && !missingRetried) {
+                missingRetried = true;
+                session = { save: slotFile };
+                log("strata-cache save: no saved slot to restore; creating without prefix reuse");
+                continue;
+            }
+            throw error;
+        }
+    }
 }
 
 /**
@@ -939,9 +1027,10 @@ async function restoreSavedSlot(context: CacheContext): Promise<boolean> {
 }
 
 /**
- * Full rebuild. `restoreFirst` is cleared by callers that restored or probed the
- * slot immediately before (maintenance, append self-check fallback), so one
- * operation restores the slot exactly once.
+ * Full rebuild. `restoreFirst` folds the saved slot into the composite write, so
+ * restore → generate → save is one atomic request; callers that restored or
+ * probed the slot immediately before (maintenance, append self-check fallback)
+ * clear it so one operation restores the slot exactly once.
  */
 async function rebuildLocked(
     context: CacheContext,
@@ -961,10 +1050,15 @@ async function rebuildLocked(
     const docs = renderDocsSection(context.projectRoot, context.connection.contextDocs, context.connection.contextDocsBudgetTokens);
     const user = composeSlotUser(INTRO, blocks, docs?.section ?? null, ACK_REQUEST, watermarkLine(watermark));
     mkdirSync(dirname(context.connection.prefixPath), { recursive: true, mode: 0o700 });
-    // Reuse the saved prefix first: the system message is unchanged, so the
-    // rebuilt chat only pays for the new user turn.
-    if (restoreFirst) await restoreSavedSlot(context);
-    const prefix = await generateAndSave(context, system, user);
+    // Reuse the saved prefix inside the same request: the system message is
+    // unchanged, so the rebuilt chat only pays for the new user turn. Without a
+    // published prefix there is nothing to restore, so the first build skips it.
+    const prefix = await generateAndSave(
+        context,
+        system,
+        user,
+        restoreFirst && existsSync(context.connection.prefixPath),
+    );
     try {
         await selfCheck(context, prefix, watermark);
     } catch (error) {
@@ -1002,8 +1096,9 @@ async function drainLocked(context: CacheContext): Promise<CacheActionResult> {
     const hasChangeLog = beforeWatermark.indexOf(`\n\n${CHANGE_LOG}\n`, ackStart < 0 ? 0 : ackStart + ACK_REQUEST.length) >= 0;
     const separator = hasChangeLog ? "" : `\n${CHANGE_LOG}\n`;
     const updatedUser = `${beforeWatermark}${separator}${lines.join("\n\n")}\n\n${watermarkLine(watermark)}`;
-    await restore(context);
-    const updatedPrefix = await generateAndSave(context, prefix[0]!.content, updatedUser);
+    // prefix.json exists here, so the saved slot is the prefix the append builds on;
+    // the restore rides the same composite request as the save.
+    const updatedPrefix = await generateAndSave(context, prefix[0]!.content, updatedUser, true);
     try {
         await selfCheck(context, updatedPrefix, watermark);
     } catch (error) {
@@ -1092,6 +1187,7 @@ export async function rebuildCache(projectRoot: string, reason: string): Promise
 }
 
 async function maintainLocked(context: CacheContext): Promise<CacheActionResult> {
+    const staleSidecar = readSidecarStale(context.connection.prefixPath);
     // Restore first: a saved slot is reused as the KV prefix, and only a 404 says
     // there is no cache to maintain yet.
     const exists = await restoreSavedSlot(context);
@@ -1099,7 +1195,7 @@ async function maintainLocked(context: CacheContext): Promise<CacheActionResult>
     const snapshot = readMemorySnapshot(context.project);
     if (!exists) {
         const estimate = estimateTokens(renderMemoryBlockV2(snapshot.memories));
-        if (estimate <= context.budget && context.connection.contextDocs.length === 0) {
+        if (!staleSidecar && estimate <= context.budget && context.connection.contextDocs.length === 0) {
             return { action: "skipped", detail: "below-threshold" };
         }
         return rebuildLocked(context, "create", false);
@@ -1107,11 +1203,15 @@ async function maintainLocked(context: CacheContext): Promise<CacheActionResult>
     const watermark = readCacheWatermark(context.connection);
     const latest = watermarkFor(snapshot, new Date().toISOString());
     if (
+        // A stale sidecar forces a rebuild even when every watermark is current:
+        // splice queries keep failing until a save rewrites it. The save clears
+        // the marker; a save that skips the sidecar leaves a fresh marker behind.
+        staleSidecar ||
         !watermark ||
         watermark.maxMemoryId < latest.maxMemoryId ||
         watermark.maxMutationId < latest.maxMutationId ||
         pending.length > 0
-    ) return rebuildLocked(context, "daily-compaction", false);
+    ) return rebuildLocked(context, staleSidecar ? "sidecar-stale" : "daily-compaction", false);
     return { action: "skipped", detail: "unchanged", watermark };
 }
 
