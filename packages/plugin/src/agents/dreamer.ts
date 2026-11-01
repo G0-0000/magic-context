@@ -55,3 +55,29 @@ export const DREAMER_REVIEWER_AGENT = "dreamer-reviewer";
  *  ctx_memory. It does not read code; the verify task checks memory accuracy.
  *  Keep the `dreamer` id because memory-tool authorization matches that id. */
 export const DREAMER_CURATE_ALLOWED_TOOLS = ["ctx_memory"] as const;
+
+/**
+ * True when a `ctx_memory` call runs inside a Dreamer (curate) child session.
+ *
+ * Memory writes made from this context are deliberately NOT recorded in the
+ * strata status document: the Dreamer edits the memory pool in the background,
+ * and the daily full rebuild re-renders the cache from the database, so a
+ * ledger row would only register work the agent session never asked for. Every
+ * other caller — user sessions and regular subagents (scout, coder, explorer)
+ * — still records its write.
+ *
+ * The hosts surface the same fact through different signals, so a caller passes
+ * the one it has: OpenCode carries the agent id on the tool context, while Pi's
+ * lean Dreamer extension registers `ctx_memory` under a flag-derived
+ * `allowDreamerActions`. Deliberately NOT keyed on `MAGIC_CONTEXT_PI_SUBAGENT`:
+ * ordinary Pi subagents carry that marker too, and silencing their writes would
+ * drop legitimate ledger rows.
+ */
+export function isDreamerCurateContext(signal: {
+    /** OpenCode: the executing tool context's agent id. */
+    agent?: string | null;
+    /** Pi: `allowDreamerActions` from the lean Dreamer subagent extension. */
+    dreamerActions?: boolean;
+}): boolean {
+    return signal.dreamerActions === true || signal.agent === DREAMER_AGENT;
+}

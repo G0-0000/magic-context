@@ -26,6 +26,23 @@ describe("per-harness dream task runtime config", () => {
         ).toBe("45 9 * * *");
         expect(LIVE_RELOAD_CONFIG_PATHS).toContain("dreamer.tasks.strata-cache-maintain.schedule");
     });
+    it("defaults strata-cache-consolidate to an hourly pass and accepts a project schedule override", () => {
+        const defaults = MagicContextConfigSchema.parse({ dreamer: { tasks: {} } }).dreamer;
+        expect(defaults.tasks["strata-cache-consolidate"].schedule).toBe("17 * * * *");
+        expect(
+            buildDreamTaskRuntimeConfigs(defaults, "opencode").find(
+                (config) => config.task === "strata-cache-consolidate",
+            )?.schedule,
+        ).toBe("17 * * * *");
+        expect(
+            MagicContextConfigSchema.parse({
+                dreamer: { tasks: { "strata-cache-consolidate": { schedule: "45 * * * *" } } },
+            }).dreamer.tasks["strata-cache-consolidate"].schedule,
+        ).toBe("45 * * * *");
+        expect(LIVE_RELOAD_CONFIG_PATHS).toContain(
+            "dreamer.tasks.strata-cache-consolidate.schedule",
+        );
+    });
     it("defaults partial promotion task blocks and preserves explicit and absent task defaults", () => {
         const parsed = MagicContextConfigSchema.parse({
             dreamer: {

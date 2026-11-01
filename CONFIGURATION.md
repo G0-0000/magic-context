@@ -51,6 +51,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `dreamer.tasks.retrospective.schedule`
 - `dreamer.tasks.review-user-memories.promotion_threshold`
 - `dreamer.tasks.review-user-memories.schedule`
+- `dreamer.tasks.strata-cache-consolidate.schedule`
 - `dreamer.tasks.strata-cache-maintain.schedule`
 - `dreamer.tasks.verify-broad.schedule`
 - `dreamer.tasks.verify.schedule`

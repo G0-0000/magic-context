@@ -42,7 +42,9 @@ import {
 import {
 	STRATA_ASK_FOOTER,
 	STRATA_ASK_MISS,
+	hasUnsafeStrataCache,
 	isStrataConfigResolutionFailure,
+	readStrataStatusDocument,
 	strataAskConnectionForProject,
 	strataRouteFor,
 	tryStrataAskDetailed,
@@ -355,7 +357,11 @@ export function createCtxSearchTool(
 							const classic = await runClassic({ sources: ["memory"] });
 							return wrap(classic.text, !classic.ok);
 						}
-						// Fusion runs classic once without memory; miss/failure reuses it.
+						// Fusion runs classic once without memory, for the transient
+						// materials; a miss, or a failure with the status document itself
+						// readable, reuses that exact result. A status the cache cannot
+						// carry at all fails the query to the FULL classic search instead —
+						// memories included (see below).
 						const classic = await runClassic({
 							sources: ["git_commit", "primer", "note", "message"],
 						});
@@ -373,6 +379,10 @@ export function createCtxSearchTool(
 							const reason = (error instanceof Error ? error.message : String(error))
 								.replace(/[\r\n]+/g, " ");
 							log(`[ctx_search] transient-material fallback: ${reason}`);
+							if (hasUnsafeStrataCache(connection.prefixPath) || !readStrataStatusDocument(connection).ok) {
+								const full = await runClassic();
+								return wrap(full.text, !full.ok);
+							}
 							return wrap(classic.text);
 						}
 						const answer = await tryStrataAskDetailed({
@@ -381,7 +391,15 @@ export function createCtxSearchTool(
 							signal,
 							transient,
 						});
-						return wrap(answer.status === "answered" ? answer.text : classic.text);
+						if (answer.status === "answered") return wrap(answer.text);
+						// The pre-run never searched memories and is not authoritative
+						// without the ledger's changes, so an unavailable status means
+						// full classic retrieval — memories included — answers this query.
+						if (answer.status === "failed" && ["status_unavailable", "http_409", "http_400"].includes(answer.reason)) {
+							const full = await runClassic();
+							return wrap(full.text, !full.ok);
+						}
+						return wrap(classic.text);
 					}
 				}
 			}
