@@ -11,11 +11,11 @@
  * This module never saves. The write side (strata-cache.ts) owns every save,
  * which is what keeps the sidecar in step with the prompt the cache answers
  * from. When the composite request reports that the sidecar cannot serve this
- * splice (`splice_stale`, `splice_base_seam`, `splice_render_mismatch`), the
- * answer comes from `askOnceLegacy` — the restore-then-replay flow that shipped
- * before the endpoint, byte-identical — and a marker is left beside
- * `prefix_path` (sidecar-stale.ts) so the next maintenance write rebuilds the
- * sidecar. Every other failure is a plain fallback to classic retrieval.
+ * splice (`splice_stale`, `splice_base_seam`, `splice_render_mismatch`), a
+ * marker is left beside `prefix_path` (sidecar-stale.ts) so the next
+ * maintenance write rebuilds the sidecar, and the query falls back to classic
+ * retrieval exactly like every other failure. The splice request is the only
+ * request this module sends: there is no replay wire to fall back to.
  *
  * `memory.strata_ask.*` is intentionally absent from LIVE_RELOAD_CONFIG_PATHS.
  * That list is for historian and dreamer sampling. ctx_search does not use it:
@@ -25,11 +25,9 @@
  * incomplete connection, or a project identity that is missing or not equal to
  * a configured project target is disabled: this module returns null and the
  * caller continues on the classic path. Identity is resolved before any network
- * call. `timeout_ms` bounds one composite request, and each legacy call
- * separately.
+ * call. `timeout_ms` bounds the one composite request.
  */
 
-import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import PROMPTS from "./strata-prompts.json";
 import { loadPluginConfigDetailed } from "../../config";
@@ -324,7 +322,7 @@ function isExactMiss(content: string): boolean {
 }
 
 function fallback(reason: string): StrataAskOutcome {
-    const safe = /^(?:file_error|invalid_prefix|invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3}|splice_stale|splice_base_seam|splice_render_mismatch)$/.test(
+    const safe = /^(?:invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3}|splice_stale|splice_base_seam|splice_render_mismatch)$/.test(
         reason,
     )
         ? reason
@@ -382,54 +380,6 @@ export function enqueue<T>(work: () => Promise<T>, signal?: AbortSignal): Promis
             },
         );
     });
-}
-
-async function readPrefix(
-    path: string,
-    readFileImpl: (path: string) => Promise<string> | string,
-    signal: AbortSignal,
-): Promise<Array<Record<string, unknown>> | null> {
-    let raw: string;
-    try {
-        raw = await new Promise<string>((resolve, reject) => {
-            const fail = (error: unknown) => {
-                signal.removeEventListener("abort", onAbort);
-                reject(error);
-            };
-            const onAbort = () => fail(new Error("aborted"));
-            if (signal.aborted) {
-                onAbort();
-                return;
-            }
-            signal.addEventListener("abort", onAbort, { once: true });
-            Promise.resolve()
-                .then(() => readFileImpl(path))
-                .then(
-                    (value) => {
-                        signal.removeEventListener("abort", onAbort);
-                        resolve(value);
-                    },
-                    fail,
-                );
-        });
-    } catch {
-        return null;
-    }
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(raw);
-    } catch {
-        return null;
-    }
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    const messages: Array<Record<string, unknown>> = [];
-    for (const item of parsed) {
-        if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-        const row = item as Record<string, unknown>;
-        if (typeof row.role !== "string" || typeof row.content !== "string") return null;
-        messages.push(row);
-    }
-    return messages;
 }
 
 export interface StrataPostFailure {
@@ -535,6 +485,7 @@ function linkedSignal(
     };
 }
 
+/** The `n_restored` reply of a restore call; the query path never restores. */
 export function isRestoreSuccess(json: unknown): boolean {
     if (!json || typeof json !== "object" || Array.isArray(json)) return false;
     const restored = (json as { n_restored?: unknown }).n_restored;
@@ -576,7 +527,6 @@ interface AskRequest {
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl: typeof fetch;
-    readFileImpl: (path: string) => Promise<string> | string;
     transient?: string;
 }
 
@@ -594,9 +544,10 @@ function outcomeOf(json: unknown): StrataAskOutcome {
 }
 
 /**
- * A splice failure the legacy flow can still answer. Dispatch is on `error.type`
- * (and, for the 400, on the message prefix the server documents): a 409 is not
- * automatically a splice problem — `model_busy` is a plain failure.
+ * A failure that means the sidecar cannot serve this splice, and so needs a
+ * rebuild marker. Dispatch is on `error.type` (and, for the 400, on the message
+ * prefix the server documents): a 409 is not automatically a splice problem —
+ * `model_busy` is a plain failure and marks nothing.
  */
 function spliceFailureOf(result: StrataPostFailure): string | null {
     if (result.status === 409 && (result.errorType === "splice_stale" || result.errorType === "splice_base_seam")) {
@@ -639,16 +590,13 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
         fetchImpl: args.fetchImpl,
     });
     if (!chat.ok) {
+        // A splice the sidecar cannot serve leaves a marker for the write side to
+        // rebuild — a query must never save — and then fails like any other
+        // request, so classic retrieval answers this query.
         const splice = spliceFailureOf(chat);
-        if (splice) {
-            // The sidecar cannot serve this splice. Answer through the old flow and
-            // leave the rebuild to the write side: a query must never save.
-            markSidecarStale(args.config.prefixPath, splice);
-            return askOnceLegacy(args, apiKey);
-        }
-        // Anything else falls through to classic retrieval, where the structured
-        // failure is otherwise lost: record its type and message (never the key
-        // and never the request or reply body).
+        if (splice) markSidecarStale(args.config.prefixPath, splice);
+        // The structured failure would otherwise be lost: record its type and
+        // message (never the key and never the request or reply body).
         log("strata-ask: composite request failed; classic retrieval answers this query", {
             reason: chat.reason,
             errorType: chat.errorType ?? null,
@@ -660,63 +608,11 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
     return outcomeOf(chat.json);
 }
 
-/**
- * The pre-composite flow, kept verbatim: read the frozen prefix, restore the
- * saved slot, then send the full message array. Only a splice failure reaches
- * this path, so these request bytes are the compatibility lock for its output.
- */
-async function askOnceLegacy(args: AskRequest, apiKey: string): Promise<StrataAskOutcome> {
-    const prefixLinked = linkedSignal(args.signal, args.config.timeoutMs);
-    let prefix: Array<Record<string, unknown>> | null;
-    try {
-        if (prefixLinked.signal.aborted) {
-            return fallback(prefixLinked.timedOut() ? "timeout" : "aborted");
-        }
-        prefix = await readPrefix(args.config.prefixPath, args.readFileImpl, prefixLinked.signal);
-    } finally {
-        prefixLinked.cleanup();
-    }
-    if (!prefix) {
-        return fallback(
-            prefixLinked.timedOut() ? "timeout" : args.signal?.aborted ? "aborted" : "file_error",
-        );
-    }
-
-    const restored = await postWithDeadline({
-        url: `${args.config.baseUrl}/slots/0?action=restore`,
-        body: { filename: args.config.slotFile },
-        apiKey,
-        caller: args.signal,
-        timeoutMs: args.config.timeoutMs,
-        fetchImpl: args.fetchImpl,
-    });
-    if (!restored.ok) return fallback(restored.reason);
-    if (!isRestoreSuccess(restored.json)) return fallback("invalid_reply");
-
-    const chat = await postWithDeadline({
-        url: `${args.config.baseUrl}/v1/chat/completions`,
-        body: {
-            model: args.config.model,
-            messages: [...prefix, { role: "user", content: renderQueryMessage(args.query, args.transient) }],
-            max_tokens: args.config.maxTokens,
-            stream: false,
-            ...strataNoThinking(),
-        },
-        apiKey,
-        caller: args.signal,
-        timeoutMs: args.config.timeoutMs,
-        fetchImpl: args.fetchImpl,
-    });
-    if (!chat.ok) return fallback(chat.reason);
-    return outcomeOf(chat.json);
-}
-
 export async function tryStrataAskDetailed(args: {
     query: string;
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
-    readFileImpl?: (path: string) => Promise<string> | string;
     transient?: string;
 }): Promise<StrataAskOutcome> {
     const query = args.query.trim();
@@ -731,7 +627,6 @@ export async function tryStrataAskDetailed(args: {
                     config: args.config,
                     signal: args.signal,
                     fetchImpl: args.fetchImpl ?? fetch,
-                    readFileImpl: args.readFileImpl ?? ((path) => readFile(path, "utf8")),
                 }),
             args.signal,
         );
@@ -747,7 +642,6 @@ export async function tryStrataAsk(args: {
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
-    readFileImpl?: (path: string) => Promise<string> | string;
 }): Promise<string | null> {
     const outcome = await tryStrataAskDetailed(args);
     return outcome.status === "answered" ? outcome.text : null;
